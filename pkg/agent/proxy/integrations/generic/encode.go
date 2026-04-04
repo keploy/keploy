@@ -106,6 +106,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		case buffer := <-clientBuffChan:
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
+			if ml != nil {
+				ml.Release(int64(len(buffer)))
+			}
 			if err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
@@ -172,6 +175,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
+			if ml != nil {
+				ml.Release(int64(len(buffer)))
+			}
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return err

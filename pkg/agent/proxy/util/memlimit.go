@@ -39,6 +39,9 @@ func NewMemoryLimiter(limit int64, logger *zap.Logger) *MemoryLimiter {
 	if limit <= 0 {
 		return nil // nil is the "unlimited" sentinel
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &MemoryLimiter{
 		limit:  limit,
 		logger: logger,
