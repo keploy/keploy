@@ -65,6 +65,7 @@ test:
   protoInclude: []
   compareAll: false
   updateTestMapping: false
+  disableAutoHeaderNoise: false
 record:
   recordTimer: 0s
   filters: []
