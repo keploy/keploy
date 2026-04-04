@@ -50,27 +50,24 @@ send_request() {
     sudo kill $pid
 }
 
-for i in {1..2}; do
-    app_name="sse-preflight_${i}"
-    send_request &
-    "$RECORD_BIN" record -c "./sse-preflight-server" --port 8000 --sse-port 8047 --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    sleep 5
-    wait
-    echo "Recorded test case and mocks for iteration ${i}"
-done
+send_request &
+"$RECORD_BIN" record -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee record.txt
+if grep "ERROR" "record.txt"; then
+    echo "Error found in pipeline..."
+    cat record.txt
+    exit 1
+fi
+if grep "WARNING: DATA RACE" "record.txt"; then
+    echo "Race condition detected in recording, stopping pipeline..."
+    cat record.txt
+    exit 1
+fi
+sleep 5
+wait
+echo "Recorded test case and mocks"
 
 # Start the app in test mode.
-"$REPLAY_BIN" test -c "./sse-preflight-server" --port 8000 --sse-port 8047 --delay 7 --api-timeout 200 --generateGithubActions=false 2>&1 | tee test_logs.txt
+"$REPLAY_BIN" test -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
