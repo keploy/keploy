@@ -125,6 +125,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		return res, err
 	}
 
+	// DecodePayload stores the client flags in ClientCapabilities. Also
+	// populate ClientCaps so that DeprecateEOF() (which checks ClientCaps
+	// via effectiveClientCaps()) works correctly in record mode.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
+
 	res.req = append(res.req, mysql.Request{
 		PacketBundle: *handshakeResponsePkt,
 	})

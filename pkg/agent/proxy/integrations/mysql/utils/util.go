@@ -189,6 +189,39 @@ func IsOKPacket(data []byte) bool {
 	return len(data) > 7 && data[4] == mysql.OK
 }
 
+// IsOKReplacingEOF detects the OK packet that replaces EOF when
+// CLIENT_DEPRECATE_EOF is negotiated. Per MySQL protocol, this packet
+// uses the 0xFE header byte (same as legacy EOF) but has a payload
+// length >= 9 bytes (unlike legacy EOF which has < 9 bytes).
+// See: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_ok_packet.html
+func IsOKReplacingEOF(data []byte) bool {
+	if len(data) < 5 {
+		return false
+	}
+	// The payload starts at data[4]. Header byte must be 0xFE.
+	if data[4] != 0xFE {
+		return false
+	}
+	// Payload length is in the first 3 bytes (little-endian).
+	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+	// Legacy EOF has payload < 9 bytes; OK-replacing-EOF has >= 9.
+	return payloadLen >= 9
+}
+
+// IsResultSetTerminator checks if a packet terminates a result set row
+// stream. When deprecateEOF is false, only legacy EOF packets terminate.
+// When deprecateEOF is true, the 0xFE-based OK-replacing-EOF terminates.
+// Row data never starts with 0xFE so this check has no false positives.
+func IsResultSetTerminator(data []byte, deprecateEOF bool) bool {
+	if IsEOFPacket(data) {
+		return true
+	}
+	if deprecateEOF && IsOKReplacingEOF(data) {
+		return true
+	}
+	return false
+}
+
 func IsGenericResponse(data []byte) (string, bool) {
 	if IsOKPacket(data) {
 		return "OK", true
