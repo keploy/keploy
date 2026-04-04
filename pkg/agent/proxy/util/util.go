@@ -182,10 +182,11 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				return
 			}
 
-			// Track cumulative buffered bytes. Once total exceeds the
-			// limit, TryAcquire sets the exceeded flag so the check at
-			// the top of the next iteration triggers the sentinel.
-			// The buffer is always forwarded to avoid data loss.
+			// Track cumulative buffered bytes. TryAcquire increments the
+			// counter; the consumer (e.g. encodeGeneric's for/select loop)
+			// MUST call ml.Release(len(buffer)) after forwarding each
+			// buffer so the limiter can clear the exceeded flag via
+			// hysteresis. The buffer is always forwarded to avoid data loss.
 			if ml != nil {
 				ml.TryAcquire(int64(len(buffer)))
 			}
