@@ -42,12 +42,6 @@ send_request() {
         --url "http://localhost:8047/subscribe/student/events?doubtId=repro" \
         --host "doubt-service.example.com"
 
-    # Send a normal GET to the SSE endpoint to stream events
-    curl -s -N --max-time 5 http://localhost:8047/subscribe/student/events?doubtId=repro || true
-
-    # Send a health check on the normal HTTP port
-    curl -s http://localhost:8000/health
-
     # Wait for Keploy to record the tcs and mocks.
     sleep 7
     pid=$(pgrep keploy)
