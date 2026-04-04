@@ -69,7 +69,7 @@ type OutgoingOptions struct {
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
-	TLSCfg *tls.Config
+	TLSCfg *tls.Config `json:"-" yaml:"-"`
 }
 
 type IncomingOptions struct {
