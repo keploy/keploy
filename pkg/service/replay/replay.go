@@ -1690,12 +1690,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					// Populate consumed mocks for failed/obsolete test cases
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+						// Build a lookup of mock name → summary from the mock registry
+						mockSummary := map[string]string{}
+						if r.mockDB != nil {
+							if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
+								for _, mock := range allMocks {
+									if mock.Spec.HTTPReq != nil {
+										mockSummary[mock.Name] = string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
+									} else if op := mock.Spec.Metadata["operation"]; op != "" {
+										mockSummary[mock.Name] = op
+									}
+								}
+							}
+						}
 						for _, m := range consumedMocks {
 							if m.Kind != models.DNS {
-								testCaseResult.FailureInfo.ConsumedMocks = append(testCaseResult.FailureInfo.ConsumedMocks, models.ConsumedMock{
-									Name: m.Name,
-									Kind: string(m.Kind),
-								})
+								cm := models.ConsumedMock{
+									Name:    m.Name,
+									Kind:    string(m.Kind),
+									Summary: mockSummary[m.Name],
+								}
+								testCaseResult.FailureInfo.ConsumedMocks = append(testCaseResult.FailureInfo.ConsumedMocks, cm)
 							}
 						}
 						// Populate unmatched calls from mock errors (channel-based for in-process)

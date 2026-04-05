@@ -81,10 +81,9 @@ type MockMismatchInfo struct {
 // ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
 // ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
 type ConsumedMock struct {
-	Name   string `json:"name" yaml:"name"`
-	Kind   string `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Method string `json:"method,omitempty" yaml:"method,omitempty"` // e.g. "GET"
-	URL    string `json:"url,omitempty" yaml:"url,omitempty"`       // e.g. "/posts?id=1"
+	Name    string `json:"name" yaml:"name"`
+	Kind    string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Summary string `json:"summary,omitempty" yaml:"summary,omitempty"` // e.g. "GET /posts?id=1" for HTTP, "find users" for Mongo
 }
 
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
