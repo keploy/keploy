@@ -97,20 +97,22 @@ jobs:
           name: build
           path: keploy.exe
 
-      - name: Cleanup per-run git isolation
+      - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
         shell: powershell
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
-          if (Test-Path $isoDir) { Remove-Item $isoDir -Recurse -Force }
-
-          # Prune stale isolation dirs older than 2 hours
+          # Do NOT delete the current run's isolation dir here because
+          # actions/checkout's post-job hook still needs GIT_CONFIG_GLOBAL.
+          # Only prune dirs from previous runs that are older than 1 hour.
           $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
           if (Test-Path $root) {
             Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.LastWriteTime -lt (Get-Date).AddHours(-2)
-            } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
+            } | ForEach-Object {
+              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "Pruned stale isolation dir: $($_.Name)"
+            }
           }
 
   docker-image-build:
@@ -214,19 +216,20 @@ jobs:
         run: |
           docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
-      - name: Cleanup per-run git isolation
+      - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
         shell: powershell
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
-          if (Test-Path $isoDir) { Remove-Item $isoDir -Recurse -Force }
-
+          # Do NOT delete current run's dir; checkout post-job still needs it.
           $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
           if (Test-Path $root) {
             Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.LastWriteTime -lt (Get-Date).AddHours(-2)
-            } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
+            } | ForEach-Object {
+              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "Pruned stale isolation dir: $($_.Name)"
+            }
           }
 
   run_golang_docker_windows:
@@ -287,19 +290,20 @@ jobs:
             exit 1
           }
 
-      - name: Cleanup per-run git isolation
+      - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
         shell: powershell
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
-          if (Test-Path $isoDir) { Remove-Item $isoDir -Recurse -Force }
-
+          # Do NOT delete current run's dir; checkout post-job still needs it.
           $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
           if (Test-Path $root) {
             Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.LastWriteTime -lt (Get-Date).AddHours(-2)
-            } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
+            } | ForEach-Object {
+              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "Pruned stale isolation dir: $($_.Name)"
+            }
           }
 
   gate:
