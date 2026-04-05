@@ -28,29 +28,47 @@ jobs:
           Write-Host "Created workflow start lock: $lockPath"
 
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: pwsh
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
+          $ErrorActionPreference = 'Stop'
+          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
           # Seed per-run gitconfig from the global one (if it exists)
-          $src = Join-Path $env:USERPROFILE '.gitconfig'
-          $dst = Join-Path $isoDir 'gitconfig'
-          if (Test-Path $src) { Copy-Item $src $dst -Force } else { New-Item $dst -ItemType File -Force | Out-Null }
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
+          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
 
-          # Set EOL settings in the per-run config
-          git config --file $dst core.autocrlf false
-          git config --file $dst core.eol lf
+          # Remove inherited SSH redirect settings so the initial
+          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
+          $staleKeys = @(
+              'url."git@github.com:".insteadOf',
+              'url."ssh://git@github.com/".insteadOf',
+              'core.sshCommand'
+          )
+          foreach ($key in $staleKeys) {
+              git config --file $gitConfig --unset-all $key 2>$null
+          }
 
-          # Ensure github.com is in the shared known_hosts (append is idempotent)
-          $sshDir = Join-Path $env:USERPROFILE '.ssh'
-          New-Item -Path $sshDir -ItemType Directory -Force | Out-Null
-          ssh-keyscan github.com 2>$null | Out-File -FilePath (Join-Path $sshDir 'known_hosts') -Encoding ascii -Append
+          # Set EOL handling
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
 
-          # Export GIT_CONFIG_GLOBAL so all subsequent steps use the isolated
-          # gitconfig. Do NOT set GIT_SSH_COMMAND as it would override the
-          # ssh-agent configured by webfactory/ssh-agent.
-          "GIT_CONFIG_GLOBAL=$dst" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Per-run SSH known_hosts
+          $knownHosts = Join-Path $isoDir 'known_hosts'
+          $hostKeys = ssh-keyscan github.com 2>$null
+          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
+              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+          }
+          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
+
+          # Export env vars
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
+          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
+          Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -102,20 +120,9 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: pwsh
         run: |
-          # Do NOT delete the current run's isolation dir here because
-          # actions/checkout's post-job hook still needs GIT_CONFIG_GLOBAL.
-          # Only prune dirs from previous runs that are older than 1 hour.
-          $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
-          if (Test-Path $root) {
-            Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
-            } | ForEach-Object {
-              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "Pruned stale isolation dir: $($_.Name)"
-            }
-          }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -164,23 +171,47 @@ jobs:
     steps:
 
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: pwsh
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
+          $ErrorActionPreference = 'Stop'
+          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
-          $src = Join-Path $env:USERPROFILE '.gitconfig'
-          $dst = Join-Path $isoDir 'gitconfig'
-          if (Test-Path $src) { Copy-Item $src $dst -Force } else { New-Item $dst -ItemType File -Force | Out-Null }
+          # Seed per-run gitconfig from the global one (if it exists)
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
+          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
 
-          git config --file $dst core.autocrlf false
-          git config --file $dst core.eol lf
+          # Remove inherited SSH redirect settings so the initial
+          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
+          $staleKeys = @(
+              'url."git@github.com:".insteadOf',
+              'url."ssh://git@github.com/".insteadOf',
+              'core.sshCommand'
+          )
+          foreach ($key in $staleKeys) {
+              git config --file $gitConfig --unset-all $key 2>$null
+          }
 
-          $kh = Join-Path $isoDir 'known_hosts'
-          ssh-keyscan github.com 2>$null | Out-File -FilePath $kh -Encoding ascii
+          # Set EOL handling
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
 
-          "GIT_CONFIG_GLOBAL=$dst"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$kh" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Per-run SSH known_hosts
+          $knownHosts = Join-Path $isoDir 'known_hosts'
+          $hostKeys = ssh-keyscan github.com 2>$null
+          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
+              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+          }
+          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
+
+          # Export env vars
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
+          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
+          Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -221,18 +252,9 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: pwsh
         run: |
-          # Do NOT delete current run's dir; checkout post-job still needs it.
-          $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
-          if (Test-Path $root) {
-            Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
-            } | ForEach-Object {
-              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "Pruned stale isolation dir: $($_.Name)"
-            }
-          }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]
@@ -251,23 +273,47 @@ jobs:
     steps:
 
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: pwsh
         run: |
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}\$env:GITHUB_RUN_ID"
+          $ErrorActionPreference = 'Stop'
+          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
-          $src = Join-Path $env:USERPROFILE '.gitconfig'
-          $dst = Join-Path $isoDir 'gitconfig'
-          if (Test-Path $src) { Copy-Item $src $dst -Force } else { New-Item $dst -ItemType File -Force | Out-Null }
+          # Seed per-run gitconfig from the global one (if it exists)
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
+          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
 
-          git config --file $dst core.autocrlf false
-          git config --file $dst core.eol lf
+          # Remove inherited SSH redirect settings so the initial
+          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
+          $staleKeys = @(
+              'url."git@github.com:".insteadOf',
+              'url."ssh://git@github.com/".insteadOf',
+              'core.sshCommand'
+          )
+          foreach ($key in $staleKeys) {
+              git config --file $gitConfig --unset-all $key 2>$null
+          }
 
-          $kh = Join-Path $isoDir 'known_hosts'
-          ssh-keyscan github.com 2>$null | Out-File -FilePath $kh -Encoding ascii
+          # Set EOL handling
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
 
-          "GIT_CONFIG_GLOBAL=$dst"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$kh" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Per-run SSH known_hosts
+          $knownHosts = Join-Path $isoDir 'known_hosts'
+          $hostKeys = ssh-keyscan github.com 2>$null
+          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
+              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+          }
+          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
+
+          # Export env vars
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
+          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
+          Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -295,18 +341,9 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: pwsh
         run: |
-          # Do NOT delete current run's dir; checkout post-job still needs it.
-          $root = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}"
-          if (Test-Path $root) {
-            Get-ChildItem -Path $root -Directory | Where-Object {
-              $_.Name -ne "$env:GITHUB_RUN_ID" -and $_.LastWriteTime -lt (Get-Date).AddHours(-1)
-            } | ForEach-Object {
-              Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "Pruned stale isolation dir: $($_.Name)"
-            }
-          }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   gate:
     name: CI Gate (Windows)
