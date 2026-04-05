@@ -24,14 +24,14 @@ func newFakeConn(data string) *fakeConn {
 	}
 }
 
-func (f *fakeConn) Read(p []byte) (int, error)  { return f.readBuf.Read(p) }
-func (f *fakeConn) Write(p []byte) (int, error)  { return f.writeBuf.Write(p) }
-func (f *fakeConn) Close() error                 { f.closed = true; return nil }
-func (f *fakeConn) LocalAddr() net.Addr           { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234} }
-func (f *fakeConn) RemoteAddr() net.Addr          { return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5678} }
+func (f *fakeConn) Read(p []byte) (int, error)         { return f.readBuf.Read(p) }
+func (f *fakeConn) Write(p []byte) (int, error)        { return f.writeBuf.Write(p) }
+func (f *fakeConn) Close() error                       { f.closed = true; return nil }
+func (f *fakeConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234} }
+func (f *fakeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5678} }
 func (f *fakeConn) SetDeadline(_ time.Time) error      { return nil }
-func (f *fakeConn) SetReadDeadline(_ time.Time) error   { return nil }
-func (f *fakeConn) SetWriteDeadline(_ time.Time) error  { return nil }
+func (f *fakeConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (f *fakeConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func TestSafeConnReadPassesThrough(t *testing.T) {
 	fc := newFakeConn("hello world")
