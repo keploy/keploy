@@ -195,6 +195,74 @@ func buildPacket(seqID byte, payload []byte) []byte {
 	return append([]byte{byte(pktLen), byte(pktLen >> 8), byte(pktLen >> 16), seqID}, payload...)
 }
 
+func TestIsEOFPacket(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   []byte
+		expect bool
+	}{
+		{
+			name:   "valid legacy EOF with CLIENT_PROTOCOL_41 (5-byte payload)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00}),
+			expect: true,
+		},
+		{
+			name:   "valid minimal EOF (1-byte payload)",
+			data:   buildPacket(1, []byte{0xFE}),
+			expect: true,
+		},
+		{
+			name:   "not EOF - wrong header byte (OK packet)",
+			data:   buildPacket(1, []byte{0x00, 0x00, 0x00, 0x02, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - wrong header byte (ERR packet)",
+			data:   buildPacket(1, []byte{0xFF, 0x48, 0x04, '#', '0'}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - payload too large (7 bytes, OK-replacing-EOF)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			expect: false, // payload=7 is NOT a legacy EOF
+		},
+		{
+			name:   "not EOF - payload too large (>9 bytes)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - large packet with LSB=5 (false positive prevention)",
+			data:   append([]byte{0x05, 0x01, 0x00, 0x01}, append([]byte{0xFE}, make([]byte, 260)...)...),
+			expect: false, // payloadLen=0x0105=261, not 5
+		},
+		{
+			name:   "too short - empty",
+			data:   []byte{},
+			expect: false,
+		},
+		{
+			name:   "too short - 4 bytes",
+			data:   []byte{0x01, 0x00, 0x00, 0x01},
+			expect: false,
+		},
+		{
+			name:   "truncated - header says 5 but only 2 payload bytes",
+			data:   []byte{0x05, 0x00, 0x00, 0x01, 0xFE, 0x00},
+			expect: false, // buffer too short for claimed payload
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsEOFPacket(tt.data)
+			if got != tt.expect {
+				t.Errorf("IsEOFPacket(%v) = %v, want %v", tt.data, got, tt.expect)
+			}
+		})
+	}
+}
+
 func TestIsOKReplacingEOF(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -247,9 +315,24 @@ func TestIsOKReplacingEOF(t *testing.T) {
 			expect: false,
 		},
 		{
-			name:   "text row with 0xFE lenenc (8-byte integer)",
+			name:   "text row with 0xFE lenenc (8-byte integer, non-zero low bytes)",
 			data:   buildPacket(1, []byte{0xFE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}),
 			expect: false, // affected_rows != 0
+		},
+		{
+			name:   "text row with 0xFE lenenc and zero low bytes (false-positive edge case)",
+			data:   func() []byte {
+				// Simulate a text row where 0xFE lenenc has 0x00 0x00 as first
+				// two bytes of the 8-byte integer, followed by large data.
+				// The total payload exceeds maxOKReplacingEOFPayload.
+				payload := make([]byte, 2000)
+				payload[0] = 0xFE // lenenc marker
+				payload[1] = 0x00 // low byte of integer
+				payload[2] = 0x00 // second byte of integer
+				// rest is data, all zeros
+				return buildPacket(1, payload)
+			}(),
+			expect: false, // exceeds maxOKReplacingEOFPayload
 		},
 	}
 

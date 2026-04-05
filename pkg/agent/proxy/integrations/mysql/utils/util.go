@@ -197,14 +197,23 @@ func IsOKPacket(data []byte) bool {
 	return len(data) > 7 && data[4] == mysql.OK
 }
 
+// maxOKReplacingEOFPayload is the maximum reasonable payload size for an
+// OK-replacing-EOF terminator packet. An OK terminator for a SELECT carries
+// header (1) + affected_rows (1) + last_insert_id (1) + status_flags (2) +
+// warnings (2) + optional session state info. Even with large session state,
+// this should never exceed 1024 bytes. Text row packets using 0xFE
+// length-encoded integers encode values >= 16 MB, so their total payload
+// will always exceed this bound — eliminating false positives.
+const maxOKReplacingEOFPayload = 1024
+
 // IsOKReplacingEOF detects the OK packet that replaces EOF when
 // CLIENT_DEPRECATE_EOF is negotiated. This packet uses the 0xFE header
 // byte (same as legacy EOF) but carries OK-packet structure. We validate
-// the packet strictly: header 0xFE, payload length consistent with the
-// wire bytes, and the two length-encoded integers (affected_rows and
-// last_insert_id) both zero — which is always the case for a SELECT
-// result set terminator. This avoids false positives with text row
-// packets whose first column uses the 0xFE length-encoded integer form.
+// strictly: header 0xFE, consistent payload length, both affected_rows and
+// last_insert_id zero (always true for SELECT terminators), and a
+// reasonable payload size upper bound to avoid false positives with text
+// row packets whose first column uses the 0xFE length-encoded integer
+// form (which encodes values >= 16 MB).
 // See: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_ok_packet.html
 func IsOKReplacingEOF(data []byte) bool {
 	if len(data) < 11 {
@@ -228,9 +237,11 @@ func IsOKReplacingEOF(data []byte) bool {
 		return false
 	}
 
-	// After header + two zero lenenc ints we need at least status_flags (2)
-	// + warnings (2), so minimum payload is 7 bytes.
-	return payloadLen >= 7
+	// Payload must be at least 7 bytes (header + 2 zeroes + status_flags +
+	// warnings) and at most maxOKReplacingEOFPayload. The upper bound rules
+	// out text rows with 0xFE lenenc integers, which encode values >= 16 MB
+	// and thus produce payloads far exceeding this limit.
+	return payloadLen >= 7 && payloadLen <= maxOKReplacingEOFPayload
 }
 
 // IsResultSetTerminator checks if a packet terminates a result set row
