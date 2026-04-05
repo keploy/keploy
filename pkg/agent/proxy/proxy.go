@@ -619,7 +619,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			mysqlLogger := p.logger.With(
 				zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
 				zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
-				zap.String("Destination IP Address", dstAddr),
+				zap.String("Destination Address", dstAddr),
 			)
 			mysqlSession := &integrations.RecordSession{
 				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
