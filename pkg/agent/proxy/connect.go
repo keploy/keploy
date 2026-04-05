@@ -55,6 +55,11 @@ func handleConnectTunnel(
 	dstConn net.Conn, // nil in test mode
 	isTestMode bool,
 ) (*connectTunnelResult, error) {
+	// A new bufio.Reader is intentionally created here even though srcConn
+	// may already be wrapped with one. http.ReadRequest requires a
+	// bufio.Reader, and we return this reader as BufferedReader so the
+	// caller can reuse it for subsequent reads (preserving any bytes
+	// read ahead past the CONNECT headers, like a pipelined TLS ClientHello).
 	reader := bufio.NewReader(srcConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
