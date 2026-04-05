@@ -845,7 +845,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			zap.Bool("isHTTPReq", isHTTP),
 			zap.Bool("isCONNECT", isCONNECT),
 			zap.Int("initialBufLen", len(initialBuf)),
-			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
 		)
 
 		// Allow H2 if:
