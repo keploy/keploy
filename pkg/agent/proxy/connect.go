@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 
 	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -78,8 +77,11 @@ func handleConnectTunnel(
 	host, port, err := net.SplitHostPort(targetAddr)
 	if err != nil {
 		// SplitHostPort can fail for "host-without-port" or malformed input.
-		// Strip IPv6 brackets to avoid double-bracketing in JoinHostPort.
-		host = strings.Trim(targetAddr, "[]")
+		// Strip a single pair of IPv6 brackets to avoid double-bracketing.
+		host = targetAddr
+		if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+			host = host[1 : len(host)-1]
+		}
 		port = "443"
 		targetAddr = net.JoinHostPort(host, port)
 	}

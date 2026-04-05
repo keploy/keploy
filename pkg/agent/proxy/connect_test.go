@@ -177,6 +177,51 @@ func TestIsConnectRequest(t *testing.T) {
 	}
 }
 
+func TestHandleConnectTunnel_IPv6Target(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = client.Write([]byte("CONNECT [2001:db8::1]:443 HTTP/1.1\r\nHost: [2001:db8::1]:443\r\n\r\n"))
+		buf := make([]byte, 256)
+		client.Read(buf)
+	}()
+
+	result, err := handleConnectTunnel(testLogger(), server, nil, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wg.Wait()
+
+	if result.TargetHost != "2001:db8::1" {
+		t.Errorf("TargetHost = %q, want %q", result.TargetHost, "2001:db8::1")
+	}
+	if result.TargetPort != "443" {
+		t.Errorf("TargetPort = %q, want %q", result.TargetPort, "443")
+	}
+}
+
+func TestHandleConnectTunnel_InvalidPort(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = client.Write([]byte("CONNECT example.com:0 HTTP/1.1\r\nHost: example.com:0\r\n\r\n"))
+		buf := make([]byte, 256)
+		client.Read(buf)
+	}()
+
+	_, err := handleConnectTunnel(testLogger(), server, nil, true)
+	if err == nil {
+		t.Fatal("expected error for port 0, got nil")
+	}
+}
+
 func TestStripUtilConn(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

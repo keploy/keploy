@@ -86,9 +86,9 @@ send_request() {
 
     # Wait for keploy to finish recording
     sleep 7
-    pid=$(pgrep -n keploy || true)
+    pid=$(pgrep -f "keploy record" || true)
     if [ -n "$pid" ]; then
-        echo "Killing Keploy (PID: $pid)"
+        echo "Killing Keploy record process (PID: $pid)"
         sudo kill "$pid"
     fi
 }
