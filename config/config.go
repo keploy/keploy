@@ -91,10 +91,6 @@ type Record struct {
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
-	// MaxBufferMemoryMB sets the maximum memory (in MB) for proxy record
-	// buffers. The zero value (default) means unlimited — no memory limit
-	// is enforced and all traffic is recorded.
-	MaxBufferMemoryMB uint64 `json:"maxBufferMemoryMB" yaml:"maxBufferMemoryMB" mapstructure:"maxBufferMemoryMB"`
 }
 
 type ReRecord struct {
