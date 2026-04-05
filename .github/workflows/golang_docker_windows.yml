@@ -31,61 +31,17 @@ jobs:
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
-      - name: Setup per-run git isolation
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
-          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
-
-          # Seed per-run gitconfig from the global one (if it exists)
-          $gitConfig = Join-Path $isoDir 'gitconfig'
-          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
-          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
-
-          # Remove inherited SSH redirect settings so the initial
-          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
-          $staleKeys = @(
-              'url."git@github.com:".insteadOf',
-              'url."ssh://git@github.com/".insteadOf',
-              'core.sshCommand'
-          )
-          foreach ($key in $staleKeys) {
-              git config --file $gitConfig --unset-all $key 2>$null
-              if ($LASTEXITCODE -gt 1 -and $LASTEXITCODE -ne 5) {
-                  throw "Failed to unset '$key' (exit code $LASTEXITCODE)"
-              }
-          }
-
-          # Liveness marker so cleanup can detect active runs
-          Set-Content -Path (Join-Path $isoDir '.active') -Value (Get-Date -UFormat '%s')
-
-          # Set EOL handling
-          git config --file $gitConfig core.autocrlf false
-          if ($LASTEXITCODE -ne 0) { throw "git config core.autocrlf failed (exit $LASTEXITCODE)" }
-          git config --file $gitConfig core.eol lf
-          if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
-
-          # Per-run SSH known_hosts
-          $knownHosts = Join-Path $isoDir 'known_hosts'
-          $hostKeys = ssh-keyscan github.com 2>$null
-          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
-              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
-          }
-          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
-
-          # Export env vars
-          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
-          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
-          Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
-
+      # Checkout first (HTTPS-based, doesn't need isolation), then
+      # call the reusable script for git/SSH isolation.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           clean: true
+
+      - name: Setup per-run git isolation
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       # --- CLI binaries (same as before) ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
