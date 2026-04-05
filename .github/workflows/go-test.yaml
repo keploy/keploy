@@ -25,9 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           cache: false     
       
       - name: Installing build Essentials and gcc

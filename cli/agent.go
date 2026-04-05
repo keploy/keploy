@@ -37,6 +37,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
 				return nil
 			}
+
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
@@ -51,7 +52,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
 						return
 					}
-					routes.StartAgentServer(logger, p, router)
+					routes.StartAgentServer(ctx, logger, p, router)
 				}
 			}()
 

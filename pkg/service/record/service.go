@@ -41,7 +41,7 @@ type MockDB interface {
 
 type MappingDb interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
-	Upsert(ctx context.Context, testSetID string, testID string, mockIDs []string) error
+	Upsert(ctx context.Context, testSetID string, testID string, mockEntries []models.MockEntry) error
 }
 
 type TestSetConfig interface {
@@ -50,7 +50,7 @@ type TestSetConfig interface {
 }
 
 type Telemetry interface {
-	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
+	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{})
 	RecordedTestCaseMock(mockType string)
 	RecordedMocks(mockTotal map[string]int)
 	RecordedTestAndMocks()

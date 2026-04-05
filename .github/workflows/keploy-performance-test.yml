@@ -1,0 +1,280 @@
+name: Keploy Performance Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      keploy_repo:
+        description: 'Keploy repository for performance testing'
+        required: false
+        default: 'keploy/keploy'
+      keploy_branch:
+        description: 'Keploy branch for performance testing'
+        required: false
+        default: 'main'
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: keploy-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: petclinic
+          MYSQL_DATABASE: petclinic
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ppetclinic" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Checkout Keploy (current branch with scripts)
+        uses: actions/checkout@v4
+        with:
+          path: keploy
+
+      - name: Checkout Keploy to test (custom repo/branch if manually specified)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
+          ref: ${{ github.event.inputs.keploy_branch || 'main' }}
+          path: keploy-to-test
+
+      - name: Checkout Spring PetClinic
+        uses: actions/checkout@v4
+        with:
+          repository: spring-projects/spring-petclinic
+          path: petclinic
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          go-version-file: ${{ github.event_name == 'workflow_dispatch' && 'keploy-to-test/go.mod' || 'keploy/go.mod' }}
+          cache: true
+          cache-dependency-path: |
+            keploy/go.sum
+            keploy-to-test/go.sum
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Build Spring PetClinic
+        working-directory: petclinic
+        run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
+
+      - name: Build Keploy
+        run: |
+          # Determine which directory to build from
+          if [ -d "keploy-to-test" ]; then
+            BUILD_DIR="keploy-to-test"
+            echo "Building from custom repo/branch: keploy-to-test/"
+          else
+            BUILD_DIR="keploy"
+            echo "Building from current branch: keploy/"
+          fi
+
+          cd "$BUILD_DIR"
+          go build -o keploy main.go
+
+          # Move binary to keploy directory if built elsewhere
+          if [ "$BUILD_DIR" != "keploy" ]; then
+            cp keploy ../keploy/keploy
+          fi
+          
+      - name: Verify Keploy binary
+        working-directory: keploy
+        run: |
+          chmod +x keploy
+          echo "Keploy binary info:"
+          ls -lh keploy
+          ./keploy --version || echo "Version check failed (might be expected)"
+
+      - name: Make scripts executable
+        working-directory: keploy
+        run: chmod +x .github/workflows/test_workflow_scripts/performance/*.sh
+
+      - name: Start PetClinic with Keploy recording
+        working-directory: keploy
+        run: ./.github/workflows/test_workflow_scripts/performance/start-petclinic-with-keploy.sh
+
+      - name: Create k6 load test script
+        working-directory: keploy
+        run: ./.github/workflows/test_workflow_scripts/performance/create-k6-script.sh
+
+      - name: Run k6 performance tests (3 runs with validation)
+        working-directory: keploy
+        run: |
+          chmod +x ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
+          ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
+        env:
+          NUM_RUNS: 3
+          REQUIRED_FAILURES: 2
+          P50_THRESHOLD: 5       # Based on baseline ~2.5ms
+          P90_THRESHOLD: 15      # Based on baseline ~7.6ms
+          P99_THRESHOLD: 70      # Based on baseline ~15-60ms (increased for CI variance)
+          RPS_THRESHOLD: 100     # Target 100 RPS (allows 1% tolerance = 99 RPS)
+
+      - name: Stop Keploy
+        if: always()
+        working-directory: keploy
+        run: ./.github/workflows/test_workflow_scripts/performance/stop-keploy.sh
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results-${{ github.run_number }}
+          path: keploy/perf-results/
+          retention-days: 30
+
+      - name: Comment PR with performance results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Find the latest results directory
+            const resultsDir = 'keploy/perf-results';
+            if (!fs.existsSync(resultsDir)) {
+              console.log('No results directory found');
+              return;
+            }
+            
+            const dirs = fs.readdirSync(resultsDir);
+            if (dirs.length === 0) {
+              console.log('No results found');
+              return;
+            }
+            
+            const latestDir = dirs.sort().reverse()[0];
+            const resultsPath = path.join(resultsDir, latestDir);
+            
+            // Sort files by run number to ensure correct ordering
+            const getRunNumber = (filename) => {
+              const match = filename.match(/run-(\d+)-output\.log$/);
+              return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+            };
+            
+            const files = fs.readdirSync(resultsPath)
+              .filter(f => f.endsWith('-output.log'))
+              .sort((a, b) => {
+                const aNum = getRunNumber(a);
+                const bNum = getRunNumber(b);
+                if (aNum !== bNum) return aNum - bNum;
+                return a.localeCompare(b);
+              });
+            
+            let comment = '## 🚀 Keploy Performance Test Results\n\n';
+            comment += '**Multi-Run Validation:** Tests run 3 times, pipeline fails only if 2+ runs show regression.\n\n';
+            comment += '| Run | P50 | P90 | P99 | RPS | Error Rate | Status |\n';
+            comment += '|-----|-----|-----|-----|-----|------------|--------|\n';
+            
+            let passCount = 0;
+            let failCount = 0;
+            
+            files.forEach((file, idx) => {
+              const content = fs.readFileSync(path.join(resultsPath, file), 'utf8');
+              
+              // Extract metrics
+              const p50Match = content.match(/med=([0-9.]+[µm]?s)/);
+              const p90Match = content.match(/p\(90\)=([0-9.]+[µm]?s)/);
+              const p99Match = content.match(/p\(99\)=([0-9.]+[µm]?s)/);
+              const errorMatch = content.match(/http_req_failed.*?(?:rate=([0-9.]+)|:\s*([0-9.]+)%)/);
+              const rpsMatch = content.match(/http_reqs.*:\s+\d+\s+([0-9.]+)\/s/);
+              
+              const p50 = p50Match ? p50Match[1] : 'N/A';
+              const p90 = p90Match ? p90Match[1] : 'N/A';
+              const p99 = p99Match ? p99Match[1] : 'N/A';
+              
+              let errorRate = 'N/A';
+              if (errorMatch) {
+                const baseValue = errorMatch[1] !== undefined
+                  ? parseFloat(errorMatch[1]) * 100 // rate (0-1) -> percentage
+                  : parseFloat(errorMatch[2]);      // already a percentage
+                if (!Number.isNaN(baseValue)) {
+                  errorRate = baseValue.toFixed(2) + '%';
+                }
+              }
+              
+              const rps = rpsMatch ? parseFloat(rpsMatch[1]).toFixed(2) : 'N/A';
+              
+              // Determine status by checking for "FAILED" or "PASSED" in output
+              // Use the actual run number from filename, not array index
+              const runNumber = getRunNumber(file);
+              const failedPattern = new RegExp(`Run ${runNumber}: FAILED`, 'i');
+              const passedPattern = new RegExp(`Run ${runNumber}: PASSED`, 'i');
+              
+              let status;
+              if (failedPattern.test(content)) {
+                status = '❌ FAIL';
+                failCount++;
+              } else if (passedPattern.test(content)) {
+                status = '✅ PASS';
+                passCount++;
+              } else {
+                // Fallback: check if final result shows pipeline passed
+                if (content.includes('✅ PIPELINE PASSED')) {
+                  status = '✅ PASS';
+                  passCount++;
+                } else if (content.includes('❌ PIPELINE FAILED')) {
+                  status = '❌ FAIL';
+                  failCount++;
+                } else {
+                  // Last resort: assume pass if no explicit failure
+                  status = '✅ PASS';
+                  passCount++;
+                }
+              }
+              
+              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${rps} | ${errorRate} | ${status} |\n`;
+            });
+            
+            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, RPS >= 100 (±1% tolerance), Error Rate < 1%\n\n';
+            
+            if (failCount >= 2) {
+              comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';
+            } else {
+              comment += '✅ **Result:** PASSED - Only ' + failCount + ' out of 3 runs failed (threshold: 2)\n';
+            }
+            
+            comment += '\n*P50, P90, and P99 percentiles naturally filter out outliers*';
+            
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('Could not post comment:', error.message);
+            }
+
+      - name: Display Keploy test cases
+        if: always()
+        working-directory: keploy
+        run: ./.github/workflows/test_workflow_scripts/performance/display-test-cases.sh

@@ -12,10 +12,11 @@ type BypassRule struct {
 }
 
 type Filter struct {
-	BypassRule `mapstructure:",squash"`
-	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
-	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
-	MatchType  MatchType         `json:"matchType"`
+	BypassRule   `mapstructure:",squash"`
+	URLMethods   []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	Headers      map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType    MatchType         `json:"matchType" yaml:"matchType" mapstructure:"matchType"`
+	FilterPolicy FilterPolicy      `json:"filterPolicy" yaml:"filterPolicy" mapstructure:"filterPolicy"`
 }
 
 type MatchType string
@@ -23,6 +24,13 @@ type MatchType string
 const (
 	OR  MatchType = "OR"
 	AND MatchType = "AND"
+)
+
+type FilterPolicy string
+
+const (
+	Include FilterPolicy = "include"
+	Exclude FilterPolicy = "exclude"
 )
 
 type HookOptions struct {
@@ -46,14 +54,17 @@ type IngressEvent struct {
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
+	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay       time.Duration // This is the same as Application delay.
-	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
-	Mocking        bool          // used to enable/disable mocking
-	DstCfg         *ConditionalDstCfg
-	Backdate       time.Time                      // used to set backdate in cacert request
-	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	SQLDelay               time.Duration // This is the same as Application delay.
+	Mocking                bool          // used to enable/disable mocking
+	DstCfg                 *ConditionalDstCfg
+	Backdate               time.Time                      // used to set backdate in cacert request
+	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
+	SkipTLSMITM            bool
+	ConnKey                string // connection-level key for TLSHandshakeStore correlation
 }
 
 type ConditionalDstCfg struct {
@@ -91,6 +102,7 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	ConfigPath        string
 	ExtraArgs         []string
+	EnableSampling    int
 }
 
 type RunOptions struct {

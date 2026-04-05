@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -23,13 +24,16 @@ type HookCfg struct {
 	Port     uint32
 }
 
+type AuxiliaryProxyHook interface {
+	AfterStart(ctx context.Context, proxy Proxy) error
+}
+
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
 	Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
-	DeleteMocks(ctx context.Context, mocks []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
@@ -37,6 +41,10 @@ type Proxy interface {
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
 	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
+	GetDestInfo() DestInfo
+	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
+	GetSession() *Session
+	SetAuxiliaryHook(h AuxiliaryProxyHook)
 }
 
 type IncomingProxy interface {
@@ -67,6 +75,8 @@ type NetworkAddress struct {
 	Port     uint32
 }
 
+// Sessions provides a thread-safe store for Session objects, keyed by ID.
+// Used by the hooks packages (linux, windows, others) to track client sessions.
 type Sessions struct {
 	sessions sync.Map
 }
@@ -91,24 +101,6 @@ func (s *Sessions) Set(id uint64, session *Session) {
 
 func (s *Sessions) Delete(id uint64) {
 	s.sessions.Delete(id)
-}
-
-func (s *Sessions) getAll() map[uint64]*Session {
-	sessions := map[uint64]*Session{}
-	s.sessions.Range(func(k, v interface{}) bool {
-		sessions[k.(uint64)] = v.(*Session)
-		return true
-	})
-	return sessions
-}
-
-func (s *Sessions) GetAllMC() []chan<- *models.Mock {
-	sessions := s.getAll()
-	var mc []chan<- *models.Mock
-	for _, session := range sessions {
-		mc = append(mc, session.MC)
-	}
-	return mc
 }
 
 type Session struct {

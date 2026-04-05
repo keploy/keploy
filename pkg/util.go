@@ -12,16 +12,19 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
@@ -198,7 +201,15 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
+type SimulationConfig struct {
+	APITimeout      uint64
+	ConfigPort      uint32
+	KeployPath      string
+	ConfigHost      string
+	URLReplacements map[string]string
+}
+
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -218,6 +229,148 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
+	// If the request body was offloaded to an asset file (>1MB), load it back
+	if tc.HTTPReq.BodyRef.Path != "" {
+		bodyRefPath := tc.HTTPReq.BodyRef.Path
+		// Resolve relative paths against keployPath so assets work even if
+		// the keploy directory has been moved since recording.
+		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
+			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
+		}
+		bodyData, readErr := os.ReadFile(bodyRefPath)
+		if readErr != nil {
+			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			return nil, readErr
+		}
+		reqBody = bodyData
+		logger.Debug("loaded request body from asset file",
+			zap.String("path", bodyRefPath),
+			zap.Int("size", len(bodyData)))
+	}
+
+	// If form field values were offloaded to asset files (>1MB) and they were not actual files (json,html,xml,txt etc...), load them back
+	for i, form := range tc.HTTPReq.Form {
+		if len(form.FileNames) == 0 && len(form.Paths) > 0 && len(form.Values) > 0 {
+			for j, value := range form.Values {
+				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
+					formPath := form.Paths[j]
+					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
+						formPath = filepath.Join(cfg.KeployPath, formPath)
+					}
+					valData, readErr := os.ReadFile(formPath)
+					if readErr != nil {
+						utils.LogError(logger, readErr, "failed to read form value from asset file",
+							zap.String("path", formPath),
+							zap.String("key", form.Key))
+						return nil, readErr
+					}
+					tc.HTTPReq.Form[i].Values[j] = string(valData)
+					logger.Debug("loaded form value from asset file",
+						zap.String("key", form.Key),
+						zap.String("path", formPath),
+						zap.Int("size", len(valData)))
+				}
+			}
+			// Clear Paths after restoring values so the multipart builder
+			// doesn't treat these asset paths as file uploads.
+			tc.HTTPReq.Form[i].Paths = nil
+		}
+	}
+
+	contentType := tc.HTTPReq.Header["Content-Type"]
+	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		logger.Debug("building multipart body",
+			zap.Int("form_fields", len(tc.HTTPReq.Form)),
+			zap.String("content_type", contentType),
+		)
+		for _, field := range tc.HTTPReq.Form {
+			logger.Debug("multipart field",
+				zap.String("key", field.Key),
+				zap.Int("values", len(field.Values)),
+				zap.Int("paths", len(field.Paths)),
+			)
+			for _, path := range field.Paths {
+				// Resolve relative paths against keployPath
+				resolvedPath := path
+				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
+					resolvedPath = filepath.Join(cfg.KeployPath, path)
+				}
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				file, ferr := os.Open(resolvedPath)
+				if ferr != nil {
+					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					return nil, ferr
+				}
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				if perr != nil {
+					file.Close()
+					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					return nil, perr
+				}
+				if _, cerr := io.Copy(part, file); cerr != nil {
+					file.Close()
+					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					return nil, cerr
+				}
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "failed to close multipart file", zap.String("path", path))
+					return nil, cerr
+				}
+			}
+			for valueIndex, value := range field.Values {
+				logger.Debug("multipart field value",
+					zap.String("field", field.Key),
+					zap.Int("value_len", len(value)),
+					zap.Bool("looks_binary", looksBinary(value)),
+				)
+				isFileValue := false
+				fileName := ""
+				if len(field.Paths) == 0 && len(field.FileNames) > 0 {
+					isFileValue = true
+				} else if len(field.Paths) == 0 && len(field.FileNames) == 0 && looksBinary(value) {
+					isFileValue = true
+				}
+
+				if isFileValue {
+					if len(field.FileNames) > 0 && valueIndex < len(field.FileNames) {
+						fileName = field.FileNames[valueIndex]
+					}
+					if fileName == "" {
+						fileName = "upload.bin"
+					}
+					fileName = filepath.Base(fileName)
+					if fileName == "." || fileName == string(filepath.Separator) || fileName == "" {
+						fileName = "upload.bin"
+					}
+					part, perr := writer.CreateFormFile(field.Key, fileName)
+					if perr != nil {
+						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						return nil, perr
+					}
+					if _, werr := part.Write([]byte(value)); werr != nil {
+						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						return nil, werr
+					}
+					continue
+				}
+				if werr := writer.WriteField(field.Key, value); werr != nil {
+					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					return nil, werr
+				}
+			}
+		}
+		if cerr := writer.Close(); cerr != nil {
+			utils.LogError(logger, cerr, "failed to close multipart writer")
+			return nil, cerr
+		}
+		logger.Debug("multipart body built", zap.Int("body_len", body.Len()), zap.String("content_type", writer.FormDataContentType()))
+		reqBody = body.Bytes()
+		tc.HTTPReq.Header["Content-Type"] = writer.FormDataContentType()
+		delete(tc.HTTPReq.Header, "Content-Length")
+	}
+
 	if tc.HTTPReq.Header["Content-Encoding"] != "" {
 		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
 		if err != nil {
@@ -228,53 +381,20 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	// Determine which port to use for test execution
-	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original URL port (defaults to 80 for HTTP, 443 for HTTPS)
-	testURL := tc.HTTPReq.URL
-	parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
-	if parseErr != nil {
-		utils.LogError(logger, parseErr, "failed to parse test case URL")
-		return nil, parseErr
-	}
+	// Determine which URL/port to use for test execution.
+	// Priority logic (refined):
+	// 1. Check replaceWith against the ORIGINAL test case URL.
+	//    If a match is found, apply it.
+	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
+	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
+	// 2. ConfigHost (if provided) overrides host (ONLY if replaceWith didn't match)
+	// 3. AppPort (if present) overrides port
+	// 4. ConfigPort (if present) overrides port
 
-	// Get the port from URL (returns empty string if not specified, meaning default 80/443)
-	urlPort := parsedURL.Port()
-
-	if configPort > 0 {
-		// Config port takes highest priority - use it for all test cases
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
-		testURL = parsedURL.String()
-
-		// Warn if config port differs from recorded app_port (may cause test failures)
-		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Info("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
-				zap.Uint32("config_port", configPort),
-				zap.Uint16("recorded_app_port", tc.AppPort),
-				zap.String("url", testURL))
-		} else {
-			logger.Debug("Using port from config/flag", zap.Uint32("port", configPort), zap.String("url", testURL))
-		}
-	} else if tc.AppPort > 0 {
-		// Use test case AppPort if no config port is provided
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
-		testURL = parsedURL.String()
-		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
-	} else {
-		// Neither configPort nor AppPort is set - use original URL
-		// If URL has no explicit port, Go's http.Client uses scheme defaults (80 for HTTP, 443 for HTTPS)
-		if urlPort == "" {
-			defaultPort := "80"
-			if parsedURL.Scheme == "https" {
-				defaultPort = "443"
-			}
-			logger.Debug("No port specified in config or test case. Using URL as-is with default port.",
-				zap.String("url", testURL),
-				zap.String("default_port", defaultPort))
-		} else {
-			logger.Debug("Using port from URL", zap.String("url", testURL), zap.String("port", urlPort))
-		}
+	// Step 1: Resolve the target URL/Authority using the helper
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
@@ -310,7 +430,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -321,7 +441,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -333,7 +453,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else {
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -400,6 +520,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 	return resp, errHTTPReq
+}
+
+func looksBinary(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
@@ -993,37 +1125,44 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 }
 
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
-	// Early exit if no time filters
-	if afterTime.Equal(time.Time{}) || beforeTime.Equal(time.Time{}) {
-		return m, nil
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
 	}
 
-	// OPTIMIZATION: Pre-allocate slices based on expected distribution
-	// Assuming most mocks will be filtered (within time range)
-	filteredMocks := make([]*models.Mock, 0, len(m))
-	unfilteredMocks := make([]*models.Mock, 0, len(m)/4) // Expect ~25% unfiltered
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy - using thread-safe SetIsFiltered method
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+		if mock == nil {
+			continue
+		}
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		mock.TestModeInfo.SetIsFiltered(false)
-		unfilteredMocks = append(unfilteredMocks, mock)
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
@@ -1032,38 +1171,32 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	// OPTIMIZATION: Pre-allocate slices
-	filteredMocks := make([]*models.Mock, 0, len(mocksPresentInMapping))
-	unfilteredMocks := make([]*models.Mock, 0, len(m))
-
-	// OPTIMIZATION: Build a set for O(1) lookup instead of O(n) linear search
-	mappingSet := make(map[string]struct{}, len(mocksPresentInMapping))
+	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {
-		mappingSet[name] = struct{}{}
+		mapping[name] = true
 	}
-
+	var filtered, unfiltered []*models.Mock
 	isNonKeploy := false
-
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy (same rationale as filterByTimeStamp)
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+		if mock == nil {
+			continue
+		}
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-
-		if _, found := mappingSet[mock.Name]; found {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+		if mapping[p.Name] {
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
 		} else {
-			mock.TestModeInfo.SetIsFiltered(false)
-			unfilteredMocks = append(unfilteredMocks, mock)
+			p.TestModeInfo.IsFiltered = false
+			unfiltered = append(unfiltered, p)
 		}
 	}
-
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
-
-	return filteredMocks, unfilteredMocks
+	return filtered, unfiltered
 }
 
 func GuessContentType(data []byte) models.BodyType {
@@ -1285,4 +1418,180 @@ func LooksLikeJSON(s string) bool {
 	}
 	return (strings.HasPrefix(s, "{") && strings.Contains(s, "}")) ||
 		(strings.HasPrefix(s, "[") && strings.Contains(s, "]"))
+}
+
+// hasExplicitPort checks if the given host string (or host:port)
+// has an explicit port defined. It handles IPv6 addresses (e.g. [::1]:8080) correctly.
+func hasExplicitPort(hostStr string) bool {
+	// Basic check: if no colon, definitely no port (unless it's a bare IPv6, but that doesn't have a port either)
+	if !strings.Contains(hostStr, ":") {
+		return false
+	}
+
+	// Attempt to split host/port
+	// net.SplitHostPort handles IPv6 addresses enclosed in brackets [::1]:8080
+	_, port, err := net.SplitHostPort(hostStr)
+	if err != nil {
+		return false
+	}
+
+	// If a port is found, verify it is numeric
+	if port != "" {
+		if _, err := strconv.Atoi(port); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
+// by applying replacement logic and precedence rules.
+//
+// Priority logic:
+//  1. Check urlReplacements against originalTarget.
+//     If match found, apply it.
+//     CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
+//  2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
+//  3. AppPort (if present) overrides port.
+//  4. ConfigPort (if present) overrides port (takes precedence over AppPort).
+func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+	finalTarget := originalTarget
+	replacementHasPort := false
+	replacementMatched := false
+
+	// Step 1: Check replaceWith
+	if len(urlReplacements) > 0 {
+		for substr, replacement := range urlReplacements {
+			if strings.Contains(finalTarget, substr) {
+				replacementMatched = true
+				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+
+				// Check if the replacement value explicitly defines a port.
+				// Heuristic: check if the string contains a port using `hasExplicitPort`.
+				// For HTTP/HTTPS, we usually ignore the scheme part for port detection,
+				// but `hasExplicitPort` expects "host:port".
+				checkStr := replacement
+				if isHTTP {
+					// Strip scheme for port check if present
+					if strings.HasPrefix(replacement, "http://") {
+						checkStr = strings.TrimPrefix(replacement, "http://")
+					} else if strings.HasPrefix(replacement, "https://") {
+						checkStr = strings.TrimPrefix(replacement, "https://")
+					}
+				}
+
+				if hasExplicitPort(checkStr) {
+					replacementHasPort = true
+				}
+
+				logger.Debug("Applied replaceWith substitution",
+					zap.String("find", substr),
+					zap.String("replace", replacement),
+					zap.String("result_target", finalTarget),
+					zap.Bool("replacement_has_port", replacementHasPort))
+				break
+			}
+		}
+	}
+
+	// If replacement defined a port, we are done
+	if replacementHasPort {
+		return finalTarget, nil
+	}
+
+	// Step 2a: ConfigHost override (if no replacement match)
+	if !replacementMatched && configHost != "" {
+		var err error
+		if isHTTP {
+			finalTarget, err = utils.ReplaceHost(finalTarget, configHost)
+		} else {
+			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
+		}
+		if err != nil {
+			utils.LogError(logger, err, "failed to replace host with config host")
+			return "", err
+		}
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+	}
+
+	// Step 2b: Port overrides (AppPort / ConfigPort)
+	// We need to parse valid host/port from finalTarget.
+	// For HTTP, it's a URL. For gRPC, it's usually "host:port" or just "host".
+
+	var host string
+	var port string
+	var scheme string // only for HTTP
+
+	if isHTTP {
+		parsedURL, parseErr := url.Parse(finalTarget)
+		if parseErr != nil {
+			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			return "", parseErr
+		}
+		host = parsedURL.Hostname()
+		port = parsedURL.Port()
+		scheme = parsedURL.Scheme
+		if port == "" {
+			// Set default port if missing
+			if scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+			logger.Debug("URL has no explicit port, using scheme default",
+				zap.String("target", finalTarget), zap.String("default_port", port))
+		}
+	} else {
+		// gRPC Authority parsing
+		host = finalTarget
+		if colonIdx := strings.LastIndex(finalTarget, ":"); colonIdx != -1 {
+			// Check if it's not part of IPv6 brackets ??
+			// safest is SplitHostPort if possible, or manual logic
+			h, p, err := net.SplitHostPort(finalTarget)
+			if err == nil {
+				host = h
+				port = p
+			} else {
+				// Fallback or assume it's just host if Split failed or it's just host
+				// If no colon, port is empty
+			}
+		}
+		if port == "" {
+			logger.Debug("Authority has no explicit port, using gRPC default",
+				zap.String("target", finalTarget), zap.String("default_port", "443"))
+			port = "443" // Default for gRPC logic
+		}
+	}
+
+	// Apply overrides
+	// AppPort
+	if appPort > 0 {
+		port = fmt.Sprintf("%d", appPort)
+		logger.Debug("Overriding port with app_port",
+			zap.Uint16("app_port", appPort))
+	}
+
+	// ConfigPort (Precedence)
+	if configPort > 0 {
+		if appPort > 0 && uint32(appPort) != configPort {
+			logger.Info("Config port overrides recorded app_port",
+				zap.Uint32("config_port", configPort),
+				zap.Uint16("recorded_app_port", appPort))
+		}
+		port = fmt.Sprintf("%d", configPort)
+	}
+
+	// Reassemble
+	if isHTTP {
+		// For URL, we can reconstruct
+		u, _ := url.Parse(finalTarget) // assumed valid from before
+		u.Host = net.JoinHostPort(host, port)
+		finalTarget = u.String()
+	} else {
+		finalTarget = net.JoinHostPort(host, port)
+	}
+
+	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	return finalTarget, nil
 }

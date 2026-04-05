@@ -79,6 +79,27 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
 			return nil, err
 		}
+	case models.DNS:
+		var dnsReq models.DNSReq
+		if mock.Spec.DNSReq != nil {
+			dnsReq = *mock.Spec.DNSReq
+		}
+		var dnsResp models.DNSResp
+		if mock.Spec.DNSResp != nil {
+			dnsResp = *mock.Spec.DNSResp
+		}
+		dnsSpec := models.DNSSchema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          dnsReq,
+			Response:         dnsResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(dnsSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the dns input-output as yaml")
+			return nil, err
+		}
 	case models.GENERIC:
 		genericSpec := models.GenericSchema{
 			Metadata:         mock.Spec.Metadata,
@@ -105,19 +126,17 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
 			return nil, err
 		}
-	case models.Postgres:
-		// case models.PostgresV2:
-		postgresSpec := models.PostgresSpec{
-			Metadata:          mock.Spec.Metadata,
-			PostgresRequests:  mock.Spec.PostgresRequests,
-			PostgresResponses: mock.Spec.PostgresResponses,
-			ReqTimestampMock:  mock.Spec.ReqTimestampMock,
-			ResTimestampMock:  mock.Spec.ResTimestampMock,
+	case models.KAFKA:
+		kafkaSpec := models.KafkaSchema{
+			Metadata:         mock.Spec.Metadata,
+			KafkaRequests:    mock.Spec.KafkaRequests,
+			KafkaResponses:   mock.Spec.KafkaResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-
-		err := yamlDoc.Spec.Encode(postgresSpec)
+		err := yamlDoc.Spec.Encode(kafkaSpec)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the postgres input-output as yaml")
+			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
 			return nil, err
 		}
 	case models.PostgresV2:
@@ -211,6 +230,28 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
 			return nil, err
 		}
+	case models.HTTP2:
+		var http2Req models.HTTP2Req
+		if mock.Spec.HTTP2Req != nil {
+			http2Req = *mock.Spec.HTTP2Req
+		}
+		var http2Resp models.HTTP2Resp
+		if mock.Spec.HTTP2Resp != nil {
+			http2Resp = *mock.Spec.HTTP2Resp
+		}
+		http2Spec := models.HTTP2Schema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          http2Req,
+			Response:         http2Resp,
+			Created:          mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(http2Spec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
+			return nil, err
+		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
@@ -250,6 +291,24 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
 				ResTimestampMock: httpSpec.ResTimestampMock,
+			}
+		case models.DNS:
+			dnsSpec := models.DNSSchema{}
+			err := m.Spec.Decode(&dnsSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into dns mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			metadata := dnsSpec.Metadata
+			if metadata == nil {
+				metadata = map[string]string{}
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         metadata,
+				DNSReq:           &dnsSpec.Request,
+				DNSResp:          &dnsSpec.Response,
+				ReqTimestampMock: dnsSpec.ReqTimestampMock,
+				ResTimestampMock: dnsSpec.ResTimestampMock,
 			}
 		case models.Mongo:
 			mongoSpec := models.MongoSpec{}
@@ -306,23 +365,19 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: redisSpec.ReqTimestampMock,
 				ResTimestampMock: redisSpec.ResTimestampMock,
 			}
-
-		case models.Postgres:
-
-			PostSpec := models.PostgresSpec{}
-			err := m.Spec.Decode(&PostSpec)
-
+		case models.KAFKA:
+			kafkaSpec := models.KafkaSchema{}
+			err := m.Spec.Decode(&kafkaSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into kafka mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata: PostSpec.Metadata,
-				// OutputBinary: genericSpec.Objects,
-				PostgresRequests:  PostSpec.PostgresRequests,
-				PostgresResponses: PostSpec.PostgresResponses,
-				ReqTimestampMock:  PostSpec.ReqTimestampMock,
-				ResTimestampMock:  PostSpec.ResTimestampMock,
+				Metadata:         kafkaSpec.Metadata,
+				KafkaRequests:    kafkaSpec.KafkaRequests,
+				KafkaResponses:   kafkaSpec.KafkaResponses,
+				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
+				ResTimestampMock: kafkaSpec.ResTimestampMock,
 			}
 		case models.PostgresV2:
 
@@ -353,6 +408,21 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = *mockSpec
+		case models.HTTP2:
+			http2Spec := models.HTTP2Schema{}
+			err := m.Spec.Decode(&http2Spec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http2 mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         http2Spec.Metadata,
+				HTTP2Req:         &http2Spec.Request,
+				HTTP2Resp:        &http2Spec.Response,
+				Created:          http2Spec.Created,
+				ReqTimestampMock: http2Spec.ReqTimestampMock,
+				ResTimestampMock: http2Spec.ResTimestampMock,
+			}
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
 			continue

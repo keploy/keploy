@@ -98,38 +98,72 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 
 // Handled chunked requests when content-length is given.
 func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn, contentLength int) error {
+	// Use a larger buffer (e.g., 32KB) for better performance than 1KB
+	buf := make([]byte, 32*1024)
+
 	for contentLength > 0 {
-		err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		// 1. Check if context is already done before trying to read
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// 2. Refresh the deadline
+		err := clientConn.SetReadDeadline(time.Now().Add(20 * time.Second))
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to set the read deadline for the client conn")
 			return err
 		}
-		requestChunked, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
+
+		// 3. Read directly from connection
+		// This blocks only until *some* data is available or error occurs.
+		readBuf := buf
+		if contentLength < len(buf) {
+			readBuf = buf[:contentLength]
+		}
+		n, err := clientConn.Read(readBuf)
+
+		if n > 0 {
+			chunk := buf[:n]
+
+			// Append to final request
+			*finalReq = append(*finalReq, chunk...)
+			contentLength -= n
+
+			h.Logger.Debug("Read chunk", zap.Int("chunkSize", n), zap.Int("remaining", contentLength))
+
+			// Write to destination
+			if destConn != nil {
+				_, wErr := destConn.Write(chunk)
+				if wErr != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, wErr, "failed to write request message to the destination server")
+					return wErr
+				}
+			}
+		}
+
 		if err != nil {
 			if err == io.EOF {
+				// Client closed connection cleanly
 				utils.LogError(h.Logger, nil, "conn closed by the user client")
 				return err
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				h.Logger.Info("Stopped getting data from the conn", zap.Error(err))
+			}
+
+			// Check for Timeout
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				h.Logger.Info("Stopped getting data from the conn (Timeout)", zap.Error(err))
 				break
 			}
-			utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
-			return err
-		}
-		h.Logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
-		*finalReq = append(*finalReq, requestChunked...)
-		contentLength -= len(requestChunked)
 
-		// destConn is nil in case of test mode.
-		if destConn != nil {
-			_, err = destConn.Write(requestChunked)
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
-				return err
+			// Check for Context Cancel (if Read failed due to context closure wrapped in net error)
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+
+			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+			return err
 		}
 	}
 	return nil

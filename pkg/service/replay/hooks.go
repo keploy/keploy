@@ -44,6 +44,23 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
+	// Extract URL replacements: merge global + per-test-set (test-set level overrides global for same key)
+	var urlReplacements map[string]string
+	rw := h.cfg.Test.ReplaceWith
+	if len(rw.Global.URL) > 0 || len(rw.TestSets) > 0 {
+		urlReplacements = make(map[string]string)
+		// Start with global replacements
+		for k, v := range rw.Global.URL {
+			urlReplacements[k] = v
+		}
+		// Override/add with per-test-set replacements
+		if tsRW, ok := rw.TestSets[testSetID]; ok {
+			for k, v := range tsRW.URL {
+				urlReplacements[k] = v
+			}
+		}
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
 
@@ -52,7 +69,18 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port)
+
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			APITimeout:      h.cfg.Test.APITimeout,
+			ConfigPort:      h.cfg.Test.Port,
+			KeployPath:      h.cfg.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -66,7 +94,15 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, h.cfg.Test.GRPCPort)
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -97,6 +133,11 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firs
 		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
 	}
 
+	return nil
+}
+
+func (h *Hooks) BeforeTestSetReplay(ctx context.Context, testSetID string) error {
+	h.logger.Debug("BeforeTestSetReplay hook executed", zap.String("testSetID", testSetID))
 	return nil
 }
 
@@ -257,6 +298,13 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 		return nil, err
 	}
 	return consumedMocks, nil
+}
+
+// GetNoisyTestCaseNames is a no-op in the default Hooks implementation.
+// Callers that embed custom TestHooks should override this to return the
+// noisy test case names collected during BeforeTestResult processing.
+func (h *Hooks) GetNoisyTestCaseNames(testSetID string) []string {
+	return nil
 }
 
 // Function to parse and extract claims from a JWT token without verification

@@ -31,6 +31,18 @@ APP_IMAGE="go-app-${JOB_ID}"
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
+# Clean up stale Docker state from previous killed runs.
+echo "Cleaning up stale docker compose project state..."
+docker compose down --remove-orphans -v 2>/dev/null || true
+docker compose -p echo-sql down --remove-orphans -v 2>/dev/null || true
+# Force-remove ghost containers stuck in Docker's containerd metadata.
+# These don't show in 'docker ps -a' but compose still tries to recreate them.
+for id in $(docker compose ps -aq 2>/dev/null); do
+  docker rm -f "$id" 2>/dev/null || true
+done
+# Also try removing by inspecting compose config for stale references
+docker compose rm -f -s 2>/dev/null || true
+
 # Cleanup function to remove containers
 cleanup() {
     echo "Cleaning up containers and services..."
@@ -151,7 +163,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="${APP_CONTAINER}"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --debug --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

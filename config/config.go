@@ -38,6 +38,7 @@ type Config struct {
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
@@ -76,6 +77,7 @@ type UtGen struct {
 	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
 	Flakiness          bool    `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
 }
+
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
 }
@@ -86,7 +88,9 @@ type Record struct {
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 }
 
 type ReRecord struct {
@@ -101,6 +105,7 @@ type ReRecord struct {
 	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
 	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
+
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
 	Tests    []string `json:"tests" yaml:"tests" mapstructure:"tests"`
@@ -110,6 +115,7 @@ type Contract struct {
 	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
 	Mappings Mappings `json:"mappings" yaml:"mappings" mapstructure:"mappings"`
 }
+
 type Mappings struct {
 	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
 	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
@@ -119,39 +125,44 @@ type Normalize struct {
 	SelectedTests []SelectedTests `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	TestRun       string          `json:"testReport" yaml:"testReport" mapstructure:"testReport"`
 	AllowHighRisk bool            `json:"allowHighRisk" yaml:"allowHighRisk" mapstructure:"allowHighRisk"`
+	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Test struct {
-	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	Host                string              `json:"host" yaml:"host" mapstructure:"host"`
-	Port                uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	GRPCPort            uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout          uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	SkipCoverage        bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
-	CoverageReportPath  string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	IgnoreOrdering      bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
-	MongoPassword       string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Language            models.Language     `json:"language" yaml:"language" mapstructure:"language"`
-	RemoveUnusedMocks   bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
-	FallBackOnMiss      bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
-	JacocoAgentPath     string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
-	BasePath            string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	Mocking             bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
-	IgnoredTests        map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
-	DisableLineCoverage bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	DisableMockUpload   bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
-	UseLocalMock        bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
-	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
-	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
-	MaxFailAttempts     uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
-	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
-	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
-	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
-	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
-	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
-	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
+	SelectedTests          map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise            Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith            ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay                  uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
+	Port                   uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	GRPCPort               uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	APITimeout             uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	SkipCoverage           bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
+	CoverageReportPath     string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
+	IgnoreOrdering         bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
+	MongoPassword          string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
+	Language               models.Language     `json:"language" yaml:"language" mapstructure:"language"`
+	RemoveUnusedMocks      bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
+	FallBackOnMiss         bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"` // Deprecated: this flag is ignored. Replay is now always deterministic.
+	JacocoAgentPath        string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
+	BasePath               string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	Mocking                bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	IgnoredTests           map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+	DisableLineCoverage    bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
+	DisableMockUpload      bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
+	UseLocalMock           bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
+	UpdateTemplate         bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
+	MustPass               bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
+	MaxFailAttempts        uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
+	MaxFlakyChecks         uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
+	ProtoFile              string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir               string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude           []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CompareAll             bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
+	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
+	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
+	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	CmdUsed                string              `json:"-" yaml:"-" mapstructure:"-"`                                                                // Full command used for the test run (set at runtime)
 }
 
 type Report struct {
@@ -160,11 +171,21 @@ type Report struct {
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
+	Format           string              `json:"format" yaml:"format" mapstructure:"format"`
 }
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+}
+
+type ReplaceWith struct {
+	Global   ReplaceWithMap            `json:"global" yaml:"global" mapstructure:"global"`
+	TestSets map[string]ReplaceWithMap `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+}
+
+type ReplaceWithMap struct {
+	URL map[string]string `json:"url" yaml:"url" mapstructure:"url"`
 }
 
 type SelectedTests struct {
@@ -202,12 +223,13 @@ func SetSelectedTests(conf *Config, testSets []string) {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
 }
+
 func SetSelectedServices(conf *Config, services []string) {
 	// string is "s1,s2" so i want to get s1,s2
 	conf.Contract.Services = services
 }
-func SetSelectedContractTests(conf *Config, tests []string) {
 
+func SetSelectedContractTests(conf *Config, tests []string) {
 	conf.Contract.Tests = tests
 }
 

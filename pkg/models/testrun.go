@@ -5,21 +5,24 @@ import (
 )
 
 type TestReport struct {
-	Version    Version      `json:"version" yaml:"version"`
-	Name       string       `json:"name" yaml:"name"`
-	Status     string       `json:"status" yaml:"status"`
-	Success    int          `json:"success" yaml:"success"`
-	Failure    int          `json:"failure" yaml:"failure"`
-	HighRisk   int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
-	MediumRisk int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
-	LowRisk    int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
-	Ignored    int          `json:"ignored" yaml:"ignored"`
-	Total      int          `json:"total" yaml:"total"`
-	Tests      []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet    string       `json:"testSet" yaml:"test_set"`
-	CreatedAt  int64        `json:"created_at" yaml:"created_at"`
-	TimeTaken  string       `json:"time_taken" yaml:"time_taken"`
-	CmdUsed    string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
+	Version       Version      `json:"version" yaml:"version"`
+	Name          string       `json:"name" yaml:"name"`
+	Status        string       `json:"status" yaml:"status"`
+	FailureReason string       `json:"failureReason,omitempty" yaml:"failure_reason,omitempty"`
+	Success       int          `json:"success" yaml:"success"`
+	Failure       int          `json:"failure" yaml:"failure"`
+	Obsolete      int          `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
+	HighRisk      int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
+	MediumRisk    int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
+	LowRisk       int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
+	Ignored       int          `json:"ignored" yaml:"ignored"`
+	Total         int          `json:"total" yaml:"total"`
+	Tests         []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet       string       `json:"testSet" yaml:"test_set"`
+	CreatedAt     int64        `json:"created_at" yaml:"created_at"`
+	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
+	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
+	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
 }
 
 type TestCoverage struct {
@@ -135,12 +138,13 @@ type FailureAssessment struct {
 }
 
 type Result struct {
-	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
-	FailureInfo   FailureInfo    `json:"-" yaml:"-"`
-	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
-	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
-	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
-	TrailerResult []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
+	StatusCode     IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
+	FailureInfo    FailureInfo    `json:"-" yaml:"-"`
+	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
+	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
+	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
+	DepResult      []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
+	TrailerResult  []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
 }
 
 type DepResult struct {
@@ -184,11 +188,12 @@ type TestStatus string
 
 // constants for test status
 const (
-	TestStatusPending TestStatus = "PENDING"
-	TestStatusRunning TestStatus = "RUNNING"
-	TestStatusFailed  TestStatus = "FAILED"
-	TestStatusPassed  TestStatus = "PASSED"
-	TestStatusIgnored TestStatus = "IGNORED"
+	TestStatusPending  TestStatus = "PENDING"
+	TestStatusRunning  TestStatus = "RUNNING"
+	TestStatusFailed   TestStatus = "FAILED"
+	TestStatusPassed   TestStatus = "PASSED"
+	TestStatusIgnored  TestStatus = "IGNORED"
+	TestStatusObsolete TestStatus = "OBSOLETE"
 )
 
 type (
