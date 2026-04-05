@@ -27,6 +27,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 7.3+: make $ErrorActionPreference also apply to native commands
+$PSNativeCommandUseErrorActionPreference = $true
 
 $isoDir = Join-Path $env:USERPROFILE $IsoRoot $env:GITHUB_RUN_ID
 New-Item -Path $isoDir -ItemType Directory -Force | Out-Null

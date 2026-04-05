@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
   _ISO_ROOT: .git-isolation
 
 jobs:
@@ -33,6 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
