@@ -742,12 +742,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		innerReader := connectResult.BufferedReader
 		testBuffer, err = innerReader.Peek(5)
 		if err != nil {
-			if err == io.EOF {
+			if err == io.EOF && len(testBuffer) == 0 {
 				p.logger.Debug("CONNECT tunnel closed immediately after handshake")
 				return nil
 			}
-			utils.LogError(p.logger, err, "failed to peek inner tunnel data after CONNECT")
-			return err
+			if err != io.EOF {
+				utils.LogError(p.logger, err, "failed to peek inner tunnel data after CONNECT")
+				return err
+			}
+			// Partial read with EOF — proceed with what we have.
 		}
 
 		// Wrap the raw TCP connection with innerReader for subsequent reads.
