@@ -11,13 +11,19 @@ import (
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, ml ...*pUtil.MemoryLimiter) error {
+	var memLimiter *pUtil.MemoryLimiter
+	if len(ml) > 0 {
+		memLimiter = ml[0]
+	}
+
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -25,6 +31,20 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	//for keeping conn alive
 	for {
+		if memLimiter != nil && memLimiter.IsExceeded() {
+			logger.Debug("memory limit exceeded, stopping MySQL recording and falling back to passthrough")
+			done := make(chan struct{}, 2)
+			cp := func(dst, src net.Conn) {
+				_, _ = io.Copy(dst, src)
+				done <- struct{}{}
+			}
+			go cp(destConn, clientConn)
+			go cp(clientConn, destConn)
+			<-done
+			<-done
+			return nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
