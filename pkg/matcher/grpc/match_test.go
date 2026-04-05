@@ -64,6 +64,21 @@ func TestMatch_JSONComparison(t *testing.T) {
 			expectedMatch:  false,
 			description:    "Should handle mixed JSON and non-JSON gracefully",
 		},
+		{
+			name: "Protoscope field reorder with different indentation",
+			expectedData: "9: {  3: {    1: {      2: {2: 0.0}   # 0x0i64\n" +
+				"  1: {\"candidateCnt\"}}\n" +
+				"  1: {      2: {3: {\"OVS\"}}\n" +
+				"  1: {\"type\"}}}}",
+			actualData: "9: {  3: {    1: {      2: {3: {\"OVS\"}}\n" +
+				"  1: {\"type\"}}\n" +
+				"  1: {      2: {2: 0.0}   # 0x0i64\n" +
+				"  1: {\"candidateCnt\"}}}}",
+			noiseConfig:    map[string]map[string][]string{},
+			ignoreOrdering: false,
+			expectedMatch:  true,
+			description:    "Should match protoscope text where field order (and thus indentation) differs but content is identical",
+		},
 	}
 
 	for _, tt := range tests {

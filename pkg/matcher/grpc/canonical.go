@@ -45,6 +45,12 @@ func canonicalizeRecursive(s string, depth int) string {
 		blocks[i] = normalizeWhitespace(blocks[i])
 	}
 
+	// Strip leading whitespace so sort order depends on content,
+	// not position-dependent indentation assigned by protoscope.
+	for i := range blocks {
+		blocks[i] = strings.TrimLeft(blocks[i], " \t")
+	}
+
 	// Order-insensitive among siblings
 	sort.Strings(blocks)
 	return strings.Join(blocks, "\n")
