@@ -2,7 +2,7 @@ name: Python On Docker (macOS)
 on:
   workflow_call:
     inputs:
-      image_tag:            
+      image_tag:
         description: "Docker image tag or digest to pull"
         required: false
         type: string
@@ -13,22 +13,12 @@ on:
 
 jobs:
   python_docker_macos:
-    # concurrency:
-    #   group: macos-keploy-${{ github.ref }}
-    #   cancel-in-progress: false
     runs-on: [self-hosted, macOS, native]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          # - job: record_latest_replay_build
-          #   record_src: latest
-          #   replay_src: build
-          # - job: record_latest_replay_latest
-          #   record_src: latest
-          #   replay_src: latest
-
-
           - job: record_build_replay_build
             record_src: build
             replay_src: build
@@ -47,7 +37,9 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          rm -rf ~/.gitconfig
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,15 +52,6 @@ jobs:
             exit 1
           fi
           echo "Docker Desktop is running."
-
-      - name: Clean up stale Docker state
-        continue-on-error: true
-        run: |
-          for project in $(docker compose ls -q 2>/dev/null); do
-            docker compose -p "$project" down --remove-orphans 2>/dev/null || true
-          done
-          docker container prune -f 2>/dev/null || true
-          docker network prune -f 2>/dev/null || true
 
       - id: image
         uses: ./.github/actions/download-image
@@ -96,7 +79,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
-          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+          JOB_ID: ${{ github.run_id }}-python-${{ github.run_attempt }}
         shell: bash
         run: |
           cd samples-python/flask-mongo
@@ -112,22 +95,17 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+          JOB_ID: ${{ github.run_id }}-python-${{ github.run_attempt }}
         run: |
-          # Remove JOB_ID-suffixed containers created by the test script
-          for prefix in flaskApp mongo keploy; do
-            ids=$(docker ps -aq --filter "name=${prefix}_${JOB_ID}" 2>/dev/null || true)
+          # Only remove containers scoped to THIS job's JOB_ID.
+          echo "Cleaning up Docker artifacts for JOB_ID=${JOB_ID}..."
+          for prefix in flaskApp_ mongo_ keploy_; do
+            ids=$(docker ps -aq --filter "name=${prefix}${JOB_ID}" 2>/dev/null || true)
             if [ -n "$ids" ]; then
               docker rm -f $ids 2>/dev/null || true
             fi
           done
-          # Remove any containers still attached to keploy-network
-          ids=$(docker ps -aq --filter "network=keploy-network" 2>/dev/null || true)
-          if [ -n "$ids" ]; then
-            docker rm -f $ids 2>/dev/null || true
-          fi
-          docker network rm keploy-network 2>/dev/null || true
-          pkill -9 -f 'keploy record|keploy test' 2>/dev/null || true
+          docker network rm "keploy-network-${JOB_ID}" 2>/dev/null || true
 
       - name: Clean up git config
         if: always()
