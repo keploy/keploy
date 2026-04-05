@@ -97,6 +97,7 @@ send_request() {
 for i in 1 2; do
     app_name="connect-tunnel_${i}"
     send_request &
+    REQ_PID=$!
     HTTP_PROXY=http://localhost:3128 HTTPS_PROXY=http://localhost:3128 \
         "$RECORD_BIN" record -c "./connect-tunnel" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
 
@@ -111,7 +112,7 @@ for i in 1 2; do
         exit 1
     fi
     sleep 5
-    wait
+    wait "$REQ_PID" 2>/dev/null || true
     echo "Recorded test cases for iteration $i"
 done
 
