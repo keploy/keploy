@@ -67,12 +67,18 @@ fi
 send_request() {
     sleep 6
     # Wait for app to be ready
+    app_ready=false
     for i in {1..30}; do
         if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+            app_ready=true
             break
         fi
         sleep 1
     done
+    if [ "$app_ready" = false ]; then
+        echo "::error::App failed to become ready on :8080 after 30s"
+        return 1
+    fi
 
     echo "App is ready, sending requests..."
 

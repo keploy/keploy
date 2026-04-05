@@ -105,6 +105,11 @@ func TestHandleConnectTunnel_RecordMode(t *testing.T) {
 	if string(appResponse) != want {
 		t.Errorf("app received %q, want %q", appResponse, want)
 	}
+
+	// Verify DstReader is set (tunnel connection metadata preserved).
+	if result.DstReader == nil {
+		t.Error("DstReader is nil; tunnel proxy reader not preserved")
+	}
 }
 
 func TestHandleConnectTunnel_ProxyRejectsWithError(t *testing.T) {
