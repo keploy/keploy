@@ -31,9 +31,9 @@ runs:
         mkdir -p ~/.ssh
         ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-    # --- Windows: Add Known Hosts ---
+    # --- Windows: Add Known Hosts (only when per-run isolation is NOT active) ---
     - name: Add GitHub to known hosts (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && !env.GIT_SSH_COMMAND
       shell: pwsh
       run: |
         $sshDir = Join-Path $Env:USERPROFILE ".ssh"
@@ -57,10 +57,10 @@ runs:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
-        
+
         echo "Fetching private integrations dependency via SSH..."
         GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
-        
+
         echo "Creating extraparsers.go (platform-independent)..."
         mkdir -p pkg/agent/proxy
         cat <<'EOF' > pkg/agent/proxy/extraparsers.go
@@ -79,7 +79,12 @@ runs:
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        # Use per-run config when isolation is active, otherwise fall back to --global
+        if ($env:GIT_CONFIG_GLOBAL) {
+          git config --file $env:GIT_CONFIG_GLOBAL url."git@github.com:".insteadOf "https://github.com/"
+        } else {
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+        }
 
         Write-Host "Fetching private integrations dependency via SSH..."
         $env:GOPRIVATE = "github.com/keploy/integrations"
@@ -87,7 +92,7 @@ runs:
 
         Write-Host "Creating extraparsers.go..."
         New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
-        
+
         # FIX 1: Indentation of Here-String is now safe for YAML
         $content = @"
         package proxy
@@ -96,7 +101,7 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         "@
-        
+
         $content | Set-Content -Path "pkg/agent/proxy/extraparsers.go" -Encoding UTF8
 
     # --- Tidy (Split to avoid WSL error) ---
