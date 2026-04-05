@@ -76,10 +76,10 @@ func EncodeTextResultSet(ctx context.Context, logger *zap.Logger, resultSet *mys
 			return nil, fmt.Errorf("failed to write row for text resultset: %w", err)
 		}
 	}
-	// Write the final EOF packet if present
-	if resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data) {
+	// Write the final response (EOF or OK-replacing-EOF) if present
+	if resultSet.FinalResponse != nil && (utils.IsEOFPacket(resultSet.FinalResponse.Data) || utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)) {
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
-			return nil, fmt.Errorf("failed to write final EOF packet: %w", err)
+			return nil, fmt.Errorf("failed to write final response packet: %w", err)
 		}
 	}
 
@@ -121,19 +121,17 @@ func EncodeBinaryResultSet(ctx context.Context, logger *zap.Logger, resultSet *m
 		}
 	}
 
-	// Write the final EOF packet if present
-	if resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data) {
-		logger.Debug("Writing final EOF packet for BinaryProtocolResultSet",
-			zap.Int("final_response_length", len(resultSet.FinalResponse.Data)),
-			zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data)))
-		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
-			return nil, fmt.Errorf("failed to write final EOF packet: %w", err)
+	// Write the final response (EOF or OK-replacing-EOF) if present
+	if resultSet.FinalResponse != nil && (utils.IsEOFPacket(resultSet.FinalResponse.Data) || utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)) {
+		if logger.Core().Enabled(zap.DebugLevel) {
+			logger.Debug("Writing final response packet for BinaryProtocolResultSet",
+				zap.Int("final_response_length", len(resultSet.FinalResponse.Data)),
+				zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data)),
+				zap.Bool("is_ok_replacing_eof", utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)))
 		}
-		logger.Debug("Successfully wrote final EOF packet for BinaryProtocolResultSet")
-	} else {
-		logger.Debug("No final EOF packet to write for BinaryProtocolResultSet",
-			zap.Bool("has_final_response", resultSet.FinalResponse != nil),
-			zap.Bool("is_eof_packet", resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data)))
+		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
+			return nil, fmt.Errorf("failed to write final response packet: %w", err)
+		}
 	}
 
 	return buf.Bytes(), nil
