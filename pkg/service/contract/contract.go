@@ -403,6 +403,69 @@ func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 	return nil
 }
 
+func (s *contract) GenerateFromTests(ctx context.Context) error {
+	keployPath := filepath.Join(s.config.Path, "keploy")
+	if filepath.Base(filepath.Clean(s.config.Path)) == "keploy" {
+		keployPath = s.config.Path
+	}
+	originalPath := s.config.Path
+
+	s.testDB.ChangePath(keployPath)
+	defer s.testDB.ChangePath(originalPath)
+
+	testSetIDs, err := s.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory")
+		return err
+	}
+
+	testCases := make([]models.TestCase, 0)
+	for _, testSetID := range testSetIDs {
+		tcs, err := s.testDB.GetTestCases(ctx, testSetID)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
+			return err
+		}
+		for _, tc := range tcs {
+			if tc == nil {
+				continue
+			}
+			testCases = append(testCases, *tc)
+		}
+	}
+
+	inferred, err := InferSchema(testCases)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to infer OpenAPI schema from test cases")
+		return err
+	}
+
+	if err := inferred.Validate(ctx); err != nil {
+		utils.LogError(s.logger, err, "inferred OpenAPI schema validation failed")
+		return err
+	}
+
+	data, err := yamlLib.Marshal(inferred)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to marshal inferred OpenAPI schema")
+		return err
+	}
+
+	if err := os.MkdirAll(keployPath, 0o755); err != nil {
+		utils.LogError(s.logger, err, "failed to create keploy directory", zap.String("path", keployPath))
+		return err
+	}
+
+	outputPath := filepath.Join(keployPath, "contract.yaml")
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
+		return err
+	}
+
+	s.logger.Info("Inferred OpenAPI contract generated", zap.String("path", outputPath))
+	return nil
+}
+
 func (s *contract) DownloadTests(_ string) error {
 
 	targetPath := "./Download/Tests"

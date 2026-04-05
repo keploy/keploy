@@ -35,8 +35,8 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "generate",
-		Short:   "Generate contract for specified services",
-		Example: `keploy contract generate --service="email,notify"`,
+		Short:   "Generate OpenAPI contract from recorded test cases",
+		Example: `keploy contract generate --path .`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -54,7 +54,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 			// Extract services from the flag
 
-			err = contract.Generate(ctx, true)
+			err = contract.GenerateFromTests(ctx)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
