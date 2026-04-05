@@ -16,6 +16,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          integration-ref: feat/readonly-record-connections
           go-cache: true
 
       - name: Build Keploy (non-race)
@@ -65,6 +66,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          integration-ref: feat/readonly-record-connections
           go-cache: true
 
       - name: Build image
