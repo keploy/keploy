@@ -32,8 +32,11 @@ runs:
         ssh-keyscan github.com >> ~/.ssh/known_hosts
 
     # --- Windows: Add Known Hosts ---
+    # When GIT_SSH_COMMAND is set (by windows-git-isolation), ssh-keyscan
+    # is already handled. Only fall back to the shared known_hosts if the
+    # isolation action was not used upstream.
     - name: Add GitHub to known hosts (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && !env.GIT_SSH_COMMAND
       shell: pwsh
       run: |
         $sshDir = Join-Path $Env:USERPROFILE ".ssh"
@@ -79,7 +82,13 @@ runs:
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        # Use the isolated config file if windows-git-isolation set it,
+        # otherwise fall back to --global (non-concurrent runners).
+        if ($env:GIT_CONFIG_GLOBAL) {
+          git config --file $env:GIT_CONFIG_GLOBAL url."git@github.com:".insteadOf "https://github.com/"
+        } else {
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+        }
 
         Write-Host "Fetching private integrations dependency via SSH..."
         $env:GOPRIVATE = "github.com/keploy/integrations"
