@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -156,7 +156,7 @@ func handleConnectTunnel(
 
 	// Store the target hostname so TLS MITM can forge the right certificate.
 	if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
-		tls.SrcPortToDstURL.Store(tcpAddr.Port, host)
+		proxytls.SrcPortToDstURL.Store(tcpAddr.Port, host)
 		logger.Debug("Stored CONNECT target in SrcPortToDstURL",
 			zap.Int("srcPort", tcpAddr.Port),
 			zap.String("host", host),
