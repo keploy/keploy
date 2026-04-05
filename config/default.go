@@ -65,6 +65,7 @@ test:
   protoInclude: []
   compareAll: false
   updateTestMapping: false
+  disableAutoHeaderNoise: false
 record:
   recordTimer: 0s
   filters: []
@@ -101,14 +102,13 @@ inDocker: false
 cmdType: "native"
 `
 
-var config = &Config{}
-
 func New() *Config {
 	// merge default config with internal config
 	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
 	}
+	config := &Config{}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {
 		panic(err)

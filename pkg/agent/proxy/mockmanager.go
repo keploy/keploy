@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -33,7 +34,11 @@ type MockManager struct {
 	unfilteredByKind map[models.Kind]*TreeDb
 
 	logger        *zap.Logger
-	consumedMocks sync.Map // zero value is ready-to-use; no explicit init required
+	consumedMocks sync.Map
+
+	// Optimized lookup maps
+	statelessFiltered   map[models.Kind]map[string][]*models.Mock
+	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
@@ -44,13 +49,34 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered = NewTreeDb(customComparator)
 	}
 	return &MockManager{
-		filtered:         filtered,
-		unfiltered:       unfiltered,
-		filteredByKind:   make(map[models.Kind]*TreeDb),
-		unfilteredByKind: make(map[models.Kind]*TreeDb),
-		revByKind:        make(map[models.Kind]*uint64),
-		logger:           logger,
+		filtered:            filtered,
+		unfiltered:          unfiltered,
+		filteredByKind:      make(map[models.Kind]*TreeDb),
+		unfilteredByKind:    make(map[models.Kind]*TreeDb),
+		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
+		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
+		revByKind:           make(map[models.Kind]*uint64),
+		logger:              logger,
 	}
+}
+
+func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
+	if kind == models.DNS {
+		key = strings.ToLower(dns.Fqdn(key))
+	}
+	m.treesMu.RLock()
+	defer m.treesMu.RUnlock()
+	if km, ok := m.statelessFiltered[kind]; ok {
+		if list := km[key]; len(list) > 0 {
+			filtered = append([]*models.Mock(nil), list...)
+		}
+	}
+	if km, ok := m.statelessUnfiltered[kind]; ok {
+		if list := km[key]; len(list) > 0 {
+			unfiltered = append([]*models.Mock(nil), list...)
+		}
+	}
+	return
 }
 
 // ---------- revision helpers ----------
@@ -177,13 +203,10 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.filtered.deleteAll()
-
-	// rebuild per-kind filtered maps from scratch to avoid stale entries
-	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
+	newFiltered := NewTreeDb(customComparator)
+	newFilteredByKind := make(map[models.Kind]*TreeDb)
+	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
-
 	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
@@ -193,8 +216,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
-		m.filtered.insert(mock.TestModeInfo, mock)
-
+		newFiltered.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
 		td := newFilteredByKind[k]
 		if td == nil {
@@ -203,17 +225,21 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+		if newStateless[k] == nil {
+			newStateless[k] = make(map[string][]*models.Mock)
+		}
+		key := mock.Name
+		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
+			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+		}
+		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
-
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
-
-	// atomically swap the per-kind map
 	m.treesMu.Lock()
-	m.filteredByKind = newFilteredByKind
+	m.filtered, m.filteredByKind, m.statelessFiltered = newFiltered, newFilteredByKind, newStateless
 	m.treesMu.Unlock()
-
 	for k := range touched {
 		m.bumpRevisionKind(k)
 	}
@@ -221,13 +247,10 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.unfiltered.deleteAll()
-
-	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
+	newUnFiltered := NewTreeDb(customComparator)
+	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
+	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
-
 	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
@@ -237,27 +260,30 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
-		m.unfiltered.insert(mock.TestModeInfo, mock)
-
+		newUnFiltered.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
-		td := newUnfilteredByKind[k]
+		td := newUnFilteredByKind[k]
 		if td == nil {
 			td = NewTreeDb(customComparator)
-			newUnfilteredByKind[k] = td
+			newUnFilteredByKind[k] = td
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+		if newStateless[k] == nil {
+			newStateless[k] = make(map[string][]*models.Mock)
+		}
+		key := mock.Name
+		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
+			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+		}
+		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
-
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
-
-	// atomically swap the per-kind map
 	m.treesMu.Lock()
-	m.unfilteredByKind = newUnfilteredByKind
+	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = newUnFiltered, newUnFilteredByKind, newStateless
 	m.treesMu.Unlock()
-
 	for k := range touched {
 		m.bumpRevisionKind(k)
 	}
@@ -316,10 +342,14 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	// Mark usage if global changed (legacy behavior)
 	if updatedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       new.Name,
-			Usage:      models.Updated,
-			IsFiltered: new.TestModeInfo.IsFiltered,
-			SortOrder:  new.TestModeInfo.SortOrder,
+			Name:             new.Name,
+			Kind:             new.Kind,
+			Usage:            models.Updated,
+			IsFiltered:       new.TestModeInfo.IsFiltered,
+			SortOrder:        new.TestModeInfo.SortOrder,
+			Type:             new.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -356,10 +386,14 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
+			Name:             mock.Name,
+			Kind:             mock.Kind,
+			Usage:            models.Deleted,
+			IsFiltered:       mock.TestModeInfo.IsFiltered,
+			SortOrder:        mock.TestModeInfo.SortOrder,
+			Type:             mock.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -387,10 +421,14 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
+			Name:             mock.Name,
+			Kind:             mock.Kind,
+			Usage:            models.Deleted,
+			IsFiltered:       mock.TestModeInfo.IsFiltered,
+			SortOrder:        mock.TestModeInfo.SortOrder,
+			Type:             mock.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -414,10 +452,14 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		return false
 	}
 	if err := m.flagMockAsUsed(models.MockState{
-		Name:       mock.Name,
-		Usage:      models.Updated,
-		IsFiltered: mock.TestModeInfo.IsFiltered,
-		SortOrder:  mock.TestModeInfo.SortOrder,
+		Name:             mock.Name,
+		Kind:             mock.Kind,
+		Usage:            models.Updated,
+		IsFiltered:       mock.TestModeInfo.IsFiltered,
+		SortOrder:        mock.TestModeInfo.SortOrder,
+		Type:             mock.Spec.Metadata["type"],
+		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))

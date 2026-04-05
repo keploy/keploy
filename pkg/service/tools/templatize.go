@@ -786,15 +786,22 @@ func (t *Tools) compareChainSets(fuzzerChains, keployChains []CanonicalChain) (b
 func filterInsignificantChains(chains []CanonicalChain) []CanonicalChain {
 	var significantChains []CanonicalChain
 	for _, chain := range chains {
-		// Keep the chain if the value is long, or if it's not a simple number.
+		// For purely numeric values, require a longer length to be considered
+		// significant. Short numbers like "3600", "200", "1" are common
+		// constants that cause false-positive chain matches.
+		if _, err := strconv.ParseFloat(chain.Value, 64); err == nil {
+			if len(chain.Value) >= 6 {
+				significantChains = append(significantChains, chain)
+			}
+			continue
+		}
+		// Non-numeric values: keep if length >= 4, or any non-trivial string.
 		if len(chain.Value) >= 4 {
 			significantChains = append(significantChains, chain)
 			continue
 		}
-		if _, err := strconv.ParseFloat(chain.Value, 64); err != nil {
-			// It's not a number, so it's significant (e.g., "true", "v1")
-			significantChains = append(significantChains, chain)
-		}
+		// Short non-numeric values are still significant (e.g., "true", "v1")
+		significantChains = append(significantChains, chain)
 	}
 	return significantChains
 }

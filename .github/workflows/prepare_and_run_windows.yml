@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-upload:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -25,8 +29,8 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset-all url."git@github.com:".insteadof  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
           git config --global --unset-all core.sshCommand  2>$null
           git config --global --list
 
@@ -88,7 +92,9 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
 
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -115,7 +121,7 @@ jobs:
 
       - name: Build and push Docker image for PR
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+          bash ./.github/workflows/test_workflow_scripts/update-docker-ci.sh linux/amd64
 
       - name: Make unique tag for this run
         id: tag
@@ -136,41 +142,55 @@ jobs:
 
     steps:
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Clean up git config (ensure HTTPS for checkout)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
 
-    - name: Ensure Docker is running
-      shell: powershell
-      run: |
-        $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
-        if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+      - name: Update GitHub SSH known hosts
+        shell: pwsh
+        run: |
+          mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
+          ssh-keyscan github.com 2>$null | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii -Append
 
-    - name: Wait for Docker to be ready
-      shell: powershell
-      run: |
-        $maxAttempts = 30
-        $attempt = 0
-        while ($attempt -lt $maxAttempts) {
-          $attempt++
-          try {
-            $result = docker info 2>&1
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Docker is ready after $attempt attempts"
-              break
-            }
-          } catch {}
-          Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
-          Start-Sleep -Seconds 2
-        }
-        if ($attempt -eq $maxAttempts) {
-          Write-Error "Docker did not become ready in time"
-          exit 1
-        }
-    
-    - name: Pull Docker image
-      shell: powershell
-      run: |
-        docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Docker is running
+        shell: powershell
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+          if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+
+      - name: Wait for Docker to be ready
+        shell: powershell
+        run: |
+          $maxAttempts = 30
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            $attempt++
+            try {
+              $result = docker info 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Docker is ready after $attempt attempts"
+                break
+              }
+            } catch {}
+            Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+            Start-Sleep -Seconds 2
+          }
+          if ($attempt -eq $maxAttempts) {
+            Write-Error "Docker did not become ready in time"
+            exit 1
+          }
+
+      - name: Pull Docker image
+        shell: powershell
+        run: |
+          docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]
@@ -187,6 +207,14 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
+
+      - name: Clean up git config
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -210,4 +238,33 @@ jobs:
             Write-Error "Cleanup script not found at $script"
             exit 1
           }
-      
+
+  gate:
+    name: CI Gate (Windows)
+    if: always()
+    needs:
+      - build-and-upload
+      - docker-image-build
+      - pull-docker-image
+      - run_golang_docker_windows
+      - run_golang_native_windows
+      - cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-and-upload.result }}" \
+            "${{ needs.docker-image-build.result }}" \
+            "${{ needs.pull-docker-image.result }}" \
+            "${{ needs.run_golang_docker_windows.result }}" \
+            "${{ needs.run_golang_native_windows.result }}" \
+            "${{ needs.cleanup.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."

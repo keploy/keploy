@@ -25,6 +25,7 @@ const (
 	HTTP2       Kind = "Http2"
 	GENERIC     Kind = "Generic"
 	REDIS       Kind = "Redis"
+	KAFKA       Kind = "Kafka"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
@@ -58,6 +59,8 @@ type MockSpec struct {
 	GenericResponses    []Payload           `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
 	RedisRequests       []Payload           `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
 	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
+	KafkaRequests       []Payload           `json:"kafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
+	KafkaResponses      []Payload           `json:"kafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
@@ -106,10 +109,15 @@ type Payload struct {
 }
 
 type MockState struct {
-	Name       string    `json:"name"`
-	Usage      MockUsage `json:"usage"`
-	IsFiltered bool      `json:"isFiltered"`
-	SortOrder  int64     `json:"sortOrder"`
+	Name             string    `json:"name"`
+	Kind             Kind      `json:"kind"`
+	Usage            MockUsage `json:"usage"`
+	IsFiltered       bool      `json:"isFiltered"`
+	SortOrder        int64     `json:"sortOrder"`
+	Type             string    `json:"type"`
+	Timestamp        int64     `json:"timestamp"`
+	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
+	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {

@@ -13,58 +13,26 @@ concurrency:
 
 jobs:
   build-and-upload:
-    runs-on: [self-hosted, macOS, native]
+    # Cross-compile darwin/arm64 on a GitHub-hosted runner — no CGO or
+    # macOS-specific deps needed. Keeps the self-hosted runner free for
+    # integration tests that actually require Docker Desktop on macOS.
+    runs-on: ubuntu-latest
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        run: |
-          rm -rf ~/.gitconfig
-      
-      - name: Create workflow start lock
-        run: |
-          LOCK_DIR="$HOME/.github-workflow-locks"
-          mkdir -p "$LOCK_DIR"
-          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
-          echo "Created workflow lock file: $LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
-      
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-    
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: false
+          go-cache: true
 
       - name: Build Keploy - macOS (darwin/arm64)
         run: |
           GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
-
-  # upload-latest:
-  #   runs-on: [self-hosted, macOS, native]
-  #   steps:
-  #     - name: Download latest release (macOS)
-  #       run: |
-  #         LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-  #         URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
-  #         curl -L "$URL" -o keploy.tar.gz
-  #         tar -xzf keploy.tar.gz
-  #         chmod +x keploy
-
-  #     - uses: actions/upload-artifact@v4
-  #       with: { name: latest, path: keploy }
-
-  #     - name: Clean up git config
-  #       if: always() # This ensures the step runs even if previous steps fail
-  #       continue-on-error: true
-  #       run: |
-  #         git config --global --unset url."git@github.com:".insteadOf
 
   # Build docker image on Ubuntu and push to registry
   build-docker-image:
@@ -84,7 +52,16 @@ jobs:
       
       - name: Build and push Docker image
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+          # Log the build platform for debugging
+          echo "Build runner arch: $(uname -m)"
+          echo "Docker server arch: $(docker version --format '{{.Server.Arch}}')"
+          bash ./.github/workflows/test_workflow_scripts/update-docker-ci.sh linux/arm64
+
+      - name: Verify image architecture
+        run: |
+          echo "Image arch: $(docker image inspect ttl.sh/keploy/keploy:1h --format '{{.Architecture}}')"
+          # Verify the binary inside is actually arm64
+          docker run --rm --entrypoint="" ttl.sh/keploy/keploy:1h sh -c "uname -m"
 
       - name: Make unique tag for this run
         id: tag
@@ -110,13 +87,28 @@ jobs:
     needs: [build-docker-image]
     
     steps:
+      - name: Create workflow start lock
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          mkdir -p "$LOCK_DIR"
+          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
           security unlock-keychain -p $KEYCHAIN_PASSWORD
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
-          
+
+      - name: Verify Docker Desktop is running (macOS)
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
+          fi
+          echo "Docker Desktop is running."
+
       - name: Pull Docker image
         run: |
           docker pull ${{ needs.build-docker-image.outputs.image_tag }}
@@ -142,6 +134,15 @@ jobs:
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
     steps:
+      - name: Verify Docker Desktop is running (macOS)
+        continue-on-error: true
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "Docker Desktop is running."
+          else
+            echo "WARNING: Docker Desktop is not running. Cleanup will be skipped."
+          fi
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
@@ -216,27 +217,88 @@ jobs:
           done < <(docker ps -a --format '{{.ID}} {{.Names}}')
           echo "stopped_any=$stopped_any" >> $GITHUB_OUTPUT
 
-      - name: Docker Image Prune (unused only, wait if locked)
+      - name: Docker cleanup (containers, networks, images, volumes)
         if: steps.check_locks.outputs.lock_count == '0' || steps.stop_longrunning.outputs.stopped_any == '1'
         run: |
           echo "No other workflows running. Proceeding with cleanup..."
 
-          # Stop running scripts 
+          # Stop running scripts
           pkill -9 -f "actions-runner-.*_work/keploy/keploy/.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker-macos\.sh" || true
-          
-          # Prune only dangling (untagged) images not in use
-          echo "Pruning Docker images..."
-          docker image prune -a -f
-          
-          # Prune dangling (unused) volumes as well
-          echo "Pruning Docker volumes..."
-          docker volume prune -a -f
-          
+
+          # Remove stale test containers that may block the next run.
+          # Covers both fixed-name containers (gin-mongo tests) and
+          # JOB_ID-suffixed containers (python/flask tests).
+          echo "Removing stale test containers..."
+          for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb mongo; do
+            docker rm -f "$c" 2>/dev/null || true
+          done
+          for prefix in flaskApp_ mongo_ keploy_; do
+            ids=$(docker ps -aq --filter "name=${prefix}" 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done
+          # Remove any containers still attached to keploy-network
+          ids=$(docker ps -aq --filter "network=keploy-network" 2>/dev/null || true)
+          if [ -n "$ids" ]; then
+            docker rm -f $ids 2>/dev/null || true
+          fi
+
+          # Remove stale Docker networks left by test scripts
+          echo "Removing stale Docker networks..."
+          docker network rm keploy-network 2>/dev/null || true
+
+          # Kill leftover keploy processes
+          pkill -9 -f 'keploy record|keploy test' 2>/dev/null || true
+
+          # Prune stopped containers before images — images must never be
+          # pruned while stopped containers still reference their layers
+          # (that corrupts Docker Desktop's overlayfs snapshots).
+          echo "Pruning stopped containers..."
+          docker container prune -f
+
+          echo "Pruning dangling Docker images..."
+          docker image prune -f
+
+          # Only prune dangling volumes, not all volumes
+          echo "Pruning dangling Docker volumes..."
+          docker volume prune -f
+
           echo "Docker cleanup completed successfully"
 
       - name: Skip cleanup - other workflows running
         if: steps.check_locks.outputs.lock_count != '0' && steps.stop_longrunning.outputs.stopped_any != '1'
         run: |
-          echo "⚠️ Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
+          echo "Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
           echo "This is expected behavior to prevent cleanup conflicts"
+
+  gate:
+    name: CI Gate (macOS)
+    if: always()
+    needs:
+      - build-and-upload
+      - build-docker-image
+      - pull-docker-image
+      - run_python_docker_macos
+      - run_golang_docker_macos
+      - clean_up_docker_macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-and-upload.result }}" \
+            "${{ needs.build-docker-image.result }}" \
+            "${{ needs.pull-docker-image.result }}" \
+            "${{ needs.run_python_docker_macos.result }}" \
+            "${{ needs.run_golang_docker_macos.result }}" \
+            "${{ needs.clean_up_docker_macos.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."
 

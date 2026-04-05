@@ -136,6 +136,11 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firs
 	return nil
 }
 
+func (h *Hooks) BeforeTestSetReplay(ctx context.Context, testSetID string) error {
+	h.logger.Debug("BeforeTestSetReplay hook executed", zap.String("testSetID", testSetID))
+	return nil
+}
+
 func (h *Hooks) BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error {
 	h.logger.Debug("BeforeTestResult called")
 	return nil
@@ -293,6 +298,13 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 		return nil, err
 	}
 	return consumedMocks, nil
+}
+
+// GetNoisyTestCaseNames is a no-op in the default Hooks implementation.
+// Callers that embed custom TestHooks should override this to return the
+// noisy test case names collected during BeforeTestResult processing.
+func (h *Hooks) GetNoisyTestCaseNames(testSetID string) []string {
+	return nil
 }
 
 // Function to parse and extract claims from a JWT token without verification

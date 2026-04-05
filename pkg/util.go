@@ -1124,6 +1124,9 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	isNonKeploy := false
 
 	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
 		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
 		// field in this for loop, and write in mockmanager functions.
 		p := mock.DeepCopy()
@@ -1152,43 +1155,32 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	filteredMocks := make([]*models.Mock, 0)
-	unfilteredMocks := make([]*models.Mock, 0)
-
+	mapping := make(map[string]bool, len(mocksPresentInMapping))
+	for _, name := range mocksPresentInMapping {
+		mapping[name] = true
+	}
+	var filtered, unfiltered []*models.Mock
 	isNonKeploy := false
-
 	for _, mock := range m {
-
+		if mock == nil {
+			continue
+		}
 		p := mock.DeepCopy()
-
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-
-		matched := false
-		for _, name := range mocksPresentInMapping {
-			if p.Name == name {
-				p.TestModeInfo.IsFiltered = true
-				filteredMocks = append(filteredMocks, p)
-				matched = true
-				break
-			}
+		if mapping[p.Name] {
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfiltered = append(unfiltered, p)
 		}
-
-		if matched {
-			continue
-		}
-
-		p.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, p)
 	}
-
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
-		return filteredMocks, unfilteredMocks
 	}
-
-	return filteredMocks, unfilteredMocks
+	return filtered, unfiltered
 }
 
 func GuessContentType(data []byte) models.BodyType {

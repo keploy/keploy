@@ -26,6 +26,12 @@ runs:
         docker tag "${IMAGE_REF}" ghcr.io/keploy/keploy:v${{ inputs.version }}
         docker images | awk 'NR==1 || /keploy\/keploy/ {print}'
 
+        # Verify the image architecture matches the host
+        echo "Image architecture:"
+        docker image inspect "${IMAGE_REF}" --format '{{.Os}}/{{.Architecture}}' || true
+        echo "Docker server architecture:"
+        docker version --format '{{.Server.Os}}/{{.Server.Arch}}' || true
+
     - name: Pull Image (Windows)
       if: runner.os == 'Windows'
       shell: pwsh

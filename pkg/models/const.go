@@ -68,30 +68,30 @@ var IsAnsiDisabled = false
 
 var HighlightString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(orangeColorSGR...).SprintFunc()(a)
+	return color.New(orangeColorSGR...).SprintFunc()(a...)
 }
 
 var HighlightPassingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgGreen).SprintFunc()(a)
+	return color.New(color.FgGreen).SprintFunc()(a...)
 }
 
 var HighlightFailingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgRed).SprintFunc()(a)
+	return color.New(color.FgRed).SprintFunc()(a...)
 }
 
 var HighlightGrayString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgHiBlack).SprintFunc()(a)
+	return color.New(color.FgHiBlack).SprintFunc()(a...)
 }
 
 var defaultColorScheme = pp.ColorScheme{
@@ -154,3 +154,5 @@ type contextKey string
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
 const DestConnectionIDKey contextKey = "destConnectionId"
+const PostTLSModeKey contextKey = "postTLSMode"
+const TLSHandshakeStoreKey contextKey = "tlsHandshakeStore"
