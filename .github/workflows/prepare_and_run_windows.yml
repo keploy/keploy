@@ -42,13 +42,15 @@ jobs:
           git config --file $dst core.autocrlf false
           git config --file $dst core.eol lf
 
-          # Build a per-run known_hosts
-          $kh = Join-Path $isoDir 'known_hosts'
-          ssh-keyscan github.com 2>$null | Out-File -FilePath $kh -Encoding ascii
+          # Ensure github.com is in the shared known_hosts (append is idempotent)
+          $sshDir = Join-Path $env:USERPROFILE '.ssh'
+          New-Item -Path $sshDir -ItemType Directory -Force | Out-Null
+          ssh-keyscan github.com 2>$null | Out-File -FilePath (Join-Path $sshDir 'known_hosts') -Encoding ascii -Append
 
-          # Export for all subsequent steps
-          "GIT_CONFIG_GLOBAL=$dst"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$kh" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Export GIT_CONFIG_GLOBAL so all subsequent steps use the isolated
+          # gitconfig. Do NOT set GIT_SSH_COMMAND as it would override the
+          # ssh-agent configured by webfactory/ssh-agent.
+          "GIT_CONFIG_GLOBAL=$dst" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout Repository
         uses: actions/checkout@v4

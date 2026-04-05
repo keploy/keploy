@@ -31,9 +31,9 @@ runs:
         mkdir -p ~/.ssh
         ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-    # --- Windows: Add Known Hosts (only when per-run isolation is NOT active) ---
+    # --- Windows: Add Known Hosts ---
     - name: Add GitHub to known hosts (Windows)
-      if: runner.os == 'Windows' && !env.GIT_SSH_COMMAND
+      if: runner.os == 'Windows'
       shell: pwsh
       run: |
         $sshDir = Join-Path $Env:USERPROFILE ".ssh"
