@@ -320,8 +320,8 @@ func TestIsOKReplacingEOF(t *testing.T) {
 			expect: false, // affected_rows != 0
 		},
 		{
-			name:   "text row with 0xFE lenenc and zero low bytes (false-positive edge case)",
-			data:   func() []byte {
+			name: "text row with 0xFE lenenc and zero low bytes (false-positive edge case)",
+			data: func() []byte {
 				// Simulate a text row where 0xFE lenenc has 0x00 0x00 as first
 				// two bytes of the 8-byte integer, followed by large data.
 				// The total payload exceeds maxOKReplacingEOFPayload.
