@@ -131,6 +131,8 @@ func handleConnectTunnel(
 		}
 		connectBuf.WriteString("\r\n")
 
+		// Go's net.TCPConn.Write handles partial writes internally; it loops
+		// until the full buffer is written or an error occurs.
 		if _, err := dstConn.Write(connectBuf.Bytes()); err != nil {
 			return nil, fmt.Errorf("failed to forward CONNECT to proxy: %w", err)
 		}
