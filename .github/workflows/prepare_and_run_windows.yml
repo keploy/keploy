@@ -51,7 +51,6 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          integration-ref: feat/readonly-record-connections
           go-cache: false
 
       - name: Add MinGW gcc to PATH
@@ -112,7 +111,6 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          integration-ref: feat/readonly-record-connections
           go-cache: false
 
       - name: Set PR image tag
