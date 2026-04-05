@@ -37,7 +37,7 @@ var Registered = make(map[IntegrationType]*Parsers)
 
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
-	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	RecordOutgoing(ctx context.Context, session *RecordSession) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
