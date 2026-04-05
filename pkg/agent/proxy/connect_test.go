@@ -227,6 +227,23 @@ func TestHandleConnectTunnel_InvalidPort(t *testing.T) {
 	}
 }
 
+func TestHandleConnectTunnel_NonNumericPort(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = client.Write([]byte("CONNECT example.com:abc HTTP/1.1\r\nHost: example.com:abc\r\n\r\n"))
+		buf := make([]byte, 256)
+		client.Read(buf)
+	}()
+
+	_, err := handleConnectTunnel(testLogger(), server, nil, true)
+	if err == nil {
+		t.Fatal("expected error for non-numeric port, got nil")
+	}
+}
+
 func TestStripUtilConn(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
