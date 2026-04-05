@@ -66,9 +66,14 @@ func handleConnectTunnel(
 		return nil, fmt.Errorf("expected CONNECT method, got %s", req.Method)
 	}
 
+	// For CONNECT, Go's http.ReadRequest puts the authority in different
+	// fields depending on the request form. Try all sources.
 	targetAddr := req.Host
 	if targetAddr == "" {
 		targetAddr = req.URL.Host
+	}
+	if targetAddr == "" {
+		targetAddr = req.RequestURI
 	}
 	if targetAddr == "" {
 		return nil, fmt.Errorf("CONNECT request has no target host")
