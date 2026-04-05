@@ -212,9 +212,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
+	mgr := syncMock.Get()
+	if mgr != nil && !mgr.GetFirstReqSeen() {
+		// Before first incoming request: buffer via manager (startup mocks)
 		mgr.AddMock(newMock)
 		return nil
+	}
+	// After first incoming request or no manager: send directly to channel
+	// This ensures HTTP mocks are persisted even in non-synchronous mode,
+	// matching how DNS mocks are handled in dns.go:559
+	if mocks != nil {
+		mocks <- newMock
 	}
 	return nil
 }

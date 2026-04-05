@@ -14,6 +14,7 @@ type Service interface {
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.

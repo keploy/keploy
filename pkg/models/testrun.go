@@ -60,10 +60,12 @@ type TestResult struct {
 }
 
 type FailureInfo struct {
-	Risk         RiskLevel          `json:"risk,omitempty" yaml:"risk,omitempty"`
-	Category     []FailureCategory  `json:"category,omitempty" yaml:"category,omitempty"`
-	Assessment   *FailureAssessment `json:"assessment,omitempty" yaml:"assessment,omitempty"`
-	MockMismatch *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
+	Risk           RiskLevel          `json:"risk,omitempty" yaml:"risk,omitempty"`
+	Category       []FailureCategory  `json:"category,omitempty" yaml:"category,omitempty"`
+	Assessment     *FailureAssessment `json:"assessment,omitempty" yaml:"assessment,omitempty"`
+	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
+	ConsumedMocks  []ConsumedMock     `json:"consumed_mocks,omitempty" yaml:"consumed_mocks,omitempty"`
+	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
 }
 
 type MockMismatchMock struct {
@@ -74,6 +76,23 @@ type MockMismatchMock struct {
 type MockMismatchInfo struct {
 	ExpectedMocks []MockMismatchMock `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`
+}
+
+// ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
+// ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
+type ConsumedMock struct {
+	Name   string `json:"name" yaml:"name"`
+	Kind   string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Method string `json:"method,omitempty" yaml:"method,omitempty"` // e.g. "GET"
+	URL    string `json:"url,omitempty" yaml:"url,omitempty"`       // e.g. "/posts?id=1"
+}
+
+// UnmatchedCall represents an outgoing call during replay that had no matching mock.
+type UnmatchedCall struct {
+	Protocol      string `json:"protocol" yaml:"protocol"`
+	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
+	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`
+	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
 }
 
 func (tr *TestResult) GetKind() string {

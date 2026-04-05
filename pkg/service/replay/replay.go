@@ -1688,6 +1688,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
+					// Populate consumed mocks for failed/obsolete test cases
+					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+						for _, m := range consumedMocks {
+							if m.Kind != models.DNS {
+								testCaseResult.FailureInfo.ConsumedMocks = append(testCaseResult.FailureInfo.ConsumedMocks, models.ConsumedMock{
+									Name: m.Name,
+									Kind: string(m.Kind),
+								})
+							}
+						}
+						// Populate unmatched calls from mock errors (channel-based for in-process)
+						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
+							if f.MismatchReport != nil {
+								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
+									Protocol:      f.MismatchReport.Protocol,
+									ActualSummary: f.MismatchReport.ActualSummary,
+									ClosestMock:   f.MismatchReport.ClosestMock,
+									Diff:          f.MismatchReport.Diff,
+								})
+							}
+						}
+						// Also fetch mock errors via HTTP API (for remote agent / k8s-proxy mode)
+						if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
+							for _, me := range mockErrors {
+								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
+							}
+						}
+					}
 					if mockSetMismatch && testStatus == models.TestStatusObsolete {
 						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
 						for _, m := range expectedMocks {

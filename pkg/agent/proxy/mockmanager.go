@@ -469,6 +469,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	return true
 }
 
+
 // ---------- bookkeeping ----------
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {

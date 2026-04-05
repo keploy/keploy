@@ -19,6 +19,8 @@ type Instrumentation interface {
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
+	// GetMockErrors returns mock-not-found errors collected during replay
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
 	BeforeTestRun(ctx context.Context, testRunID string) error
