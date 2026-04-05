@@ -12,6 +12,14 @@
 
   GIT_SSH_COMMAND still honors SSH_AUTH_SOCK, so webfactory/ssh-agent
   keys remain accessible.
+
+  Creates a .active marker file so cleanup-git-isolation.ps1 can
+  distinguish active runs from stale ones.
+
+  NOTE: This script is also used as the reference implementation for
+  the inline setup blocks in workflow files. The inline blocks must
+  run BEFORE actions/checkout (so the script isn't available from the
+  workspace yet), but they replicate the same logic.
 #>
 
 param(
@@ -22,6 +30,10 @@ $ErrorActionPreference = 'Stop'
 
 $isoDir = Join-Path $env:USERPROFILE $IsoRoot $env:GITHUB_RUN_ID
 New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+
+# --- Liveness marker for cleanup to detect active runs ---
+$markerPath = Join-Path $isoDir '.active'
+Set-Content -Path $markerPath -Value (Get-Date -UFormat '%s')
 
 # --- Per-run gitconfig ---
 $gitConfig = Join-Path $isoDir 'gitconfig'
@@ -41,12 +53,16 @@ $staleKeys = @(
 )
 foreach ($key in $staleKeys) {
     git config --file $gitConfig --unset-all $key 2>$null
-    # exit code 5 = key not found (OK), anything > 1 other than 5 is a real error
+    if ($LASTEXITCODE -gt 1 -and $LASTEXITCODE -ne 5) {
+        throw "Failed to unset inherited git config key '$key' (exit code $LASTEXITCODE)"
+    }
 }
 
-# Set EOL handling
+# Set EOL handling and validate
 git config --file $gitConfig core.autocrlf false
+if ($LASTEXITCODE -ne 0) { throw "Failed to set core.autocrlf in per-run gitconfig (exit code $LASTEXITCODE)" }
 git config --file $gitConfig core.eol lf
+if ($LASTEXITCODE -ne 0) { throw "Failed to set core.eol in per-run gitconfig (exit code $LASTEXITCODE)" }
 
 # --- Per-run SSH known_hosts ---
 $knownHosts = Join-Path $isoDir 'known_hosts'
