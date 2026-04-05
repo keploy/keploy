@@ -85,6 +85,7 @@ type Templatize struct {
 type Record struct {
 	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	Watch             bool            `json:"watch" yaml:"watch" mapstructure:"watch"`
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
