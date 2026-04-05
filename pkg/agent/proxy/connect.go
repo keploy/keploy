@@ -149,7 +149,7 @@ func handleConnectTunnel(
 			// single CONNECT attempt. Clients that need proxy auth should
 			// include credentials in the initial CONNECT request.
 			resp.Body.Close()
-			resp.Body = nil
+			resp.Body = http.NoBody
 			resp.ContentLength = 0
 			if writeErr := resp.Write(srcConn); writeErr != nil {
 				logger.Debug("failed to forward proxy error response to client", zap.Error(writeErr))
