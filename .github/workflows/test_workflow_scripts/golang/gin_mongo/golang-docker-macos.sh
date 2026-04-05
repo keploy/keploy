@@ -1,110 +1,166 @@
 #!/bin/bash
 
 # macOS variant for gin-mongo (docker). Uses BSD sed.
-source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+# Fully isolated for concurrent execution on shared self-hosted runners.
+set -euo pipefail
 
-# Verify Docker Desktop is running — never start it from CI.
-# Starting Docker from a CI job makes the runner track it as a child
-# process and kill it between jobs.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_IID_SCRIPT="${SCRIPT_DIR}/../../test-iid-macos.sh"
+if [[ ! -f "${TEST_IID_SCRIPT}" ]]; then
+  echo "ERROR: Required helper script not found at ${TEST_IID_SCRIPT}."
+  exit 1
+fi
+source "${TEST_IID_SCRIPT}"
+
+# Verify Docker Desktop is running -- never start it from CI.
 if ! docker info >/dev/null 2>&1; then
   echo "ERROR: Docker Desktop is not running."
   echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
   exit 1
 fi
 
-# Clean up stale containers and networks from previous runs to avoid
-# port conflicts on the self-hosted macOS runner.
-for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb; do
-  docker rm -f "$c" 2>/dev/null || true
-done
-docker network rm keploy-network 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# Dynamic port allocation -- avoids conflicts with concurrent jobs.
+# Uses a JOB_ID-derived offset so concurrent jobs on the same machine
+# don't race for the same starting port (TOCTOU prevention).
+# ---------------------------------------------------------------------------
+find_available_port() {
+    local start_port=${1:-6000}
+    local port=$start_port
+    while lsof -i:$port >/dev/null 2>&1; do
+        port=$((port + 1))
+    done
+    echo $port
+}
 
-# Kill leftover keploy CLI processes holding ports (not Docker-managed ones)
-pgrep -f 'keploy record|keploy test' | xargs kill -9 2>/dev/null || true
+# gin-mongo uses base range 18000-19999, offset by JOB_ID hash
+PORT_OFFSET=$(( $(echo "$JOB_ID" | cksum | awk '{print $1}') % 400 ))
+BASE_PORT=$(( 18000 + PORT_OFFSET * 5 ))
+APP_PORT=$(find_available_port $BASE_PORT)
+DB_PORT=$(find_available_port $((APP_PORT + 1)))
+PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
+DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 
-# Start mongo before starting keploy (retry once if Docker crashes).
-docker network create keploy-network
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
+
+# ---------------------------------------------------------------------------
+# Unique resource names scoped to this job -- no collisions across runners.
+# ---------------------------------------------------------------------------
+NETWORK_NAME="keploy-network-${JOB_ID}"
+MONGO_CONTAINER="mongoDb_${JOB_ID}"
+APP_IMAGE="gin-mongo-${JOB_ID}"
+KEPLOY_CONTAINER="keploy_ginmongo_${JOB_ID}"
+
+echo "Using network: $NETWORK_NAME"
+echo "Using containers - MONGO: $MONGO_CONTAINER, APP_IMAGE: $APP_IMAGE, KEPLOY: $KEPLOY_CONTAINER"
+
+# ---------------------------------------------------------------------------
+# Cleanup -- runs on exit to free resources regardless of outcome.
+# ---------------------------------------------------------------------------
+cleanup() {
+    echo "Cleaning up containers and network for job ${JOB_ID}..."
+    for c in "${MONGO_CONTAINER}" "ginApp_${JOB_ID}_1" "ginApp_${JOB_ID}_2" "ginApp_${JOB_ID}_test" "${KEPLOY_CONTAINER}"; do
+        docker rm -f "$c" >/dev/null 2>&1 || true
+    done
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    docker rmi "$APP_IMAGE" >/dev/null 2>&1 || true
+    echo "Cleanup completed for job ${JOB_ID}"
+}
+trap cleanup EXIT INT TERM
+
+# Clean up any stale resources from a previous failed run of this exact JOB_ID (unlikely but safe).
+cleanup 2>/dev/null || true
+
+# Create isolated Docker network for this job (idempotent).
+docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+docker network create "$NETWORK_NAME"
+
+# Start MongoDB with a unique container name but a network alias of "mongoDb"
+# so the gin-mongo app (which hardcodes "mongoDb:27017") resolves correctly.
+docker run --name "$MONGO_CONTAINER" --rm \
+  --net "$NETWORK_NAME" --network-alias mongoDb \
+  -p "${DB_PORT}:27017" -d mongo
 
 # Generate the keploy-config file.
 $RECORD_BIN config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
-# use BSD sed format for macOS
 sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
-docker logs mongoDb &
+docker logs "$MONGO_CONTAINER" &
 
-# Start keploy in record mode.
-docker build -t gin-mongo .
-docker rm -f ginApp 2>/dev/null || true
+# Replace hardcoded port 8080 in source and Dockerfile so keploy records
+# and replays with the same dynamic port (avoids host/container port mismatch).
+echo "Updating source files to use APP_PORT=${APP_PORT}..."
+sed -i '' "s/port := \"8080\"/port := \"${APP_PORT}\"/" main.go
+sed -i '' "s/EXPOSE 8080/EXPOSE ${APP_PORT}/" Dockerfile
+for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \)); do
+    sed -i '' "s/8080/${APP_PORT}/g" "$file" 2>/dev/null || true
+done
 
-container_kill() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    if [ -n "$REC_PID" ]; then
-        echo "Killing keploy"
-        sudo kill -INT "$REC_PID" 2>/dev/null || true
-        # Wait for keploy to flush and exit (up to 30s)
-        for i in {1..30}; do
-            kill -0 "$REC_PID" 2>/dev/null || break
-            sleep 1
-        done
-    fi
-}
+# Build the app image with a unique tag.
+docker build -t "$APP_IMAGE" .
 
 send_request(){
-    sleep 30
+    echo "Sending requests to the application..."
+    sleep 10
     app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:8080/CJBKJd92; then
+    for attempt in $(seq 1 30); do
+        if curl --fail --silent -X GET http://localhost:${APP_PORT}/CJBKJd92 >/dev/null 2>&1; then
             app_started=true
+            break
         fi
         sleep 3
     done
+    if [ "$app_started" = false ]; then
+        echo "ERROR: App failed to start after 30 attempts"
+        return 1
+    fi
     echo "App started"
-    # Start making curl calls to record the testcases and mocks.
+
     curl --request POST \
-      --url http://localhost:8080/url \
+      --url http://localhost:${APP_PORT}/url \
       --header 'content-type: application/json' \
       --data '{
       "url": "https://google.com"
     }'
 
     curl --request POST \
-      --url http://localhost:8080/url \
+      --url http://localhost:${APP_PORT}/url \
       --header 'content-type: application/json' \
       --data '{
       "url": "https://facebook.com"
     }'
 
-    curl -X GET http://localhost:8080/CJBKJd92
+    curl -X GET http://localhost:${APP_PORT}/CJBKJd92
 
-    # Test email verification endpoint
     curl --request GET \
-      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
+      --url "http://localhost:${APP_PORT}/verify-email?email=test@gmail.com" \
       --header 'Accept: application/json'
 
     curl --request GET \
-      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
+      --url "http://localhost:${APP_PORT}/verify-email?email=admin@yahoo.com" \
       --header 'Accept: application/json'
 
-    # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
-    container_kill
-    wait
+    sleep 3
+    echo "Requests sent successfully."
 }
 
 for i in {1..2}; do
-    container_name="ginApp_${i}"
+    container_name="ginApp_${JOB_ID}_${i}"
     send_request &
-    # Explicitly use --platform linux/amd64 if running on Apple Silicon but targeting linux containers? 
-    # Or rely on Docker handling. The workflow runs on self-hosted macOS which implies Apple Silicon or Intel.
-    # Usually docker run works fine.
-    $RECORD_BIN record -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
+    $RECORD_BIN record \
+      -c "docker run -p ${APP_PORT}:${APP_PORT} --net ${NETWORK_NAME} --rm --name $container_name ${APP_IMAGE}" \
+      --container-name "$container_name" \
+      --generate-github-actions=false \
+      --proxy-port=$PROXY_PORT \
+      --dns-port=$DNS_PORT \
+      --keploy-container "$KEPLOY_CONTAINER" \
+      --record-timer "40s" \
+      2>&1 | tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -121,14 +177,18 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Keep MongoDB running during test replay. Keploy will serve mocks for
-# matched requests; unmatched requests fall through to the real database
-# which returns the same data recorded earlier, preventing flaky failures
-# caused by non-deterministic mock matching across test sets.
-
 # Start the keploy in test mode.
-test_container="ginApp_test"
-$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+test_container="ginApp_${JOB_ID}_test"
+$REPLAY_BIN test \
+  -c "docker run --rm -p ${APP_PORT}:${APP_PORT} --net ${NETWORK_NAME} --name $test_container ${APP_IMAGE}" \
+  --containerName "$test_container" \
+  --apiTimeout 60 \
+  --delay 20 \
+  --generate-github-actions=false \
+  --proxy-port=$PROXY_PORT \
+  --dns-port=$DNS_PORT \
+  --keploy-container "$KEPLOY_CONTAINER" \
+  2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -146,24 +206,17 @@ all_passed=true
 
 for i in {0..1}
 do
-    # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
     echo "Test status for test-set-$i: $test_status"
 
-    # Check if any test set did not pass
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        break
     fi
 done
 
-# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
