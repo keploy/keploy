@@ -5,10 +5,12 @@
 .DESCRIPTION
   Does NOT delete the current run's directory because the
   actions/checkout post-job hook still needs GIT_CONFIG_GLOBAL.
-  Only removes directories from OTHER runs that are older than 2 hours
-  AND do not have an .active marker file (indicating a still-running job).
-  The current run's directory will be cleaned by a future run's pruning
-  once it ages past the 2-hour threshold.
+  Only removes directories from OTHER runs that are both:
+    (a) older than 2 hours, AND
+    (b) either lacking an .active marker or having a marker whose
+        LastWriteTime is also older than the 2-hour cutoff.
+  The current run's directory will be cleaned by a future run's
+  pruning once it ages past the threshold.
 #>
 
 param(

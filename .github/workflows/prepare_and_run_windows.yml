@@ -74,11 +74,10 @@ jobs:
 
           # Export env vars
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
           Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
-          Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -179,8 +178,15 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      # Checkout first (HTTPS-based, doesn't need isolation), then
-      # call the reusable script for git/SSH isolation.
+      # Remove stale SSH redirects from global config before checkout
+      # so actions/checkout uses HTTPS, not SSH.
+      - name: Sanitize global git config for checkout
+        shell: pwsh
+        run: |
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
+          git config --global --unset-all core.sshCommand 2>$null
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -244,6 +250,13 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
+
+      - name: Sanitize global git config for checkout
+        shell: pwsh
+        run: |
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
+          git config --global --unset-all core.sshCommand 2>$null
 
       - name: Checkout repository
         uses: actions/checkout@v4

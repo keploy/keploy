@@ -76,8 +76,10 @@ $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
 # GIT_SSH_COMMAND with per-run known_hosts. SSH_AUTH_SOCK is still
 # honored so webfactory/ssh-agent keys remain accessible.
 "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-"GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+# Also set GlobalKnownHostsFile=NUL so ssh only consults the per-run
+# file, fully isolating from any stale system/global known_hosts.
+"GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
 Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
 Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
-Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o StrictHostKeyChecking=yes"
+Write-Host "  GIT_SSH_COMMAND   = ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes"

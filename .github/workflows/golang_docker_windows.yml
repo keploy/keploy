@@ -11,9 +11,6 @@ concurrency:
   group: windows-docker-runner
   cancel-in-progress: false
 
-env:
-  _ISO_ROOT: .git-isolation
-
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
@@ -31,8 +28,15 @@ jobs:
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
-      # Checkout first (HTTPS-based, doesn't need isolation), then
-      # call the reusable script for git/SSH isolation.
+      # Remove stale SSH redirects from global config before checkout
+      # so actions/checkout uses HTTPS, not SSH.
+      - name: Sanitize global git config for checkout
+        shell: pwsh
+        run: |
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
+          git config --global --unset-all core.sshCommand 2>$null
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
