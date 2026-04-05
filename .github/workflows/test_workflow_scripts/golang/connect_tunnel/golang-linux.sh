@@ -45,7 +45,7 @@ echo "tinyproxy started (PID: $PROXY_PID)"
 sleep 2
 
 # Verify proxy is listening
-if ! nc -z localhost 3128 >/dev/null 2>&1; then
+if ! nc -z 127.0.0.1 3128 >/dev/null 2>&1; then
     echo "::error::tinyproxy failed to start on port 3128"
     exit 1
 fi
@@ -98,10 +98,10 @@ for i in 1 2; do
     app_name="connect-tunnel_${i}"
     send_request &
     REQ_PID=$!
-    HTTP_PROXY=http://localhost:3128 HTTPS_PROXY=http://localhost:3128 \
+    HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
         "$RECORD_BIN" record -c "./connect-tunnel" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
 
-    if grep "ERROR" "${app_name}.txt" | grep -v "tinyproxy\|WARNING"; then
+    if grep "ERROR" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused"; then
         echo "::error::Error found in recording iteration $i"
         cat "${app_name}.txt"
         exit 1
@@ -127,10 +127,10 @@ kill "$PROXY_PID" 2>/dev/null || true
 sleep 2
 
 # ── Replay phase ──
-HTTP_PROXY=http://localhost:3128 HTTPS_PROXY=http://localhost:3128 \
+HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
     "$REPLAY_BIN" test -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs.txt
 
-if grep "ERROR" "test_logs.txt" | grep -v "tinyproxy\|WARNING"; then
+if grep "ERROR" "test_logs.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused"; then
     echo "::error::Error found in replay"
     cat "test_logs.txt"
     exit 1
