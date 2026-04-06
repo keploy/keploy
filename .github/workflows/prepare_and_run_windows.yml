@@ -9,6 +9,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
+  _ISO_ROOT: .git-isolation
+
 jobs:
   build-and-upload:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -24,21 +28,59 @@ jobs:
           Set-Content -Path $lockPath -Value "started-$timestamp"
           Write-Host "Created workflow start lock: $lockPath"
 
-      - name: Clean up git config (ensure HTTPS for checkout)
-        if: always()
-        continue-on-error: true
-        shell: powershell
+      # Inline because this runs BEFORE checkout (workspace may not exist).
+      # Logic mirrors .github/scripts/windows/setup-git-isolation.ps1.
+      - name: Setup per-run git isolation
+        shell: pwsh
         run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
-          git config --global --list
+          $ErrorActionPreference = 'Stop'
+          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
-      - name: Configure Git EOL on Windows
-        shell: powershell
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
+          # Seed per-run gitconfig from the global one (if it exists)
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
+          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
+
+          # Remove inherited SSH redirect settings so the initial
+          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
+          $staleKeys = @(
+              'url."git@github.com:".insteadOf',
+              'url."ssh://git@github.com/".insteadOf',
+              'core.sshCommand'
+          )
+          # Temporarily disable native command error preference if set in runner profile
+          $savedPref = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($key in $staleKeys) {
+              git config --file $gitConfig --unset-all $key 2>$null
+              # exit code 5 = key not found (benign)
+          }
+          $PSNativeCommandUseErrorActionPreference = $savedPref
+
+          # Liveness marker so cleanup can detect active runs
+          Set-Content -Path (Join-Path $isoDir '.active') -Value (Get-Date -UFormat '%s')
+
+          # Set EOL handling
+          git config --file $gitConfig core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw "git config core.autocrlf failed (exit $LASTEXITCODE)" }
+          git config --file $gitConfig core.eol lf
+          if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
+
+          # Per-run SSH known_hosts
+          $knownHosts = Join-Path $isoDir 'known_hosts'
+          $hostKeys = ssh-keyscan github.com 2>$null
+          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
+              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+          }
+          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
+
+          # Export env vars
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
+          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -46,7 +88,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           clean: true
-      
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
@@ -83,18 +125,16 @@ jobs:
 
       - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
-        with: 
+        with:
           name: build
           path: keploy.exe
 
-      - name: Clean up git config
+      - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: pwsh
         run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -106,7 +146,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
@@ -134,30 +174,35 @@ jobs:
       - name: Push unique tag
         run: |
           docker push "${{ steps.tag.outputs.image_tag }}"
-    
+
   pull-docker-image:
     needs: [docker-image-build]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-
-      - name: Clean up git config (ensure HTTPS for checkout)
-        continue-on-error: true
-        shell: powershell
-        run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
-
-      - name: Update GitHub SSH known hosts
+      # Remove stale SSH redirects from global config before checkout
+      # so actions/checkout uses HTTPS, not SSH.
+      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # concurrent jobs' SSH redirects from leaking into our checkout.
+      - name: Pre-checkout git isolation
         shell: pwsh
         run: |
-          mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
-          ssh-keyscan github.com 2>$null | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii -Append
+          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup per-run git isolation
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       - name: Ensure Docker is running
         shell: powershell
@@ -192,12 +237,19 @@ jobs:
         run: |
           docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
+      - name: Prune stale git isolation dirs
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
+
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]
     uses: ./.github/workflows/golang_docker_windows.yml
     with:
       image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
-    
+
   run_golang_native_windows:
     needs: [build-and-upload]
     uses: ./.github/workflows/golang_native_windows.yml
@@ -208,16 +260,26 @@ jobs:
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
 
-      - name: Clean up git config
-        continue-on-error: true
-        shell: powershell
+      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # concurrent jobs' SSH redirects from leaking into our checkout.
+      - name: Pre-checkout git isolation
+        shell: pwsh
         run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
+          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup per-run git isolation
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       - name: Remove workflow start lock
         shell: powershell
@@ -225,7 +287,7 @@ jobs:
           $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
           $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
           Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
-    
+
       - name: Check and cleanup long-running containers (Windows helper)
         id: count_stash
         continue-on-error: true
@@ -238,6 +300,13 @@ jobs:
             Write-Error "Cleanup script not found at $script"
             exit 1
           }
+
+      - name: Prune stale git isolation dirs
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   gate:
     name: CI Gate (Windows)
