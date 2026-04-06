@@ -50,7 +50,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
-	errChan := make(chan error)
+	// Two reader goroutines can each report one terminal error.
+	errChan := make(chan error, 2)
 	//TODO: where to close the error channel since it is used in both the go routines
 	//close(errChan)
 

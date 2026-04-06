@@ -51,6 +51,44 @@ func TestResolveMemoryCurrentPathFromSelfCgroup(t *testing.T) {
 	}
 }
 
+func TestResolveMemoryCurrentPathFromRootSelfCgroup(t *testing.T) {
+	t.Parallel()
+
+	cgroupRoot := t.TempDir()
+	expectedPath := filepath.Join(cgroupRoot, "memory.current")
+	err := os.WriteFile(expectedPath, []byte("321"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to create fake root memory.current: %v", err)
+	}
+
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	err = os.WriteFile(procSelfCgroup, []byte("0::/\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/self/cgroup: %v", err)
+	}
+
+	procMountInfo := filepath.Join(t.TempDir(), "mountinfo")
+	err = os.WriteFile(procMountInfo, []byte("36 35 0:32 / "+cgroupRoot+" rw - cgroup2 cgroup rw\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/self/mountinfo: %v", err)
+	}
+
+	procMounts := filepath.Join(t.TempDir(), "mounts")
+	err = os.WriteFile(procMounts, []byte("cgroup2 "+cgroupRoot+" cgroup2 rw 0 0\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/mounts: %v", err)
+	}
+
+	actualPath, _, err := resolveMemoryUsagePath(procMounts, procSelfCgroup, procMountInfo)
+	if err != nil {
+		t.Fatalf("resolveMemoryUsagePath returned error: %v", err)
+	}
+
+	if actualPath != expectedPath {
+		t.Fatalf("expected %s, got %s", expectedPath, actualPath)
+	}
+}
+
 func TestResolveMemoryCurrentPathFallsBackToContainerIdentifierSearch(t *testing.T) {
 	t.Parallel()
 

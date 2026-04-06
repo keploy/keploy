@@ -665,10 +665,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	multiReader := io.MultiReader(reader, srcConn)
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: multiReader,
+		Reader: reader,
 		Logger: p.logger,
 	}
 
@@ -765,7 +764,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Reader: util.NewPrefixReader(initialBuf, srcConn),
 		Logger: p.logger,
 	}
 

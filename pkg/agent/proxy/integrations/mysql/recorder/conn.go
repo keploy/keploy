@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -876,7 +875,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Feed the first packet back to the parser by wrapping clientConn.
 		wrappedClient := &pUtils.Conn{
 			Conn:   clientConn,
-			Reader: io.MultiReader(bytes.NewReader(firstPkt), clientConn),
+			Reader: pUtils.NewPrefixReader(firstPkt, clientConn),
 			Logger: logger,
 		}
 

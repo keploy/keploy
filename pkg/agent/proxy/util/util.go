@@ -152,6 +152,7 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 // When stopOnRecordingPause is true, it exits as soon as the shared
 // self-aware memory guard pauses recording, allowing record-mode parsers to
 // fall back to passthrough without reading more data for decoding.
+// errChannel should be buffered to hold one terminal error per reader goroutine.
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
 	//TODO: where to close the errChannel
 	for {

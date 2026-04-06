@@ -270,12 +270,12 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
-	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
-	if err != nil {
-		//if not EOF then log
-		if err != io.EOF {
-			utils.LogError(logger, err, "error reading initial bytes from client connection")
-		}
+	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
+	if err == io.EOF && len(preface) == 0 {
+		return
+	}
+	if err != nil && err != io.EOF {
+		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
@@ -313,21 +313,18 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 type replayConn struct {
 	net.Conn
-	buf *bytes.Reader
+	reader io.Reader
 }
 
 func newReplayConn(initial []byte, c net.Conn) net.Conn {
 	return &replayConn{
-		Conn: c,
-		buf:  bytes.NewReader(initial),
+		Conn:   c,
+		reader: util.NewPrefixReader(initial, c),
 	}
 }
 
 func (r *replayConn) Read(p []byte) (int, error) {
-	if r.buf.Len() > 0 {
-		return r.buf.Read(p)
-	}
-	return r.Conn.Read(p)
+	return r.reader.Read(p)
 }
 
 // extractPortFromAddr extracts the port from an address string (host:port).

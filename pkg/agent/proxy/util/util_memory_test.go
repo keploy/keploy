@@ -113,3 +113,43 @@ func TestReadBuffConnIgnoresPauseForPassthroughReads(t *testing.T) {
 		t.Fatal("timed out waiting for ReadBuffConn goroutine to exit")
 	}
 }
+
+func TestReadBuffConnPauseSignalDoesNotBlockWithTwoReaders(t *testing.T) {
+	stubRecordingPaused(t, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errChannel := make(chan error, 2)
+	done := make(chan struct{}, 2)
+
+	for range 2 {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		go func(conn net.Conn) {
+			ReadBuffConn(ctx, zap.NewNop(), conn, make(chan []byte, 1), errChannel, true)
+			done <- struct{}{}
+		}(clientConn)
+	}
+
+	for range 2 {
+		select {
+		case err := <-errChannel:
+			if !errors.Is(err, ErrRecordingPausedDueToMemoryPressure) {
+				t.Fatalf("expected ErrRecordingPausedDueToMemoryPressure, got %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for pause errors from both readers")
+		}
+	}
+
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for both ReadBuffConn goroutines to exit")
+		}
+	}
+}

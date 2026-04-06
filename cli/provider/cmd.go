@@ -1393,8 +1393,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if cmd.Flags().Changed("memory-limit") {
 			memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
 			if err != nil {
-				utils.LogError(c.logger, err, "failed to get memory-limit flag")
-				return nil
+				errMsg := "failed to get memory-limit flag; verify the --memory-limit value and try again"
+				utils.LogError(c.logger, err, errMsg)
+				return fmt.Errorf("failed to get memory-limit flag: %w", err)
 			}
 			c.cfg.Agent.MemoryLimit = memoryLimit
 		}

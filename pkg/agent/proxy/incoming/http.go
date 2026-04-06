@@ -107,6 +107,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		reqTimestamp := time.Now()
 		var chunked bool = false
+		pressureCloseMode := forceCloseMode || memoryguard.IsRecordingPaused()
 		captureEnabled := !memoryguard.IsRecordingPaused()
 
 		// Request modifications for Sync/Sampling modes
@@ -127,18 +128,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
+		if pressureCloseMode && !forceCloseMode {
+			releaseLock()
+			req.Close = true
+			req.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
 
 		var reqData []byte
 		if captureEnabled {
-			reqData, err = httputil.DumpRequest(req, true)
-			if err != nil {
-				logger.Error("Failed to dump request for capturing", zap.Error(err))
-				req.Body.Close()
-				return
+			if memoryguard.IsRecordingPaused() {
+				pressureCloseMode = true
+				captureEnabled = false
+				releaseLock()
+				req.Close = true
+				req.Header.Set("Connection", "close")
+			} else {
+				reqData, err = httputil.DumpRequest(req, true)
+				if err != nil {
+					logger.Error("Failed to dump request for capturing", zap.Error(err))
+					req.Body.Close()
+					return
+				}
 			}
 		}
 
 		if err := req.Write(upConn); err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress request write ended during close-under-pressure path", zap.Error(err))
+				req.Body.Close()
+				return
+			}
 			logger.Error("Failed to forward request to upstream", zap.Error(err))
 			req.Body.Close()
 			return
@@ -147,6 +167,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", zap.Error(err))
+				return
+			}
 			logger.Error("Failed to read upstream response", zap.Error(err))
 			return
 		}
@@ -163,19 +187,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
+		if pressureCloseMode && !forceCloseMode {
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
 
 		respTimestamp := time.Now()
 		var respData []byte
 		if captureEnabled {
-			respData, err = httputil.DumpResponse(resp, true)
-			if err != nil {
-				logger.Error("Failed to dump response for capturing", zap.Error(err))
-				resp.Body.Close()
-				return
+			if memoryguard.IsRecordingPaused() {
+				pressureCloseMode = true
+				captureEnabled = false
+				releaseLock()
+				resp.Close = true
+				resp.Header.Set("Connection", "close")
+			} else {
+				respData, err = httputil.DumpResponse(resp, true)
+				if err != nil {
+					logger.Error("Failed to dump response for capturing", zap.Error(err))
+					resp.Body.Close()
+					return
+				}
 			}
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
+				resp.Body.Close()
+				return
+			}
 			logger.Error("Failed to forward response to client", zap.Error(err))
 			resp.Body.Close()
 			return
@@ -208,7 +250,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		// Break the keep-alive loop and exit if we are in sync/sampling mode
-		if forceCloseMode {
+		if pressureCloseMode {
 			return
 		}
 	}
@@ -221,4 +263,21 @@ func isChunked(te []string) bool {
 		}
 	}
 	return false
+}
+
+func isIngressExpectedCloseErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "unexpected EOF") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "wsarecv") ||
+		strings.Contains(errStr, "wsasend") ||
+		strings.Contains(errStr, "forcibly closed by the remote host")
 }
