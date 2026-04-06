@@ -1404,6 +1404,11 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 		}
 	}()
 
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("get mock errors returned status %d: %s", res.StatusCode, string(body))
+	}
+
 	var mockErrors []models.UnmatchedCall
 	if err := json.NewDecoder(res.Body).Decode(&mockErrors); err != nil {
 		return nil, fmt.Errorf("failed to decode mock errors response: %s", err.Error())

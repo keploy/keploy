@@ -62,13 +62,13 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 
 	mockErrors, err := a.svc.GetMockErrors(r.Context())
 	if err != nil {
-		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
 		return
 	}
 
-	render.JSON(w, r, mockErrors)
 	render.Status(r, http.StatusOK)
+	render.JSON(w, r, mockErrors)
 }
 
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {

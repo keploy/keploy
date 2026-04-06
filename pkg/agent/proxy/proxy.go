@@ -1103,14 +1103,14 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 				return errs, nil
 			}
 			if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
-				uc := models.UnmatchedCall{}
 				if parserErr.MismatchReport != nil {
-					uc.Protocol = parserErr.MismatchReport.Protocol
-					uc.ActualSummary = parserErr.MismatchReport.ActualSummary
-					uc.ClosestMock = parserErr.MismatchReport.ClosestMock
-					uc.Diff = parserErr.MismatchReport.Diff
+					errs = append(errs, models.UnmatchedCall{
+						Protocol:      parserErr.MismatchReport.Protocol,
+						ActualSummary: parserErr.MismatchReport.ActualSummary,
+						ClosestMock:   parserErr.MismatchReport.ClosestMock,
+						Diff:          parserErr.MismatchReport.Diff,
+					})
 				}
-				errs = append(errs, uc)
 			}
 		default:
 			return errs, nil
