@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/fatih/color"
@@ -418,6 +419,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory")
 		return err
 	}
+	sort.Strings(testSetIDs)
 
 	testCases := make([]models.TestCase, 0)
 	for _, testSetID := range testSetIDs {

@@ -114,6 +114,43 @@ func TestInferSchemaTypeInferenceNestedObjects(t *testing.T) {
 	assertSchemaType(t, tags.Value.Items, "string")
 }
 
+func TestInferSchemaResponseDescriptionPointerAliasing(t *testing.T) {
+	// Regression: each response must have its own description string, not a
+	// shared pointer that gets overwritten on the next loop iteration.
+	doc, err := InferSchema([]models.TestCase{
+		{HTTPReq: models.HTTPReq{Method: "GET", URL: "http://example.com/a"}, HTTPResp: models.HTTPResp{StatusCode: 200, StatusMessage: "OK"}},
+		{HTTPReq: models.HTTPReq{Method: "GET", URL: "http://example.com/b"}, HTTPResp: models.HTTPResp{StatusCode: 404, StatusMessage: "Not Found"}},
+	})
+	if err != nil {
+		t.Fatalf("InferSchema returned error: %v", err)
+	}
+
+	aResp := doc.Paths.Value("/a").Get.Responses.Value("200")
+	bResp := doc.Paths.Value("/b").Get.Responses.Value("404")
+
+	if *aResp.Value.Description != "OK" {
+		t.Errorf("expected /a 200 description 'OK', got %q", *aResp.Value.Description)
+	}
+	if *bResp.Value.Description != "Not Found" {
+		t.Errorf("expected /b 404 description 'Not Found', got %q", *bResp.Value.Description)
+	}
+}
+
+func TestInferSchemaObjectFieldsNotRequired(t *testing.T) {
+	// Inference from a single sample should not mark all fields as required.
+	doc, err := InferSchema([]models.TestCase{
+		{HTTPReq: models.HTTPReq{Method: "GET", URL: "http://example.com/user"}, HTTPResp: models.HTTPResp{StatusCode: 200, Body: `{"id":"1","name":"John"}`}},
+	})
+	if err != nil {
+		t.Fatalf("InferSchema returned error: %v", err)
+	}
+
+	schema := doc.Paths.Value("/user").Get.Responses.Value("200").Value.Content["application/json"].Schema
+	if len(schema.Value.Required) > 0 {
+		t.Errorf("expected no Required fields from single-sample inference, got %v", schema.Value.Required)
+	}
+}
+
 func assertSchemaType(t *testing.T, schemaRef *openapi3.SchemaRef, expected string) {
 	t.Helper()
 

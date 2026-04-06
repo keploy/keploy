@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -52,7 +51,7 @@ func InferSchema(testCases []models.TestCase) (*openapi3.T, error) {
 		if requestSchema, ok := inferSchemaFromBody(tc.HTTPReq.Body); ok && op.RequestBody == nil {
 			op.RequestBody = &openapi3.RequestBodyRef{
 				Value: &openapi3.RequestBody{
-					Required: true,
+					Required: false,
 					Content: openapi3.Content{
 						"application/json": &openapi3.MediaType{Schema: requestSchema},
 					},
@@ -61,13 +60,15 @@ func InferSchema(testCases []models.TestCase) (*openapi3.T, error) {
 		}
 
 		statusCode := strconv.Itoa(tc.HTTPResp.StatusCode)
-		description := tc.HTTPResp.StatusMessage
-		if description == "" {
-			description = http.StatusText(tc.HTTPResp.StatusCode)
+		desc := tc.HTTPResp.StatusMessage
+		if desc == "" {
+			desc = http.StatusText(tc.HTTPResp.StatusCode)
 		}
-		if description == "" {
-			description = "response"
+		if desc == "" {
+			desc = "response"
 		}
+		// Copy to avoid pointer aliasing across loop iterations
+		description := desc
 
 		response := &openapi3.Response{Description: &description}
 		if responseSchema, ok := inferSchemaFromBody(tc.HTTPResp.Body); ok {
@@ -143,15 +144,13 @@ func inferSchemaRef(value any) *openapi3.SchemaRef {
 	case map[string]any:
 		objectSchema := openapi3.NewObjectSchema()
 		properties := make(openapi3.Schemas, len(v))
-		required := make([]string, 0, len(v))
 
 		for key, val := range v {
 			properties[key] = inferSchemaRef(val)
-			required = append(required, key)
 		}
-		sort.Strings(required)
 		objectSchema.Properties = properties
-		objectSchema.Required = required
+		// Do not mark all fields Required from a single sample; inference
+		// from one observation cannot determine which fields are optional.
 		return openapi3.NewSchemaRef("", objectSchema)
 	default:
 		return openapi3.NewSchemaRef("", openapi3.NewStringSchema())
