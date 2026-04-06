@@ -19,7 +19,7 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 
 # --- Build Application ---
 echo "Building gRPC server and client binaries..."
-go build -o grpc-server .
+go build -o grpc-server ./server
 go build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
 
