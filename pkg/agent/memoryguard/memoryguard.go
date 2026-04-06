@@ -34,6 +34,7 @@ type guard struct {
 	limitBytes        int64
 	memoryLimitMB     uint64
 	lastReclaim       time.Time
+	underPressure     bool
 }
 
 type cgroupLayout struct {
@@ -69,10 +70,7 @@ func IsRecordingPaused() bool {
 
 // Start enables the memory guard when a Docker agent is running with a limit.
 func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB uint64) error {
-	recordingPaused.Store(false)
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.SetMemoryPressure(false)
-	}
+	resetAllPressure()
 
 	limitBytes, err := LimitBytes(memoryLimitMB)
 	if err != nil {
@@ -133,9 +131,9 @@ func (g *guard) run(ctx context.Context) {
 				continue
 			}
 
-			if recordingPaused.Load() && currentBytes <= resumeThreshold {
+			if g.underPressure && currentBytes <= resumeThreshold {
 				g.resetPressure()
-				g.logger.Info("Resumed recording after keploy-agent memory recovered",
+				g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
 					zap.Int64("memory_usage_bytes", currentBytes),
 					zap.Int64("resume_threshold_bytes", resumeThreshold),
 					zap.Int64("memory_limit_bytes", g.limitBytes))
@@ -145,11 +143,9 @@ func (g *guard) run(ctx context.Context) {
 }
 
 func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.SetMemoryPressure(true)
-	}
-
-	alreadyPaused := recordingPaused.Swap(true)
+	alreadyPaused := g.underPressure
+	g.underPressure = true
+	applyPausedState(true)
 	now := time.Now()
 	if !alreadyPaused {
 		g.logger.Warn("Pausing keploy-agent recording due to memory pressure",
@@ -166,9 +162,18 @@ func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
 }
 
 func (g *guard) resetPressure() {
-	recordingPaused.Store(false)
+	g.underPressure = false
+	applyPausedState(false)
+}
+
+func resetAllPressure() {
+	applyPausedState(false)
+}
+
+func applyPausedState(paused bool) {
+	recordingPaused.Store(paused)
 	if mgr := syncMock.Get(); mgr != nil {
-		mgr.SetMemoryPressure(false)
+		mgr.SetMemoryPressure(paused)
 	}
 }
 

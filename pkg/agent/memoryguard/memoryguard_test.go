@@ -144,3 +144,17 @@ func TestResolveMemoryUsagePathFromSelfCgroupV1(t *testing.T) {
 		t.Fatalf("expected %s, got %s", expectedPath, actualPath)
 	}
 }
+
+func TestResetAllPressureClearsRecordingPause(t *testing.T) {
+	applyPausedState(true)
+	t.Cleanup(resetAllPressure)
+
+	if !IsRecordingPaused() {
+		t.Fatal("expected recording to be paused after applying pressure state")
+	}
+
+	resetAllPressure()
+	if IsRecordingPaused() {
+		t.Fatal("expected resetAllPressure to clear the paused state")
+	}
+}

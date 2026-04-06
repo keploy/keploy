@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"sort"
 	"strings"
@@ -79,8 +78,6 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
-	memLimiter *util.MemoryLimiter
-
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
@@ -114,11 +111,6 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	var memLimit int64
-	if opts.Record.MaxBufferMemoryMB > 0 && opts.Record.MaxBufferMemoryMB <= uint64(math.MaxInt64/(1024*1024)) {
-		memLimit = int64(opts.Record.MaxBufferMemoryMB) * 1024 * 1024
-	}
-
 	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
@@ -136,7 +128,6 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
-		memLimiter:        util.NewMemoryLimiter(memLimit, logger),
 	}
 
 	return proxy
@@ -160,7 +151,6 @@ func (p *Proxy) buildRecordSession(
 		Egress:       util.NewSafeConn(dstConn, logger),
 		Mocks:        mocks,
 		ErrGroup:     errGrp,
-		MemLimiter:   p.memLimiter,
 		TLSUpgrader:  tlsUpgrader,
 		Logger:       logger,
 		ClientConnID: fmt.Sprint(clientConnID),
@@ -625,7 +615,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
 				Mocks:        rule.MC,
 				ErrGroup:     parserErrGrp,
-				MemLimiter:   p.memLimiter,
 				TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
 				Logger:       mysqlLogger,
 				ClientConnID: fmt.Sprint(clientConnID),
