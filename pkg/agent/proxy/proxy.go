@@ -1109,6 +1109,7 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 						ActualSummary: parserErr.MismatchReport.ActualSummary,
 						ClosestMock:   parserErr.MismatchReport.ClosestMock,
 						Diff:          parserErr.MismatchReport.Diff,
+						NextSteps:     parserErr.MismatchReport.NextSteps,
 					})
 				}
 			}

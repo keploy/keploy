@@ -1744,6 +1744,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 									ActualSummary: f.MismatchReport.ActualSummary,
 									ClosestMock:   f.MismatchReport.ClosestMock,
 									Diff:          f.MismatchReport.Diff,
+									NextSteps:     f.MismatchReport.NextSteps,
 								})
 							}
 						}
