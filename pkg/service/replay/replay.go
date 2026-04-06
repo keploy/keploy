@@ -3100,9 +3100,12 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 	for {
 		select {
 		case <-ctx.Done():
-			r.logger.Debug("Stopping proxy error monitoring",
+			r.logger.Debug("Stopping proxy error monitoring, draining remaining errors",
 				zap.String("testSetID", testSetID),
 				zap.String("testCaseID", testCaseID))
+			// Drain any remaining errors that arrived before context cancellation,
+			// so mock-not-found errors aren't lost due to select randomness.
+			r.drainProxyErrors(errorChannel, testSetID, testCaseID)
 			return
 		case proxyErr, ok := <-errorChannel:
 			if !ok {
@@ -3111,21 +3114,35 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 					zap.String("testCaseID", testCaseID))
 				return
 			}
+			r.processProxyError(proxyErr, testSetID, testCaseID)
+		}
+	}
+}
 
-			// Determine effective test case ID
-			effectiveTestCaseID := testCaseID
-			if effectiveTestCaseID == "" {
-				effectiveTestCaseID = UNKNOWN_TEST
+// drainProxyErrors non-blocking drains remaining errors from the channel after context cancellation.
+func (r *Replayer) drainProxyErrors(errorChannel <-chan error, testSetID, testCaseID string) {
+	for {
+		select {
+		case proxyErr, ok := <-errorChannel:
+			if !ok {
+				return
 			}
+			r.processProxyError(proxyErr, testSetID, testCaseID)
+		default:
+			return
+		}
+	}
+}
 
-			if parserErr, ok := proxyErr.(models.ParserError); ok {
-				// Handle typed ParserError
-				switch parserErr.ParserErrorType {
-				case models.ErrMockNotFound:
-					r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
-				}
-			}
-
+func (r *Replayer) processProxyError(proxyErr error, testSetID, testCaseID string) {
+	effectiveTestCaseID := testCaseID
+	if effectiveTestCaseID == "" {
+		effectiveTestCaseID = UNKNOWN_TEST
+	}
+	if parserErr, ok := proxyErr.(models.ParserError); ok {
+		switch parserErr.ParserErrorType {
+		case models.ErrMockNotFound:
+			r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
 		}
 	}
 }
