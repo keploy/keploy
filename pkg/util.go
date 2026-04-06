@@ -1273,25 +1273,6 @@ func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(st
 	return queue
 }
 
-func expectedStructuredRawSize(chunks []models.HTTPStreamChunk) (int, bool) {
-	if len(chunks) == 0 {
-		return 0, false
-	}
-
-	total := 0
-	found := false
-	for _, chunk := range chunks {
-		raw, ok := streamChunkFieldValue(chunk, "raw")
-		if !ok {
-			continue
-		}
-		total += len([]byte(raw))
-		found = true
-	}
-
-	return total, found
-}
-
 func streamChunkFieldValue(chunk models.HTTPStreamChunk, key string) (string, bool) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	for _, field := range chunk.Data {
@@ -1459,24 +1440,6 @@ func mergeConsecutiveSSEDataFields(fields []sseField) []sseField {
 	}
 
 	return merged
-}
-
-func detectScalarType(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "empty"
-	}
-
-	if strings.EqualFold(value, "null") {
-		return "null"
-	}
-	if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
-		return "bool"
-	}
-	if _, err := strconv.ParseFloat(value, 64); err == nil {
-		return "number"
-	}
-	return "string"
 }
 
 func compareJSONTextWithNoise(expected, actual string, jsonNoiseKeys map[string]struct{}) (bool, error) {
