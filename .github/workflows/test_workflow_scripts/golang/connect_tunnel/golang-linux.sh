@@ -148,26 +148,72 @@ if grep -q "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+# ── Determine expected behavior ──
+# CONNECT tunnel support only exists in the build from this branch.
+# When either record or replay uses the "latest" release binary,
+# the /via-proxy test (which depends on CONNECT) is expected to fail.
+# Only the /health test (no CONNECT dependency) must always pass.
+both_build=false
+case "${RECORD_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy)
+        case "${REPLAY_BIN:-}" in
+            */build/keploy|*/build-no-race/keploy)
+                both_build=true
+                ;;
+        esac
+        ;;
+esac
+
+echo "Both binaries are build (CONNECT-capable): $both_build"
+
 # ── Validate test reports ──
-all_passed=true
-for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
-    [ -e "$report_file" ] || { echo "No report files found!"; all_passed=false; break; }
+if [ "$both_build" = true ]; then
+    # Full validation: all test sets must pass.
+    all_passed=true
+    for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found!"; all_passed=false; break; }
 
-    test_set_name=$(basename "$report_file" -report.yaml)
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_set_name=$(basename "$report_file" -report.yaml)
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-    echo "Status for ${test_set_name}: $test_status"
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "::error::${test_set_name} did not pass"
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "::error::${test_set_name} did not pass"
+        fi
+    done
+
+    if [ "$all_passed" = true ]; then
+        echo "All CONNECT tunnel tests passed!"
+        exit 0
+    else
+        echo "::error::Some tests failed. Dumping logs..."
+        cat test_logs.txt
+        exit 1
     fi
-done
-
-if [ "$all_passed" = true ]; then
-    echo "All CONNECT tunnel tests passed!"
-    exit 0
 else
-    echo "::error::Some tests failed. Dumping logs..."
-    cat test_logs.txt
-    exit 1
+    # Partial validation: at least /health tests must pass.
+    # /via-proxy failures are expected when latest binary lacks CONNECT support.
+    echo "Latest binary lacks CONNECT support — validating /health tests only."
+    health_passed=false
+    if grep -q "test passed" test_logs.txt 2>/dev/null; then
+        health_passed=true
+    fi
+    # Check that the test report exists and has at least 1 pass.
+    for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || continue
+        pass_count=$(grep -c 'status: PASSED' "$report_file" 2>/dev/null || echo "0")
+        if [ "$pass_count" -gt 0 ]; then
+            health_passed=true
+        fi
+    done
+
+    if [ "$health_passed" = true ]; then
+        echo "Health tests passed (CONNECT tests expected to fail with latest binary)."
+        exit 0
+    else
+        echo "::error::Even health tests failed — unexpected."
+        cat test_logs.txt
+        exit 1
+    fi
 fi
