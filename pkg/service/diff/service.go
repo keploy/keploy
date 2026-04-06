@@ -15,5 +15,5 @@ type ReportDB interface {
 }
 
 type TestDB interface {
-	GetReportTestSets(ctx context.Context, reportID string) ([]string, error)
+	GetReportTestSets(ctx context.Context, runID string) ([]string, error)
 }

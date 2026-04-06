@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/report"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -26,9 +27,10 @@ type StatusChange struct {
 }
 
 type DiffResult struct {
-	Regressions []StatusChange
-	Fixes       []StatusChange
-	Unchanged   []StatusChange
+	Regressions      []StatusChange
+	Fixes            []StatusChange
+	StatusTransitions []StatusChange
+	Unchanged        []StatusChange
 }
 
 func New(logger *zap.Logger, reportDB ReportDB, testDB TestDB) *Diff {
@@ -41,9 +43,10 @@ func New(logger *zap.Logger, reportDB ReportDB, testDB TestDB) *Diff {
 
 func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 	result := &DiffResult{
-		Regressions: make([]StatusChange, 0),
-		Fixes:       make([]StatusChange, 0),
-		Unchanged:   make([]StatusChange, 0),
+		Regressions:      make([]StatusChange, 0),
+		Fixes:            make([]StatusChange, 0),
+		StatusTransitions: make([]StatusChange, 0),
+		Unchanged:        make([]StatusChange, 0),
 	}
 	if report1 == nil || report2 == nil {
 		return result
@@ -84,12 +87,15 @@ func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 			After:      after,
 		}
 		switch {
+		case before == after:
+			result.Unchanged = append(result.Unchanged, change)
 		case before == models.TestStatusPassed && after == models.TestStatusFailed:
 			result.Regressions = append(result.Regressions, change)
 		case before == models.TestStatusFailed && after == models.TestStatusPassed:
 			result.Fixes = append(result.Fixes, change)
 		default:
-			result.Unchanged = append(result.Unchanged, change)
+			// Non-binary transitions such as IGNORED->PASSED, PASSED->OBSOLETE, etc.
+			result.StatusTransitions = append(result.StatusTransitions, change)
 		}
 	}
 
@@ -103,9 +109,10 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 	}
 
 	aggregate := &DiffResult{
-		Regressions: make([]StatusChange, 0),
-		Fixes:       make([]StatusChange, 0),
-		Unchanged:   make([]StatusChange, 0),
+		Regressions:      make([]StatusChange, 0),
+		Fixes:            make([]StatusChange, 0),
+		StatusTransitions: make([]StatusChange, 0),
+		Unchanged:        make([]StatusChange, 0),
 	}
 
 	for _, testSetID := range selectedTestSets {
@@ -122,6 +129,7 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 		diff := ComputeDiff(report1, report2)
 		aggregate.Regressions = append(aggregate.Regressions, withTestSet(testSetID, diff.Regressions)...)
 		aggregate.Fixes = append(aggregate.Fixes, withTestSet(testSetID, diff.Fixes)...)
+		aggregate.StatusTransitions = append(aggregate.StatusTransitions, withTestSet(testSetID, diff.StatusTransitions)...)
 		aggregate.Unchanged = append(aggregate.Unchanged, withTestSet(testSetID, diff.Unchanged)...)
 	}
 
@@ -169,7 +177,7 @@ func normalizeTestSets(testSets []string) []string {
 	out := make([]string, 0, len(testSets))
 	for _, setID := range testSets {
 		trimmed := strings.TrimSpace(setID)
-		trimmed = strings.TrimSuffix(trimmed, "-report")
+		trimmed = strings.TrimSuffix(trimmed, report.ReportSuffix)
 		if trimmed == "" {
 			continue
 		}
@@ -214,7 +222,17 @@ func printDiff(run1 string, run2 string, result *DiffResult) {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "\nSummary: %d regressions, %d fixes, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.Unchanged))
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stdout, "Status transitions (other changes):")
+	if len(result.StatusTransitions) == 0 {
+		fmt.Fprintln(os.Stdout, "  none")
+	} else {
+		for _, change := range result.StatusTransitions {
+			fmt.Fprintf(os.Stdout, "  %s: %s -> %s\n", formatTestCaseLabel(change), change.Before, change.After)
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "\nSummary: %d regressions, %d fixes, %d status transitions, %d unchanged\n", len(result.Regressions), len(result.Fixes), len(result.StatusTransitions), len(result.Unchanged))
 }
 
 func formatTestCaseLabel(change StatusChange) string {

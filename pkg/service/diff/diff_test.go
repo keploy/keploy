@@ -90,6 +90,54 @@ func TestComputeDiffFixes(t *testing.T) {
 	}
 }
 
+func TestComputeDiffStatusTransitions(t *testing.T) {
+	tests := []struct {
+		name   string
+		before models.TestStatus
+		after  models.TestStatus
+	}{
+		{"IGNORED to PASSED", models.TestStatusIgnored, models.TestStatusPassed},
+		{"PASSED to OBSOLETE", models.TestStatusPassed, models.TestStatusObsolete},
+		{"IGNORED to FAILED", models.TestStatusIgnored, models.TestStatusFailed},
+		{"FAILED to OBSOLETE", models.TestStatusFailed, models.TestStatusObsolete},
+		{"OBSOLETE to PASSED", models.TestStatusObsolete, models.TestStatusPassed},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report1 := &models.TestReport{
+				Tests: []models.TestResult{
+					{TestCaseID: "tc-1", Status: tc.before},
+				},
+			}
+			report2 := &models.TestReport{
+				Tests: []models.TestResult{
+					{TestCaseID: "tc-1", Status: tc.after},
+				},
+			}
+
+			diff := ComputeDiff(report1, report2)
+			if len(diff.Regressions) != 0 {
+				t.Fatalf("expected no regressions, got %d", len(diff.Regressions))
+			}
+			if len(diff.Fixes) != 0 {
+				t.Fatalf("expected no fixes, got %d", len(diff.Fixes))
+			}
+			if len(diff.StatusTransitions) != 1 {
+				t.Fatalf("expected 1 status transition, got %d", len(diff.StatusTransitions))
+			}
+			if diff.StatusTransitions[0].Before != tc.before || diff.StatusTransitions[0].After != tc.after {
+				t.Fatalf("expected %s -> %s, got %s -> %s",
+					tc.before, tc.after,
+					diff.StatusTransitions[0].Before, diff.StatusTransitions[0].After)
+			}
+			if len(diff.Unchanged) != 0 {
+				t.Fatalf("expected no unchanged, got %d", len(diff.Unchanged))
+			}
+		})
+	}
+}
+
 func TestComputeDiffMixedChanges(t *testing.T) {
 	report1 := &models.TestReport{
 		Tests: []models.TestResult{

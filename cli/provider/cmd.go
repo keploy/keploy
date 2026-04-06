@@ -281,7 +281,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "diff":
 		cmd.Flags().String("run1", "", "First test run ID to compare")
 		cmd.Flags().String("run2", "", "Second test run ID to compare")
-		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to compare e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Test-sets to compare e.g. --test-sets \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
