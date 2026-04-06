@@ -78,6 +78,7 @@ record:
   recordTimer: 0s
   filters: []
   sync: false
+  maxBufferMemoryMB: 0
 configPath: ""
 bypassRules: []
 disableMapping: true
