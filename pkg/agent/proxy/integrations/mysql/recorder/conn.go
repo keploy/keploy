@@ -76,6 +76,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Set the intial request operation
 	res.requestOperation = handshakePkt.Header.Type
 
+	// Store server capabilities for CLIENT_DEPRECATE_EOF handling during query phase
+	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
+		decodeCtx.ServerCaps = greeting.CapabilityFlags
+	}
+
 	// Get the initial Plugin Name
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
@@ -118,6 +123,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		utils.LogError(logger, err, "failed to decode handshake response packet")
 		return res, err
 	}
+
+	// DecodePayload stores the client flags in ClientCapabilities. Also
+	// populate ClientCaps so that DeprecateEOF() (which checks ClientCaps
+	// via effectiveClientCaps()) works correctly in record mode.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 	res.req = append(res.req, mysql.Request{
 		PacketBundle: *handshakeResponsePkt,
@@ -255,6 +265,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			utils.LogError(logger, err, "failed to decode handshake response packet")
 			return res, err
 		}
+
+		// After TLS upgrade, the client sends a new HandshakeResponse41 with
+		// the final negotiated capabilities. Update ClientCaps so
+		// DeprecateEOF() reflects the post-TLS negotiation.
+		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 		res.req = append(res.req, mysql.Request{
 			PacketBundle: *handshakeResponsePkt,
