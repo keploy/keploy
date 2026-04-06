@@ -35,6 +35,9 @@ jobs:
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
+          - name: sse-preflight
+            path: sse-preflight
+            script_dir: sse_preflight
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -78,6 +81,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: chore/add-sse-preflight-sample
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
