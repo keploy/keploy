@@ -403,6 +403,11 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		}
 
 		isSSERequest := tc.Kind == models.HTTP && pkg.IsSSERequest(tc)
+		// Fallback: if the request was recorded on the configured SSE port, treat it as SSE
+		// even without SSE headers (e.g., OPTIONS preflight). Matches replay hook logic.
+		if !isSSERequest && tc.Kind == models.HTTP && tc.AppPort > 0 && o.config.ReRecord.SSEPort != 0 && uint32(tc.AppPort) == uint32(o.config.ReRecord.SSEPort) {
+			isSSERequest = true
+		}
 
 		if o.config.ReRecord.Port != 0 && tc.Kind == models.HTTP {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
