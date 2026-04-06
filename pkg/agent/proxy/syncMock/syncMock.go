@@ -9,6 +9,7 @@ import (
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const defaultMockBufferCapacity = 100
 
 func generateRandomString(n int) string {
 	sb := make([]byte, n)
@@ -29,7 +30,7 @@ type SyncMockManager struct {
 
 // Global instance is initialized at package load time
 var instance = &SyncMockManager{
-	buffer:       make([]*models.Mock, 0, 100),
+	buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
 	firstReqSeen: false,
 }
 
@@ -97,6 +98,10 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		return
 	}
 
+	for i := range m.buffer {
+		m.buffer[i] = nil
+	}
+	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
