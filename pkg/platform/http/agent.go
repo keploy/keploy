@@ -1400,7 +1400,7 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	}
 	defer func() {
 		if closeErr := res.Body.Close(); closeErr != nil {
-			utils.LogError(a.logger, closeErr, "failed to close response body for getmockerrors")
+			utils.LogError(a.logger, closeErr, "failed to close response body for getmockerrors; safe to ignore once, but check agent/proxy logs if repeated")
 		}
 	}()
 

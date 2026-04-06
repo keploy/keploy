@@ -214,7 +214,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	mgr := syncMock.Get()
 	if mgr != nil && !mgr.GetFirstReqSeen() {
-		// Before first incoming request: buffer via manager (startup mocks)
+		// Before first incoming request: hand startup mocks to the manager,
+		// which may buffer them or forward them immediately depending on its state.
 		mgr.AddMock(newMock)
 		return nil
 	}
