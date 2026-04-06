@@ -87,7 +87,7 @@ func handleConnectTunnel(
 
 	host, port, err := net.SplitHostPort(targetAddr)
 	if err != nil {
-		// SplitHostPort can fail for "host-without-port" or malformed input.
+		// SplitHostPort failed — no port in address. Default to 443.
 		// Strip a single pair of IPv6 brackets to avoid double-bracketing.
 		host = targetAddr
 		if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
@@ -96,10 +96,13 @@ func handleConnectTunnel(
 		port = "443"
 		targetAddr = net.JoinHostPort(host, port)
 	}
-	// Validate port is numeric and in valid range (1-65535).
+	// Reject empty port (e.g., "example.com:"), non-numeric, out-of-range.
+	if port == "" {
+		return nil, fmt.Errorf("empty port in CONNECT target %q", targetAddr)
+	}
 	portNum, parseErr := strconv.ParseUint(port, 10, 16)
 	if parseErr != nil || portNum == 0 {
-		return nil, fmt.Errorf("invalid port in CONNECT target %q", targetAddr)
+		return nil, fmt.Errorf("invalid port %q in CONNECT target %q", port, targetAddr)
 	}
 
 	logger.Debug("CONNECT tunnel detected",

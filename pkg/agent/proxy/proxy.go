@@ -967,7 +967,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			} else {
 				dstConn, err = tls.Dial("tcp", addr, cfg)
 				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
 					return err
 				}
 
