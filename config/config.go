@@ -88,7 +88,7 @@ type Record struct {
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
-	DetectPII         bool            `json:"detectPII" yaml:"detect_pii" mapstructure:"detectPII"`
+	DetectPII         bool            `json:"detectPII" yaml:"detectPII" mapstructure:"detectPII"`
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
