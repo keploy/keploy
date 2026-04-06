@@ -1751,7 +1751,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 								}
 							}
 							if !isDNS {
-								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: m.Kind})
+								resolvedKind := m.Kind
+								if resolvedKind == "" {
+									if kind, ok := mockKindByName[m.Name]; ok {
+										resolvedKind = string(kind)
+									}
+								}
+								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
 							}
 						}
 						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
