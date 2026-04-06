@@ -35,6 +35,7 @@ type Proxy interface {
 	Mock(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.

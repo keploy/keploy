@@ -19,6 +19,8 @@ type Instrumentation interface {
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
+	// GetMockErrors returns mock-not-found errors collected during replay
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
 	BeforeTestRun(ctx context.Context, testRunID string) error
@@ -75,7 +77,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error
 }
 
 type ReportDB interface {

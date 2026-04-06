@@ -1378,10 +1378,40 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 	return nil
 }
 
-// This function should be implemented such that we listen to the mock not found errors on the proxy side and send it back to the client from agent
-// Currently, we are sending the nil chan and it is handled for the nil check in the monitorProxyErrors function
+// GetErrorChannel returns nil for HTTP transport — use GetMockErrors() instead.
 func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
+}
+
+// GetMockErrors fetches mock-not-found errors from the agent via HTTP.
+func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	url := fmt.Sprintf("%s/mockerrors", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mock errors: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for getmockerrors; safe to ignore once, but check agent/proxy logs if repeated")
+		}
+	}()
+
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("get mock errors returned status %d: %s", res.StatusCode, string(body))
+	}
+
+	var mockErrors []models.UnmatchedCall
+	if err := json.NewDecoder(res.Body).Decode(&mockErrors); err != nil {
+		return nil, fmt.Errorf("failed to decode mock errors response: %s", err.Error())
+	}
+	return mockErrors, nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

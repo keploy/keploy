@@ -57,6 +57,20 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	render.Status(r, http.StatusOK)
 }
 
+func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	mockErrors, err := a.svc.GetMockErrors(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, mockErrors)
+}
+
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
