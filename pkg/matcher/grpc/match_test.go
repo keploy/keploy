@@ -66,14 +66,14 @@ func TestMatch_JSONComparison(t *testing.T) {
 		},
 		{
 			name: "Protoscope field reorder with different indentation",
-			expectedData: "9: {  3: {    1: {      2: {2: 0.0}   # 0x0i64\n" +
-				"  1: {\"candidateCnt\"}}\n" +
-				"  1: {      2: {3: {\"OVS\"}}\n" +
-				"  1: {\"type\"}}}}",
-			actualData: "9: {  3: {    1: {      2: {3: {\"OVS\"}}\n" +
-				"  1: {\"type\"}}\n" +
-				"  1: {      2: {2: 0.0}   # 0x0i64\n" +
-				"  1: {\"candidateCnt\"}}}}",
+			expectedData: `9: {  3: {    1: {      2: {2: 0.0}   # 0x0i64
+  1: {"candidateCnt"}}
+  1: {      2: {3: {"OVS"}}
+  1: {"type"}}}}`,
+			actualData: `9: {  3: {    1: {      2: {3: {"OVS"}}
+  1: {"type"}}
+  1: {      2: {2: 0.0}   # 0x0i64
+  1: {"candidateCnt"}}}}`,
 			noiseConfig:    map[string]map[string][]string{},
 			ignoreOrdering: false,
 			expectedMatch:  true,
