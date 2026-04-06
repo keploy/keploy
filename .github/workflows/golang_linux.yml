@@ -35,6 +35,9 @@ jobs:
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
+          - name: sse-preflight
+            path: sse-preflight
+            script_dir: sse_preflight
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -78,6 +81,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: chore/add-sse-preflight-sample
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -297,4 +301,12 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-go/${{ matrix.app.path }}
-          $REPLAY_BIN test --port 8000 --api-timeout 200 --delay 30
+          $REPLAY_BIN test --port 8000 --sse-port 8047 --api-timeout 200 --delay 30
+
+      - name: Test port mapping (http-sse only)
+        if: matrix.app.name == 'http-sse'
+        env:
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          SKIP_PING_SERVER=1 $REPLAY_BIN test --test-sets port-mapping-test --api-timeout 200 --delay 30

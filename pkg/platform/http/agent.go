@@ -145,8 +145,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 						utils.LogError(a.logger, err, "failed to decode metadata json")
 						continue
 					}
-					a.logger.Debug("Received test case metadata", zap.Any("test_case", tc))
-
 					if tc.HasBinaryFile {
 						pendingTestCase = &tc
 					} else {

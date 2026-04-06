@@ -271,7 +271,6 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 		return nil, readErr
 	}
 
-	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
 	return initialBuf, nil
 }
 
