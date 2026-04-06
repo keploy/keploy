@@ -64,7 +64,7 @@ type FailureInfo struct {
 	Category       []FailureCategory  `json:"category,omitempty" yaml:"category,omitempty"`
 	Assessment     *FailureAssessment `json:"assessment,omitempty" yaml:"assessment,omitempty"`
 	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
-	ConsumedMocks  []ConsumedMock     `json:"consumed_mocks,omitempty" yaml:"consumed_mocks,omitempty"`
+	MatchedCalls   []MatchedCall      `json:"matched_calls,omitempty" yaml:"matched_calls,omitempty"`
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
 }
 
@@ -78,20 +78,60 @@ type MockMismatchInfo struct {
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`
 }
 
-// ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
-// ConsumedMock represents an outgoing call that was successfully matched to a recorded mock.
-type ConsumedMock struct {
-	Name    string `json:"name" yaml:"name"`
-	Kind    string `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Summary string `json:"summary,omitempty" yaml:"summary,omitempty"` // e.g. "GET /posts?id=1" for HTTP, "find users" for Mongo
+// MatchedCall represents an outgoing call that was successfully matched to a recorded mock.
+type MatchedCall struct {
+	MockName string `json:"mock_name" yaml:"mock_name"`                        // internal mock reference for View Mock
+	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"`      // Http, Mongo, Postgres, etc.
+	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`        // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
-	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`
+	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
 	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
+}
+
+// MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
+func MockSummaryFromSpec(mock *Mock) string {
+	if mock.Spec.HTTPReq != nil {
+		return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
+	}
+	if mock.Spec.DNSReq != nil {
+		return "DNS " + mock.Spec.DNSReq.Name
+	}
+	if len(mock.Spec.MongoRequests) > 0 {
+		if op := mock.Spec.Metadata["operation"]; op != "" {
+			return "MongoDB " + op
+		}
+		return "MongoDB"
+	}
+	if len(mock.Spec.MySQLRequests) > 0 {
+		if op := mock.Spec.Metadata["operation"]; op != "" {
+			return "MySQL " + op
+		}
+		return "MySQL"
+	}
+	if len(mock.Spec.PostgresRequestsV2) > 0 {
+		if op := mock.Spec.Metadata["operation"]; op != "" {
+			return "PostgreSQL " + op
+		}
+		return "PostgreSQL"
+	}
+	if mock.Spec.GRPCReq != nil {
+		if op := mock.Spec.Metadata["operation"]; op != "" {
+			return "gRPC " + op
+		}
+		return "gRPC"
+	}
+	if len(mock.Spec.RedisRequests) > 0 {
+		return "Redis"
+	}
+	if op := mock.Spec.Metadata["operation"]; op != "" {
+		return string(mock.Kind) + " " + op
+	}
+	return string(mock.Kind)
 }
 
 func (tr *TestResult) GetKind() string {

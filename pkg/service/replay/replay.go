@@ -1688,29 +1688,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// Populate consumed mocks for failed/obsolete test cases
+					// Populate matched/unmatched calls for failed/obsolete test cases
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
-						// Build a lookup of mock name → summary from the mock registry
-						mockSummary := map[string]string{}
+						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
+						matchedMocks := consumedMocks
+						if !r.instrument {
+							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
+								matchedMocks = fetched
+							}
+						}
+						// Build a lookup of mock name → summary and protocol from the mock registry
+						type mockInfo struct {
+							summary  string
+							protocol string
+						}
+						mockLookup := map[string]mockInfo{}
 						if r.mockDB != nil {
 							if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
 								for _, mock := range allMocks {
-									if mock.Spec.HTTPReq != nil {
-										mockSummary[mock.Name] = string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
-									} else if op := mock.Spec.Metadata["operation"]; op != "" {
-										mockSummary[mock.Name] = op
+									mockLookup[mock.Name] = mockInfo{
+										summary:  models.MockSummaryFromSpec(mock),
+										protocol: string(mock.Kind),
 									}
 								}
 							}
 						}
-						for _, m := range consumedMocks {
+						for _, m := range matchedMocks {
 							if m.Kind != models.DNS {
-								cm := models.ConsumedMock{
-									Name:    m.Name,
-									Kind:    string(m.Kind),
-									Summary: mockSummary[m.Name],
-								}
-								testCaseResult.FailureInfo.ConsumedMocks = append(testCaseResult.FailureInfo.ConsumedMocks, cm)
+								info := mockLookup[m.Name]
+								testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
+									MockName: m.Name,
+									Protocol: info.protocol,
+									Summary:  info.summary,
+								})
 							}
 						}
 						// Populate unmatched calls from mock errors (channel-based for in-process)
@@ -1919,7 +1929,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && r.instrument {
+	// When PreserveFailedMocks is enabled (k8s-proxy autoreplay), skip pruning if any test failed
+	// so all recorded mocks remain available for UI inspection.
+	skipPruning := r.config.Test.PreserveFailedMocks && (failure > 0 || obsolete > 0)
+	if r.config.Test.RemoveUnusedMocks && r.instrument && !skipPruning {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
 			added := retainNoisyTestCaseMocks(noisyTestCases, actualTestMockMappings, passingTotalConsumedMocks)
