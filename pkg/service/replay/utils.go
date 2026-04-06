@@ -137,22 +137,9 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 	return map1
 }
 
-func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
-	if tc == nil {
-		return time.Time{}
-	}
-	switch tc.Kind {
-	case models.HTTP:
-		return tc.HTTPReq.Timestamp
-	case models.GRPC_EXPORT:
-		return tc.GrpcReq.Timestamp
-	default:
-		return time.Time{}
-	}
-}
-
 // effectiveStreamMockWindow calculates the effective time window for streaming mocks.
-// It returns the start time (request timestamp) and end time (request timestamp + timeout).
+// It returns the start time (request timestamp) and end time (anchor + timeout),
+// where anchor is the later of request/response timestamps (falling back to time.Now).
 // The timeout is calculated using pkg.ComputeStreamingTimeoutSeconds which considers the test case's timeout configuration.
 func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
 	if tc == nil {
