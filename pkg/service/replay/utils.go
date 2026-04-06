@@ -269,11 +269,6 @@ func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
 
-	fmt.Printf("[DEBUG-UNMATCHED] GetFailuresForTestCase called: testSetID=%s testCaseID=%s totalStored=%d\n", testSetID, testCaseID, len(tfs.failures))
-	for i, f := range tfs.failures {
-		fmt.Printf("[DEBUG-UNMATCHED]   stored[%d]: testSetID=%s testID=%s reason=%s hasMismatchReport=%v\n", i, f.TestSetID, f.TestID, f.FailureReason, f.MismatchReport != nil)
-	}
-
 	var result []TestFailure
 	for _, f := range tfs.failures {
 		if f.TestSetID == testSetID && f.TestID == testCaseID {
@@ -281,7 +276,6 @@ func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string
 			result = append(result, cp)
 		}
 	}
-	fmt.Printf("[DEBUG-UNMATCHED] GetFailuresForTestCase returning %d matches\n", len(result))
 	return result
 }
 
