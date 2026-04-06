@@ -92,11 +92,8 @@ send_request() {
 
     # Wait for keploy to finish recording
     sleep 7
-    pid=$(pgrep -f "keploy record" || true)
-    if [ -n "$pid" ]; then
-        echo "Killing Keploy record process (PID: $pid)"
-        sudo kill "$pid"
-    fi
+    sudo pkill -INT -f "keploy record" 2>/dev/null || true
+    echo "Sent SIGINT to keploy record process"
 }
 
 # ── Record phase (2 iterations for dedup testing) ──

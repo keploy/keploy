@@ -160,7 +160,9 @@ func handleConnectTunnel(
 			}
 			return nil, fmt.Errorf("corporate proxy rejected CONNECT with %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		}
-		resp.Body.Close()
+		// Do NOT close resp.Body here. For a CONNECT 200, the "body" is the
+		// start of the tunneled byte stream. Closing it would drain/consume
+		// bytes needed for the subsequent TLS handshake over the tunnel.
 
 		// Send a clean 200 to the app. CONNECT tunnel 200 responses have no
 		// meaningful headers per RFC 7231 §4.3.6, so a synthetic response

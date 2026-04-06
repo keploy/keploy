@@ -956,7 +956,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 				tlsConn := tls.Client(tlsTransport, cfg)
 				if err := tlsConn.Handshake(); err != nil {
-					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel",
+					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
 						zap.String("target", addr))
 					return err
 				}
