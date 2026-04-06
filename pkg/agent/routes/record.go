@@ -45,6 +45,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/stop", a.Stop)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
+		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
