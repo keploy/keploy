@@ -30,15 +30,18 @@ jobs:
     steps:
       # Remove stale SSH redirects from global config before checkout
       # so actions/checkout uses HTTPS, not SSH.
-      - name: Sanitize global git config for checkout
-        continue-on-error: true
+      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # concurrent jobs' SSH redirects from leaking into our checkout.
+      - name: Pre-checkout git isolation
         shell: pwsh
         run: |
-          # Exit code 5 = key not found (benign). Suppress all errors.
-          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null; $null
-          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null; $null
-          git config --global --unset-all core.sshCommand 2>$null; $null
-          exit 0
+          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout repository
         uses: actions/checkout@v4
