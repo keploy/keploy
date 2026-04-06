@@ -80,9 +80,9 @@ type MockMismatchInfo struct {
 
 // MatchedCall represents an outgoing call that was successfully matched to a recorded mock.
 type MatchedCall struct {
-	MockName string `json:"mock_name" yaml:"mock_name"`                        // internal mock reference for View Mock
-	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"`      // Http, Mongo, Postgres, etc.
-	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`        // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
+	MockName string `json:"mock_name" yaml:"mock_name"`                   // internal mock reference for View Mock
+	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"` // Http, Mongo, Postgres, etc.
+	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
@@ -200,9 +200,9 @@ const (
 type RejectionReason string
 
 const (
-	RejectionObsolete       RejectionReason = "OBSOLETE"           // mock mapping mismatch
-	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE"  // breaking change
-	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE"  // non-extractable noise
+	RejectionObsolete       RejectionReason = "OBSOLETE"          // mock mapping mismatch
+	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE" // breaking change
+	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // non-extractable noise
 )
 
 type NoiseFailureReason string
