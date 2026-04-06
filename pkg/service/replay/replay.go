@@ -1707,20 +1707,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// In non-instrument mode (k8s-proxy), always drain consumed mocks to prevent
-					// accumulation across test cases (the proxy resets state on each call).
-					var remoteConsumedMocks []models.MockState
-					if !r.instrument {
-						if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
-							remoteConsumedMocks = fetched
-						}
-					}
-
 					// Populate matched/unmatched calls for failed/obsolete test cases
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
 						matchedMocks := consumedMocks
 						if !r.instrument {
-							matchedMocks = remoteConsumedMocks
+							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
+								matchedMocks = fetched
+							}
 						}
 						for _, m := range matchedMocks {
 							if m.Kind != models.DNS {

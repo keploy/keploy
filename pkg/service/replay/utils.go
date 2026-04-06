@@ -264,7 +264,7 @@ func (tfs *TestFailureStore) GetFailures() []TestFailure {
 	return failures
 }
 
-// GetFailuresForTestCase returns a copy of failures for a specific test set + test case.
+// GetFailuresForTestCase returns failures for a specific test set + test case.
 func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string) []TestFailure {
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
@@ -272,8 +272,7 @@ func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string
 	var result []TestFailure
 	for _, f := range tfs.failures {
 		if f.TestSetID == testSetID && f.TestID == testCaseID {
-			cp := f
-			result = append(result, cp)
+			result = append(result, f)
 		}
 	}
 	return result
