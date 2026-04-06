@@ -119,6 +119,21 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	return logger, nil
 }
 
+// RedirectToStderr re-creates the logger writing to stderr instead of stdout.
+// Use this when --json mode is active to prevent log lines from contaminating
+// structured JSON on stdout.
+func RedirectToStderr() (*zap.Logger, error) {
+	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
+	core := zapcore.NewCore(
+		encoder,
+		zapcore.AddSync(os.Stderr),
+		LogCfg.Level,
+	)
+
+	logger := zap.New(core)
+	return logger, nil
+}
+
 func AddMode(mode string) (*zap.Logger, error) {
 	cfg := LogCfg
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {

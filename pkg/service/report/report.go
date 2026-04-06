@@ -406,7 +406,24 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if len(r.config.Report.TestCaseIDs) > 0 {
 			for name, rep := range reports {
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				// Recompute all counters to match filtered tests
 				rep.Total = len(rep.Tests)
+				rep.Success = 0
+				rep.Failure = 0
+				rep.Ignored = 0
+				rep.Obsolete = 0
+				for _, t := range rep.Tests {
+					switch t.Status {
+					case models.TestStatusPassed:
+						rep.Success++
+					case models.TestStatusFailed:
+						rep.Failure++
+					case models.TestStatusIgnored:
+						rep.Ignored++
+					case models.TestStatusObsolete:
+						rep.Obsolete++
+					}
+				}
 				reports[name] = rep
 			}
 		}

@@ -607,6 +607,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 	c.cfg.JSONOutput = jsonOutput
 
+	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
+	if c.cfg.JSONOutput {
+		logger, err := log.RedirectToStderr()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
 	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
