@@ -386,18 +386,28 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		cfsslLog.Level = cfsslLog.LevelError
 	})
 
-	// Generate a new server certificate and private key for the given hostname
+	// Generate a new server certificate and private key for the given hostname.
+	// When the client omits SNI (common after CONNECT tunnel setup where the
+	// client already knows the target from the CONNECT request), fall back to
+	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
 	dstURL := clientHello.ServerName
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	if dstURL == "" {
+		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
+			if s, ok := stored.(string); ok && s != "" {
+				dstURL = s
+			}
+		}
+	}
+
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
 	serverReq := &csr.CertificateRequest{
-		//Make the name accordng to the ip of the request
-		CN: clientHello.ServerName,
+		CN: dstURL,
 		Hosts: []string{
-			clientHello.ServerName,
+			dstURL,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}

@@ -38,6 +38,9 @@ jobs:
           - name: sse-preflight
             path: sse-preflight
             script_dir: sse_preflight
+          - name: connect-tunnel
+            path: connect-tunnel
+            script_dir: connect_tunnel
         config:
           - job: record_latest_replay_build
             record_src: latest
