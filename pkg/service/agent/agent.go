@@ -241,6 +241,10 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 	return a.Proxy.GetConsumedMocks(ctx)
 }
 
+func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	return a.Proxy.GetMockErrors(ctx)
+}
+
 // StoreMocks stores the filtered and unfiltered mocks for a client ID
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{

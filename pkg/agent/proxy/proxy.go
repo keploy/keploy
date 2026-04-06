@@ -1080,6 +1080,33 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }
 
+// GetMockErrors drains all mock-not-found errors from the error channel and returns them.
+// This is used by the HTTP agent transport where channel-based monitoring isn't available.
+func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+	var errs []models.UnmatchedCall
+	for {
+		select {
+		case err, ok := <-p.errChannel:
+			if !ok {
+				return errs, nil
+			}
+			if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+				if parserErr.MismatchReport != nil {
+					errs = append(errs, models.UnmatchedCall{
+						Protocol:      parserErr.MismatchReport.Protocol,
+						ActualSummary: parserErr.MismatchReport.ActualSummary,
+						ClosestMock:   parserErr.MismatchReport.ClosestMock,
+						Diff:          parserErr.MismatchReport.Diff,
+						NextSteps:     parserErr.MismatchReport.NextSteps,
+					})
+				}
+			}
+		default:
+			return errs, nil
+		}
+	}
+}
+
 // SendError sends an error to the error channel for external monitoring
 func (p *Proxy) SendError(err error) {
 	select {
