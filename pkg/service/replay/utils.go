@@ -264,6 +264,20 @@ func (tfs *TestFailureStore) GetFailures() []TestFailure {
 	return failures
 }
 
+// GetFailuresForTestCase returns failures for a specific test set + test case.
+func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string) []TestFailure {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	var result []TestFailure
+	for _, f := range tfs.failures {
+		if f.TestSetID == testSetID && f.TestID == testCaseID {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
 type MockDifference struct {
 	Key            string
 	ExpectedValues []string
