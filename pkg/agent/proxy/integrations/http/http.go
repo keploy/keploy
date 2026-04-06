@@ -212,16 +212,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	mgr := syncMock.Get()
-	if mgr != nil && !mgr.GetFirstReqSeen() {
-		// Before first incoming request: hand startup mocks to the manager,
-		// which may buffer them or forward them immediately depending on its state.
-		mgr.AddMock(newMock)
-		return nil
+	if opts.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			// In synchronous mode, always route HTTP mocks through the sync manager.
+			// The manager uses its internal first-request state to decide whether to
+			// buffer or forward mocks for correct time-window based association.
+			mgr.AddMock(newMock)
+			return nil
+		}
 	}
-	// After first incoming request or no manager: send directly to channel
-	// This ensures HTTP mocks are persisted even in non-synchronous mode,
-	// matching how DNS mocks are handled in dns.go:559
+	// In non-synchronous mode (k8s-proxy), or if no manager is available,
+	// send directly to the mocks channel so the mock is persisted.
 	if mocks != nil {
 		mocks <- newMock
 	}
