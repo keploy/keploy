@@ -16,8 +16,10 @@ find_available_port() {
     echo $port
 }
 
-# Find 4 available ports
-APP_PORT=$(find_available_port 6000)
+# echo-sql uses base range 10000-11999, offset by JOB_ID hash
+PORT_OFFSET=$(( $(echo "$JOB_ID" | cksum | awk '{print $1}') % 400 ))
+BASE_PORT=$(( 10000 + PORT_OFFSET * 5 ))
+APP_PORT=$(find_available_port $BASE_PORT)
 DB_PORT=$(find_available_port $((APP_PORT + 1)))
 PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
 DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
@@ -31,28 +33,25 @@ APP_IMAGE="go-app-${JOB_ID}"
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
-# Clean up stale Docker state from previous killed runs.
+# Job-scoped compose project name to avoid collisions with concurrent runs.
+export COMPOSE_PROJECT_NAME="echo-sql-${JOB_ID}"
+
+# Clean up stale Docker state from previous killed runs of this JOB_ID.
 echo "Cleaning up stale docker compose project state..."
 docker compose down --remove-orphans -v 2>/dev/null || true
-docker compose -p echo-sql down --remove-orphans -v 2>/dev/null || true
-# Force-remove ghost containers stuck in Docker's containerd metadata.
-# These don't show in 'docker ps -a' but compose still tries to recreate them.
 for id in $(docker compose ps -aq 2>/dev/null); do
   docker rm -f "$id" 2>/dev/null || true
 done
-# Also try removing by inspecting compose config for stale references
 docker compose rm -f -s 2>/dev/null || true
 
 # Cleanup function to remove containers
 cleanup() {
-    echo "Cleaning up containers and services..."
+    echo "Cleaning up containers and services for job ${JOB_ID}..."
     docker compose down >/dev/null 2>&1 || true
     docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
-    docker rm -f "echoApp" >/dev/null 2>&1 || true
-    docker rm -f "postgresDb" >/dev/null 2>&1 || true
-    echo "Cleanup completed"
+    echo "Cleanup completed for job ${JOB_ID}"
 }
 
 # Set trap to run cleanup on script exit (success, failure, or interrupt)

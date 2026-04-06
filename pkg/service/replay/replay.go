@@ -969,12 +969,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:         r.config.BypassRules,
-			MongoPassword: r.config.Test.MongoPassword,
-			SQLDelay:      time.Duration(r.config.Test.Delay),
-			Mocking:       r.config.Test.Mocking,
-			Backdate:      testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:   headerNoiseConfig,
+			Rules:                  r.config.BypassRules,
+			MongoPassword:          r.config.Test.MongoPassword,
+			SQLDelay:               time.Duration(r.config.Test.Delay),
+			Mocking:                r.config.Test.Mocking,
+			Backdate:               testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:            headerNoiseConfig,
+			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1136,12 +1137,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:         r.config.BypassRules,
-			MongoPassword: r.config.Test.MongoPassword,
-			SQLDelay:      time.Duration(r.config.Test.Delay),
-			Mocking:       r.config.Test.Mocking,
-			Backdate:      testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:   headerNoiseConfig,
+			Rules:                  r.config.BypassRules,
+			MongoPassword:          r.config.Test.MongoPassword,
+			SQLDelay:               time.Duration(r.config.Test.Delay),
+			Mocking:                r.config.Test.Mocking,
+			Backdate:               testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:            headerNoiseConfig,
+			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1950,7 +1952,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore)
+		// Find the earliest test-case timestamp so UpdateMocks can exempt
+		// startup/init mocks (recorded before any test case) from deletion.
+		var firstTestCaseTime time.Time
+		for _, tc := range testCases {
+			var candidate time.Time
+
+			// Prefer high-precision request timestamps when available.
+			if !tc.HTTPReq.Timestamp.IsZero() {
+				candidate = tc.HTTPReq.Timestamp
+			} else if !tc.GrpcReq.Timestamp.IsZero() {
+				candidate = tc.GrpcReq.Timestamp
+			} else if tc.Created > 0 {
+				// Fallback to the coarser Created timestamp.
+				candidate = time.Unix(tc.Created, 0)
+			}
+
+			if !candidate.IsZero() && (firstTestCaseTime.IsZero() || candidate.Before(firstTestCaseTime)) {
+				firstTestCaseTime = candidate
+			}
+		}
+
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, firstTestCaseTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}

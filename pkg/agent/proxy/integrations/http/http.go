@@ -60,17 +60,17 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return isHTTP
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MemLimiter)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
