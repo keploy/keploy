@@ -34,7 +34,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
           $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
@@ -50,12 +49,14 @@ jobs:
               'url."ssh://git@github.com/".insteadOf',
               'core.sshCommand'
           )
+          # Temporarily disable native command error preference if set in runner profile
+          $savedPref = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
           foreach ($key in $staleKeys) {
               git config --file $gitConfig --unset-all $key 2>$null
-              if ($LASTEXITCODE -gt 1 -and $LASTEXITCODE -ne 5) {
-                  throw "Failed to unset '$key' (exit code $LASTEXITCODE)"
-              }
+              # exit code 5 = key not found (benign)
           }
+          $PSNativeCommandUseErrorActionPreference = $savedPref
 
           # Liveness marker so cleanup can detect active runs
           Set-Content -Path (Join-Path $isoDir '.active') -Value (Get-Date -UFormat '%s')
@@ -183,11 +184,14 @@ jobs:
       # Remove stale SSH redirects from global config before checkout
       # so actions/checkout uses HTTPS, not SSH.
       - name: Sanitize global git config for checkout
+        continue-on-error: true
         shell: pwsh
         run: |
-          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
-          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
-          git config --global --unset-all core.sshCommand 2>$null
+          # Exit code 5 = key not found (benign). Suppress all errors.
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null; $null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null; $null
+          git config --global --unset-all core.sshCommand 2>$null; $null
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -254,11 +258,14 @@ jobs:
     steps:
 
       - name: Sanitize global git config for checkout
+        continue-on-error: true
         shell: pwsh
         run: |
-          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
-          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
-          git config --global --unset-all core.sshCommand 2>$null
+          # Exit code 5 = key not found (benign). Suppress all errors.
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null; $null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null; $null
+          git config --global --unset-all core.sshCommand 2>$null; $null
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4

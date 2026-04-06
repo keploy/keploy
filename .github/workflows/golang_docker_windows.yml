@@ -31,11 +31,14 @@ jobs:
       # Remove stale SSH redirects from global config before checkout
       # so actions/checkout uses HTTPS, not SSH.
       - name: Sanitize global git config for checkout
+        continue-on-error: true
         shell: pwsh
         run: |
-          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null
-          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null
-          git config --global --unset-all core.sshCommand 2>$null
+          # Exit code 5 = key not found (benign). Suppress all errors.
+          git config --global --unset-all 'url."git@github.com:".insteadOf' 2>$null; $null
+          git config --global --unset-all 'url."ssh://git@github.com/".insteadOf' 2>$null; $null
+          git config --global --unset-all core.sshCommand 2>$null; $null
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4

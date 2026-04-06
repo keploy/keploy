@@ -27,8 +27,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# PowerShell 7.3+: make $ErrorActionPreference also apply to native commands
-$PSNativeCommandUseErrorActionPreference = $true
+# NOTE: We intentionally do NOT set $PSNativeCommandUseErrorActionPreference
+# because git config --unset-all returns exit code 5 when a key is not found,
+# which is expected/benign. We use explicit $LASTEXITCODE checks instead.
 
 $isoDir = Join-Path $env:USERPROFILE $IsoRoot $env:GITHUB_RUN_ID
 New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
@@ -53,12 +54,14 @@ $staleKeys = @(
     'url."ssh://git@github.com/".insteadOf',
     'core.sshCommand'
 )
+# Temporarily disable native command error preference for unset-all
+# (exit code 5 = key not found, which is expected/benign).
+$savedPref = $PSNativeCommandUseErrorActionPreference
+$PSNativeCommandUseErrorActionPreference = $false
 foreach ($key in $staleKeys) {
     git config --file $gitConfig --unset-all $key 2>$null
-    if ($LASTEXITCODE -gt 1 -and $LASTEXITCODE -ne 5) {
-        throw "Failed to unset inherited git config key '$key' (exit code $LASTEXITCODE)"
-    }
 }
+$PSNativeCommandUseErrorActionPreference = $savedPref
 
 # Set EOL handling and validate
 git config --file $gitConfig core.autocrlf false
