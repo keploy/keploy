@@ -1737,8 +1737,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 						// Populate unmatched calls from mock errors (channel-based for in-process)
-						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
+						channelFailures := r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name)
+						r.logger.Info("[DEBUG-UNMATCHED] GetFailuresForTestCase result",
+							zap.String("testCaseID", testCase.Name),
+							zap.String("testSetID", testSetID),
+							zap.Int("channelFailuresCount", len(channelFailures)),
+							zap.Bool("instrument", r.instrument))
+						for _, f := range channelFailures {
 							if f.MismatchReport != nil {
+								r.logger.Info("[DEBUG-UNMATCHED] Adding unmatched call from channel path",
+									zap.String("testCaseID", testCase.Name),
+									zap.String("protocol", f.MismatchReport.Protocol),
+									zap.String("actualSummary", f.MismatchReport.ActualSummary))
 								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
 									Protocol:      f.MismatchReport.Protocol,
 									ActualSummary: f.MismatchReport.ActualSummary,
@@ -1751,11 +1761,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// Fetch mock errors via HTTP API (for remote agent / k8s-proxy mode only)
 						if !r.instrument {
 							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
+								r.logger.Info("[DEBUG-UNMATCHED] GetMockErrors HTTP result",
+									zap.String("testCaseID", testCase.Name),
+									zap.Int("count", len(mockErrors)))
+								for _, me := range mockErrors {
+									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
+								}
+							}
+						} else {
+							// Also try GetMockErrors in instrument mode to check if channel has remaining errors
+							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil && len(mockErrors) > 0 {
+								r.logger.Info("[DEBUG-UNMATCHED] GetMockErrors found errors that channel path missed!",
+									zap.String("testCaseID", testCase.Name),
+									zap.Int("count", len(mockErrors)))
 								for _, me := range mockErrors {
 									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
 								}
 							}
 						}
+						r.logger.Info("[DEBUG-UNMATCHED] Final UnmatchedCalls count",
+							zap.String("testCaseID", testCase.Name),
+							zap.Int("total", len(testCaseResult.FailureInfo.UnmatchedCalls)),
+							zap.Int("matchedCalls", len(testCaseResult.FailureInfo.MatchedCalls)))
 					}
 					if mockSetMismatch && testStatus == models.TestStatusObsolete {
 						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
@@ -3089,60 +3116,51 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 	errorChannel := r.instrumentation.GetErrorChannel()
 	if errorChannel == nil {
-		r.logger.Debug("Proxy error channel is nil, skipping error monitoring")
+		r.logger.Info("[DEBUG-UNMATCHED] Proxy error channel is nil, skipping error monitoring",
+			zap.String("testCaseID", testCaseID))
 		return
 	}
 
-	r.logger.Debug("Starting proxy error monitoring",
+	r.logger.Info("[DEBUG-UNMATCHED] Starting proxy error monitoring",
 		zap.String("testSetID", testSetID),
 		zap.String("testCaseID", testCaseID))
 
 	for {
 		select {
 		case <-ctx.Done():
-			r.logger.Debug("Stopping proxy error monitoring, draining remaining errors",
+			r.logger.Info("[DEBUG-UNMATCHED] monitorProxyErrors ctx.Done, exiting",
 				zap.String("testSetID", testSetID),
 				zap.String("testCaseID", testCaseID))
-			// Drain any remaining errors that arrived before context cancellation,
-			// so mock-not-found errors aren't lost due to select randomness.
-			r.drainProxyErrors(errorChannel, testSetID, testCaseID)
 			return
 		case proxyErr, ok := <-errorChannel:
 			if !ok {
-				r.logger.Debug("Proxy error channel closed",
-					zap.String("testSetID", testSetID),
+				r.logger.Info("[DEBUG-UNMATCHED] Proxy error channel closed",
 					zap.String("testCaseID", testCaseID))
 				return
 			}
-			r.processProxyError(proxyErr, testSetID, testCaseID)
-		}
-	}
-}
 
-// drainProxyErrors non-blocking drains remaining errors from the channel after context cancellation.
-func (r *Replayer) drainProxyErrors(errorChannel <-chan error, testSetID, testCaseID string) {
-	for {
-		select {
-		case proxyErr, ok := <-errorChannel:
-			if !ok {
-				return
+			// Determine effective test case ID
+			effectiveTestCaseID := testCaseID
+			if effectiveTestCaseID == "" {
+				effectiveTestCaseID = UNKNOWN_TEST
 			}
-			r.processProxyError(proxyErr, testSetID, testCaseID)
-		default:
-			return
-		}
-	}
-}
 
-func (r *Replayer) processProxyError(proxyErr error, testSetID, testCaseID string) {
-	effectiveTestCaseID := testCaseID
-	if effectiveTestCaseID == "" {
-		effectiveTestCaseID = UNKNOWN_TEST
-	}
-	if parserErr, ok := proxyErr.(models.ParserError); ok {
-		switch parserErr.ParserErrorType {
-		case models.ErrMockNotFound:
-			r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
+			if parserErr, ok := proxyErr.(models.ParserError); ok {
+				r.logger.Info("[DEBUG-UNMATCHED] Received proxy error in monitorProxyErrors",
+					zap.String("testCaseID", effectiveTestCaseID),
+					zap.String("errorType", string(parserErr.ParserErrorType)),
+					zap.Bool("hasMismatchReport", parserErr.MismatchReport != nil))
+				// Handle typed ParserError
+				switch parserErr.ParserErrorType {
+				case models.ErrMockNotFound:
+					r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
+				}
+			} else {
+				r.logger.Info("[DEBUG-UNMATCHED] Received non-ParserError in monitorProxyErrors",
+					zap.String("testCaseID", testCaseID),
+					zap.Error(proxyErr))
+			}
+
 		}
 	}
 }
