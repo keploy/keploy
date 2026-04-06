@@ -1971,10 +1971,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						}
 					}
 				} else {
-					r.logger.Error("invalid response type for streaming HTTP test case")
+					errMsg := fmt.Sprintf("invalid response type for streaming HTTP test case, got %T", resp)
+					r.logger.Error(errMsg)
 					failure++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, "invalid response type for streaming HTTP test case")
+					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errMsg)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
