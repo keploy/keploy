@@ -687,7 +687,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		tlsCtx := context.WithValue(ctx, models.ProxyModeKey, rule.Mode)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(tlsCtx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
