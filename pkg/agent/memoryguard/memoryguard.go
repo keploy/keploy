@@ -459,7 +459,7 @@ func buildMountedCgroupPath(mountPoint, mountRoot, cgroupPath, usageFile string)
 	var relativePath string
 	switch {
 	case cleanMountRoot == "/" && cleanCgroupPath == "/":
-		return "", false
+		relativePath = ""
 	case cleanMountRoot == "/":
 		relativePath = strings.TrimPrefix(cleanCgroupPath, "/")
 	case cleanCgroupPath == cleanMountRoot:

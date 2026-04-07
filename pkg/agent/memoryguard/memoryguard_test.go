@@ -196,3 +196,77 @@ func TestResetAllPressureClearsRecordingPause(t *testing.T) {
 		t.Fatal("expected resetAllPressure to clear the paused state")
 	}
 }
+
+func TestBuildMountedCgroupPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		mountPoint string
+		mountRoot  string
+		cgroupPath string
+		usageFile  string
+		wantPath   string
+		wantOK     bool
+	}{
+		{
+			name:       "root mount root cgroup",
+			mountPoint: "/sys/fs/cgroup",
+			mountRoot:  "/",
+			cgroupPath: "/",
+			usageFile:  "memory.current",
+			wantPath:   "/sys/fs/cgroup/memory.current",
+			wantOK:     true,
+		},
+		{
+			name:       "root mount nested cgroup",
+			mountPoint: "/sys/fs/cgroup",
+			mountRoot:  "/",
+			cgroupPath: "/docker/abcdef123456",
+			usageFile:  "memory.current",
+			wantPath:   "/sys/fs/cgroup/docker/abcdef123456/memory.current",
+			wantOK:     true,
+		},
+		{
+			name:       "exact non root match",
+			mountPoint: "/sys/fs/cgroup",
+			mountRoot:  "/docker/abcdef123456",
+			cgroupPath: "/docker/abcdef123456",
+			usageFile:  "memory.current",
+			wantPath:   "/sys/fs/cgroup/memory.current",
+			wantOK:     true,
+		},
+		{
+			name:       "non root nested match",
+			mountPoint: "/sys/fs/cgroup",
+			mountRoot:  "/kubepods.slice",
+			cgroupPath: "/kubepods.slice/pod-1/container-1",
+			usageFile:  "memory.current",
+			wantPath:   "/sys/fs/cgroup/pod-1/container-1/memory.current",
+			wantOK:     true,
+		},
+		{
+			name:       "mismatched cgroup path",
+			mountPoint: "/sys/fs/cgroup",
+			mountRoot:  "/kubepods.slice",
+			cgroupPath: "/docker/abcdef123456",
+			usageFile:  "memory.current",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotPath, gotOK := buildMountedCgroupPath(tt.mountPoint, tt.mountRoot, tt.cgroupPath, tt.usageFile)
+			if gotOK != tt.wantOK {
+				t.Fatalf("expected ok=%v, got %v", tt.wantOK, gotOK)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("expected path %q, got %q", tt.wantPath, gotPath)
+			}
+		})
+	}
+}
