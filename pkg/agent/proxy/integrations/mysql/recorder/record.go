@@ -102,8 +102,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 				// phase data is captured by SSL/GoTLS uprobes independently.
 				// Also handles the case where the client disconnected before TLS.
 				logger.Debug("TLS connections not established after SSL request; pre-TLS config mock recorded, skipping command phase",
-					zap.Any("tlsClientConn", result.tlsClientConn),
-					zap.Any("tlsDestConn", result.tlsDestConn))
+					zap.Bool("tlsClientConnNil", result.tlsClientConn == nil),
+					zap.Bool("tlsDestConnNil", result.tlsDestConn == nil))
 				return nil
 			}
 			clientConn = result.tlsClientConn

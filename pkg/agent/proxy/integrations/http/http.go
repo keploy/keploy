@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -55,8 +54,9 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
+		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", isHTTP))
 	return isHTTP
 }
 
@@ -212,9 +212,19 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.AddMock(newMock)
-		return nil
+	if opts.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			// In synchronous mode, always route HTTP mocks through the sync manager.
+			// The manager uses its internal first-request state to decide whether to
+			// buffer or forward mocks for correct time-window based association.
+			mgr.AddMock(newMock)
+			return nil
+		}
+	}
+	// In non-synchronous mode (k8s-proxy), or if no manager is available,
+	// send directly to the mocks channel so the mock is persisted.
+	if mocks != nil {
+		mocks <- newMock
 	}
 	return nil
 }

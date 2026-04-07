@@ -15,6 +15,7 @@ import (
 	"math"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -618,7 +619,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			mysqlLogger := p.logger.With(
 				zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
 				zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
-				zap.String("Destination IP Address", dstAddr),
+				zap.String("Destination Address", dstAddr),
 			)
 			mysqlSession := &integrations.RecordSession{
 				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
@@ -683,6 +684,97 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	// ── CONNECT tunnel handling ──
+	// If the first bytes are an HTTP CONNECT request (app is using a corporate
+	// HTTP proxy), we handle the CONNECT handshake here, then re-enter the
+	// normal TLS MITM + parser flow on the unwrapped tunnel.
+	//
+	// Record mode: forward CONNECT to the real proxy, relay the 200, then MITM.
+	// Test mode:   respond with 200 directly (no external proxy needed).
+	var connectResult *connectTunnelResult
+	if isConnectRequest(testBuffer) {
+		p.logger.Debug("Detected HTTP CONNECT request, handling tunnel",
+			zap.Int("sourcePort", sourcePort),
+			zap.String("dstAddr", dstAddr),
+		)
+
+		isTestMode := rule.Mode == models.MODE_TEST
+
+		// In record mode, we need a connection to the corporate proxy.
+		var proxyConn net.Conn
+		if !isTestMode {
+			proxyConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT; verify the proxy address is correct, DNS/network is reachable, and HTTP_PROXY/HTTPS_PROXY settings are configured correctly",
+					zap.String("proxy_addr", dstAddr))
+				return err
+			}
+		}
+
+		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
+		if err != nil {
+			// Close proxyConn on error to avoid leaking the TCP connection,
+			// since it won't be assigned to dstConn for deferred cleanup.
+			if proxyConn != nil {
+				proxyConn.Close()
+			}
+			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
+			return err
+		}
+
+		// The CONNECT handshake is now complete. The app will send the next
+		// bytes (typically a TLS ClientHello) over the same srcConn.
+		// We need to re-peek to detect TLS on the inner connection.
+		//
+		// Also update dstAddr and destInfo to reflect the real target
+		// (e.g., api.example.com:443) instead of the corporate proxy.
+		dstAddr = connectResult.TargetAddr
+		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
+		if connectResult.TargetPort != "" {
+			if portNum, err := strconv.ParseUint(connectResult.TargetPort, 10, 16); err == nil && portNum >= 1 && portNum <= 65535 {
+				destInfo.Port = uint32(portNum)
+			}
+		}
+
+		// Re-peek the next bytes to detect TLS on the inner tunnel.
+		// Use the BufferedReader from handleConnectTunnel to preserve any
+		// bytes it read ahead (e.g., TLS ClientHello pipelined by the client).
+		innerReader := connectResult.BufferedReader
+		testBuffer, err = innerReader.Peek(5)
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				p.logger.Debug("CONNECT tunnel closed immediately after handshake")
+				return nil
+			}
+			if err != io.EOF {
+				utils.LogError(p.logger, err, "failed to peek inner tunnel data after CONNECT")
+				return err
+			}
+			// Partial read with EOF — proceed with what we have.
+		}
+
+		// Wrap the raw TCP connection with innerReader for subsequent reads.
+		// innerReader is the bufio.Reader from handleConnectTunnel that may
+		// hold pipelined bytes (TLS ClientHello) in its internal buffer.
+		srcConn = &util.Conn{
+			Conn:   stripUtilConn(srcConn),
+			Reader: innerReader,
+			Logger: p.logger,
+		}
+
+		// In record mode, dstConn is now the tunneled connection through the
+		// corporate proxy (the CONNECT tunnel is established, raw bytes flow).
+		// We'll set dstConn = proxyConn so the TLS dial below wraps it.
+		if !isTestMode {
+			dstConn = proxyConn
+		}
+
+		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
+			zap.String("target", connectResult.TargetAddr),
+			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
+		)
+	}
+
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
@@ -715,7 +807,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
@@ -810,7 +902,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			zap.Bool("isHTTPReq", isHTTP),
 			zap.Bool("isCONNECT", isCONNECT),
 			zap.Int("initialBufLen", len(initialBuf)),
-			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
 		)
 
 		// Allow H2 if:
@@ -824,9 +915,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
+		serverName := dstURL
+		// If SNI was not captured (e.g., client omitted it after CONNECT),
+		// fall back to the CONNECT target hostname for the TLS handshake.
+		// Skip IP literals — Go's TLS uses IP SANs, not ServerName for those.
+		if serverName == "" && connectResult != nil && net.ParseIP(connectResult.TargetHost) == nil {
+			serverName = connectResult.TargetHost
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         dstURL,
+			ServerName:         serverName,
 			NextProtos:         nextProtos,
 		}
 
@@ -839,20 +938,44 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		addr := dstAddr
 		if dstURL != "" {
-			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 		}
 
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
+			if connectResult != nil && dstConn != nil {
+				// CONNECT tunnel: dstConn is already connected through the
+				// corporate proxy tunnel. If the proxyReader has buffered
+				// bytes beyond the 200 response, wrap dstConn to preserve them.
+				var tlsTransport net.Conn = dstConn
+				if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
+					tlsTransport = &util.Conn{
+						Conn:   dstConn,
+						Reader: connectResult.DstReader,
+						Logger: p.logger,
+					}
+				}
+				tlsConn := tls.Client(tlsTransport, cfg)
+				if err := tlsConn.Handshake(); err != nil {
+					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
+						zap.String("target", addr))
+					return err
+				}
+				dstConn = tlsConn
+				logger.Debug("TLS over CONNECT tunnel established",
+					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
+					zap.String("target", addr))
+			} else {
+				dstConn, err = tls.Dial("tcp", addr, cfg)
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
+					return err
+				}
+
+				conn := dstConn.(*tls.Conn)
+				state := conn.ConnectionState()
+
+				p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 			}
-
-			conn := dstConn.(*tls.Conn)
-			state := conn.ConnectionState()
-
-			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -1090,6 +1213,33 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 // GetErrorChannel returns the error channel for external monitoring
 func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
+}
+
+// GetMockErrors drains all mock-not-found errors from the error channel and returns them.
+// This is used by the HTTP agent transport where channel-based monitoring isn't available.
+func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+	var errs []models.UnmatchedCall
+	for {
+		select {
+		case err, ok := <-p.errChannel:
+			if !ok {
+				return errs, nil
+			}
+			if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+				if parserErr.MismatchReport != nil {
+					errs = append(errs, models.UnmatchedCall{
+						Protocol:      parserErr.MismatchReport.Protocol,
+						ActualSummary: parserErr.MismatchReport.ActualSummary,
+						ClosestMock:   parserErr.MismatchReport.ClosestMock,
+						Diff:          parserErr.MismatchReport.Diff,
+						NextSteps:     parserErr.MismatchReport.NextSteps,
+					})
+				}
+			}
+		default:
+			return errs, nil
+		}
+	}
 }
 
 // SendError sends an error to the error channel for external monitoring
