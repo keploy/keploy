@@ -1298,13 +1298,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// afterwards so long-lived connections do not block the normal flow.
 	type streamingTest struct {
 		testCase      *models.TestCase
-		index         int
 		expectedMocks []string
 	}
 
 	var activeTestCases []*models.TestCase
 	var streamingTests []streamingTest
-	for idx, testCase := range testCases {
+	for _, testCase := range testCases {
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
 		}
@@ -1335,7 +1334,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			streamingTests = append(streamingTests, streamingTest{
 				testCase:      &tcCopy,
-				index:         idx,
 				expectedMocks: expectedMockNames,
 			})
 			r.logger.Debug("deferring streaming test case",
