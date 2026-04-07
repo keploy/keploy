@@ -27,10 +27,10 @@ type StatusChange struct {
 }
 
 type DiffResult struct {
-	Regressions      []StatusChange
-	Fixes            []StatusChange
+	Regressions       []StatusChange
+	Fixes             []StatusChange
 	StatusTransitions []StatusChange
-	Unchanged        []StatusChange
+	Unchanged         []StatusChange
 }
 
 func New(logger *zap.Logger, reportDB ReportDB, testDB TestDB) *Diff {
@@ -43,10 +43,10 @@ func New(logger *zap.Logger, reportDB ReportDB, testDB TestDB) *Diff {
 
 func ComputeDiff(report1, report2 *models.TestReport) *DiffResult {
 	result := &DiffResult{
-		Regressions:      make([]StatusChange, 0),
-		Fixes:            make([]StatusChange, 0),
+		Regressions:       make([]StatusChange, 0),
+		Fixes:             make([]StatusChange, 0),
 		StatusTransitions: make([]StatusChange, 0),
-		Unchanged:        make([]StatusChange, 0),
+		Unchanged:         make([]StatusChange, 0),
 	}
 	if report1 == nil || report2 == nil {
 		return result
@@ -109,10 +109,10 @@ func (d *Diff) Compare(ctx context.Context, run1 string, run2 string, testSets [
 	}
 
 	aggregate := &DiffResult{
-		Regressions:      make([]StatusChange, 0),
-		Fixes:            make([]StatusChange, 0),
+		Regressions:       make([]StatusChange, 0),
+		Fixes:             make([]StatusChange, 0),
 		StatusTransitions: make([]StatusChange, 0),
-		Unchanged:        make([]StatusChange, 0),
+		Unchanged:         make([]StatusChange, 0),
 	}
 
 	for _, testSetID := range selectedTestSets {
