@@ -165,6 +165,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		req.Body.Close()
 
+		if !pressureCloseMode && memoryguard.IsRecordingPaused() {
+			pressureCloseMode = true
+			captureEnabled = false
+			releaseLock()
+		}
+
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
@@ -210,6 +216,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					return
 				}
 			}
+		}
+
+		if !pressureCloseMode && memoryguard.IsRecordingPaused() {
+			pressureCloseMode = true
+			captureEnabled = false
+			releaseLock()
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
 		}
 
 		if err := resp.Write(clientConn); err != nil {
