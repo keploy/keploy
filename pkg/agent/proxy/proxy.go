@@ -1035,13 +1035,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := matchedParser.RecordOutgoing(parserCtx, session)
 			if err != nil {
 				if isNetworkClosedErr(err) {
-					p.logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
+					logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
 				} else {
 					utils.LogError(logger, err, "failed to record the outgoing message")
 				}
 				return err
 			}
-			p.logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
+			logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
