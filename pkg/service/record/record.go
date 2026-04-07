@@ -422,19 +422,20 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 
 				if r.config.Port == 0 {
-					stopReason = "watch mode requires a configured application port"
+					stopReason = "watch mode requires a configured application port; set `port` in your keploy config to enable watch mode"
 					err = fmt.Errorf("%s %s", utils.Emoji, stopReason)
 					utils.LogError(r.logger, err, stopReason)
 					return fmt.Errorf("%s", stopReason)
 				}
 
 				r.logger.Info("Application exited. Watch mode active - waiting for restart...")
-				waitErr := utils.WaitForPort(ctx, watchHost, r.config.Port, time.Second, r.logger)
+				portStr := strconv.FormatUint(uint64(r.config.Port), 10)
+				waitErr := pkg.WaitForPort(ctx, watchHost, portStr, 0, r.logger)
 				if waitErr != nil {
 					if errors.Is(waitErr, context.Canceled) {
 						return nil
 					}
-					stopReason = "failed while waiting for application restart in watch mode"
+					stopReason = fmt.Sprintf("failed while waiting for application restart on %s:%d in watch mode", watchHost, r.config.Port)
 					err = fmt.Errorf("%s %v", utils.Emoji, waitErr)
 					utils.LogError(r.logger, err, stopReason)
 					return fmt.Errorf("%s", stopReason)
