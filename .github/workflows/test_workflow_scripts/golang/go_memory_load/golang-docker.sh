@@ -8,6 +8,10 @@ APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-300m}"
+MIXED_API_PREALLOCATED_VUS="${MIXED_API_PREALLOCATED_VUS:-250}"
+MIXED_API_MAX_VUS="${MIXED_API_MAX_VUS:-600}"
+LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-48}"
+LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-128}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 MEMORY_VIOLATION_FILE="${PWD}/keploy-memory-violation.txt"
 MEMORY_USAGE_LOG="${PWD}/keploy-memory-usage.log"
@@ -328,7 +332,12 @@ wait_for_http() {
 
 run_loadtest() {
     section "Running k6 load test"
-    docker compose --profile loadtest run --rm --no-deps k6 run /scripts/scenario.js
+    docker compose --profile loadtest run --rm --no-deps \
+        -e MIXED_API_PREALLOCATED_VUS="$MIXED_API_PREALLOCATED_VUS" \
+        -e MIXED_API_MAX_VUS="$MIXED_API_MAX_VUS" \
+        -e LARGE_PAYLOAD_PREALLOCATED_VUS="$LARGE_PAYLOAD_PREALLOCATED_VUS" \
+        -e LARGE_PAYLOAD_MAX_VUS="$LARGE_PAYLOAD_MAX_VUS" \
+        k6 run /scripts/scenario.js
 }
 
 section "Building sample application images"
