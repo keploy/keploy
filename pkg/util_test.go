@@ -202,7 +202,7 @@ func TestFilterMocks_678(t *testing.T) {
 		before := now.Add(1 * time.Hour)
 		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before)
 
-		// Check filtered mocks
+		// Check filtered mocks — only the request timestamp decides membership.
 		require.Len(t, filtered, 3)
 		filteredNames := []string{}
 		for _, m := range filtered {
@@ -244,4 +244,59 @@ func TestFilterMocks_678(t *testing.T) {
 		assert.Equal(t, "mock1", result[3].Name)
 		assert.Equal(t, "mock3", result[4].Name)
 	})
+}
+
+// TestFilterTcsMocks_TrailingMockAcrossBoundary_4021 is a regression test for
+// issue #4021: a mock whose outgoing request starts inside the testcase window
+// but whose response finishes slightly after the window boundary must be placed
+// in the prioritized (filtered) set so that replay does not fall back to an
+// older stale mock with the same request shape.
+func TestFilterTcsMocks_TrailingMockAcrossBoundary_4021(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Testcase window
+	tcReqTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)  // T0 - testcase request
+	tcRespTime := time.Date(2024, 1, 1, 10, 0, 1, 0, time.UTC) // testcase response (window end)
+
+	// Stale mock: recorded before the testcase window — same request shape as trailingMock.
+	staleMock := &models.Mock{
+		Name:    "mock-stale",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: tcReqTime.Add(-500 * time.Millisecond), // before window
+			ResTimestampMock: tcReqTime.Add(-400 * time.Millisecond), // before window
+		},
+	}
+
+	// Trailing mock: request fires inside the window, response arrives
+	// a few microseconds after the testcase response timestamp.
+	trailingMock := &models.Mock{
+		Name:    "mock-trailing",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: tcReqTime.Add(800 * time.Millisecond), // inside window
+			ResTimestampMock: tcRespTime.Add(50 * time.Microsecond), // marginally after window end
+		},
+	}
+
+	mocks := []*models.Mock{staleMock, trailingMock}
+
+	filtered, unfiltered := filterByTimeStamp(ctx, logger, mocks, tcReqTime, tcRespTime)
+
+	// The trailing mock's request is inside the window → must be prioritized.
+	require.Len(t, filtered, 1, "trailing mock should be in the prioritized set")
+	assert.Equal(t, "mock-trailing", filtered[0].Name)
+	assert.True(t, filtered[0].TestModeInfo.IsFiltered)
+
+	// The stale mock's request is before the window → must NOT be prioritized.
+	require.Len(t, unfiltered, 1, "stale mock should be in the unfiltered (fallback) set")
+	assert.Equal(t, "mock-stale", unfiltered[0].Name)
+	assert.False(t, unfiltered[0].TestModeInfo.IsFiltered)
+
+	// FilterTcsMocks (the public helper) must return only the trailing mock.
+	result := FilterTcsMocks(ctx, logger, mocks, tcReqTime, tcRespTime)
+	require.Len(t, result, 1)
+	assert.Equal(t, "mock-trailing", result[0].Name,
+		"FilterTcsMocks must return trailing mock, not stale mock with same shape")
 }
