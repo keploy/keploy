@@ -80,6 +80,11 @@ type MockSpec struct {
 	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
 	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	// Noise holds exact-match regex patterns for obfuscated values.
+	// During mock matching, any stored value matching a pattern in this
+	// list is skipped (treated as noise). Written by the enterprise
+	// secret-protection obfuscator.
+	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
