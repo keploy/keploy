@@ -1,11 +1,13 @@
 package http
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -287,5 +289,286 @@ func TestFlakyHeaders_AllLowercase(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// --- Tests for obfuscation-aware matching ---
+
+func TestJsonBodyMatchScore_NoObfuscation(t *testing.T) {
+	mockData := map[string]interface{}{"name": "john", "age": float64(25)}
+	reqData := map[string]interface{}{"name": "john", "age": float64(25)}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	if matched != 2 || total != 2 || obfuscated != 0 {
+		t.Errorf("expected matched=2 total=2 obfuscated=0, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_AllObfuscated(t *testing.T) {
+	mockData := map[string]interface{}{
+		"token":    util.ObfuscationPrefix + "abc",
+		"password": util.ObfuscationPrefix + "def",
+	}
+	reqData := map[string]interface{}{
+		"token":    "real_token",
+		"password": "real_password",
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// All fields obfuscated — excluded from matched/total entirely
+	if matched != 0 || total != 0 || obfuscated != 2 {
+		t.Errorf("expected matched=0 total=0 obfuscated=2, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_MixedObfuscation(t *testing.T) {
+	mockData := map[string]interface{}{
+		"username": "john",
+		"password": util.ObfuscationPrefix + "abc123",
+		"age":      float64(25),
+	}
+	reqData := map[string]interface{}{
+		"username": "john",
+		"password": "secret123",
+		"age":      float64(25),
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// username: match (1/1), password: obfuscated (skipped), age: match (1/1)
+	// → matched=2, total=2, obfuscated=1 → 100%
+	if matched != 2 || total != 2 || obfuscated != 1 {
+		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_PartialMismatch(t *testing.T) {
+	mockData := map[string]interface{}{
+		"username": "john",
+		"password": util.ObfuscationPrefix + "abc123",
+		"age":      float64(25),
+	}
+	reqData := map[string]interface{}{
+		"username": "jane", // different
+		"password": "secret123",
+		"age":      float64(25),
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// username: no match (0/1), password: obfuscated (skipped), age: match (1/1)
+	// → matched=1, total=2, obfuscated=1 → 50%
+	if matched != 1 || total != 2 || obfuscated != 1 {
+		t.Errorf("expected matched=1 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_NestedObfuscation(t *testing.T) {
+	mockData := map[string]interface{}{
+		"user": map[string]interface{}{
+			"name":    "john",
+			"api_key": util.ObfuscationPrefix + "xyz789",
+		},
+		"active": true,
+	}
+	reqData := map[string]interface{}{
+		"user": map[string]interface{}{
+			"name":    "john",
+			"api_key": "real_key_456",
+		},
+		"active": true,
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// user.name: match (1/1), user.api_key: obfuscated (skipped), active: match (1/1)
+	// → matched=2, total=2, obfuscated=1 → 100%
+	if matched != 2 || total != 2 || obfuscated != 1 {
+		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_ArrayWithObfuscation(t *testing.T) {
+	mockData := []interface{}{
+		"public_value",
+		util.ObfuscationPrefix + "secret",
+		"another_public",
+	}
+	reqData := []interface{}{
+		"public_value",
+		"actual_secret",
+		"another_public",
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// index 0: match (1/1), index 1: obfuscated (skipped), index 2: match (1/1)
+	// → matched=2, total=2, obfuscated=1 → 100%
+	if matched != 2 || total != 2 || obfuscated != 1 {
+		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestJsonBodyMatchScore_MissingKey(t *testing.T) {
+	mockData := map[string]interface{}{
+		"name":  "john",
+		"email": "john@example.com",
+	}
+	reqData := map[string]interface{}{
+		"name": "john",
+		// email missing
+	}
+	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+	// name: match, email: missing (not matched)
+	if matched != 1 || total != 2 || obfuscated != 0 {
+		t.Errorf("expected matched=1 total=2 obfuscated=0, got %d/%d/%d", matched, total, obfuscated)
+	}
+}
+
+func TestExactBodyMatch_ObfuscatedFullMatch(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name: "mock-obf",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: `{"username":"john","password":"` + util.ObfuscationPrefix + `abc123","age":25}`,
+				},
+			},
+		},
+	}
+	reqBody := []byte(`{"username":"john","password":"real_password","age":25}`)
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected obfuscation-aware match to succeed")
+	}
+	if match.Name != "mock-obf" {
+		t.Errorf("expected mock-obf, got %s", match.Name)
+	}
+}
+
+func TestExactBodyMatch_ObfuscatedPartialMismatch(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name: "mock-obf",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: `{"username":"john","password":"` + util.ObfuscationPrefix + `abc123"}`,
+				},
+			},
+		},
+	}
+	// username differs — should NOT match even though password is obfuscated
+	reqBody := []byte(`{"username":"jane","password":"real_password"}`)
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when non-obfuscated field differs")
+	}
+}
+
+func TestExactBodyMatch_PreferExactOverObfuscated(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name: "mock-obf",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: `{"name":"` + util.ObfuscationPrefix + `abc"}`,
+				},
+			},
+		},
+		{
+			Name: "mock-exact",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: `{"name":"john"}`,
+				},
+			},
+		},
+	}
+	reqBody := []byte(`{"name":"john"}`)
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected match")
+	}
+	// Exact match should be preferred over obfuscation-aware match
+	if match.Name != "mock-exact" {
+		t.Errorf("expected mock-exact (exact match preferred), got %s", match.Name)
+	}
+}
+
+func TestExactBodyMatch_FullyObfuscatedBody(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name: "mock-full-obf",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: util.ObfuscationPrefix + "entire_body_redacted",
+				},
+			},
+		},
+	}
+	reqBody := []byte(`anything goes here`)
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected fully obfuscated body to auto-match")
+	}
+	if match.Name != "mock-full-obf" {
+		t.Errorf("expected mock-full-obf, got %s", match.Name)
+	}
+}
+
+func TestStripObfuscatedJSON_RemovesRedactedFields(t *testing.T) {
+	input := `{"name":"john","secret":"` + util.ObfuscationPrefix + `abc","age":25}`
+	result := stripObfuscatedJSON(input)
+
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := data["secret"]; exists {
+		t.Error("expected 'secret' key to be stripped")
+	}
+	if data["name"] != "john" {
+		t.Errorf("expected name=john, got %v", data["name"])
+	}
+	if data["age"] != float64(25) {
+		t.Errorf("expected age=25, got %v", data["age"])
+	}
+}
+
+func TestStripObfuscatedJSON_NoObfuscation(t *testing.T) {
+	input := `{"name":"john","age":25}`
+	result := stripObfuscatedJSON(input)
+	if result != input {
+		t.Errorf("expected unchanged body, got %s", result)
+	}
+}
+
+func TestStripObfuscatedJSON_NonJSON(t *testing.T) {
+	input := "plain text body with " + util.ObfuscationPrefix + "value"
+	result := stripObfuscatedJSON(input)
+	if result != input {
+		t.Errorf("expected unchanged non-JSON body, got %s", result)
+	}
+}
+
+func TestStripObfuscatedJSON_Nested(t *testing.T) {
+	input := `{"user":{"name":"john","token":"` + util.ObfuscationPrefix + `xyz"},"active":true}`
+	result := stripObfuscatedJSON(input)
+
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &data); err != nil {
+		t.Fatal(err)
+	}
+	user, ok := data["user"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected user to be a map")
+	}
+	if _, exists := user["token"]; exists {
+		t.Error("expected nested 'token' to be stripped")
+	}
+	if user["name"] != "john" {
+		t.Errorf("expected name=john, got %v", user["name"])
+	}
+	if data["active"] != true {
+		t.Errorf("expected active=true, got %v", data["active"])
 	}
 }

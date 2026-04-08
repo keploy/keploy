@@ -141,6 +141,10 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, nil
 		}
 
+		h.Logger.Info("http mock schema match results",
+			zap.Int("schema_matched", len(schemaMatched)),
+			zap.Int("total_http_mocks", len(unfilteredMocks)))
+
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
@@ -376,7 +380,9 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	return schemaMatched, nil
 }
 
-// ExactBodyMatch Exact body match
+// ExactBodyMatch performs exact body matching with obfuscation awareness.
+// First pass: fast string equality for non-obfuscated mocks.
+// Second pass: JSON-level comparison that skips obfuscated fields.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
@@ -385,12 +391,177 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
 
+	// First pass: exact string match (fastest path, no obfuscation)
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
+			h.Logger.Info("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.String("match_type", "exact_body"))
 			return true, mock
 		}
 	}
+
+	// Second pass: obfuscation-aware match for mocks with redacted values
+	for _, mock := range schemaMatched {
+		mockBody := mock.Spec.HTTPReq.Body
+		if !util.ContainsObfuscatedValue(mockBody) {
+			continue
+		}
+
+		// If the entire body is a single obfuscated value, auto-match
+		// (schema match already filtered by URL, method, headers)
+		if util.IsObfuscated(mockBody) {
+			h.Logger.Info("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.Int("obfuscated_fields_skipped", 1),
+				zap.String("match_type", "exact_body_fully_obfuscated"))
+			return true, mock
+		}
+
+		// JSON-level comparison skipping obfuscated fields
+		if !pkg.IsJSON([]byte(mockBody)) || !pkg.IsJSON(body) {
+			continue
+		}
+
+		var mockData, reqData interface{}
+		if err := json.Unmarshal([]byte(mockBody), &mockData); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(body, &reqData); err != nil {
+			continue
+		}
+
+		matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+
+		pct := 100.0
+		if total > 0 {
+			pct = float64(matched) / float64(total) * 100
+		}
+		h.Logger.Info("http mock match score (obfuscation-aware)",
+			zap.String("mock", mock.Name),
+			zap.Int("matched_fields", matched),
+			zap.Int("total_fields", total),
+			zap.Int("obfuscated_fields_skipped", obfuscated),
+			zap.Float64("match_percentage", pct))
+
+		if matched == total {
+			return true, mock
+		}
+	}
+
 	return false, nil
+}
+
+// jsonBodyMatchScore recursively compares mock and request JSON values.
+// Obfuscated mock values are completely excluded from the comparison — they
+// do not count towards matched or total. The returned obfuscated count is
+// tracked separately for logging. This means if all non-obfuscated fields
+// match, the percentage is 100%.
+func jsonBodyMatchScore(mockVal, reqVal interface{}) (matched, total, obfuscated int) {
+	// Obfuscated value — skip entirely, don't count in matched or total.
+	if util.IsObfuscated(mockVal) {
+		return 0, 0, 1
+	}
+
+	switch mv := mockVal.(type) {
+	case map[string]interface{}:
+		rv, ok := reqVal.(map[string]interface{})
+		if !ok {
+			return 0, 1, 0
+		}
+		for key, mockField := range mv {
+			if util.IsObfuscated(mockField) {
+				obfuscated++
+				continue
+			}
+			reqField, exists := rv[key]
+			if !exists {
+				total++
+				continue
+			}
+			m, t, o := jsonBodyMatchScore(mockField, reqField)
+			matched += m
+			total += t
+			obfuscated += o
+		}
+		return
+
+	case []interface{}:
+		rv, ok := reqVal.([]interface{})
+		if !ok {
+			return 0, 1, 0
+		}
+		for i := 0; i < len(mv); i++ {
+			if util.IsObfuscated(mv[i]) {
+				obfuscated++
+				continue
+			}
+			if i >= len(rv) {
+				total++
+				continue
+			}
+			m, t, o := jsonBodyMatchScore(mv[i], rv[i])
+			matched += m
+			total += t
+			obfuscated += o
+		}
+		return
+
+	default:
+		total = 1
+		// JSON unmarshal produces comparable types: string, float64, bool, nil.
+		if mockVal == reqVal {
+			matched = 1
+		}
+		return
+	}
+}
+
+// stripObfuscatedFields recursively removes obfuscated values from a parsed
+// JSON structure so they don't skew fuzzy similarity scores.
+func stripObfuscatedFields(data interface{}) interface{} {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for key, val := range v {
+			if util.IsObfuscated(val) {
+				continue
+			}
+			result[key] = stripObfuscatedFields(val)
+		}
+		return result
+	case []interface{}:
+		var result []interface{}
+		for _, item := range v {
+			if util.IsObfuscated(item) {
+				continue
+			}
+			result = append(result, stripObfuscatedFields(item))
+		}
+		return result
+	default:
+		return data
+	}
+}
+
+// stripObfuscatedJSON removes obfuscated values from a JSON body string.
+// Returns the body as-is if it's not JSON or has no obfuscated values.
+func stripObfuscatedJSON(body string) string {
+	if !util.ContainsObfuscatedValue(body) || !pkg.IsJSON([]byte(body)) {
+		return body
+	}
+	var data interface{}
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		return body
+	}
+	stripped := stripObfuscatedFields(data)
+	b, err := json.Marshal(stripped)
+	if err != nil {
+		return body
+	}
+	return string(b)
 }
 
 func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
@@ -445,6 +616,11 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 			h.Logger.Debug("found a mock with body schema match", zap.String("mock name", mock.Name))
 		}
 	}
+
+	h.Logger.Info("http mock body key match results",
+		zap.Int("body_key_matched", len(bodyMatched)),
+		zap.Int("schema_matched", len(schemaMatched)))
+
 	return bodyMatched, nil
 }
 
@@ -491,7 +667,9 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	return mxIdx
 }
 
-// PerformFuzzyMatch Perform fuzzy match on the request
+// PerformFuzzyMatch performs fuzzy matching on the request body.
+// Obfuscated values are stripped from mock bodies before computing
+// similarity so that redacted padding doesn't skew the score.
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(tcsMocks))
@@ -504,26 +682,62 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			h.Logger.Debug("exact match found", zap.String("mock name", mock.Name))
+			h.Logger.Info("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.String("match_type", "fuzzy_exact"))
 			return true, mock
 		}
 	}
-	// String-based fuzzy matching
+
+	// Build mock body strings, stripping obfuscated values for fair comparison
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
-		mockStrings[i] = tcsMocks[i].Spec.HTTPReq.Body
+		mockStrings[i] = stripObfuscatedJSON(tcsMocks[i].Spec.HTTPReq.Body)
 	}
-	if util.IsASCII(string(reqBuff)) {
-		idx := h.findStringMatch(string(reqBuff), mockStrings)
+
+	// String-based fuzzy matching (Levenshtein distance)
+	reqStr := string(reqBuff)
+	if util.IsASCII(reqStr) {
+		idx := h.findStringMatch(reqStr, mockStrings)
 		if idx != -1 {
-			h.Logger.Debug("string match found", zap.String("mock name", tcsMocks[idx].Name))
+			dist := levenshtein.ComputeDistance(reqStr, mockStrings[idx])
+			maxLen := len(reqStr)
+			if len(mockStrings[idx]) > maxLen {
+				maxLen = len(mockStrings[idx])
+			}
+			pct := 0.0
+			if maxLen > 0 {
+				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
+			}
+			h.Logger.Info("http mock matched",
+				zap.String("mock", tcsMocks[idx].Name),
+				zap.Float64("match_percentage", pct),
+				zap.String("match_type", "fuzzy_levenshtein"))
 			return true, tcsMocks[idx]
 		}
 	}
-	idx := h.findBinaryMatch(tcsMocks, reqBuff)
-	if idx != -1 {
-		h.Logger.Debug("binary match found", zap.String("mock name", tcsMocks[idx].Name))
-		return true, tcsMocks[idx]
+
+	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
+	mxSim := -1.0
+	mxIdx := -1
+	for idx := range tcsMocks {
+		mockBody := []byte(mockStrings[idx])
+		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+		shingles1 := util.CreateShingles(mockBody, k)
+		shingles2 := util.CreateShingles(reqBuff, k)
+		similarity := util.JaccardSimilarity(shingles1, shingles2)
+		if mxSim < similarity {
+			mxSim = similarity
+			mxIdx = idx
+		}
+	}
+	if mxIdx != -1 {
+		h.Logger.Info("http mock matched",
+			zap.String("mock", tcsMocks[mxIdx].Name),
+			zap.Float64("match_percentage", mxSim*100),
+			zap.String("match_type", "fuzzy_jaccard"))
+		return true, tcsMocks[mxIdx]
 	}
 	return false, nil
 }
