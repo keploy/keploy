@@ -30,12 +30,13 @@ const (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version      models.Version `json:"version" yaml:"version"`
-	Kind         models.Kind    `json:"kind" yaml:"kind"`
-	Name         string         `json:"name" yaml:"name"`
-	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl         string         `json:"curl" yaml:"curl,omitempty"`
-	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
+	Version      models.Version      `json:"version" yaml:"version"`
+	Kind         models.Kind         `json:"kind" yaml:"kind"`
+	Name         string              `json:"name" yaml:"name"`
+	Spec         yamlLib.Node        `json:"spec" yaml:"spec"`
+	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
+	Curl         string              `json:"curl" yaml:"curl,omitempty"`
+	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
