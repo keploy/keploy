@@ -119,11 +119,20 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 	}
 	if isIngressRecordingPaused() || (w.maxSize > 0 && w.buf.Len()+len(p) > w.maxSize) {
 		w.stopped = true
-		w.buf.Reset()
+		// Replace with zero-value buffer to immediately release the underlying
+		// allocated memory to the GC. bytes.Buffer.Reset() only resets the
+		// length but keeps the capacity, so a 5MB buffer would still hold 5MB.
+		w.buf = bytes.Buffer{}
 		return len(p), nil
 	}
 	w.buf.Write(p)
 	return len(p), nil
+}
+
+// free releases the capture buffer's underlying memory to the GC.
+// Must only be called after forwarding goroutines have finished (after done channels).
+func (w *captureWriter) free() {
+	w.buf = bytes.Buffer{}
 }
 
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
@@ -503,20 +512,29 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	<-done
 	<-done
 
-	// Parse captured data asynchronously to create test cases.
-	// The capture buffers are safe to read here because the done channels
-	// guarantee both forwarding goroutines have finished writing.
+	// Immediately free capture buffers to release memory back to GC.
+	// This is critical: we must not hold onto multi-MB buffers any longer
+	// than necessary, especially when memory may be near the container limit.
+	// Copy the data out first (for async parsing), then free immediately.
+	var reqBytes, respBytes []byte
 	if reqCapture != nil && respCapture != nil && !reqCapture.stopped && !respCapture.stopped {
-		reqBytes := make([]byte, reqCapture.buf.Len())
-		copy(reqBytes, reqCapture.buf.Bytes())
-		respBytes := make([]byte, respCapture.buf.Len())
-		copy(respBytes, respCapture.buf.Bytes())
-		reqCapture.buf.Reset()
-		respCapture.buf.Reset()
-
-		if len(reqBytes) > 0 && len(respBytes) > 0 {
-			go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, t, appPort)
+		if reqCapture.buf.Len() > 0 && respCapture.buf.Len() > 0 {
+			reqBytes = make([]byte, reqCapture.buf.Len())
+			copy(reqBytes, reqCapture.buf.Bytes())
+			respBytes = make([]byte, respCapture.buf.Len())
+			copy(respBytes, respCapture.buf.Bytes())
 		}
+	}
+	// Free regardless of whether capture succeeded or was stopped
+	if reqCapture != nil {
+		reqCapture.free()
+	}
+	if respCapture != nil {
+		respCapture.free()
+	}
+
+	if len(reqBytes) > 0 && len(respBytes) > 0 {
+		go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, t, appPort)
 	}
 }
 

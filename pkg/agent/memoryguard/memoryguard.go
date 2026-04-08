@@ -22,7 +22,7 @@ import (
 const (
 	defaultCheckInterval = 500 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
-	pauseThresholdRatio  = 0.90
+	pauseThresholdRatio  = 0.80
 	resumeThresholdRatio = 0.80
 )
 
