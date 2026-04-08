@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	defaultCheckInterval = time.Second
+	defaultCheckInterval = 500 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
 	pauseThresholdRatio  = 0.90
 	resumeThresholdRatio = 0.80
@@ -86,10 +86,13 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	}
 
 	// Inform the Go runtime about the memory constraint so the GC becomes
-	// more aggressive well before the cgroup hard-limit is hit.  This
-	// prevents the heap from growing unchecked under bursty load and
-	// reduces the chance of cgroup-level OOM kills or I/O disruptions.
-	debug.SetMemoryLimit(limitBytes)
+	// more aggressive well before the cgroup hard-limit is hit.  We use
+	// 90% of the container limit because the remaining 10% is needed for
+	// non-Go memory (kernel buffers, page cache, OS overhead).  Without
+	// this headroom the GC won't kick in until the cgroup is already at
+	// the OOM boundary, causing connection drops and I/O disruptions.
+	goMemLimit := int64(float64(limitBytes) * 0.9)
+	debug.SetMemoryLimit(goMemLimit)
 
 	g := &guard{
 		logger:            logger,

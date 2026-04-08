@@ -320,6 +320,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				logger.Debug("HTTP/1 ingress upstream read failed under memory pressure", zap.Error(err))
 				return
 			}
+			if isIngressExpectedCloseErr(err) {
+				logger.Warn("Upstream closed connection before completing response", zap.Error(err))
+				return
+			}
 			logger.Error("Failed to read upstream response", zap.Error(err))
 			return
 		}
