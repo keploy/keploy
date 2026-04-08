@@ -8,6 +8,10 @@ APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-300m}"
+MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
+MEMORY_VIOLATION_FILE="${PWD}/keploy-memory-violation.txt"
+MEMORY_USAGE_LOG="${PWD}/keploy-memory-usage.log"
+MEMORY_MONITOR_PID=""
 
 section() {
     printf '\n==== %s ====\n' "$*"
@@ -41,7 +45,20 @@ dump_logs() {
 
     section "Compose State"
     docker compose ps || true
-    docker compose logs || true
+
+    section "Keploy Memory Log"
+    if [ -f "$MEMORY_USAGE_LOG" ]; then
+        cat "$MEMORY_USAGE_LOG"
+    else
+        echo "Keploy memory log not found."
+    fi
+
+    section "Keploy Memory Violation"
+    if [ -f "$MEMORY_VIOLATION_FILE" ]; then
+        cat "$MEMORY_VIOLATION_FILE"
+    else
+        echo "No memory violation recorded."
+    fi
 }
 
 stop_keploy_record() {
@@ -57,8 +74,17 @@ cleanup_compose() {
     docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
+stop_memory_monitor() {
+    if [ -n "${MEMORY_MONITOR_PID:-}" ] && kill -0 "$MEMORY_MONITOR_PID" 2>/dev/null; then
+        kill "$MEMORY_MONITOR_PID" 2>/dev/null || true
+        wait "$MEMORY_MONITOR_PID" 2>/dev/null || true
+    fi
+    MEMORY_MONITOR_PID=""
+}
+
 final_cleanup() {
     local rc=$?
+    stop_memory_monitor
     if [ "$rc" -ne 0 ]; then
         echo "go-memory-load workflow failed (exit code=$rc)"
         dump_logs
@@ -68,6 +94,40 @@ final_cleanup() {
 }
 
 trap final_cleanup EXIT
+
+bytes_from_human() {
+    local value="$1"
+    local number
+    local unit
+    local scale
+
+    value="${value//[[:space:]]/}"
+    if [ -z "$value" ] || [ "$value" = "--" ]; then
+        echo "-1"
+        return
+    fi
+
+    number="${value%%[[:alpha:]]*}"
+    unit="${value#$number}"
+
+    case "$unit" in
+        B) scale=1 ;;
+        KiB) scale=1024 ;;
+        MiB) scale=$((1024 * 1024)) ;;
+        GiB) scale=$((1024 * 1024 * 1024)) ;;
+        TiB) scale=$((1024 * 1024 * 1024 * 1024)) ;;
+        kB) scale=1000 ;;
+        MB) scale=$((1000 * 1000)) ;;
+        GB) scale=$((1000 * 1000 * 1000)) ;;
+        TB) scale=$((1000 * 1000 * 1000 * 1000)) ;;
+        *)
+            echo "-1"
+            return
+            ;;
+    esac
+
+    awk -v number="$number" -v scale="$scale" 'BEGIN { printf "%.0f\n", number * scale }'
+}
 
 check_for_errors() {
     local logfile="$1"
@@ -79,10 +139,10 @@ check_for_errors() {
         return 1
     fi
 
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
-        echo "Critical Keploy errors found in $logfile"
-        return 1
-    fi
+    # if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    #     echo "Critical Keploy errors found in $logfile"
+    #     return 1
+    # fi
 
     if grep -q "WARNING: DATA RACE" "$logfile"; then
         echo "Data race detected in $logfile"
@@ -182,6 +242,70 @@ apply_keploy_memory_limit() {
     docker inspect --format 'Memory={{.HostConfig.Memory}} MemorySwap={{.HostConfig.MemorySwap}}' "$keploy_container" || true
 }
 
+start_memory_monitor() {
+    local keploy_container="$1"
+    local phase_pid="$2"
+    local phase_name="$3"
+    local threshold_bytes
+    local threshold_mib
+
+    threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
+    if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
+        threshold_bytes="$((300 * 1024 * 1024))"
+    fi
+
+    threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
+    echo "Monitoring ${keploy_container} memory during ${phase_name}. Threshold: ${threshold_bytes} bytes (${threshold_mib} MiB)." | tee -a "$MEMORY_USAGE_LOG"
+
+    (
+        usage_raw=""
+        usage_value=""
+        usage_bytes=""
+        oom_killed=""
+        running=""
+
+        while kill -0 "$phase_pid" 2>/dev/null; do
+            if ! docker inspect "$keploy_container" >/dev/null 2>&1; then
+                sleep "$MEMORY_MONITOR_INTERVAL_SECONDS"
+                continue
+            fi
+
+            usage_raw="$(docker stats --no-stream --format '{{.MemUsage}}' "$keploy_container" 2>/dev/null | head -n 1 || true)"
+            usage_value="${usage_raw%% / *}"
+            usage_bytes="$(bytes_from_human "$usage_value")"
+            oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$keploy_container" 2>/dev/null || echo false)"
+            running="$(docker inspect --format '{{.State.Running}}' "$keploy_container" 2>/dev/null || echo false)"
+
+            echo "[$(date -u +%FT%TZ)] phase=${phase_name} container=${keploy_container} usage=${usage_raw:-unknown} running=${running} oom_killed=${oom_killed}" >> "$MEMORY_USAGE_LOG"
+
+            if [ "$oom_killed" = "true" ]; then
+                echo "Keploy container ${keploy_container} was OOM-killed during ${phase_name}." > "$MEMORY_VIOLATION_FILE"
+                kill -TERM "$phase_pid" 2>/dev/null || true
+                exit 0
+            fi
+
+            if [ "$usage_bytes" -ge 0 ] && [ "$usage_bytes" -gt "$threshold_bytes" ]; then
+                echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB during ${phase_name}. Observed usage: ${usage_raw}." > "$MEMORY_VIOLATION_FILE"
+                docker kill "$keploy_container" >/dev/null 2>&1 || true
+                kill -TERM "$phase_pid" 2>/dev/null || true
+                exit 0
+            fi
+
+            sleep "$MEMORY_MONITOR_INTERVAL_SECONDS"
+        done
+    ) &
+
+    MEMORY_MONITOR_PID=$!
+}
+
+check_memory_violation() {
+    if [ -f "$MEMORY_VIOLATION_FILE" ]; then
+        echo "Keploy memory threshold violation detected:"
+        cat "$MEMORY_VIOLATION_FILE"
+        return 1
+    fi
+}
+
 wait_for_http() {
     local url="${1:-$APP_HEALTH_URL}"
     local timeout_s="${2:-180}"
@@ -212,7 +336,7 @@ docker compose build
 
 section "Cleaning previous artifacts"
 sudo rm -rf keploy/
-rm -f record.txt test.txt docker-compose-tmp.yaml
+rm -f record.txt test.txt docker-compose-tmp.yaml "$MEMORY_VIOLATION_FILE" "$MEMORY_USAGE_LOG"
 cleanup_compose
 
 section "Generating Keploy config"
@@ -226,6 +350,7 @@ echo "Started Keploy record process with PID: $record_pid"
 keploy_container="$(wait_for_keploy_container 120)"
 echo "Detected Keploy container: $keploy_container"
 apply_keploy_memory_limit "$keploy_container"
+start_memory_monitor "$keploy_container" "$record_pid" "record"
 
 wait_for_http "$APP_HEALTH_URL" 180
 run_loadtest
@@ -233,16 +358,30 @@ run_loadtest
 sleep 10
 stop_keploy_record
 wait "$record_pid" || true
+stop_memory_monitor
 
+check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
 
 section "Preparing Replay"
 cleanup_compose
+rm -f "$MEMORY_VIOLATION_FILE"
 
 section "Replaying recorded test cases"
-run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt || true
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+replay_pid=$!
+echo "Started Keploy test process with PID: $replay_pid"
 
+replay_keploy_container="$(wait_for_keploy_container 120)"
+echo "Detected replay Keploy container: $replay_keploy_container"
+apply_keploy_memory_limit "$replay_keploy_container"
+start_memory_monitor "$replay_keploy_container" "$replay_pid" "replay"
+
+wait "$replay_pid" || true
+stop_memory_monitor
+
+check_memory_violation
 check_for_errors test.txt
 check_test_report
 

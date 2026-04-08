@@ -523,6 +523,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	ports = append(ports, opts.AppPorts...)
+	ports = append(ports, "127.0.0.1:6060:6060")
 
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
