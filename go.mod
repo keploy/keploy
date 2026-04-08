@@ -93,6 +93,7 @@ require (
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/andybalholm/brotli v1.2.0
 	github.com/bufbuild/protocompile v0.14.1
+	github.com/bytedance/gopkg v0.1.3
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
