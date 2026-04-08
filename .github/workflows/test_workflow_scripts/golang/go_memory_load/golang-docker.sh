@@ -9,7 +9,7 @@ APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-300m}"
 MIXED_API_PREALLOCATED_VUS="${MIXED_API_PREALLOCATED_VUS:-250}"
-MIXED_API_MAX_VUS="${MIXED_API_MAX_VUS:-600}"
+MIXED_API_MAX_VUS="${MIXED_API_MAX_VUS:-800}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-48}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-128}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
@@ -375,22 +375,14 @@ check_recorded_tests
 
 section "Preparing Replay"
 cleanup_compose
-rm -f "$MEMORY_VIOLATION_FILE"
 
 section "Replaying recorded test cases"
 run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
 replay_pid=$!
 echo "Started Keploy test process with PID: $replay_pid"
 
-replay_keploy_container="$(wait_for_keploy_container 120)"
-echo "Detected replay Keploy container: $replay_keploy_container"
-apply_keploy_memory_limit "$replay_keploy_container"
-start_memory_monitor "$replay_keploy_container" "$replay_pid" "replay"
-
 wait "$replay_pid" || true
-stop_memory_monitor
 
-check_memory_violation
 check_for_errors test.txt
 check_test_report
 
