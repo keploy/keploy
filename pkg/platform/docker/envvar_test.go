@@ -198,7 +198,54 @@ func TestAddServiceEnvVar_CreatesEnvironmentIfMissing(t *testing.T) {
 	assert.Equal(t, testCACertPath, val)
 }
 
-// --- appendServiceEnvVar Tests ---
+func TestAddServiceEnvVar_Sequence_BareKeyUpdated(t *testing.T) {
+	// Docker Compose allows bare "KEY" (no =) to inherit from host.
+	// addServiceEnvVar must detect this and update it in place.
+	idc := newTestImpl()
+	node := buildSequenceEnvNode(map[string]string{})
+	// Manually add a bare key (no "=")
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == "environment" {
+			node.Content[i+1].Content = append(node.Content[i+1].Content, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Value: "SSL_CERT_FILE",
+			})
+		}
+	}
+
+	idc.addServiceEnvVar(node, "SSL_CERT_FILE", testCACertPath)
+
+	val, found := getEnvFromSequence(node, "SSL_CERT_FILE")
+	require.True(t, found)
+	assert.Equal(t, testCACertPath, val)
+	assert.Equal(t, 1, countEnvOccurrences(node, "SSL_CERT_FILE"),
+		"bare KEY must be updated in place, not duplicated")
+}
+
+func TestAppendJavaToolOptions_Sequence_BareKeyUpdated(t *testing.T) {
+	// If compose has bare "JAVA_TOOL_OPTIONS" (inheriting from host),
+	// appendJavaToolOptions must detect it and set the truststore flags.
+	idc := newTestImpl()
+	node := buildSequenceEnvNode(map[string]string{})
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == "environment" {
+			node.Content[i+1].Content = append(node.Content[i+1].Content, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Value: "JAVA_TOOL_OPTIONS",
+			})
+		}
+	}
+
+	idc.appendJavaToolOptions(node, testJavaOpts)
+
+	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
+	require.True(t, found)
+	assert.Contains(t, val, testTrustStoreFlag)
+	assert.Equal(t, 1, countEnvOccurrences(node, "JAVA_TOOL_OPTIONS"),
+		"bare KEY must be updated in place, not duplicated")
+}
+
+// --- appendJavaToolOptions Tests ---
 
 func TestAppendServiceEnvVar_Sequence_AppendsToExistingValue(t *testing.T) {
 	existing := "-Dhttps.proxyHost=proxy.corp.com -Dhttps.proxyPort=3128"
@@ -207,7 +254,7 @@ func TestAppendServiceEnvVar_Sequence_AppendsToExistingValue(t *testing.T) {
 		"JAVA_TOOL_OPTIONS": existing,
 	})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -223,7 +270,7 @@ func TestAppendServiceEnvVar_Sequence_CreatesWhenMissing(t *testing.T) {
 	idc := newTestImpl()
 	node := buildSequenceEnvNode(map[string]string{})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -237,7 +284,7 @@ func TestAppendServiceEnvVar_Sequence_NoDuplicateWhenTrustStorePresent(t *testin
 		"JAVA_TOOL_OPTIONS": existing,
 	})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -252,7 +299,7 @@ func TestAppendServiceEnvVar_Sequence_EmptyExistingValue(t *testing.T) {
 		"JAVA_TOOL_OPTIONS": "",
 	})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -266,7 +313,7 @@ func TestAppendServiceEnvVar_Mapping_AppendsToExistingValue(t *testing.T) {
 		"JAVA_TOOL_OPTIONS": existing,
 	})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromMapping(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -282,7 +329,7 @@ func TestAppendServiceEnvVar_Mapping_NoDuplicateWhenTrustStorePresent(t *testing
 		"JAVA_TOOL_OPTIONS": existing,
 	})
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromMapping(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -293,7 +340,7 @@ func TestAppendServiceEnvVar_NoEnvironmentSection(t *testing.T) {
 	idc := newTestImpl()
 	node := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}
 
-	idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+	idc.appendJavaToolOptions(node, testJavaOpts)
 
 	val, found := getEnvFromSequence(node, "JAVA_TOOL_OPTIONS")
 	require.True(t, found)
@@ -314,7 +361,7 @@ func TestAddServiceEnvVar_AllEnvVars_NoDuplicatesOnRepeatedMutation(t *testing.T
 		idc.addServiceEnvVar(node, "REQUESTS_CA_BUNDLE", testCACertPath)
 		idc.addServiceEnvVar(node, "SSL_CERT_FILE", testCACertPath)
 		idc.addServiceEnvVar(node, "CARGO_HTTP_CAINFO", testCACertPath)
-		idc.appendServiceEnvVar(node, "JAVA_TOOL_OPTIONS", testJavaOpts)
+		idc.appendJavaToolOptions(node, testJavaOpts)
 	}
 
 	// Each env var must appear exactly once

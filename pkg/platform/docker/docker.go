@@ -954,7 +954,7 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)
 
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
-			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)
+			idc.appendJavaToolOptions(serviceContentNode, javaOpts)
 			// Add PID namespace sharing
 			idc.addServiceProperty(serviceContentNode, "pid", fmt.Sprintf("service:%s", "keploy-agent"))
 
@@ -993,9 +993,11 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
-// Helper to add/set an environment variable. If the key already exists, its
-// value is replaced. This prevents duplicate entries when the compose file is
-// modified more than once or the user already defined the variable.
+// addServiceEnvVar adds or replaces an environment variable in a compose
+// service node. If the key already exists (as "KEY=VAL" or bare "KEY" which
+// inherits from the host), it is updated in place. This prevents duplicate
+// entries when the compose file is modified more than once or the user already
+// defined the variable.
 func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
 	var envNode *yaml.Node
 
@@ -1018,10 +1020,11 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 
 	prefix := envKey + "="
 
-	// Handle Sequence (array) style environment: ["KEY=VAL"]
+	// Handle Sequence (array) style environment: ["KEY=VAL"] or bare ["KEY"]
 	if envNode.Kind == yaml.SequenceNode {
 		for _, item := range envNode.Content {
-			if strings.HasPrefix(item.Value, prefix) {
+			// Match "KEY=..." or bare "KEY" (host-inherited)
+			if strings.HasPrefix(item.Value, prefix) || item.Value == envKey {
 				item.Value = fmt.Sprintf("%s=%s", envKey, envValue)
 				return
 			}
@@ -1046,11 +1049,16 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 }
 
-// appendServiceEnvVar appends a value to an existing environment variable
-// (space-separated, like JAVA_TOOL_OPTIONS). If the key does not exist, it is
-// created with the given value. If the target substring is already present, the
-// variable is left unchanged to prevent duplication.
-func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
+// appendJavaToolOptions appends JVM truststore flags to an existing
+// JAVA_TOOL_OPTIONS environment variable. If the key does not exist, it is
+// created with the given value. If the truststore flags are already present,
+// the variable is left unchanged to prevent duplication.
+//
+// This function is specific to JAVA_TOOL_OPTIONS because it uses space-
+// separated flag appending and deduplicates on "-Djavax.net.ssl.trustStore=".
+// Other env vars should use addServiceEnvVar() which overwrites the value.
+func (idc *Impl) appendJavaToolOptions(serviceNode *yaml.Node, trustStoreFlags string) {
+	const envKey = "JAVA_TOOL_OPTIONS"
 	var envNode *yaml.Node
 
 	// Find 'environment' key
@@ -1062,26 +1070,29 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 	}
 
 	if envNode == nil {
-		// No environment section yet; create with the full value.
-		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		idc.addServiceEnvVar(serviceNode, envKey, trustStoreFlags)
 		return
 	}
 
 	prefix := envKey + "="
 
-	// Handle Sequence (array) style: ["KEY=VAL"]
+	// Handle Sequence (array) style: ["KEY=VAL"] or bare ["KEY"]
 	if envNode.Kind == yaml.SequenceNode {
 		for _, item := range envNode.Content {
-			if strings.HasPrefix(item.Value, prefix) {
+			if strings.HasPrefix(item.Value, prefix) || item.Value == envKey {
 				existingVal := strings.TrimPrefix(item.Value, prefix)
+				// Bare "KEY" without "=" gives existingVal == "JAVA_TOOL_OPTIONS"; treat as empty
+				if existingVal == envKey {
+					existingVal = ""
+				}
 				if strings.Contains(existingVal, "-Djavax.net.ssl.trustStore=") {
 					return // already has truststore flags
 				}
 				trimmed := strings.TrimSpace(existingVal)
 				if trimmed == "" {
-					item.Value = fmt.Sprintf("%s=%s", envKey, appendValue)
+					item.Value = fmt.Sprintf("%s=%s", envKey, trustStoreFlags)
 				} else {
-					item.Value = fmt.Sprintf("%s=%s %s", envKey, trimmed, appendValue)
+					item.Value = fmt.Sprintf("%s=%s %s", envKey, trimmed, trustStoreFlags)
 				}
 				return
 			}
@@ -1098,9 +1109,9 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 				}
 				trimmed := strings.TrimSpace(existingVal)
 				if trimmed == "" {
-					envNode.Content[i+1].Value = appendValue
+					envNode.Content[i+1].Value = trustStoreFlags
 				} else {
-					envNode.Content[i+1].Value = trimmed + " " + appendValue
+					envNode.Content[i+1].Value = trimmed + " " + trustStoreFlags
 				}
 				return
 			}
@@ -1108,7 +1119,7 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 	}
 
 	// Key not found; add it fresh.
-	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+	idc.addServiceEnvVar(serviceNode, envKey, trustStoreFlags)
 }
 
 // Helper to ensure top-level volumes exists
