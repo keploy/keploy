@@ -103,6 +103,29 @@ func wrapBodyForCapture(body io.ReadCloser, capture io.Writer) io.ReadCloser {
 	}
 }
 
+// captureWriter is a non-blocking writer that buffers data for async test case
+// capture. It silently stops capturing (without returning errors) when memory
+// pressure is detected or the buffer exceeds maxSize, so it never blocks or
+// slows the primary forwarding path.
+type captureWriter struct {
+	buf     bytes.Buffer
+	stopped bool
+	maxSize int
+}
+
+func (w *captureWriter) Write(p []byte) (int, error) {
+	if w.stopped {
+		return len(p), nil
+	}
+	if isIngressRecordingPaused() || (w.maxSize > 0 && w.buf.Len()+len(p) > w.maxSize) {
+		w.stopped = true
+		w.buf.Reset()
+		return len(p), nil
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
 	clone := new(http.Request)
 	*clone = *req
@@ -208,12 +231,24 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}
 	defer upConn.Close()
 
-	clientReader := bufio.NewReader(clientConn)
-	upstreamReader := bufio.NewReader(upConn)
-
 	// forceCloseMode is true if we are running in Sync or Sampling mode.
 	// In these modes, we strictly disable Keep-Alive and drop the loop after one request.
 	forceCloseMode := pm.synchronous || pm.sampling
+
+	if !forceCloseMode {
+		// Normal mode: transparent TCP passthrough with async test case capture.
+		// Raw bytes are forwarded between client and upstream with zero HTTP
+		// parsing overhead. A copy is captured in side buffers and parsed
+		// asynchronously after the connection closes to create test cases.
+		// When memory pressure is detected, the side-copy stops but forwarding
+		// continues unimpacted.
+		releaseLock()
+		pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, t, actualPort)
+		return
+	}
+
+	clientReader := bufio.NewReader(clientConn)
+	upstreamReader := bufio.NewReader(upConn)
 
 	for {
 		req, err := http.ReadRequest(clientReader)
@@ -279,11 +314,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				req.Body.Close()
 				return
 			}
-			if isIngressRecordingPaused() {
-				logger.Debug("HTTP/1 ingress request write failed under memory pressure", zap.Error(err))
-				req.Body.Close()
-				return
-			}
 			logger.Error("Failed to forward request to upstream", zap.Error(err))
 			req.Body.Close()
 			return
@@ -314,14 +344,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err != nil {
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", zap.Error(err))
-				return
-			}
-			if isIngressRecordingPaused() {
-				logger.Debug("HTTP/1 ingress upstream read failed under memory pressure", zap.Error(err))
-				return
-			}
-			if isIngressExpectedCloseErr(err) {
-				logger.Warn("Upstream closed connection before completing response", zap.Error(err))
 				return
 			}
 			logger.Error("Failed to read upstream response", zap.Error(err))
@@ -372,11 +394,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err := resp.Write(clientConn); err != nil {
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
-				resp.Body.Close()
-				return
-			}
-			if isIngressRecordingPaused() {
-				logger.Debug("HTTP/1 ingress client write failed under memory pressure", zap.Error(err))
 				resp.Body.Close()
 				return
 			}
@@ -436,6 +453,119 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if pressureCloseMode {
 			return
 		}
+	}
+}
+
+// handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
+// non-sampling) mode. It forwards raw TCP bytes bidirectionally between client
+// and upstream with zero HTTP parsing overhead on the critical path. A copy of
+// the bytes is captured in side buffers. After the connection closes, the
+// captured data is parsed asynchronously to create test cases. When memory
+// pressure is detected, the side-copy stops but forwarding continues unimpacted.
+func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16) {
+	logger.Debug("Using zero-copy TCP passthrough with async capture")
+
+	captureEnabled := !isIngressRecordingPaused()
+	var reqCapture, respCapture *captureWriter
+	if captureEnabled {
+		reqCapture = &captureWriter{maxSize: hooksUtils.MaxTestCaseSize}
+		respCapture = &captureWriter{maxSize: hooksUtils.MaxTestCaseSize}
+	}
+
+	done := make(chan struct{}, 2)
+
+	// client → upstream (with optional side-copy for capture)
+	go func() {
+		var dst io.Writer = upConn
+		if reqCapture != nil {
+			dst = io.MultiWriter(upConn, reqCapture)
+		}
+		_, _ = io.Copy(dst, clientConn)
+		if tc, ok := upConn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+
+	// upstream → client (with optional side-copy for capture)
+	go func() {
+		var dst io.Writer = clientConn
+		if respCapture != nil {
+			dst = io.MultiWriter(clientConn, respCapture)
+		}
+		_, _ = io.Copy(dst, upConn)
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
+
+	// Parse captured data asynchronously to create test cases.
+	// The capture buffers are safe to read here because the done channels
+	// guarantee both forwarding goroutines have finished writing.
+	if reqCapture != nil && respCapture != nil && !reqCapture.stopped && !respCapture.stopped {
+		reqBytes := make([]byte, reqCapture.buf.Len())
+		copy(reqBytes, reqCapture.buf.Bytes())
+		respBytes := make([]byte, respCapture.buf.Len())
+		copy(respBytes, respCapture.buf.Bytes())
+		reqCapture.buf.Reset()
+		respCapture.buf.Reset()
+
+		if len(reqBytes) > 0 && len(respBytes) > 0 {
+			go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, t, appPort)
+		}
+	}
+}
+
+// parseCapturedHTTP parses raw HTTP request/response bytes captured during
+// zero-copy passthrough and creates test cases. It handles multiple
+// request/response pairs from keep-alive connections. This runs in a background
+// goroutine after the connection closes, with zero impact on the client-server
+// communication.
+func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *zap.Logger, reqData, respData []byte, t chan *models.TestCase, appPort uint16) {
+	reqReader := bufio.NewReader(bytes.NewReader(reqData))
+	respReader := bufio.NewReader(bytes.NewReader(respData))
+
+	for {
+		if isIngressRecordingPaused() {
+			return
+		}
+
+		req, err := http.ReadRequest(reqReader)
+		if err != nil {
+			return
+		}
+		reqTimestamp := time.Now()
+
+		// Set Host header to match pkg.ParseHTTPRequest behavior
+		req.Header.Set("Host", req.Host)
+
+		// Read the full request body to advance the reader past it
+		reqBody, err := io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return
+		}
+		// Re-wrap body so CaptureHook can read it
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+
+		resp, err := http.ReadResponse(respReader, req)
+		if err != nil {
+			return
+		}
+		respTimestamp := time.Now()
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+		hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, appPort)
 	}
 }
 
