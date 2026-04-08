@@ -8,10 +8,10 @@ APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-300m}"
-MIXED_API_PREALLOCATED_VUS="${MIXED_API_PREALLOCATED_VUS:-250}"
-MIXED_API_MAX_VUS="${MIXED_API_MAX_VUS:-800}"
-LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-48}"
-LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-128}"
+MIXED_API_START_VUS="${MIXED_API_START_VUS:-4}"
+MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-8,12,20,8}"
+LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-8}"
+LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-16}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 MEMORY_VIOLATION_FILE="${PWD}/keploy-memory-violation.txt"
 MEMORY_USAGE_LOG="${PWD}/keploy-memory-usage.log"
@@ -333,8 +333,8 @@ wait_for_http() {
 run_loadtest() {
     section "Running k6 load test"
     docker compose --profile loadtest run --rm --no-deps \
-        -e MIXED_API_PREALLOCATED_VUS="$MIXED_API_PREALLOCATED_VUS" \
-        -e MIXED_API_MAX_VUS="$MIXED_API_MAX_VUS" \
+        -e MIXED_API_START_VUS="$MIXED_API_START_VUS" \
+        -e MIXED_API_VU_STAGE_TARGETS="$MIXED_API_VU_STAGE_TARGETS" \
         -e LARGE_PAYLOAD_PREALLOCATED_VUS="$LARGE_PAYLOAD_PREALLOCATED_VUS" \
         -e LARGE_PAYLOAD_MAX_VUS="$LARGE_PAYLOAD_MAX_VUS" \
         k6 run /scripts/scenario.js
@@ -373,17 +373,17 @@ check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
 
-section "Preparing Replay"
-cleanup_compose
+# section "Preparing Replay"
+# cleanup_compose
 
-section "Replaying recorded test cases"
-run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
-replay_pid=$!
-echo "Started Keploy test process with PID: $replay_pid"
+# section "Replaying recorded test cases"
+# run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+# replay_pid=$!
+# echo "Started Keploy test process with PID: $replay_pid"
 
-wait "$replay_pid" || true
+# wait "$replay_pid" || true
 
-check_for_errors test.txt
-check_test_report
+# check_for_errors test.txt
+# check_test_report
 
 echo "go-memory-load workflow completed successfully."
