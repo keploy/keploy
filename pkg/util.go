@@ -1140,7 +1140,15 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			continue
 		}
 
-		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+		// A mock belongs to this testcase window when its outgoing *request*
+		// started inside [afterTime, beforeTime].  We intentionally do NOT
+		// gate on ResTimestampMock: a dependency call whose request fires
+		// inside the window but whose response arrives marginally after
+		// beforeTime is still the correct mock for this testcase.  Requiring
+		// the response to also be before beforeTime caused trailing mocks to
+		// be dropped from the prioritized set, letting an older stale mock
+		// with the same request shape be selected instead (issue #4021).
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ReqTimestampMock.Before(beforeTime) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue

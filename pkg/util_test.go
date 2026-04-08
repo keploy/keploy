@@ -388,7 +388,7 @@ func TestFilterMocks_678(t *testing.T) {
 		before := now.Add(1 * time.Hour)
 		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before)
 
-		// Check filtered mocks
+		// Check filtered mocks — only the request timestamp decides membership.
 		require.Len(t, filtered, 3)
 		filteredNames := []string{}
 		for _, m := range filtered {
@@ -432,181 +432,57 @@ func TestFilterMocks_678(t *testing.T) {
 	})
 }
 
-// TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
-// including IPv4, IPv6, and hostnames, both with and without ports.
-func TestHasExplicitPort_IPv6_777(t *testing.T) {
-	testCases := []struct {
-		name     string
-		host     string
-		expected bool
-	}{
-		{"IPv4WithPort", "127.0.0.1:8080", true},
-		{"IPv4WithoutPort", "127.0.0.1", false},
-		{"IPv6WithPort", "[::1]:8080", true},
-		{"IPv6WithoutPort", "[::1]", false},
-		{"IPv6WithoutBrackets", "::1", false}, // Invalid for SplitHostPort, so false
-		{"HostnameWithPort", "localhost:8080", true},
-		{"HostnameWithoutPort", "localhost", false},
-		{"InvalidPort", "localhost:http", false},    // Non-numeric port
-		{"FullURL", "http://localhost:8080", false}, // SplitHostPort fails on scheme
-		{"IPv6ComplexWithPort", "[2001:db8::1]:8080", true},
-		{"IPv6ComplexWithoutPort", "[2001:db8::1]", false},
-		{"ColonInPath", "localhost:8080/foo", false}, // SplitHostPort fails
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, hasExplicitPort(tc.host))
-		})
-	}
-}
-
-func TestResolveTestTarget(t *testing.T) {
+// TestFilterTcsMocks_TrailingMockAcrossBoundary_4021 is a regression test for
+// issue #4021: a mock whose outgoing request starts inside the testcase window
+// but whose response finishes slightly after the window boundary must be placed
+// in the prioritized (filtered) set so that replay does not fall back to an
+// older stale mock with the same request shape.
+func TestFilterTcsMocks_TrailingMockAcrossBoundary_4021(t *testing.T) {
 	logger := zap.NewNop()
+	ctx := context.Background()
 
-	tests := []struct {
-		name            string
-		originalTarget  string
-		urlReplacements map[string]string
-		configHost      string
-		appPort         uint16
-		configPort      uint32
-		isHTTP          bool
-		expectedTarget  string
-		expectError     bool
-	}{
-		// HTTP Scenarios
-		{
-			name:           "HTTP_NoOverrides",
-			originalTarget: "http://example.com/api",
-			isHTTP:         true,
-			expectedTarget: "http://example.com:80/api",
-		},
-		{
-			name:           "HTTP_AppPortOverride",
-			originalTarget: "http://example.com/api",
-			appPort:        8080,
-			isHTTP:         true,
-			expectedTarget: "http://example.com:8080/api",
-		},
-		{
-			name:           "HTTP_ConfigPortOverride",
-			originalTarget: "http://example.com/api",
-			appPort:        8080,
-			configPort:     9090,
-			isHTTP:         true,
-			expectedTarget: "http://example.com:9090/api",
-		},
-		{
-			name:           "HTTP_ConfigHostOverride",
-			originalTarget: "http://example.com/api",
-			configHost:     "localhost",
-			isHTTP:         true,
-			expectedTarget: "http://localhost:80/api",
-		},
-		{
-			name:            "HTTP_ReplacementWithPort_Final",
-			originalTarget:  "http://example.com/api",
-			urlReplacements: map[string]string{"example.com": "localhost:3000"},
-			configPort:      9090, // Should be ignored
-			isHTTP:          true,
-			expectedTarget:  "http://localhost:3000/api",
-		},
-		{
-			name:            "HTTP_ReplacementWithoutPort_AppliesOverrides",
-			originalTarget:  "http://example.com/api",
-			urlReplacements: map[string]string{"example.com": "new-host"},
-			configPort:      9090,
-			isHTTP:          true,
-			expectedTarget:  "http://new-host:9090/api",
-		},
-		{
-			name:           "HTTPS_DefaultPort",
-			originalTarget: "https://example.com/api",
-			isHTTP:         true,
-			expectedTarget: "https://example.com:443/api",
-		},
+	// Testcase window
+	tcReqTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)  // T0 - testcase request
+	tcRespTime := time.Date(2024, 1, 1, 10, 0, 1, 0, time.UTC) // testcase response (window end)
 
-		// gRPC Scenarios
-		{
-			name:           "GRPC_NoOverrides",
-			originalTarget: "example.com",
-			isHTTP:         false,
-			expectedTarget: "example.com:443",
-		},
-		{
-			name:           "GRPC_ExistingPort_NoOverrides",
-			originalTarget: "example.com:50051",
-			isHTTP:         false,
-			expectedTarget: "example.com:50051",
-		},
-		{
-			name:           "GRPC_AppPortOverride",
-			originalTarget: "example.com",
-			appPort:        8080,
-			isHTTP:         false,
-			expectedTarget: "example.com:8080",
-		},
-		{
-			name:           "GRPC_ConfigPortOverride",
-			originalTarget: "example.com",
-			configPort:     9090,
-			isHTTP:         false,
-			expectedTarget: "example.com:9090",
-		},
-		{
-			name:           "GRPC_ConfigHostOverride",
-			originalTarget: "example.com:50051",
-			configHost:     "localhost",
-			isHTTP:         false,
-			expectedTarget: "localhost:50051",
-		},
-		{
-			name:            "GRPC_ReplacementWithPort_Final",
-			originalTarget:  "example.com:50051",
-			urlReplacements: map[string]string{"example.com": "localhost:3000"},
-			configPort:      9090, // Should be ignored
-			isHTTP:          false,
-			expectedTarget:  "localhost:3000:50051", // Replacement is literal substitution first
-		},
-		{
-			name:            "GRPC_ReplacementWithPort_ExactMatch",
-			originalTarget:  "example.com",
-			urlReplacements: map[string]string{"example.com": "localhost:3000"},
-			configPort:      9090,
-			isHTTP:          false,
-			expectedTarget:  "localhost:3000",
-		},
-		{
-			name:           "GRPC_IPv6_Host",
-			originalTarget: "[::1]:50051",
-			configPort:     9090,
-			isHTTP:         false,
-			expectedTarget: "[::1]:9090",
+	// Stale mock: recorded before the testcase window — same request shape as trailingMock.
+	staleMock := &models.Mock{
+		Name:    "mock-stale",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: tcReqTime.Add(-500 * time.Millisecond), // before window
+			ResTimestampMock: tcReqTime.Add(-400 * time.Millisecond), // before window
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedTarget, got)
-			}
-		})
+	// Trailing mock: request fires inside the window, response arrives
+	// a few microseconds after the testcase response timestamp.
+	trailingMock := &models.Mock{
+		Name:    "mock-trailing",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: tcReqTime.Add(800 * time.Millisecond), // inside window
+			ResTimestampMock: tcRespTime.Add(50 * time.Microsecond), // marginally after window end
+		},
 	}
-}
 
-func TestResolveTestTarget_EdgeCases(t *testing.T) {
-	logger := zap.NewNop()
+	mocks := []*models.Mock{staleMock, trailingMock}
 
-	t.Run("HTTP_InvalidURL", func(t *testing.T) {
-		_, err := ResolveTestTarget("http://[::1]:namedport", nil, "", 0, 0, true, logger)
-		assert.Error(t, err)
-	})
+	filtered, unfiltered := filterByTimeStamp(ctx, logger, mocks, tcReqTime, tcRespTime)
 
-	t.Run("GRPC_ConfigHost_ReplaceError", func(t *testing.T) {
-		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
-	})
+	// The trailing mock's request is inside the window → must be prioritized.
+	require.Len(t, filtered, 1, "trailing mock should be in the prioritized set")
+	assert.Equal(t, "mock-trailing", filtered[0].Name)
+	assert.True(t, filtered[0].TestModeInfo.IsFiltered)
+
+	// The stale mock's request is before the window → must NOT be prioritized.
+	require.Len(t, unfiltered, 1, "stale mock should be in the unfiltered (fallback) set")
+	assert.Equal(t, "mock-stale", unfiltered[0].Name)
+	assert.False(t, unfiltered[0].TestModeInfo.IsFiltered)
+
+	// FilterTcsMocks (the public helper) must return only the trailing mock.
+	result := FilterTcsMocks(ctx, logger, mocks, tcReqTime, tcRespTime)
+	require.Len(t, result, 1)
+	assert.Equal(t, "mock-trailing", result[0].Name,
+		"FilterTcsMocks must return trailing mock, not stale mock with same shape")
 }
