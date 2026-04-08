@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -292,37 +293,48 @@ func TestFlakyHeaders_AllLowercase(t *testing.T) {
 	}
 }
 
-// --- Tests for obfuscation-aware matching ---
+// --- Tests for noise-aware matching ---
 
-func TestJsonBodyMatchScore_NoObfuscation(t *testing.T) {
+// noiseFor builds exact-match anchored regex patterns for the given values,
+// mirroring what the enterprise obfuscator produces for Mock.Noise.
+func noiseFor(values ...string) []string {
+	patterns := make([]string, len(values))
+	for i, v := range values {
+		patterns[i] = "^" + regexp.QuoteMeta(v) + "$"
+	}
+	return patterns
+}
+
+func TestJSONBodyMatchScore_NoNoise(t *testing.T) {
 	mockData := map[string]interface{}{"name": "john", "age": float64(25)}
 	reqData := map[string]interface{}{"name": "john", "age": float64(25)}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	if matched != 2 || total != 2 || obfuscated != 0 {
-		t.Errorf("expected matched=2 total=2 obfuscated=0, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(nil)
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 2 || total != 2 || noisy != 0 {
+		t.Errorf("expected matched=2 total=2 noisy=0, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_AllObfuscated(t *testing.T) {
+func TestJSONBodyMatchScore_AllNoisy(t *testing.T) {
 	mockData := map[string]interface{}{
-		"token":    util.ObfuscationPrefix + "abc",
-		"password": util.ObfuscationPrefix + "def",
+		"token":    "KEPLOYREDACTabc",
+		"password": "KEPLOYREDACTdef",
 	}
 	reqData := map[string]interface{}{
 		"token":    "real_token",
 		"password": "real_password",
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// All fields obfuscated — excluded from matched/total entirely
-	if matched != 0 || total != 0 || obfuscated != 2 {
-		t.Errorf("expected matched=0 total=0 obfuscated=2, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTabc", "KEPLOYREDACTdef"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 0 || total != 0 || noisy != 2 {
+		t.Errorf("expected matched=0 total=0 noisy=2, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_MixedObfuscation(t *testing.T) {
+func TestJSONBodyMatchScore_MixedNoise(t *testing.T) {
 	mockData := map[string]interface{}{
 		"username": "john",
-		"password": util.ObfuscationPrefix + "abc123",
+		"password": "KEPLOYREDACTabc123",
 		"age":      float64(25),
 	}
 	reqData := map[string]interface{}{
@@ -330,18 +342,17 @@ func TestJsonBodyMatchScore_MixedObfuscation(t *testing.T) {
 		"password": "secret123",
 		"age":      float64(25),
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// username: match (1/1), password: obfuscated (skipped), age: match (1/1)
-	// → matched=2, total=2, obfuscated=1 → 100%
-	if matched != 2 || total != 2 || obfuscated != 1 {
-		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTabc123"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 2 || total != 2 || noisy != 1 {
+		t.Errorf("expected matched=2 total=2 noisy=1, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_PartialMismatch(t *testing.T) {
+func TestJSONBodyMatchScore_PartialMismatch(t *testing.T) {
 	mockData := map[string]interface{}{
 		"username": "john",
-		"password": util.ObfuscationPrefix + "abc123",
+		"password": "KEPLOYREDACTabc123",
 		"age":      float64(25),
 	}
 	reqData := map[string]interface{}{
@@ -349,19 +360,18 @@ func TestJsonBodyMatchScore_PartialMismatch(t *testing.T) {
 		"password": "secret123",
 		"age":      float64(25),
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// username: no match (0/1), password: obfuscated (skipped), age: match (1/1)
-	// → matched=1, total=2, obfuscated=1 → 50%
-	if matched != 1 || total != 2 || obfuscated != 1 {
-		t.Errorf("expected matched=1 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTabc123"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 1 || total != 2 || noisy != 1 {
+		t.Errorf("expected matched=1 total=2 noisy=1, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_NestedObfuscation(t *testing.T) {
+func TestJSONBodyMatchScore_NestedNoise(t *testing.T) {
 	mockData := map[string]interface{}{
 		"user": map[string]interface{}{
 			"name":    "john",
-			"api_key": util.ObfuscationPrefix + "xyz789",
+			"api_key": "KEPLOYREDACTxyz789",
 		},
 		"active": true,
 	}
@@ -372,18 +382,17 @@ func TestJsonBodyMatchScore_NestedObfuscation(t *testing.T) {
 		},
 		"active": true,
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// user.name: match (1/1), user.api_key: obfuscated (skipped), active: match (1/1)
-	// → matched=2, total=2, obfuscated=1 → 100%
-	if matched != 2 || total != 2 || obfuscated != 1 {
-		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTxyz789"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 2 || total != 2 || noisy != 1 {
+		t.Errorf("expected matched=2 total=2 noisy=1, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_ArrayWithObfuscation(t *testing.T) {
+func TestJSONBodyMatchScore_ArrayWithNoise(t *testing.T) {
 	mockData := []interface{}{
 		"public_value",
-		util.ObfuscationPrefix + "secret",
+		"KEPLOYREDACTsecret",
 		"another_public",
 	}
 	reqData := []interface{}{
@@ -391,39 +400,55 @@ func TestJsonBodyMatchScore_ArrayWithObfuscation(t *testing.T) {
 		"actual_secret",
 		"another_public",
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// index 0: match (1/1), index 1: obfuscated (skipped), index 2: match (1/1)
-	// → matched=2, total=2, obfuscated=1 → 100%
-	if matched != 2 || total != 2 || obfuscated != 1 {
-		t.Errorf("expected matched=2 total=2 obfuscated=1, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTsecret"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 2 || total != 2 || noisy != 1 {
+		t.Errorf("expected matched=2 total=2 noisy=1, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestJsonBodyMatchScore_MissingKey(t *testing.T) {
+func TestJSONBodyMatchScore_MissingKey(t *testing.T) {
 	mockData := map[string]interface{}{
 		"name":  "john",
 		"email": "john@example.com",
 	}
 	reqData := map[string]interface{}{
 		"name": "john",
-		// email missing
 	}
-	matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
-	// name: match, email: missing (not matched)
-	if matched != 1 || total != 2 || obfuscated != 0 {
-		t.Errorf("expected matched=1 total=2 obfuscated=0, got %d/%d/%d", matched, total, obfuscated)
+	nc := util.NewNoiseChecker(nil)
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 1 || total != 2 || noisy != 0 {
+		t.Errorf("expected matched=1 total=2 noisy=0, got %d/%d/%d", matched, total, noisy)
 	}
 }
 
-func TestExactBodyMatch_ObfuscatedFullMatch(t *testing.T) {
+func TestJSONBodyMatchScore_DigitOnlyNoise(t *testing.T) {
+	// Digit-only obfuscated values have no prefix — noise is the only way to detect them
+	mockData := map[string]interface{}{
+		"username": "john",
+		"otp":      "317508",
+	}
+	reqData := map[string]interface{}{
+		"username": "john",
+		"otp":      "849372",
+	}
+	nc := util.NewNoiseChecker(noiseFor("317508"))
+	matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+	if matched != 1 || total != 1 || noisy != 1 {
+		t.Errorf("expected matched=1 total=1 noisy=1, got %d/%d/%d", matched, total, noisy)
+	}
+}
+
+func TestExactBodyMatch_NoisyFullMatch(t *testing.T) {
 	h := newHTTP()
 	mocks := []*models.Mock{
 		{
-			Name: "mock-obf",
-			Kind: models.Kind(models.HTTP),
+			Name:  "mock-noisy",
+			Kind:  models.Kind(models.HTTP),
+			Noise: noiseFor("KEPLOYREDACTabc123"),
 			Spec: models.MockSpec{
 				HTTPReq: &models.HTTPReq{
-					Body: `{"username":"john","password":"` + util.ObfuscationPrefix + `abc123","age":25}`,
+					Body: `{"username":"john","password":"KEPLOYREDACTabc123","age":25}`,
 				},
 			},
 		},
@@ -431,43 +456,44 @@ func TestExactBodyMatch_ObfuscatedFullMatch(t *testing.T) {
 	reqBody := []byte(`{"username":"john","password":"real_password","age":25}`)
 	ok, match := h.ExactBodyMatch(reqBody, mocks)
 	if !ok {
-		t.Fatal("expected obfuscation-aware match to succeed")
+		t.Fatal("expected noise-aware match to succeed")
 	}
-	if match.Name != "mock-obf" {
-		t.Errorf("expected mock-obf, got %s", match.Name)
+	if match.Name != "mock-noisy" {
+		t.Errorf("expected mock-noisy, got %s", match.Name)
 	}
 }
 
-func TestExactBodyMatch_ObfuscatedPartialMismatch(t *testing.T) {
+func TestExactBodyMatch_NoisyPartialMismatch(t *testing.T) {
 	h := newHTTP()
 	mocks := []*models.Mock{
 		{
-			Name: "mock-obf",
-			Kind: models.Kind(models.HTTP),
+			Name:  "mock-noisy",
+			Kind:  models.Kind(models.HTTP),
+			Noise: noiseFor("KEPLOYREDACTabc123"),
 			Spec: models.MockSpec{
 				HTTPReq: &models.HTTPReq{
-					Body: `{"username":"john","password":"` + util.ObfuscationPrefix + `abc123"}`,
+					Body: `{"username":"john","password":"KEPLOYREDACTabc123"}`,
 				},
 			},
 		},
 	}
-	// username differs — should NOT match even though password is obfuscated
 	reqBody := []byte(`{"username":"jane","password":"real_password"}`)
 	ok, _ := h.ExactBodyMatch(reqBody, mocks)
 	if ok {
-		t.Error("expected no match when non-obfuscated field differs")
+		t.Error("expected no match when non-noisy field differs")
 	}
 }
 
-func TestExactBodyMatch_PreferExactOverObfuscated(t *testing.T) {
+func TestExactBodyMatch_PreferExactOverNoisy(t *testing.T) {
 	h := newHTTP()
 	mocks := []*models.Mock{
 		{
-			Name: "mock-obf",
-			Kind: models.Kind(models.HTTP),
+			Name:  "mock-noisy",
+			Kind:  models.Kind(models.HTTP),
+			Noise: noiseFor("KEPLOYREDACTabc"),
 			Spec: models.MockSpec{
 				HTTPReq: &models.HTTPReq{
-					Body: `{"name":"` + util.ObfuscationPrefix + `abc"}`,
+					Body: `{"name":"KEPLOYREDACTabc"}`,
 				},
 			},
 		},
@@ -486,21 +512,22 @@ func TestExactBodyMatch_PreferExactOverObfuscated(t *testing.T) {
 	if !ok {
 		t.Fatal("expected match")
 	}
-	// Exact match should be preferred over obfuscation-aware match
 	if match.Name != "mock-exact" {
 		t.Errorf("expected mock-exact (exact match preferred), got %s", match.Name)
 	}
 }
 
-func TestExactBodyMatch_FullyObfuscatedBody(t *testing.T) {
+func TestExactBodyMatch_FullyNoisyBody(t *testing.T) {
 	h := newHTTP()
+	noisyBody := "KEPLOYREDACTentire_body_redacted"
 	mocks := []*models.Mock{
 		{
-			Name: "mock-full-obf",
-			Kind: models.Kind(models.HTTP),
+			Name:  "mock-full-noisy",
+			Kind:  models.Kind(models.HTTP),
+			Noise: noiseFor(noisyBody),
 			Spec: models.MockSpec{
 				HTTPReq: &models.HTTPReq{
-					Body: util.ObfuscationPrefix + "entire_body_redacted",
+					Body: noisyBody,
 				},
 			},
 		},
@@ -508,16 +535,38 @@ func TestExactBodyMatch_FullyObfuscatedBody(t *testing.T) {
 	reqBody := []byte(`anything goes here`)
 	ok, match := h.ExactBodyMatch(reqBody, mocks)
 	if !ok {
-		t.Fatal("expected fully obfuscated body to auto-match")
+		t.Fatal("expected fully noisy body to auto-match")
 	}
-	if match.Name != "mock-full-obf" {
-		t.Errorf("expected mock-full-obf, got %s", match.Name)
+	if match.Name != "mock-full-noisy" {
+		t.Errorf("expected mock-full-noisy, got %s", match.Name)
 	}
 }
 
-func TestStripObfuscatedJSON_RemovesRedactedFields(t *testing.T) {
-	input := `{"name":"john","secret":"` + util.ObfuscationPrefix + `abc","age":25}`
-	result := stripObfuscatedJSON(input)
+func TestExactBodyMatch_NoNoisePatterns(t *testing.T) {
+	h := newHTTP()
+	// Mock has no Noise patterns — second pass should skip it
+	mocks := []*models.Mock{
+		{
+			Name: "mock-no-noise",
+			Kind: models.Kind(models.HTTP),
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: `{"name":"john"}`,
+				},
+			},
+		},
+	}
+	reqBody := []byte(`{"name":"jane"}`)
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when bodies differ and no noise patterns")
+	}
+}
+
+func TestStripNoisyJSON_RemovesNoisyFields(t *testing.T) {
+	input := `{"name":"john","secret":"KEPLOYREDACTabc","age":25}`
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTabc"))
+	result := util.StripNoisyJSON(input, nc)
 
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &data); err != nil {
@@ -534,25 +583,28 @@ func TestStripObfuscatedJSON_RemovesRedactedFields(t *testing.T) {
 	}
 }
 
-func TestStripObfuscatedJSON_NoObfuscation(t *testing.T) {
+func TestStripNoisyJSON_NoNoise(t *testing.T) {
 	input := `{"name":"john","age":25}`
-	result := stripObfuscatedJSON(input)
+	nc := util.NewNoiseChecker(nil)
+	result := util.StripNoisyJSON(input, nc)
 	if result != input {
 		t.Errorf("expected unchanged body, got %s", result)
 	}
 }
 
-func TestStripObfuscatedJSON_NonJSON(t *testing.T) {
-	input := "plain text body with " + util.ObfuscationPrefix + "value"
-	result := stripObfuscatedJSON(input)
+func TestStripNoisyJSON_NonJSON(t *testing.T) {
+	input := "plain text body"
+	nc := util.NewNoiseChecker(noiseFor("anything"))
+	result := util.StripNoisyJSON(input, nc)
 	if result != input {
 		t.Errorf("expected unchanged non-JSON body, got %s", result)
 	}
 }
 
-func TestStripObfuscatedJSON_Nested(t *testing.T) {
-	input := `{"user":{"name":"john","token":"` + util.ObfuscationPrefix + `xyz"},"active":true}`
-	result := stripObfuscatedJSON(input)
+func TestStripNoisyJSON_Nested(t *testing.T) {
+	input := `{"user":{"name":"john","token":"KEPLOYREDACTxyz"},"active":true}`
+	nc := util.NewNoiseChecker(noiseFor("KEPLOYREDACTxyz"))
+	result := util.StripNoisyJSON(input, nc)
 
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &data); err != nil {

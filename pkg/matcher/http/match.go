@@ -122,7 +122,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			return false, res
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, nil)
 			pass = jsonComparisonResult.IsExact()
 			if err != nil {
 				return false, res
@@ -318,7 +318,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, nil)
 					if err != nil {
 						return false, res
 					}

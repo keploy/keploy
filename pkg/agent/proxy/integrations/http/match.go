@@ -380,9 +380,10 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	return schemaMatched, nil
 }
 
-// ExactBodyMatch performs exact body matching with obfuscation awareness.
-// First pass: fast string equality for non-obfuscated mocks.
-// Second pass: JSON-level comparison that skips obfuscated fields.
+// ExactBodyMatch performs exact body matching with noise awareness.
+// First pass: fast string equality.
+// Second pass: noise-aware JSON comparison that skips obfuscated fields
+// identified by Mock.Noise patterns.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
@@ -391,7 +392,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
 
-	// First pass: exact string match (fastest path, no obfuscation)
+	// First pass: exact string match (fastest path)
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
 			h.Logger.Info("http mock matched",
@@ -402,25 +403,27 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		}
 	}
 
-	// Second pass: obfuscation-aware match for mocks with redacted values
+	// Second pass: noise-aware match for mocks with obfuscated values
 	for _, mock := range schemaMatched {
-		mockBody := mock.Spec.HTTPReq.Body
-		if !util.ContainsObfuscatedValue(mockBody) {
-			continue
+		nc := util.NewNoiseChecker(mock.Noise)
+		if nc == nil {
+			continue // no noise patterns → already checked in first pass
 		}
 
-		// If the entire body is a single obfuscated value, auto-match
+		mockBody := mock.Spec.HTTPReq.Body
+
+		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
-		if util.IsObfuscated(mockBody) {
+		if nc.IsNoisy(mockBody) {
 			h.Logger.Info("http mock matched",
 				zap.String("mock", mock.Name),
 				zap.Float64("match_percentage", 100.0),
-				zap.Int("obfuscated_fields_skipped", 1),
-				zap.String("match_type", "exact_body_fully_obfuscated"))
+				zap.Int("noisy_fields_skipped", 1),
+				zap.String("match_type", "exact_body_fully_noisy"))
 			return true, mock
 		}
 
-		// JSON-level comparison skipping obfuscated fields
+		// JSON-level comparison skipping noisy fields
 		if !pkg.IsJSON([]byte(mockBody)) || !pkg.IsJSON(body) {
 			continue
 		}
@@ -433,17 +436,17 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 			continue
 		}
 
-		matched, total, obfuscated := jsonBodyMatchScore(mockData, reqData)
+		matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
 
 		pct := 100.0
 		if total > 0 {
 			pct = float64(matched) / float64(total) * 100
 		}
-		h.Logger.Info("http mock match score (obfuscation-aware)",
+		h.Logger.Info("http mock match score (noise-aware)",
 			zap.String("mock", mock.Name),
 			zap.Int("matched_fields", matched),
 			zap.Int("total_fields", total),
-			zap.Int("obfuscated_fields_skipped", obfuscated),
+			zap.Int("noisy_fields_skipped", noisy),
 			zap.Float64("match_percentage", pct))
 
 		if matched == total {
@@ -452,116 +455,6 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 
 	return false, nil
-}
-
-// jsonBodyMatchScore recursively compares mock and request JSON values.
-// Obfuscated mock values are completely excluded from the comparison — they
-// do not count towards matched or total. The returned obfuscated count is
-// tracked separately for logging. This means if all non-obfuscated fields
-// match, the percentage is 100%.
-func jsonBodyMatchScore(mockVal, reqVal interface{}) (matched, total, obfuscated int) {
-	// Obfuscated value — skip entirely, don't count in matched or total.
-	if util.IsObfuscated(mockVal) {
-		return 0, 0, 1
-	}
-
-	switch mv := mockVal.(type) {
-	case map[string]interface{}:
-		rv, ok := reqVal.(map[string]interface{})
-		if !ok {
-			return 0, 1, 0
-		}
-		for key, mockField := range mv {
-			if util.IsObfuscated(mockField) {
-				obfuscated++
-				continue
-			}
-			reqField, exists := rv[key]
-			if !exists {
-				total++
-				continue
-			}
-			m, t, o := jsonBodyMatchScore(mockField, reqField)
-			matched += m
-			total += t
-			obfuscated += o
-		}
-		return
-
-	case []interface{}:
-		rv, ok := reqVal.([]interface{})
-		if !ok {
-			return 0, 1, 0
-		}
-		for i := 0; i < len(mv); i++ {
-			if util.IsObfuscated(mv[i]) {
-				obfuscated++
-				continue
-			}
-			if i >= len(rv) {
-				total++
-				continue
-			}
-			m, t, o := jsonBodyMatchScore(mv[i], rv[i])
-			matched += m
-			total += t
-			obfuscated += o
-		}
-		return
-
-	default:
-		total = 1
-		// JSON unmarshal produces comparable types: string, float64, bool, nil.
-		if mockVal == reqVal {
-			matched = 1
-		}
-		return
-	}
-}
-
-// stripObfuscatedFields recursively removes obfuscated values from a parsed
-// JSON structure so they don't skew fuzzy similarity scores.
-func stripObfuscatedFields(data interface{}) interface{} {
-	switch v := data.(type) {
-	case map[string]interface{}:
-		result := make(map[string]interface{})
-		for key, val := range v {
-			if util.IsObfuscated(val) {
-				continue
-			}
-			result[key] = stripObfuscatedFields(val)
-		}
-		return result
-	case []interface{}:
-		var result []interface{}
-		for _, item := range v {
-			if util.IsObfuscated(item) {
-				continue
-			}
-			result = append(result, stripObfuscatedFields(item))
-		}
-		return result
-	default:
-		return data
-	}
-}
-
-// stripObfuscatedJSON removes obfuscated values from a JSON body string.
-// Returns the body as-is if it's not JSON or has no obfuscated values.
-func stripObfuscatedJSON(body string) string {
-	if !util.ContainsObfuscatedValue(body) || !pkg.IsJSON([]byte(body)) {
-		return body
-	}
-	var data interface{}
-	if err := json.Unmarshal([]byte(body), &data); err != nil {
-		return body
-	}
-	stripped := stripObfuscatedFields(data)
-	b, err := json.Marshal(stripped)
-	if err != nil {
-		return body
-	}
-	return string(b)
 }
 
 func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
@@ -668,7 +561,7 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 }
 
 // PerformFuzzyMatch performs fuzzy matching on the request body.
-// Obfuscated values are stripped from mock bodies before computing
+// Noisy (obfuscated) values are stripped from mock bodies before computing
 // similarity so that redacted padding doesn't skew the score.
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
@@ -690,10 +583,11 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 		}
 	}
 
-	// Build mock body strings, stripping obfuscated values for fair comparison
+	// Build mock body strings, stripping noisy values for fair comparison
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
-		mockStrings[i] = stripObfuscatedJSON(tcsMocks[i].Spec.HTTPReq.Body)
+		nc := util.NewNoiseChecker(tcsMocks[i].Noise)
+		mockStrings[i] = util.StripNoisyJSON(tcsMocks[i].Spec.HTTPReq.Body, nc)
 	}
 
 	// String-based fuzzy matching (Levenshtein distance)

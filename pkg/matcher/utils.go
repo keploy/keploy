@@ -24,6 +24,7 @@ import (
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -108,7 +109,7 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 
 // JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
 // and Global noise (e.g. "timestamp") to be ignored everywhere.
-func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool, obfuscationNoise *util.NoiseChecker) (JSONComparisonResult, error) {
 	// Split noise into Path-based (contains dots) and Global (no dots)
 	pathNoise := make(map[string][]string)
 	globalKeys := make(map[string]bool)
@@ -124,11 +125,11 @@ func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]st
 	}
 
 	idx := buildNoiseIndex(pathNoise)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, obfuscationNoise)
 }
 
 // matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool) (JSONComparisonResult, error) {
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool, obfuscationNoise *util.NoiseChecker) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
@@ -142,6 +143,10 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		a, ok := actual.(string)
 		if !ok {
 			return out, errors.New("type not matched")
+		}
+		if obfuscationNoise != nil && obfuscationNoise.IsNoisy(e) {
+			out.matches, out.isExact = true, true
+			return out, nil
 		}
 		regs, noisy := ni.match(strings.ToLower(key))
 		if noisy && len(regs) != 0 {
@@ -217,7 +222,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering, obfuscationNoise)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -266,7 +271,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering, obfuscationNoise)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -295,7 +300,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering, obfuscationNoise)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false
