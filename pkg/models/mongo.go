@@ -31,6 +31,7 @@ const (
 
 type MongoSpec struct {
 	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Noise            []string          `json:"noise,omitempty" yaml:"noise,omitempty"`
 	Requests         []RequestYaml     `json:"requests" yaml:"requests"`
 	Response         []ResponseYaml    `json:"responses" yaml:"responses"`
 	CreatedAt        int64             `json:"created" yaml:"created,omitempty"`

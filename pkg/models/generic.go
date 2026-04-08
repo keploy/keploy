@@ -6,6 +6,7 @@ import (
 
 type GenericSchema struct {
 	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Noise            []string          `json:"noise,omitempty" yaml:"noise,omitempty"`
 	GenericRequests  []Payload         `json:"RequestBin,omitempty"`
 	GenericResponses []Payload         `json:"ResponseBin,omitempty"`
 	ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`

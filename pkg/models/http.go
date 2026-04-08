@@ -29,6 +29,7 @@ type HTTPReq struct {
 
 type HTTPSchema struct {
 	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
+	Noise            []string                      `json:"noise,omitempty" yaml:"noise,omitempty"`
 	Request          HTTPReq                       `json:"req" yaml:"req"`
 	Response         HTTPResp                      `json:"resp" yaml:"resp"`
 	Objects          []*OutputBinary               `json:"objects" yaml:"objects"`
