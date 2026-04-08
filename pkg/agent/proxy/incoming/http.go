@@ -279,6 +279,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				req.Body.Close()
 				return
 			}
+			if isIngressRecordingPaused() {
+				logger.Debug("HTTP/1 ingress request write failed under memory pressure", zap.Error(err))
+				req.Body.Close()
+				return
+			}
 			logger.Error("Failed to forward request to upstream", zap.Error(err))
 			req.Body.Close()
 			return
@@ -309,6 +314,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err != nil {
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", zap.Error(err))
+				return
+			}
+			if isIngressRecordingPaused() {
+				logger.Debug("HTTP/1 ingress upstream read failed under memory pressure", zap.Error(err))
 				return
 			}
 			logger.Error("Failed to read upstream response", zap.Error(err))
@@ -359,6 +368,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err := resp.Write(clientConn); err != nil {
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
+				resp.Body.Close()
+				return
+			}
+			if isIngressRecordingPaused() {
+				logger.Debug("HTTP/1 ingress client write failed under memory pressure", zap.Error(err))
 				resp.Body.Close()
 				return
 			}

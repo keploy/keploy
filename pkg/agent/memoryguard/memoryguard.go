@@ -85,6 +85,12 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 		return fmt.Errorf("failed to resolve container memory usage path: %w", err)
 	}
 
+	// Inform the Go runtime about the memory constraint so the GC becomes
+	// more aggressive well before the cgroup hard-limit is hit.  This
+	// prevents the heap from growing unchecked under bursty load and
+	// reduces the chance of cgroup-level OOM kills or I/O disruptions.
+	debug.SetMemoryLimit(limitBytes)
+
 	g := &guard{
 		logger:            logger,
 		memoryCurrentPath: memoryCurrentPath,
