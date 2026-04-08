@@ -24,6 +24,7 @@ type DNSResp struct {
 // DNSSchema is the YAML/JSON representation for DNS mocks.
 type DNSSchema struct {
 	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Noise            []string          `json:"noise,omitempty" yaml:"noise,omitempty"`
 	Request          DNSReq            `json:"request" yaml:"request"`
 	Response         DNSResp           `json:"response" yaml:"response"`
 	ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty"`

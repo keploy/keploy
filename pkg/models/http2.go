@@ -25,6 +25,7 @@ type HTTP2Resp struct {
 // HTTP2Schema is the YAML/JSON representation for HTTP/2 outgoing mocks.
 type HTTP2Schema struct {
 	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Noise            []string          `json:"noise,omitempty" yaml:"noise,omitempty"`
 	Request          HTTP2Req          `json:"req" yaml:"req"`
 	Response         HTTP2Resp         `json:"resp" yaml:"resp"`
 	Created          int64             `json:"created" yaml:"created,omitempty"`
