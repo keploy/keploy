@@ -2,12 +2,12 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +19,126 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+var isIngressRecordingPaused = memoryguard.IsRecordingPaused
+
+type httpCaptureState struct {
+	mu        sync.Mutex
+	maxBytes  int
+	usedBytes int
+	aborted   bool
+}
+
+func newHTTPCaptureState(maxBytes int) *httpCaptureState {
+	return &httpCaptureState{maxBytes: maxBytes}
+}
+
+func (s *httpCaptureState) reserve(n int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.aborted {
+		return false
+	}
+	if isIngressRecordingPaused() {
+		s.aborted = true
+		return false
+	}
+	if s.maxBytes > 0 && s.usedBytes+n > s.maxBytes {
+		s.aborted = true
+		return false
+	}
+
+	s.usedBytes += n
+	return true
+}
+
+func (s *httpCaptureState) isAborted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aborted
+}
+
+type httpBodyCaptureBuffer struct {
+	state *httpCaptureState
+	buf   bytes.Buffer
+}
+
+func (b *httpBodyCaptureBuffer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.state == nil || !b.state.reserve(len(p)) {
+		b.buf.Reset()
+		return len(p), nil
+	}
+
+	if _, err := b.buf.Write(p); err != nil {
+		return 0, err
+	}
+
+	return len(p), nil
+}
+
+func (b *httpBodyCaptureBuffer) Bytes() []byte {
+	return b.buf.Bytes()
+}
+
+func (b *httpBodyCaptureBuffer) Reset() {
+	b.buf.Reset()
+}
+
+type teeReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func wrapBodyForCapture(body io.ReadCloser, capture io.Writer) io.ReadCloser {
+	if body == nil || capture == nil {
+		return body
+	}
+	return &teeReadCloser{
+		Reader: io.TeeReader(body, capture),
+		Closer: body,
+	}
+}
+
+func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
+	clone := new(http.Request)
+	*clone = *req
+	clone.Header = req.Header.Clone()
+	clone.Trailer = req.Trailer.Clone()
+	clone.GetBody = nil
+	if len(body) == 0 {
+		clone.Body = http.NoBody
+	} else {
+		clone.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	var buf bytes.Buffer
+	if err := clone.Write(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func serializeCapturedResponse(resp *http.Response, body []byte) ([]byte, error) {
+	clone := new(http.Response)
+	*clone = *resp
+	clone.Header = resp.Header.Clone()
+	clone.Trailer = resp.Trailer.Clone()
+	if len(body) == 0 {
+		clone.Body = http.NoBody
+	} else {
+		clone.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	var buf bytes.Buffer
+	if err := clone.Write(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	var acquiredLock bool
@@ -107,8 +227,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		reqTimestamp := time.Now()
 		var chunked bool = false
-		pressureCloseMode := forceCloseMode || memoryguard.IsRecordingPaused()
-		captureEnabled := !memoryguard.IsRecordingPaused()
+		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
+		captureEnabled := !isIngressRecordingPaused()
+		var captureState *httpCaptureState
+		var reqBodyCapture httpBodyCaptureBuffer
+		var respBodyCapture httpBodyCaptureBuffer
 
 		// Request modifications for Sync/Sampling modes
 		if forceCloseMode {
@@ -137,19 +260,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		var reqData []byte
 		if captureEnabled {
-			if memoryguard.IsRecordingPaused() {
+			if isIngressRecordingPaused() {
 				pressureCloseMode = true
 				captureEnabled = false
 				releaseLock()
 				req.Close = true
 				req.Header.Set("Connection", "close")
 			} else {
-				reqData, err = httputil.DumpRequest(req, true)
-				if err != nil {
-					logger.Error("Failed to dump request for capturing", zap.Error(err))
-					req.Body.Close()
-					return
-				}
+				captureState = newHTTPCaptureState(hooksUtils.MaxTestCaseSize)
+				reqBodyCapture.state = captureState
+				req.Body = wrapBodyForCapture(req.Body, &reqBodyCapture)
 			}
 		}
 
@@ -165,7 +285,21 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		req.Body.Close()
 
-		if !pressureCloseMode && memoryguard.IsRecordingPaused() {
+		if captureEnabled && captureState != nil {
+			if captureState.isAborted() {
+				captureEnabled = false
+				reqBodyCapture.Reset()
+			} else {
+				reqData, err = serializeCapturedRequest(req, reqBodyCapture.Bytes())
+				reqBodyCapture.Reset()
+				if err != nil {
+					captureEnabled = false
+					logger.Warn("Failed to serialize forwarded request for capturing", zap.Error(err))
+				}
+			}
+		}
+
+		if !pressureCloseMode && isIngressRecordingPaused() {
 			pressureCloseMode = true
 			captureEnabled = false
 			releaseLock()
@@ -202,23 +336,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		respTimestamp := time.Now()
 		var respData []byte
 		if captureEnabled {
-			if memoryguard.IsRecordingPaused() {
+			if isIngressRecordingPaused() {
 				pressureCloseMode = true
 				captureEnabled = false
 				releaseLock()
 				resp.Close = true
 				resp.Header.Set("Connection", "close")
 			} else {
-				respData, err = httputil.DumpResponse(resp, true)
-				if err != nil {
-					logger.Error("Failed to dump response for capturing", zap.Error(err))
-					resp.Body.Close()
-					return
-				}
+				respBodyCapture.state = captureState
+				resp.Body = wrapBodyForCapture(resp.Body, &respBodyCapture)
 			}
 		}
 
-		if !pressureCloseMode && memoryguard.IsRecordingPaused() {
+		if !pressureCloseMode && isIngressRecordingPaused() {
 			pressureCloseMode = true
 			captureEnabled = false
 			releaseLock()
@@ -238,6 +368,27 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		resp.Body.Close()
 
+		if captureEnabled && captureState != nil {
+			if captureState.isAborted() {
+				captureEnabled = false
+				reqBodyCapture.Reset()
+				respBodyCapture.Reset()
+			} else {
+				respData, err = serializeCapturedResponse(resp, respBodyCapture.Bytes())
+				respBodyCapture.Reset()
+				if err != nil {
+					captureEnabled = false
+					logger.Warn("Failed to serialize forwarded response for capturing", zap.Error(err))
+				}
+			}
+		}
+
+		if !pressureCloseMode && isIngressRecordingPaused() {
+			pressureCloseMode = true
+			captureEnabled = false
+			releaseLock()
+		}
+
 		// Capture Evaluation
 		shouldCapture := captureEnabled
 		if forceCloseMode {
@@ -249,7 +400,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		// Only parse and invoke the hook if it's eligible for capture
-		if shouldCapture {
+		if shouldCapture && !isIngressRecordingPaused() {
 			parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 			if err == nil {
 				parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)

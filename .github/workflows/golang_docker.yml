@@ -20,6 +20,9 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: go-memory-load
+            path: go-memory-load
+            script_dir: go_memory_load
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -54,6 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
+          ref: memory-load-app
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:
