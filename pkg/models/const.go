@@ -38,6 +38,7 @@ const (
 	SQLDB               string = "SQL_DB"
 	GRPC                string = "GRPC"
 	HTTPClient          string = "HTTP_CLIENT"
+	HTTP2Client         string = "HTTP2_CLIENT"
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"
@@ -153,3 +154,5 @@ type contextKey string
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
 const DestConnectionIDKey contextKey = "destConnectionId"
+const PostTLSModeKey contextKey = "postTLSMode"
+const TLSHandshakeStoreKey contextKey = "tlsHandshakeStore"

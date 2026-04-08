@@ -106,7 +106,7 @@ for i in 1 2; do
   app_name="nodeApp_${i}"
 
   # Start keploy recording in background, capture PID
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' \
+  "$RECORD_BIN" record -c 'npm start' \
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
 
@@ -176,7 +176,7 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
+  "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
     > "$logfile" 2>&1
   local rc=$?
   set -e

@@ -21,6 +21,8 @@ import (
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -520,10 +522,7 @@ func compareZip(exp *interface{}, act *interface{}, key string, rev map[interfac
 			return
 		}
 		// Walk by index. We only normalize where both sides have an element.
-		n := len(ev.List)
-		if len(aa.List) < n {
-			n = len(aa.List)
-		}
+		n := min(len(aa.List), len(ev.List))
 		for i := 0; i < n; i++ {
 			child := ev.List[i]
 			compareZip(&child, &aa.List[i], "", rev)
@@ -535,10 +534,7 @@ func compareZip(exp *interface{}, act *interface{}, key string, rev map[interfac
 		if !ok {
 			return
 		}
-		n := len(ev)
-		if len(aarr) < n {
-			n = len(aarr)
-		}
+		n := min(len(aarr), len(ev))
 		for i := 0; i < n; i++ {
 			child := ev[i]
 			compareZip(&child, &aarr[i], "", rev)
@@ -695,6 +691,7 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 			return validatedJSON, err
 		}
 	}
+
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
@@ -783,6 +780,16 @@ func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
 	}
 }
 
+func newDiffTableRenderer() *renderer.Colorized {
+	return renderer.NewColorized(renderer.ColorizedConfig{
+		Header:    renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
+		Column:    renderer.Tint{Columns: []renderer.Tint{}},
+		Footer:    renderer.Tint{FG: renderer.Colors{color.FgYellow}},
+		Border:    renderer.Tint{FG: renderer.Colors{color.FgWhite}},
+		Separator: renderer.Tint{FG: renderer.Colors{color.FgWhite}},
+	})
+}
+
 func (d *DiffsPrinter) PushTypeDiff(exp, act string) {
 	d.typeExp, d.typeAct = exp, act
 }
@@ -802,7 +809,6 @@ func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]s
 func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
-
 func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
@@ -845,11 +851,16 @@ func (d *DiffsPrinter) Render() error {
 		return nil
 	}
 
-	table := tablewriter.NewWriter(d.out)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
+	if !models.IsAnsiDisabled {
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
+	}
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
+	table := tablewriter.NewTable(d.out, opts...)
+	table.Header([]string{d.testCase})
 
 	for _, e := range diffs {
 		if strings.TrimSpace(e) != "" {
@@ -858,55 +869,77 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
-		endPaint := yellowPaint(" are in different order but have the same objects")
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
+
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 
 	table.Render()
 	return nil
 }
-
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
-	table := tablewriter.NewWriter(d.out)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
+	if !models.IsAnsiDisabled {
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
+	}
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
+	table := tablewriter.NewTable(d.out, opts...)
+	table.Header([]string{d.testCase})
 
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
 
-		endPaint := yellowPaint(" are in different order but have the same objects")
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 	table.Render()
 	return nil
 }
+
 func (d *DiffsPrinter) RenderAppender() error {
 	//Only show difference for the response body
 	diffs := []string{}
@@ -947,6 +980,74 @@ func (d *DiffsPrinter) RenderAppender() error {
 
 	}
 
+	return nil
+}
+
+// SchemaError represents a single schema mismatch
+type SchemaError struct {
+	Reason   string
+	Expected string
+	Actual   string
+}
+
+// SchemaDiffPrinter for printing schema mismatch errors
+type SchemaDiffPrinter struct {
+	out      io.Writer
+	testCase string
+	errors   []SchemaError
+}
+
+func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
+	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
+}
+
+func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
+	if out == nil {
+		out = os.Stdout
+	}
+	return SchemaDiffPrinter{
+		out:      out,
+		testCase: testCase,
+		errors:   []SchemaError{},
+	}
+}
+
+func (s *SchemaDiffPrinter) PushError(reason, expected, actual string) {
+	s.errors = append(s.errors, SchemaError{
+		Reason:   reason,
+		Expected: expected,
+		Actual:   actual,
+	})
+}
+
+func (s *SchemaDiffPrinter) Render() error {
+	if len(s.errors) == 0 {
+		return nil
+	}
+
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithHeaderAlignment(tw.AlignLeft))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
+	if !models.IsAnsiDisabled {
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
+	}
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignLeft))
+	table := tablewriter.NewTable(s.out, opts...)
+	table.Header([]string{"Schema Check Failed", "Expected", "Actual"})
+
+	for _, e := range s.errors {
+		exp := e.Expected
+		act := e.Actual
+		reason := e.Reason
+
+		table.Append([]string{reason, exp, act})
+	}
+
+	fmt.Fprintf(s.out, "\nTestrun failed for testcase with id: %s\n", s.testCase)
+	table.Render()
+	fmt.Fprintln(s.out) // Add a newline after
 	return nil
 }
 
@@ -1101,20 +1202,14 @@ func truncateStrings(exp, act string) (string, string) {
 		if diff > maxDiff {
 			if expLen > actLen {
 				// Expected is larger, truncate it
-				newExpLen := actLen + maxDiff
-				if newExpLen > maxBytes {
-					newExpLen = maxBytes
-				}
+				newExpLen := min(actLen+maxDiff, maxBytes)
 				if newExpLen < expLen {
 					exp = exp[:newExpLen]
 					expTruncated = true
 				}
 			} else {
 				// Actual is larger, truncate it
-				newActLen := expLen + maxDiff
-				if newActLen > maxBytes {
-					newActLen = maxBytes
-				}
+				newActLen := min(expLen+maxDiff, maxBytes)
 				if newActLen < actLen {
 					act = act[:newActLen]
 					actTruncated = true
@@ -1143,28 +1238,31 @@ func truncateStrings(exp, act string) (string, string) {
 
 	return exp, act
 }
-
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	table := tablewriter.NewWriter(buf)
-
+	rowAlign := tw.AlignLeft
 	if centerize {
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
-	} else {
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
+		rowAlign = tw.AlignCenter
 	}
 
-	// Apply truncation logic before processing
+	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// jsonDiff.JsonDiff()
-	exp = wrapTextWithAnsi(exp)
-	act = wrapTextWithAnsi(act)
-	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
-	table.SetAutoWrapText(false)
-	table.SetBorder(false)
-	table.SetColMinWidth(0, maxLineLength)
-	table.SetColMinWidth(1, maxLineLength)
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	}
+
+	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
+	table := tablewriter.NewTable(buf,
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAlignment(rowAlign),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
@@ -1173,40 +1271,44 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 // expectActualTableWithColors creates a table with colored expected (red) and actual (green) values
 func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	table := tablewriter.NewWriter(buf)
-
+	rowAlign := tw.AlignLeft
 	if centerize {
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
-	} else {
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
+		rowAlign = tw.AlignCenter
 	}
 
 	// Apply truncation logic before processing
 	exp, act = truncateStrings(exp, act)
 
-	// Apply colors: red for expected, green for actual
-	// Force color output even when piping to files
-	greenPaint := color.New(color.FgGreen)
-	greenPaint.EnableColor()
-	redPaint := color.New(color.FgRed)
-	redPaint.EnableColor()
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	} else {
+		greenPaint := color.New(color.FgGreen)
+		greenPaint.EnableColor()
+		redPaint := color.New(color.FgRed)
+		redPaint.EnableColor()
 
-	coloredExp := redPaint.SprintFunc()(exp)
-	coloredAct := greenPaint.SprintFunc()(act)
+		exp = redPaint.SprintFunc()(exp)
+		act = greenPaint.SprintFunc()(act)
+	}
 
-	coloredExp = wrapTextWithAnsi(coloredExp)
-	coloredAct = wrapTextWithAnsi(coloredAct)
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 
-	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
-	table.SetAutoWrapText(false)
-	table.SetBorder(false)
-	table.SetColMinWidth(0, maxLineLength)
-	table.SetColMinWidth(1, maxLineLength)
-	table.Append([]string{coloredExp, coloredAct})
+	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
+	table := tablewriter.NewTable(buf,
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAlignment(rowAlign),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
+	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
 }
-
 func Contains(elems []string, v string) bool {
 	for _, s := range elems {
 		if v == s {

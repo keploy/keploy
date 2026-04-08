@@ -35,8 +35,11 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
+  replaceWith:
+    global: {}
+    test-sets: {}
   delay: 5
-  host: ""
+  host: "localhost"
   port: 0
   grpcPort: 0
   apiTimeout: 5
@@ -60,12 +63,17 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
+  compareAll: false
+  updateTestMapping: false
+  disableAutoHeaderNoise: false
 record:
   recordTimer: 0s
   filters: []
   sync: false
+  maxBufferMemoryMB: 0
 configPath: ""
 bypassRules: []
+disableMapping: true
 contract:
   driven: "consumer"
   mappings:
@@ -95,14 +103,13 @@ inDocker: false
 cmdType: "native"
 `
 
-var config = &Config{}
-
 func New() *Config {
 	// merge default config with internal config
 	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
 	}
+	config := &Config{}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {
 		panic(err)

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# safer bash, but we’ll locally disable -e around commands we want to inspect
-set -Eeuo pipefail
+# safer bash, but we’ll locally disable -e around commands we want to inspectset -Eeuo pipefail
 
 git fetch origin
 git checkout origin/add-ssl-mysql
@@ -97,8 +96,11 @@ run_record_iteration() {
   local app_name="urlShort_${idx}"
 
   echo "Record iteration $idx"
+
+  sudo rm -f /tmp/keploy-logs.txt
+
   # Start recording in background so we capture its PID explicitly
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
+  "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
     2>&1 | tee "${app_name}.txt" & 
   local KEPLOY_PID=$!
 
@@ -138,11 +140,14 @@ run_record_iteration() {
 section "Environment"
 echo "RECORD_BIN: $RECORD_BIN"
 echo "REPLAY_BIN : $REPLAY_BIN"
-"$RECORD_BIN" version 2>/dev/null || true
-"$REPLAY_BIN" version  2>/dev/null || true
+"$RECORD_BIN" --version 2>/dev/null || true
+"$REPLAY_BIN" --version 2>/dev/null || true
 # Clean slate per run
 rm -rf keploy/ keploy.yml || true
  # Generate config
+
+sudo rm -f /tmp/keploy-logs.txt
+
 sudo "$RECORD_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
 go build -o urlShort
@@ -180,7 +185,10 @@ endsec
 section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
+
+sudo rm -f /tmp/keploy-logs.txt
+
+"$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
   2>&1 | tee test_logs.txt || true
 REPLAY_RC=$?
 set -e

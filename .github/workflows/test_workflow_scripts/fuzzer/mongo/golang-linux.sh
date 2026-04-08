@@ -214,7 +214,7 @@ endsec
 # --- Recording Phase ---
 section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
+"$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
@@ -251,7 +251,7 @@ sleep 5
 section "Replaying Tests"
 cd $GO_FUZZERS_PATH
 # The test command must match the record command
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test.txt &
+"$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test.txt &
 TEST_PID=$!
 echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID

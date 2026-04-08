@@ -5,18 +5,25 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, ml ...*pUtil.MemoryLimiter) error {
+	var memLimiter *pUtil.MemoryLimiter
+	if len(ml) > 0 {
+		memLimiter = ml[0]
+	}
+
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -24,6 +31,20 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	//for keeping conn alive
 	for {
+		if memLimiter != nil && memLimiter.IsExceeded() {
+			logger.Debug("memory limit exceeded, stopping MySQL recording and falling back to passthrough")
+			done := make(chan struct{}, 2)
+			cp := func(dst, src net.Conn) {
+				_, _ = io.Copy(dst, src)
+				done <- struct{}{}
+			}
+			go cp(destConn, clientConn)
+			go cp(clientConn, destConn)
+			<-done
+			<-done
+			return nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -68,6 +89,24 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				continue
 			}
 
+			// Unknown/unrecognized packet types (e.g. "0x12") are produced by
+			// decodePacket's default case when the first payload byte doesn't
+			// match any known MySQL command. This typically happens in the
+			// post-TLS uprobe path when the capture starts mid-stream on an
+			// existing connection and the data is misaligned. Treating these
+			// as no-response commands prevents the parser from trying to read
+			// a response that doesn't exist, which would desync the streams
+			// and cascade into errors like "expected TextResultSet, got
+			// *mysql.QueryPacket".
+			if strings.HasPrefix(commandPkt.Header.Type, "0x") {
+				logger.Debug("Skipping unknown command packet to avoid stream desync",
+					zap.String("type", commandPkt.Header.Type))
+				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+				requests = []mysql.Request{}
+				responses = []mysql.Response{}
+				continue
+			}
+
 			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
 				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
@@ -109,6 +148,11 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		return nil, time.Time{}, err
 	}
 
+	// Snapshot the previous lastOp for diagnostics. If decode sees stale
+	// state and parses a response as a command packet, we include this in
+	// logs to explain the desync path.
+	prevLastOp, _ := decodeCtx.LastOp.Load(clientConn)
+
 	//decode the command response packet
 	commandRespPkt, err := wire.DecodePayload(ctx, logger, commandResp, clientConn, decodeCtx)
 	if err != nil {
@@ -127,6 +171,24 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
 	if !ok {
 		return nil, time.Time{}, fmt.Errorf("failed to get the last operation from the context while handling the query response")
+	}
+
+	// Guard: if the response was decoded as a command packet (e.g.
+	// *mysql.QueryPacket) instead of a response type, the data streams are
+	// desynchronized — typically because DecodePayload's lastOp was stale and
+	// the response went through decodePacket instead of
+	// handleQueryStmtResponse. Return the raw packet as-is rather than
+	// cascading into handleTextResultSet which would fail with a type
+	// assertion error and kill the parser pipeline.
+	if isCommandPacket(commandRespPkt.Message) {
+		logger.Debug("Response decoded as command packet — stream desync detected, returning raw response",
+			zap.String("responseType", commandRespPkt.Header.Type),
+			zap.String("prevLastOp", fmt.Sprintf("%#x", prevLastOp)),
+			zap.String("lastOp", fmt.Sprintf("%#x", lastOp)))
+		// Reset lastOp so the next iteration starts clean.
+		decodeCtx.LastOp.Store(clientConn, wire.RESET)
+		resTimestamp := time.Now()
+		return commandRespPkt, resTimestamp, nil
 	}
 
 	var queryResponsePkt *mysql.PacketBundle
@@ -205,30 +267,34 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
-		// Read the EOF packet for parameter definition
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+		if !decodeCtx.DeprecateEOF() {
+			logger.Debug("EOF packet is not deprecated while handling prepared statement param defs")
+
+			// Read the EOF packet for parameter definition
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+				}
+				return nil, err
 			}
-			return nil, err
+
+			// Write the EOF packet for parameter definition to the client
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write EOF packet for parameter definition to the client")
+				return nil, err
+			}
+
+			// Validate the EOF packet for parameter definition
+			if !mysqlUtils.IsEOFPacket(eofData) {
+				return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
+			}
+
+			responseOk.EOFAfterParamDefs = eofData
+
+			logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 		}
-
-		// Write the EOF packet for parameter definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for parameter definition to the client")
-			return nil, err
-		}
-
-		// Validate the EOF packet for parameter definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
-		}
-
-		responseOk.EOFAfterParamDefs = eofData
-
-		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 	}
 
 	//See if there are any columns
@@ -262,30 +328,34 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
-		// Read the EOF packet for column definition
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+		if !decodeCtx.DeprecateEOF() {
+			logger.Debug("EOF packet is not deprecated while handling prepared statement column defs")
+
+			// Read the EOF packet for column definition
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for column definition")
+				}
+				return nil, err
 			}
-			return nil, err
+
+			// Write the EOF packet for column definition to the client
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+				return nil, err
+			}
+
+			// Validate the EOF packet for column definition
+			if !mysqlUtils.IsEOFPacket(eofData) {
+				return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
+			}
+
+			responseOk.EOFAfterColumnDefs = eofData
+
+			logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 		}
-
-		// Write the EOF packet for column definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-			return nil, err
-		}
-
-		// Validate the EOF packet for column definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
-		}
-
-		responseOk.EOFAfterColumnDefs = eofData
-
-		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 	}
 
 	//set the lastOp to COM_STMT_PREPARE_OK
@@ -337,7 +407,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 		textResultSet.Columns = append(textResultSet.Columns, column)
 	}
 
-	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+	if !decodeCtx.DeprecateEOF() {
 		logger.Debug("EOF packet is not deprecated while handling textResultSet")
 
 		// Read the EOF packet for column definition
@@ -398,13 +468,19 @@ rowLoop:
 			// 	break rowLoop
 			// }
 
-			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
-			if mysqlUtils.IsEOFPacket(data) {
-				logger.Debug("Found EOF packet after row data in text resultset")
+			// Check for result set terminator. When CLIENT_DEPRECATE_EOF is
+			// negotiated the server replaces the final EOF with an OK packet
+			// that uses a 0xFE header byte. IsOKReplacingEOF validates the
+			// full OK packet structure to avoid false positives with row data.
+			if mysqlUtils.IsResultSetTerminator(data, decodeCtx.DeprecateEOF()) {
+				respType := mysql.StatusToString(mysql.EOF)
+				if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(data) {
+					respType = mysql.StatusToString(mysql.OK)
+				}
+				logger.Debug("Found result set terminator in text resultset", zap.String("type", respType))
 				textResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
-					Type: mysql.StatusToString(mysql.EOF),
+					Type: respType,
 				}
 				break rowLoop
 			}
@@ -469,28 +545,32 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
-	// Read the EOF packet for column definition
-	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-	if err != nil {
-		if err != io.EOF {
-			utils.LogError(logger, err, "failed to read EOF packet for column definition")
+	if !decodeCtx.DeprecateEOF() {
+		logger.Debug("EOF packet is not deprecated while handling BinaryProtocolResultSet")
+
+		// Read the EOF packet for column definition
+		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			if err != io.EOF {
+				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+			}
+			return nil, err
 		}
-		return nil, err
-	}
 
-	// Write the EOF packet for column definition to the client
-	_, err = clientConn.Write(eofData)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-		return nil, err
-	}
+		// Write the EOF packet for column definition to the client
+		_, err = clientConn.Write(eofData)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+			return nil, err
+		}
 
-	// Validate the EOF packet for column definition
-	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
-	}
+		// Validate the EOF packet for column definition
+		if !mysqlUtils.IsEOFPacket(eofData) {
+			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
+		}
 
-	binaryResultSet.EOFAfterColumns = eofData
+		binaryResultSet.EOFAfterColumns = eofData
+	}
 
 	// Read the row data packets
 rowLoop:
@@ -528,13 +608,19 @@ rowLoop:
 			// 	break rowLoop
 			// }
 
-			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
-			if mysqlUtils.IsEOFPacket(data) {
-				logger.Debug("Found EOF packet after row data in binary resultset")
+			// Check for result set terminator. When CLIENT_DEPRECATE_EOF is
+			// negotiated the server replaces the final EOF with an OK packet
+			// that uses a 0xFE header byte (not 0x00), so there is no
+			// ambiguity with binary row data (binary rows start with 0x00).
+			if mysqlUtils.IsResultSetTerminator(data, decodeCtx.DeprecateEOF()) {
+				respType := mysql.StatusToString(mysql.EOF)
+				if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(data) {
+					respType = mysql.StatusToString(mysql.OK)
+				}
+				logger.Debug("Found result set terminator in binary resultset", zap.String("type", respType))
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
-					Type: mysql.StatusToString(mysql.EOF),
+					Type: respType,
 				}
 				break rowLoop
 			}
@@ -555,4 +641,28 @@ rowLoop:
 
 	return binaryResultSetPkt, nil
 
+}
+
+// isCommandPacket returns true if the decoded message is a client command type
+// rather than a server response type. This is used to detect stream desync
+// where DecodePayload misidentifies a server response as a client command.
+func isCommandPacket(msg interface{}) bool {
+	switch msg.(type) {
+	case *mysql.QueryPacket,
+		*mysql.StmtPreparePacket,
+		*mysql.StmtExecutePacket,
+		*mysql.StmtClosePacket,
+		*mysql.StmtResetPacket,
+		*mysql.StmtSendLongDataPacket,
+		*mysql.QuitPacket,
+		*mysql.InitDBPacket,
+		*mysql.PingPacket,
+		*mysql.StatisticsPacket,
+		*mysql.DebugPacket,
+		*mysql.ChangeUserPacket,
+		*mysql.ResetConnectionPacket:
+		return true
+	default:
+		return false
+	}
 }

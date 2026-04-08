@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +18,87 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// flakyHeaders lists HTTP header keys (lowercased) that are known to change
+// on every request due to cryptographic signatures, timestamps, credential
+// rotation, or per-request identifiers. These are automatically treated as
+// noise during mock matching so that replayed requests can find the correct
+// recorded mock even though these artifacts differ. Users who need strict
+// header matching can disable this with --disableAutoHeaderNoise.
+//
+// No single public library maintains such a list. Most recording/replay
+// tools (VCR, WireMock, Hoverfly) avoid the problem by not matching on
+// headers at all by default. Since Keploy does match on header keys, we
+// maintain this list covering the most common sources of non-determinism.
+//
+// Categories:
+//   - Cloud auth/signing:  AWS SigV4, GCP OAuth, Azure HMAC/Bearer
+//   - Tracing/correlation: W3C Trace Context, B3, Datadog, X-Request-Id
+//   - Webhook signatures:  Stripe, GitHub, Slack, Twilio, Shopify
+//   - SDK metadata:        per-call invocation IDs and attempt counters
+var flakyHeaders = []string{
+	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
+	"authorization",         // signature changes every request (all cloud providers)
+	"x-amz-date",            // signing timestamp
+	"x-amz-security-token",  // STS/IRSA session token — may appear or disappear
+	"x-amz-content-sha256",  // payload hash
+	"x-amz-credential",      // credential scope string
+	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
+	"amz-sdk-request",       // attempt counter (attempt=1; max=3)
+
+	// ── GCP ──────────────────────────────────────────────────────────
+	"x-goog-api-client",     // SDK metadata (version, runtime info)
+	"x-goog-request-params", // routing parameters, may change with resource
+
+	// ── Azure ────────────────────────────────────────────────────────
+	"x-ms-date",                     // signing timestamp
+	"x-ms-client-request-id",        // client-generated UUID per call
+	"x-ms-content-sha256",           // body hash for HMAC auth
+	"x-ms-return-client-request-id", // echo control flag
+
+	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
+	"traceparent", // unique trace-id + span-id per request
+	"tracestate",  // vendor-specific trace context
+
+	// ── Zipkin B3 propagation ────────────────────────────────────────
+	"x-b3-traceid",
+	"x-b3-spanid",
+	"x-b3-parentspanid",
+	"x-b3-sampled",
+	"b3", // single-header compact format
+
+	// ── Datadog ──────────────────────────────────────────────────────
+	"x-datadog-trace-id",
+	"x-datadog-parent-id",
+	"x-datadog-sampling-priority",
+	"x-datadog-origin",
+
+	// ── Generic request/correlation IDs ──────────────────────────────
+	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
+	"x-correlation-id", // cross-service correlation
+	"request-id",       // ASP.NET Core and others
+
+	// ── Webhook signatures (request-side, inbound webhooks) ──────────
+	"stripe-signature",
+	"x-hub-signature-256", // GitHub
+	"x-hub-signature",     // GitHub (legacy SHA-1)
+	"x-twilio-signature",
+	"x-shopify-hmac-sha256",
+	"x-slack-signature",
+	"x-slack-request-timestamp",
+	"webhook-signature", // Standard Webhooks spec
+	"webhook-timestamp", // Standard Webhooks spec
+	"webhook-id",        // Standard Webhooks spec
+
+	// ── Idempotency / CSRF ───────────────────────────────────────────
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+
+	// ── GCP trace (legacy) ───────────────────────────────────────────
+	"x-cloud-trace-context",
+}
 
 type req struct {
 	method string
@@ -236,10 +318,22 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			return nil, ctx.Err()
 		}
 
-		// Content type check
-		if input.header.Get("Content-Type") != "" {
-			if !pkg.CompareMultiValueHeaders(mock.Spec.HTTPReq.Header["Content-Type"], input.header.Values("Content-Type")) {
-				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header.Values("Content-Type")), zap.Any("mock header content-type", mock.Spec.HTTPReq.Header["Content-Type"]))
+		// Content type check — only enforced when both the request and
+		// the mock specify a Content-Type. Compares only the media type
+		// (ignoring parameters like charset) so that trivial differences
+		// such as "application/json" vs "application/json;charset=UTF-8"
+		// don't prevent a match. If either side omits Content-Type,
+		// matching falls through to the other criteria.
+		inputCTValues := input.header.Values("Content-Type")
+		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
+		if len(inputCTValues) > 0 && mockCT != "" {
+			mockMediaTypes := parseMediaTypes(mockCT)
+			inputMediaTypes := parseMediaTypes(strings.Join(inputCTValues, ","))
+			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
+				h.Logger.Debug("The content type of mock and request aren't the same",
+					zap.String("mock name", mock.Name),
+					zap.Strings("input media types", inputMediaTypes),
+					zap.Strings("mock media types", mockMediaTypes))
 				continue
 			}
 		}
@@ -434,6 +528,40 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	return false, nil
 }
 
+// parseMediaTypes splits a (possibly comma-joined) Content-Type header
+// value into individual media types using mime.ParseMediaType. Malformed
+// entries are skipped so that a single non-conformant value (e.g. a
+// trailing semicolon or vendor quirk) does not prevent matching on the
+// remaining valid types.
+func parseMediaTypes(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		ct := strings.TrimSpace(part)
+		if ct == "" {
+			continue
+		}
+		mt, _, err := mime.ParseMediaType(ct)
+		if err != nil || mt == "" {
+			continue
+		}
+		out = append(out, mt)
+	}
+	return out
+}
+
+// mediaTypesOverlap returns true if any media type in a matches any in b
+// (case-insensitive).
+func mediaTypesOverlap(a, b []string) bool {
+	for _, ma := range a {
+		for _, mb := range b {
+			if strings.EqualFold(ma, mb) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Update the matched mock (delete or update)
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
@@ -441,4 +569,99 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 	return updated
+}
+
+// buildHTTPMismatchReport finds the closest HTTP mock to the given request
+// and returns a human-readable diff report. If httpMocks is nil, it fetches
+// from mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
+func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
+	if httpMocks == nil {
+		mocks, err := mockDb.GetUnFilteredMocks()
+		if err != nil {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
+			}
+		}
+		if len(mocks) == 0 {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+			}
+		}
+		httpMocks = FilterHTTPMocks(mocks)
+	}
+	if len(httpMocks) == 0 {
+		return &models.MockMismatchReport{
+			Protocol:      "HTTP",
+			ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+			NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+		}
+	}
+
+	// Find closest mock: first try same-method mocks (cheap filter), then fall back to all.
+	actualKey := request.Method + " " + request.URL.Path
+	bestDist := -1
+	var closestMock *models.Mock
+	// Two-pass: first same method only, then all if no match found
+	for pass := 0; pass < 2; pass++ {
+		for _, mock := range httpMocks {
+			if mock.Spec.HTTPReq == nil {
+				continue
+			}
+			if pass == 0 && string(mock.Spec.HTTPReq.Method) != request.Method {
+				continue
+			}
+			// Parse mock URL to extract just the path (mocks store full URL strings)
+			mockPath := mock.Spec.HTTPReq.URL
+			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
+				mockPath = parsed.Path
+			}
+			mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
+			dist := levenshtein.ComputeDistance(actualKey, mockKey)
+			if bestDist < 0 || dist < bestDist {
+				bestDist = dist
+				closestMock = mock
+			}
+		}
+		if closestMock != nil {
+			break
+		}
+	}
+	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
+		return &models.MockMismatchReport{
+			Protocol:      "HTTP",
+			ActualSummary: actualKey,
+			NextSteps:     "Re-record mocks if the API endpoint or request format has changed.",
+		}
+	}
+
+	// Build diff details
+	var diffs []string
+	mockReq := closestMock.Spec.HTTPReq
+	if string(mockReq.Method) != request.Method {
+		diffs = append(diffs, fmt.Sprintf("method: %q vs %q", request.Method, mockReq.Method))
+	}
+	mockPath := mockReq.URL
+	if parsed, err := url.Parse(mockReq.URL); err == nil {
+		mockPath = parsed.Path
+	}
+	if mockPath != request.URL.Path {
+		diffs = append(diffs, fmt.Sprintf("path: %q vs %q", request.URL.Path, mockPath))
+	}
+
+	diff := strings.Join(diffs, "; ")
+	if diff == "" {
+		diff = "method and path match but headers or body differ"
+	}
+
+	return &models.MockMismatchReport{
+		Protocol:      "HTTP",
+		ActualSummary: actualKey,
+		ClosestMock:   closestMock.Name,
+		Diff:          diff,
+		NextSteps:     "Re-record mocks if the API endpoint or request format has changed.",
+	}
 }

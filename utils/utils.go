@@ -47,6 +47,25 @@ var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
+// IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
+// This is useful for gracefully handling errors during application shutdown.
+func IsShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check error message for common shutdown-related patterns
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
+
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -319,6 +338,10 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//If it does, remove it.
 	err = os.Remove(name)
 	if err != nil {
+		if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(err.Error()), "used by another process") {
+			logger.Debug("skipping removal of file still in use during shutdown", zap.String("file", name), zap.Error(err))
+			return nil
+		}
 		LogError(logger, err, "Error removing file")
 		return err
 	}
@@ -520,6 +543,33 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		return GitHubRelease{}, err
 	}
 	return release, nil
+}
+
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
+// Returns empty string if not found.
+func ExtractCommandFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// Check for -c or --command
+		if arg == "-c" || arg == "--command" {
+			// Next argument is the command value
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+
+		// Check for -c=value or --command=value format
+		if len(arg) > 3 && arg[:3] == "-c=" {
+			return arg[3:]
+		}
+		if len(arg) > 10 && arg[:10] == "--command=" {
+			return arg[10:]
+		}
+	}
+	return ""
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
@@ -1135,15 +1185,16 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
 		return false
 	}
-	if err := f.Close(); err != nil {
-		LogError(logger, err, "failed to close file", zap.String("file", filePath))
-	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
 
 	// Check for section names typical to Go binaries
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}
@@ -1240,6 +1291,14 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
+// PermissionError holds information about files/directories with permission issues
+type PermissionError struct {
+	Path     string
+	OwnerUID uint32
+	IsRead   bool // true if it's a read permission issue, false if write
+}
+
+// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
 
@@ -1250,7 +1309,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	defer func() {
 		if err := file.Close(); err != nil {
-			logger.Error("error closing .gitignore file: %v", zap.Error(err))
+			logger.Error("error closing .gitignore file", zap.Error(err))
 		}
 	}()
 
@@ -1267,7 +1326,6 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
-		return nil
 	}
 
 	return nil

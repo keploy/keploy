@@ -58,7 +58,11 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 	// Reuse one pretty printer
 	pr := pp.New()
 	pr.WithLineInfo = false
-	pr.SetColorScheme(models.GetFailingColorScheme())
+	if !cfg.DisableANSI {
+		pr.SetColorScheme(models.GetFailingColorScheme())
+	} else {
+		pr.SetColoringEnabled(false)
+	}
 	r.printer = pr
 	return r
 }
@@ -152,14 +156,14 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 
 // printSummary prints the grand summary + per test-set table.
 func (r *Report) printSummary(reports map[string]*models.TestReport) error {
-	var total, passed, failed int
+	var total, passed, failed, obsolete int
 	var highRisk, mediumRisk, lowRisk int
 	categoryCounts := make(map[models.FailureCategory]int)
 
 	type row struct {
-		name              string
-		total, pass, fail int
-		dur               time.Duration
+		name                        string
+		total, pass, fail, obsolete int
+		dur                         time.Duration
 	}
 	rows := make([]row, 0, len(reports))
 
@@ -167,6 +171,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		total += rep.Total
 		passed += rep.Success
 		failed += rep.Failure
+		obsolete += rep.Obsolete
 
 		// Count risk levels and categories for failed tests
 		for _, test := range rep.Tests {
@@ -197,7 +202,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			dur = estimateDuration(rep.Tests)
 		}
 
-		rows = append(rows, row{name: name, total: rep.Total, pass: rep.Success, fail: rep.Failure, dur: dur})
+		rows = append(rows, row{name: name, total: rep.Total, pass: rep.Success, fail: rep.Failure, obsolete: rep.Obsolete, dur: dur})
 	}
 
 	// Sort by name for determinism
@@ -213,6 +218,9 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal tests: %d\n", total)
 	fmt.Fprintf(r.out, "\tTotal test passed: %d\n", passed)
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
+	if obsolete > 0 {
+		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
+	}
 
 	// Add risk level statistics
 	if failed > 0 {
@@ -250,13 +258,22 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 
 	// Tabwriter over the same buffered writer.
 	w := tabwriter.NewWriter(r.out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken\t")
+	header := "\tTest Suite\tTotal\tPassed\tFailed"
+	if obsolete > 0 {
+		header += "\tObsolete"
+	}
+	header += "\tTime Taken\t"
+	fmt.Fprintln(w, header)
 	for _, rrow := range rows {
 		tt := "N/A"
 		if rrow.dur > 0 {
 			tt = fmtDuration(rrow.dur)
 		}
-		fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, tt)
+		if obsolete > 0 {
+			fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, rrow.obsolete, tt)
+		} else {
+			fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, tt)
+		}
 	}
 	_ = w.Flush()
 
@@ -334,6 +351,9 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	}
 
 	if r.config.Report.ReportPath != "" {
+		if r.config.Report.Format == "junit" {
+			return fmt.Errorf("--format junit is not supported with --report-path; use the database-backed report path instead")
+		}
 		// File mode (single test-set file)
 		return r.generateReportFromFile(ctx, r.config.Report.ReportPath)
 	}
@@ -360,6 +380,21 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			r.logger.Warn("No test sets found for report generation")
 			return nil
 		}
+	}
+
+	if r.config.Report.Format == "junit" {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
+		}
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			for name, rep := range reports {
+				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				rep.Total = len(rep.Tests)
+				reports[name] = rep
+			}
+		}
+		return r.generateJUnit(reports)
 	}
 
 	if r.config.Report.Summary {
@@ -488,24 +523,27 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 // processLegacySummary generates a summary report for legacy format
 func (r *Report) processLegacySummary(tests []models.TestResult) error {
-	total, pass, fail := len(tests), 0, 0
+	total, pass, fail, obsolete := len(tests), 0, 0, 0
 	var failedCases []string
 
 	for _, t := range tests {
-		if t.Status == models.TestStatusFailed {
+		switch t.Status {
+		case models.TestStatusFailed:
 			fail++
 			label := t.TestCaseID
 			if t.Name != "" {
 				label = fmt.Sprintf("%s (%s)", t.TestCaseID, t.Name)
 			}
 			failedCases = append(failedCases, label)
-		} else {
+		case models.TestStatusObsolete:
+			obsolete++
+		default:
 			pass++
 		}
 	}
 
 	totalTime := estimateDuration(tests)
-	printSingleSummaryTo(r.out, "file", total, pass, fail, totalTime, failedCases)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)
@@ -610,10 +648,7 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 2 {
-			workers = 2
-		}
+		workers := max(runtime.GOMAXPROCS(0), 2)
 		sem := make(chan struct{}, workers)
 		results := make([]item, len(failedTests))
 		var wg sync.WaitGroup
@@ -657,10 +692,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 		return nil
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 {
-		workers = 2
-	}
+	workers := max(runtime.GOMAXPROCS(0), 2)
 	sem := make(chan struct{}, workers)
 	results := make([]item, len(failedTests))
 	var wg sync.WaitGroup
@@ -719,9 +751,26 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
-	sb.WriteString(applyCliColorsToDiff(metaDiff))
+
+	if !r.config.DisableANSI {
+		sb.WriteString(applyCliColorsToDiff(metaDiff))
+	} else {
+		sb.WriteString(metaDiff)
+	}
+
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
+
+	// Body size comparison (when body was skipped during recording)
+	if test.Result.BodySizeResult.Expected != 0 || test.Result.BodySizeResult.Actual != 0 {
+		if !test.Result.BodySizeResult.Normal {
+			sb.WriteString(fmt.Sprintf("Body Size Mismatch:\n  Expected: %d bytes\n  Actual:   %d bytes\n\n",
+				test.Result.BodySizeResult.Expected, test.Result.BodySizeResult.Actual))
+		} else {
+			sb.WriteString(fmt.Sprintf("Body Size Match: %d bytes (body was too large to store, size compared instead)\n\n",
+				test.Result.BodySizeResult.Expected))
+		}
+	}
 
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
@@ -733,7 +782,11 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
 				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
 				if err == nil {
-					sb.WriteString(applyCliColorsToDiff(diff))
+					if !r.config.DisableANSI {
+						sb.WriteString(applyCliColorsToDiff(diff))
+					} else {
+						sb.WriteString(diff)
+					}
 					sb.WriteString("\n")
 				} else {
 					tmp := *r
@@ -747,7 +800,12 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 		// Force the old compact format for non-JSON bodies (fast).
 		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-		sb.WriteString(applyCliColorsToDiff(diff))
+
+		if !r.config.DisableANSI {
+			sb.WriteString(applyCliColorsToDiff(diff))
+		} else {
+			sb.WriteString(diff)
+		}
 		sb.WriteString("\n\n")
 
 	}
@@ -866,6 +924,17 @@ func (r *Report) addHeaderDiffs(test models.TestResult, logDiffs *matcherUtils.D
 
 // addBodyDiffs adds body differences to the diff printer
 func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
+	// Handle body size comparison result (when body was skipped during recording)
+	if test.Result.BodySizeResult.Expected != 0 || test.Result.BodySizeResult.Actual != 0 {
+		if !test.Result.BodySizeResult.Normal {
+			logDiffs.PushBodyDiff(
+				fmt.Sprintf("body_size: %d bytes", test.Result.BodySizeResult.Expected),
+				fmt.Sprintf("body_size: %d bytes", test.Result.BodySizeResult.Actual),
+				nil,
+			)
+		}
+	}
+
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)

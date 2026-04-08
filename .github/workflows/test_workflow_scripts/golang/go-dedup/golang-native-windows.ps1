@@ -1,4 +1,3 @@
-
 <#
   PowerShell test runner for Keploy (Windows) - go-dedup sample
   - Synchronous (PID-controlled) record phase; no background jobs
@@ -142,8 +141,7 @@ $dockerCmd = "go run main.go"
 $recArgs = @(
   'record',
   '-c', $dockerCmd,
-  '--generate-github-actions=false',
-  '--debug'
+  '--generate-github-actions=false'
 )
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
@@ -173,7 +171,7 @@ function Sync-Logs {
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline = (Get-Date).AddMinutes(5)
+$deadline = (Get-Date).AddMinutes(10)  # go run on cold Windows runners can take 5+ minutes to compile
 $ready = $false
 do {
   Sync-Logs -job $recJob # <-- Print Keploy logs here
@@ -264,7 +262,8 @@ $testArgs = @(
   'test',
   '-c', 'go run main.go',
   '--api-timeout', '60',
-  '--delay', '20',
+  '--delay', '30',
+  # '--port', '8080',
   '--generate-github-actions=false'
 )
 

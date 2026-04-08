@@ -9,7 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -24,11 +24,11 @@ type ClientMockStorage struct {
 }
 
 type Agent struct {
-	logger       *zap.Logger
-	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
-	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
-	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	agent.IncomingProxy
+	logger          *zap.Logger
+	coreAgent.Proxy                // embedding the Proxy interface to transfer the proxy methods to the core object
+	coreAgent.Hooks                // embedding the Hooks interface to transfer the hooks methods to the core object
+	dockerClient    kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	coreAgent.IncomingProxy
 	proxyStarted bool
 	config       *config.Config
 	// activeClients sync.Map
@@ -37,8 +37,8 @@ type Agent struct {
 	Ip          string
 }
 
-func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
-	return &Agent{
+func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
+	instrumentation := &Agent{
 		logger:        logger,
 		Hooks:         hook,
 		Proxy:         proxy,
@@ -46,6 +46,11 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker
 		dockerClient:  client,
 		config:        config,
 	}
+	if coreAgent.ProxyHook != nil && proxy != nil {
+		proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
+	}
+	coreAgent.RegisterIncomingProxy(ip)
+	return instrumentation
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
@@ -87,7 +92,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
 	}
-	a.logger.Info("Context cancelled, stopping the agent")
+	a.logger.Debug("Context cancelled, stopping the agent")
 	return context.Canceled
 
 }
@@ -96,6 +101,13 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	tc := a.IncomingProxy.Start(ctx, opts)
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
+}
+
+// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
+	a.logger.Debug("Setting graceful shutdown flag on proxy")
+	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -109,8 +121,15 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	return m, nil
 }
 
+func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
+	mappingCh := make(chan models.TestMockMapping, 100)
+	a.Proxy.Mapping(ctx, mappingCh)
+
+	return mappingCh, nil
+}
+
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -161,12 +180,17 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	})
 
 	// load hooks if the mode changes ..
-	err := a.Hooks.Load(hookCtx, agent.HookCfg{
+	hookCfg := coreAgent.HookCfg{
 		Pid:      0,
 		IsDocker: opts.IsDocker,
 		Mode:     opts.Mode,
 		Rules:    opts.Rules,
-	}, a.config.Agent)
+	}
+
+	if coreAgent.EbpfProxyPortOverride != 0 {
+		hookCfg.Port = coreAgent.EbpfProxyPortOverride
+	}
+	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
@@ -188,7 +212,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		utils.LogError(a.logger, err, "failed to get container IP")
 		return hookErr
 	}
-	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
+	if coreAgent.ProxyHook != nil {
+		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
+	}
+
+	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
 	})
@@ -206,6 +234,10 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 	return a.Proxy.GetConsumedMocks(ctx)
 }
 
+func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	return a.Proxy.GetMockErrors(ctx)
+}
+
 // StoreMocks stores the filtered and unfiltered mocks for a client ID
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
@@ -219,25 +251,36 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client")
+	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 
-	// Get stored mocks for the
+	a.logger.Debug("UpdateMockParams called",
+		zap.Time("afterTime", params.AfterTime),
+		zap.Time("beforeTime", params.BeforeTime),
+		zap.Bool("useMappingBased", params.UseMappingBased),
+		zap.Int("mockMappingCount", len(params.MockMapping)))
+
+	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
+
 	storage.mu.RLock()
 	originalFiltered := make([]*models.Mock, len(storage.filtered))
 	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
 	copy(originalFiltered, storage.filtered)
 	copy(originalUnfiltered, storage.unfiltered)
 	storage.mu.RUnlock()
+
+	a.logger.Debug("Original mocks before filtering",
+		zap.Int("originalFiltered", len(originalFiltered)),
+		zap.Int("originalUnfiltered", len(originalUnfiltered)))
 
 	var filteredMocks, unfilteredMocks []*models.Mock
 
@@ -250,10 +293,24 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
 	}
 
+	// Count IsFiltered distribution for debugging
+	var filteredCount, unfilteredCount int
+	for _, m := range unfilteredMocks {
+		if m.TestModeInfo.IsFiltered {
+			filteredCount++
+		} else {
+			unfilteredCount++
+		}
+	}
+	a.logger.Debug("After filtering",
+		zap.Int("filteredMocks", len(filteredMocks)),
+		zap.Int("unfilteredMocks", len(unfilteredMocks)),
+		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
+		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
-		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Set the filtered mocks to the proxy

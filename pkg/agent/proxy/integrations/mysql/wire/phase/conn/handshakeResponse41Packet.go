@@ -66,28 +66,41 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 		if len(data) < 1 {
 			return nil, errors.New("handshake response packet too short for auth data length")
 		}
-		length := int(data[0])
-		data = data[1:]
-
-		if length > 0 {
-			if len(data) < length {
-				return nil, errors.New("handshake response packet too short for auth data")
-			}
-			packet.AuthResponse = data[:length]
-			data = data[length:]
-		}
-	} else {
-		if len(data) < 2 {
+		// ReadLengthEncodedInteger to correctly handle variable-length auth data.
+		// Previously, it blindly read 1 byte, which failed for larger payloads (like SHA256 passwords).
+		// We also now check if the returned length is valid (n != 0) to avoid panics.
+		length, isNull, n := utils.ReadLengthEncodedInteger(data)
+		if isNull || n == 0 {
 			return nil, errors.New("handshake response packet too short for auth data length")
 		}
-		authLen := int(data[0])
-		data = data[2:]
+		data = data[n:]
 
+		if length > 0 {
+			authLen := int(length)
+			// Fix: Add bounds check to prevent panic if packet is truncated
+			if len(data) < authLen {
+				return nil, errors.New("handshake response packet too short for auth data")
+			}
+			packet.AuthResponse = data[:authLen]
+			data = data[authLen:]
+		}
+	} else {
+		if len(data) < 1 {
+			return nil, errors.New("handshake response packet too short for auth data length")
+		}
+		// Fix: Explicitly read 1-byte length for SECURE_CONNECTION.
+		// Previously, incorrect slicing skipped bytes.
+		authLen := int(data[0])
+		data = data[1:]
+
+		// Fix: Add bounds check to prevent panic
 		if len(data) < authLen {
 			return nil, errors.New("handshake response packet too short for auth data")
 		}
-		packet.AuthResponse = data[:authLen]
-		data = data[authLen:]
+		if authLen > 0 {
+			packet.AuthResponse = data[:authLen]
+			data = data[authLen:]
+		}
 	}
 
 	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
@@ -204,7 +217,8 @@ func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.H
 
 	// Write Auth Response
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
-		if err := buf.WriteByte(byte(len(packet.AuthResponse))); err != nil {
+		// Fix: Use WriteLengthEncodedInteger to match the decoder's logic for variable-length data.
+		if err := utils.WriteLengthEncodedInteger(buf, uint64(len(packet.AuthResponse))); err != nil {
 			return nil, fmt.Errorf("failed to write length of AuthResponse for HandshakeResponse41Packet: %w", err)
 		}
 		if _, err := buf.Write(packet.AuthResponse); err != nil {

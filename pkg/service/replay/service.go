@@ -19,6 +19,8 @@ type Instrumentation interface {
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
+	// GetMockErrors returns mock-not-found errors collected during replay
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
 	BeforeTestRun(ctx context.Context, testRunID string) error
@@ -27,7 +29,11 @@ type Instrumentation interface {
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	GetRecentAppLogs(ctx context.Context) string
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
+	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
+	// When this is called, connection errors will be logged as debug instead of error.
+	NotifyGracefulShutdown(ctx context.Context) error
 }
 
 type Service interface {
@@ -52,12 +58,12 @@ type Service interface {
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
 
-	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	StoreMappings(ctx context.Context, mapping *models.Mapping) error
 
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
-	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
+	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs
-	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result)
+	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 }
 
 type TestDB interface {
@@ -69,9 +75,9 @@ type TestDB interface {
 }
 
 type MockDB interface {
-	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
+	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
+	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error
 }
 
 type ReportDB interface {
@@ -92,16 +98,20 @@ type TestSetConfig interface {
 
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
-	TestRun(success int, failure int, testSets int, runStatus string)
+	TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{})
 	MockTestRun(utilizedMocks int)
 }
 
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	// GetNoisyTestCaseNames returns test case names that were reclassified as noisy
+	// for the provided test set during BeforeTestResult processing.
+	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	BeforeTestSetReplay(ctx context.Context, testSetID string) error
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
@@ -117,6 +127,6 @@ type InstrumentState struct {
 }
 
 type MappingDB interface {
-	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
-	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
+	Insert(ctx context.Context, mapping *models.Mapping) error
+	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }

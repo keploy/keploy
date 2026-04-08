@@ -16,6 +16,7 @@ type IntegrationType string
 // constants for different types of integrations
 const (
 	HTTP        IntegrationType = "http"
+	HTTP2       IntegrationType = "http2"
 	GRPC        IntegrationType = "grpc"
 	GENERIC     IntegrationType = "generic"
 	MYSQL       IntegrationType = "mysql"
@@ -24,6 +25,7 @@ const (
 	MONGO_V1    IntegrationType = "mongo_v1"
 	MONGO_V2    IntegrationType = "mongo_v2"
 	REDIS       IntegrationType = "redis"
+	KAFKA       IntegrationType = "kafka"
 )
 
 type Parsers struct {
@@ -35,7 +37,7 @@ var Registered = make(map[IntegrationType]*Parsers)
 
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
-	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	RecordOutgoing(ctx context.Context, session *RecordSession) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
@@ -50,4 +52,5 @@ type MockMemDb interface {
 	DeleteFilteredMock(mock models.Mock) bool
 	DeleteUnFilteredMock(mock models.Mock) bool
 	GetMySQLCounts() (total, config, data int)
+	MarkMockAsUsed(mock models.Mock) bool
 }

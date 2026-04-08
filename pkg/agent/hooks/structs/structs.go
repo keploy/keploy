@@ -24,10 +24,11 @@ type ClientInfo struct {
 }
 
 type AgentInfo struct {
-	KeployAgentNsPid uint32
-	DNSPort          int32
-	KeployAgentInode uint64
-	IsDocker         uint32
-	Proxy            ProxyInfo
-	_                [4]byte
+	KeployAgentNsPid   uint32
+	DNSPort            int32
+	KeployAgentInode   uint64
+	IsDocker           uint32
+	Proxy              ProxyInfo
+	_                  [4]byte
+	RecordingStartTime uint64 // boot-time NS when recording started; pre-existing processes are auto-excluded by eBPF
 }

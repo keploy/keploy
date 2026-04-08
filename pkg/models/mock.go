@@ -6,29 +6,32 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/models/postgres"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func init() {
-	gob.Register(primitive.D{})
-	gob.Register(primitive.E{})
-	gob.Register(primitive.A{})
-	gob.Register(primitive.Binary{})
-	gob.Register(primitive.M{})
-	gob.Register(primitive.ObjectID{})
+	gob.Register(bson.D{})
+	gob.Register(bson.E{})
+	gob.Register(bson.A{})
+	gob.Register(bson.Binary{})
+	gob.Register(bson.M{})
+	gob.Register(bson.ObjectID{})
 }
 
 type Kind string
 
 const (
 	HTTP        Kind = "Http"
+	HTTP2       Kind = "Http2"
 	GENERIC     Kind = "Generic"
 	REDIS       Kind = "Redis"
+	KAFKA       Kind = "Kafka"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
+	DNS         Kind = "DNS"
 )
 
 type Mock struct {
@@ -56,22 +59,27 @@ type MockSpec struct {
 	GenericResponses    []Payload           `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
 	RedisRequests       []Payload           `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
 	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
+	KafkaRequests       []Payload           `json:"kafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
+	KafkaResponses      []Payload           `json:"kafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests       []MongoRequest      `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses      []MongoResponse     `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
-	PostgresRequests    []Backend           `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
-	PostgresResponses   []Frontend          `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
 	PostgresRequestsV2  []postgres.Request  `json:"PostgresRequestsV2,omitempty" bson:"postgres_requests_v2,omitempty"`
 	PostgresResponsesV2 []postgres.Response `json:"PostgresResponsesV2,omitempty" bson:"postgres_responses_v2,omitempty"`
 	// gRPC
-	GRPCReq          *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
-	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
-	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
-	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
-	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	GRPCReq        *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
+	GRPCResp       *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
+	MySQLRequests  []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
+	MySQLResponses []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	DNSReq         *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
+	DNSResp        *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
+	// HTTP/2
+	HTTP2Req         *HTTP2Req  `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
+	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
+	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
@@ -101,10 +109,15 @@ type Payload struct {
 }
 
 type MockState struct {
-	Name       string    `json:"name"`
-	Usage      MockUsage `json:"usage"`
-	IsFiltered bool      `json:"isFiltered"`
-	SortOrder  int64     `json:"sortOrder"`
+	Name             string    `json:"name"`
+	Kind             Kind      `json:"kind"`
+	Usage            MockUsage `json:"usage"`
+	IsFiltered       bool      `json:"isFiltered"`
+	SortOrder        int64     `json:"sortOrder"`
+	Type             string    `json:"type"`
+	Timestamp        int64     `json:"timestamp"`
+	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
+	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
@@ -112,11 +125,20 @@ func (m *Mock) DeepCopy() *Mock {
 		return nil
 	}
 
-	// 1. Perform a shallow copy of the main struct and its nested structs.
-	// This handles all simple value types (string, int, bool, etc.).
-	c := *m
-	c.Spec = m.Spec
-	c.TestModeInfo = m.TestModeInfo
+	// Copy top-level fields explicitly to avoid copying embedded lock fields.
+	id, isFiltered, sortOrder := m.TestModeInfo.ID, m.TestModeInfo.IsFiltered, m.TestModeInfo.SortOrder
+	c := Mock{
+		Version: m.Version,
+		Name:    m.Name,
+		Kind:    m.Kind,
+		Spec:    m.Spec,
+		TestModeInfo: TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+		ConnectionID: m.ConnectionID,
+	}
 
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.
 	if m.Spec.Metadata != nil {
@@ -146,12 +168,6 @@ func (m *Mock) DeepCopy() *Mock {
 	c.Spec.MongoResponses = make([]MongoResponse, len(m.Spec.MongoResponses))
 	copy(c.Spec.MongoResponses, m.Spec.MongoResponses)
 
-	c.Spec.PostgresRequests = make([]Backend, len(m.Spec.PostgresRequests))
-	copy(c.Spec.PostgresRequests, m.Spec.PostgresRequests)
-
-	c.Spec.PostgresResponses = make([]Frontend, len(m.Spec.PostgresResponses))
-	copy(c.Spec.PostgresResponses, m.Spec.PostgresResponses)
-
 	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
 	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
 
@@ -174,6 +190,45 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.GRPCResp != nil {
 		grpcRespCopy := *m.Spec.GRPCResp
 		c.Spec.GRPCResp = &grpcRespCopy
+	}
+	if m.Spec.DNSReq != nil {
+		dnsReqCopy := *m.Spec.DNSReq
+		c.Spec.DNSReq = &dnsReqCopy
+	}
+	if m.Spec.DNSResp != nil {
+		dnsRespCopy := *m.Spec.DNSResp
+		if m.Spec.DNSResp.Answers != nil {
+			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
+			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
+		}
+		c.Spec.DNSResp = &dnsRespCopy
+	}
+
+	if m.Spec.HTTP2Req != nil {
+		http2ReqCopy := *m.Spec.HTTP2Req
+		if m.Spec.HTTP2Req.Headers != nil {
+			http2ReqCopy.Headers = make(map[string]string, len(m.Spec.HTTP2Req.Headers))
+			for k, v := range m.Spec.HTTP2Req.Headers {
+				http2ReqCopy.Headers[k] = v
+			}
+		}
+		c.Spec.HTTP2Req = &http2ReqCopy
+	}
+	if m.Spec.HTTP2Resp != nil {
+		http2RespCopy := *m.Spec.HTTP2Resp
+		if m.Spec.HTTP2Resp.Headers != nil {
+			http2RespCopy.Headers = make(map[string]string, len(m.Spec.HTTP2Resp.Headers))
+			for k, v := range m.Spec.HTTP2Resp.Headers {
+				http2RespCopy.Headers[k] = v
+			}
+		}
+		if m.Spec.HTTP2Resp.Trailers != nil {
+			http2RespCopy.Trailers = make(map[string]string, len(m.Spec.HTTP2Resp.Trailers))
+			for k, v := range m.Spec.HTTP2Resp.Trailers {
+				http2RespCopy.Trailers[k] = v
+			}
+		}
+		c.Spec.HTTP2Resp = &http2RespCopy
 	}
 
 	return &c

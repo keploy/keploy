@@ -48,7 +48,11 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
-					routes.StartAgentServer(logger, p, router)
+					if err := agent.SetupAgentHook.AfterSetup(ctx); err != nil {
+						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
+						return
+					}
+					routes.StartAgentServer(ctx, logger, p, router)
 				}
 			}()
 
