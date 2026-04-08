@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -33,7 +34,7 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
 	// Run the app as the user who invoked sudo
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
@@ -48,11 +49,19 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmdType := FindDockerCmd(userCmd)
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
+	// When in-memory compose content is provided, pipe it via stdin and skip PTY.
+	// PTY takes over the terminal's stdin/stdout so it cannot coexist with an
+	// explicit stdin reader; the non-PTY path handles this case correctly.
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+
 	// Use PTY for Docker Compose when running in a TTY to avoid SIGTTOU/SIGTTIN issues
 	// Docker Compose needs to read terminal size for progress bars, but Setpgid: true
 	// puts it in a background process group which causes the OS to pause it.
 	// A PTY gives Docker Compose its own terminal to work with.
-	if cmdType == DockerCompose && isTTY {
+	// Skip PTY when stdin content is provided (in-memory compose mode).
+	if cmdType == DockerCompose && isTTY && len(stdin) == 0 {
 		// For PTY, we use Setsid to create a new session instead of Setpgid
 		// This allows the PTY to become the controlling terminal
 		cmd.SysProcAttr = &syscall.SysProcAttr{

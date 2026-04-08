@@ -11,6 +11,26 @@ import (
 	"go.uber.org/zap"
 )
 
+// ensureInMemoryComposeFlags rewrites the docker compose command to use stdin
+// ("-f -") for in-memory content and injects the exit-code-from flags.
+func ensureInMemoryComposeFlags(appCmd, serviceName string) string {
+	// Replace any existing "-f <path>" with "-f -" so docker compose reads from stdin.
+	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
+	re := regexp.MustCompile(pattern)
+	if re.MatchString(appCmd) {
+		appCmd = re.ReplaceAllString(appCmd, "-f -")
+	} else {
+		// No -f flag present; inject "-f -" before "up".
+		upIdx := strings.Index(appCmd, " up")
+		if upIdx != -1 {
+			appCmd = appCmd[:upIdx] + " -f -" + appCmd[upIdx:]
+		} else {
+			appCmd += " -f -"
+		}
+	}
+	return ensureComposeExitOnAppFailure(appCmd, serviceName)
+}
+
 func findComposeFile(cmd string) []string {
 
 	cmdArgs := strings.Fields(cmd)
