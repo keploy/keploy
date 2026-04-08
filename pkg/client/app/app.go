@@ -133,11 +133,18 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e CARGO_HTTP_CAINFO=%s ", certPath)
-	// For Java, we append to existing options if possible, or just set it.
-	// In CLI args, setting it blindly is usually safe as it overrides or adds.
-	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
+	// For Java, check if JAVA_TOOL_OPTIONS is already set in the docker run
+	// command. If so, append the truststore flags to the existing value.
+	// If not, add it as a new -e flag.
 	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
-	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
+	if !strings.Contains(a.cmd, "-Djavax.net.ssl.trustStore=") {
+		if strings.Contains(a.cmd, "JAVA_TOOL_OPTIONS=") {
+			// Append truststore flags to the existing JAVA_TOOL_OPTIONS value
+			a.cmd = strings.Replace(a.cmd, "JAVA_TOOL_OPTIONS=", fmt.Sprintf("JAVA_TOOL_OPTIONS=%s ", javaOpts), 1)
+		} else {
+			tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
+		}
+	}
 
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"

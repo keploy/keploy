@@ -993,7 +993,9 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
-// Helper to add/update an environment variable
+// Helper to add/set an environment variable. If the key already exists, its
+// value is replaced. This prevents duplicate entries when the compose file is
+// modified more than once or the user already defined the variable.
 func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
 	var envNode *yaml.Node
 
@@ -1014,8 +1016,16 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 		)
 	}
 
+	prefix := envKey + "="
+
 	// Handle Sequence (array) style environment: ["KEY=VAL"]
 	if envNode.Kind == yaml.SequenceNode {
+		for _, item := range envNode.Content {
+			if strings.HasPrefix(item.Value, prefix) {
+				item.Value = fmt.Sprintf("%s=%s", envKey, envValue)
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content, &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Value: fmt.Sprintf("%s=%s", envKey, envValue),
@@ -1023,6 +1033,12 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 	// Handle Mapping (dict) style environment: { KEY: VAL }
 	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				envNode.Content[i+1].Value = envValue
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envKey},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envValue},
@@ -1030,12 +1046,68 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 }
 
-// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS)
+// appendServiceEnvVar appends a value to an existing environment variable
+// (space-separated, like JAVA_TOOL_OPTIONS). If the key does not exist, it is
+// created with the given value. If the target substring is already present, the
+// variable is left unchanged to prevent duplication.
 func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
-	// Logic: Find existing key. If found, append string " " + value. If not, create it.
-	// (Simplified implementation reuse addServiceEnvVar for now, assuming override is fine or strictly adding)
-	// For Java Tool Options, users rarely hardcode it in compose, but if they do, we ideally append.
-	// For simplicity in this iteration:
+	var envNode *yaml.Node
+
+	// Find 'environment' key
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Value == "environment" {
+			envNode = serviceNode.Content[i+1]
+			break
+		}
+	}
+
+	if envNode == nil {
+		// No environment section yet; create with the full value.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
+
+	prefix := envKey + "="
+
+	// Handle Sequence (array) style: ["KEY=VAL"]
+	if envNode.Kind == yaml.SequenceNode {
+		for _, item := range envNode.Content {
+			if strings.HasPrefix(item.Value, prefix) {
+				existingVal := strings.TrimPrefix(item.Value, prefix)
+				if strings.Contains(existingVal, "-Djavax.net.ssl.trustStore=") {
+					return // already has truststore flags
+				}
+				trimmed := strings.TrimSpace(existingVal)
+				if trimmed == "" {
+					item.Value = fmt.Sprintf("%s=%s", envKey, appendValue)
+				} else {
+					item.Value = fmt.Sprintf("%s=%s %s", envKey, trimmed, appendValue)
+				}
+				return
+			}
+		}
+	}
+
+	// Handle Mapping (dict) style: { KEY: VAL }
+	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				existingVal := envNode.Content[i+1].Value
+				if strings.Contains(existingVal, "-Djavax.net.ssl.trustStore=") {
+					return // already has truststore flags
+				}
+				trimmed := strings.TrimSpace(existingVal)
+				if trimmed == "" {
+					envNode.Content[i+1].Value = appendValue
+				} else {
+					envNode.Content[i+1].Value = trimmed + " " + appendValue
+				}
+				return
+			}
+		}
+	}
+
+	// Key not found; add it fresh.
 	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
 }
 
