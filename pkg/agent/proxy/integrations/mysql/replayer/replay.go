@@ -17,7 +17,7 @@ import (
 
 // Mock Yaml to Binary
 
-func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	unfiltered, err := mockDb.GetUnFilteredMocks()
@@ -82,7 +82,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts, dstCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate initial handshake")
 			errCh <- err

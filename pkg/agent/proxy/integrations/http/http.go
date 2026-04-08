@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -54,22 +54,23 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
+		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", isHTTP))
 	return isHTTP
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MemLimiter)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -89,6 +90,10 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 
 	err = h.decodeHTTP(ctx, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
+		if errors.Is(err, ErrMockNotMatched) {
+			h.Logger.Debug("mock miss — 502 already sent to client", zap.Error(err))
+			return err
+		}
 		utils.LogError(h.Logger, err, "failed to decode the http message from the yaml")
 		return err
 	}
@@ -209,10 +214,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	if opts.Synchronous {
 		if mgr := syncMock.Get(); mgr != nil {
+			// In synchronous mode, always route HTTP mocks through the sync manager.
+			// The manager uses its internal first-request state to decide whether to
+			// buffer or forward mocks for correct time-window based association.
 			mgr.AddMock(newMock)
 			return nil
 		}
 	}
-	mocks <- newMock
+	// In non-synchronous mode (k8s-proxy), or if no manager is available,
+	// send directly to the mocks channel so the mock is persisted.
+	if mocks != nil {
+		mocks <- newMock
+	}
 	return nil
 }

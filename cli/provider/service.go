@@ -35,15 +35,15 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      TeleGlobalMap,
+		GlobalMap:      &TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})
-	tel.Ping()
+	tel.Ping(ctx)
 
 	switch cmd {
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
-	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report", "sanitize":
+	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report", "sanitize", "diff":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	case "agent":
 		return GetAgent(ctx, cmd, n.cfg, n.logger, n.auth)

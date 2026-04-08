@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,7 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml *pUtil.MemoryLimiter) error {
 
 	var genericRequests []models.Payload
 
@@ -54,13 +55,13 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//close(errChan)
 
 	// read requests from client
-	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, ml)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
 
 	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination)
+	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, ml)
 	if err != nil {
 		return fmt.Errorf("error reading from destination:%v", err)
 	}
@@ -96,18 +97,18 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Metadata:         metadata,
 					},
 				}
-				if opts.Synchronous {
-					if mgr := syncMock.Get(); mgr != nil {
-						mgr.AddMock(mock)
-						return ctx.Err()
-					}
+				if mgr := syncMock.Get(); mgr != nil {
+					mgr.AddMock(mock)
+					return ctx.Err()
 				}
-				mocks <- mock
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
+			if ml != nil {
+				ml.Release(int64(len(buffer)))
+			}
 			if err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
@@ -138,12 +139,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 							Metadata:         metadata,
 						},
 					}
-					if opts.Synchronous {
-						if mgr := syncMock.Get(); mgr != nil {
-							mgr.AddMock(mock)
-						}
-					} else {
-						mocks <- mock
+					if mgr := syncMock.Get(); mgr != nil {
+						mgr.AddMock(mock)
 					}
 
 				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
@@ -178,6 +175,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
+			if ml != nil {
+				ml.Release(int64(len(buffer)))
+			}
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
@@ -208,6 +208,21 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			prevChunkWasReq = false
 		case err := <-errChan:
 			if err == io.EOF {
+				return nil
+			}
+			if errors.Is(err, pUtil.ErrMemoryLimitExceeded) {
+				logger.Debug("memory limit exceeded, falling back to passthrough for this connection")
+				// Use bidirectional io.Copy on the existing connections
+				// instead of pUtil.PassThrough which dials a new connection.
+				done := make(chan struct{}, 2)
+				cp := func(dst, src net.Conn) {
+					_, _ = io.Copy(dst, src)
+					done <- struct{}{}
+				}
+				go cp(destConn, clientConn)
+				go cp(clientConn, destConn)
+				<-done
+				<-done
 				return nil
 			}
 			return err

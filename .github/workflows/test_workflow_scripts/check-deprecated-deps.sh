@@ -1,6 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-
 # -------------------------------
 # Allowlisted deprecated deps
 # (kept for legacy / reference)

@@ -86,6 +86,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
 	domainSet := telemetry.NewDomainSet()
+	var recordingStarted bool
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -131,9 +132,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
-			"host-domains": domainSet.ToSlice(),
-		})
+		if recordingStarted {
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+				"host-domains": domainSet.ToSlice(),
+			})
+		}
+		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+			s.Shutdown()
+		}
 	}()
 
 	defer close(appErrChan)
@@ -181,7 +187,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
+	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -237,6 +243,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
+	recordingStarted = true
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
@@ -253,8 +263,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-			// Extract domains from the test case for telemetry
+			// Skip curl generation for either form data requests or large body (>1MB)
+			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
+				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
@@ -276,7 +288,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
-			// Extract domains from the mock for telemetry
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			// Send a copy to global mock channel for correlation manager if available
@@ -300,7 +311,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				insertMockErrChan <- err
 			} else {
 				if tempID != "" && mock.Name != "" {
-					correlationMap.Store(tempID, mock.Name)
+					correlationMap.Store(tempID, models.MockEntry{
+						Name:             mock.Name,
+						Kind:             string(mock.GetKind()),
+						Timestamp:        mock.Spec.ReqTimestampMock.Unix(),
+						ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+					})
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
@@ -311,17 +328,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mapping := range frames.Mappings {
-			var realMockNames []string
+			var realMockEntries []models.MockEntry
 
 			for _, tempID := range mapping.MockIDs {
 
-				var realName string
+				var realEntry models.MockEntry
 				found := false
 
 				// Simple retry loop (fast spin) to wait for the Mock Loop
 				for i := 0; i < 50; i++ { // Wait up to ~500ms
 					if val, ok := correlationMap.Load(tempID); ok {
-						realName = val.(string)
+						realEntry = val.(models.MockEntry)
 						found = true
 						break
 					}
@@ -329,7 +346,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 
 				if found {
-					realMockNames = append(realMockNames, realName)
+					realMockEntries = append(realMockEntries, realEntry)
 					correlationMap.Delete(tempID)
 				} else {
 					r.logger.Warn("Failed to correlate mock mapping",
@@ -339,8 +356,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 
 			// Write to mappings.yaml
-			if len(realMockNames) > 0 {
-				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+			if len(realMockEntries) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockEntries)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to save mapping")
 				}
@@ -478,10 +495,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		TLSPrivateKey:  tlsPrivateKey,
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		Rules:         r.config.BypassRules,
+		MongoPassword: r.config.Test.MongoPassword,
+		TLSPrivateKey: tlsPrivateKey,
 	})
 	if err != nil {
 

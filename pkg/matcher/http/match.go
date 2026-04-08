@@ -27,7 +27,35 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+	// If the response body was skipped during recording (>1MB), compute body size comparison
+	// and clear the actual body so the normal comparison runs (empty vs empty).
+	var bodySizeResult models.IntResult
+	if tc.HTTPResp.BodySkipped {
+		actualBodySize := int64(len(actualResponse.Body))
+		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
+
+		logger.Info("response body was greater than 1MB during recording, comparing body size",
+			zap.String("testcase", tc.Name),
+			zap.Int64("expected_size", tc.HTTPResp.BodySize),
+			zap.Int64("actual_size", actualBodySize),
+			zap.Bool("size_match", bodySizeMatch))
+
+		// Log actual response body as debug before clearing
+		logger.Debug("actual response body (skipped during recording)",
+			zap.String("testcase", tc.Name),
+			zap.String("body", actualResponse.Body))
+
+		bodySizeResult = models.IntResult{
+			Normal:   bodySizeMatch,
+			Expected: int(tc.HTTPResp.BodySize),
+			Actual:   int(actualBodySize),
+		}
+
+		// Clear actual body so body comparison below runs as empty vs empty
+		actualResponse.Body = ""
+	}
+
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -47,7 +75,14 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			Expected: tc.HTTPResp.Body,
 			Actual:   actualResponse.Body,
 		}},
+		BodySizeResult: bodySizeResult,
 	}
+
+	// If body size comparison failed, mark pass as false
+	if tc.HTTPResp.BodySkipped && !bodySizeResult.Normal {
+		pass = false
+	}
+
 	noise := tc.Noise
 	var (
 		bodyNoise   = noiseConfig["body"]
@@ -345,11 +380,13 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// 3) Body mismatches
+		var bodyAssessment *models.FailureAssessment
 		if isBodyMismatch {
 			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
 				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 					currentRisk = matcherUtils.MaxRisk(currentRisk, assess.Risk)
 					currentCategories = append(currentCategories, assess.Category...)
+					bodyAssessment = assess
 				} else {
 					// couldn't classify → conservative
 					currentRisk = models.High
@@ -373,20 +410,34 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		res.FailureInfo = models.FailureInfo{
-			Risk:     currentRisk,
-			Category: uniqueCategories,
+			Risk:       currentRisk,
+			Category:   uniqueCategories,
+			Assessment: bodyAssessment,
 		}
 
-		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
+		isBodySizeMismatch := tc.HTTPResp.BodySkipped && !bodySizeResult.Normal
+
+		if isStatusMismatch || isHeaderMismatch || isBodyMismatch || isBodySizeMismatch {
 			skipSuccessMsg = true
-			_, err := newLogger.Printf(logs)
-			if err != nil {
-				utils.LogError(logger, err, "failed to print the logs")
+
+			if isBodySizeMismatch {
+				logDiffs.PushBodyDiff(
+					fmtSprint234(fmt.Sprintf("body_size: %d bytes", bodySizeResult.Expected)),
+					fmtSprint234(fmt.Sprintf("body_size: %d bytes", bodySizeResult.Actual)),
+					nil,
+				)
 			}
 
-			err = logDiffs.Render()
-			if err != nil {
-				utils.LogError(logger, err, "failed to render the diffs")
+			if emitFailureLogs {
+				_, err := newLogger.Printf(logs)
+				if err != nil {
+					utils.LogError(logger, err, "failed to print the logs")
+				}
+
+				err = logDiffs.Render()
+				if err != nil {
+					utils.LogError(logger, err, "failed to render the diffs")
+				}
 			}
 		} else {
 			pass = true

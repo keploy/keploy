@@ -2,7 +2,7 @@ name: Golang On Docker (macOS)
 on:
   workflow_call:
     inputs:
-      image_tag:            
+      image_tag:
         description: "Docker image tag or digest to pull"
         required: false
         type: string
@@ -15,6 +15,7 @@ jobs:
   golang_docker_macos:
 
     runs-on: [self-hosted, macOS, native]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +23,9 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: gin-mongo
+            path: gin-mongo
+            script_dir: gin_mongo
         config:
           - job: record_build_replay_build
             record_src: build
@@ -40,10 +44,23 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          rm -rf ~/.gitconfig
+          # Use unset instead of rm -rf ~/.gitconfig to avoid racing with
+          # concurrent jobs that also need gitconfig.
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify Docker Desktop is running (macOS)
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
+          fi
+          echo "Docker Desktop is running."
 
       - id: image
         uses: ./.github/actions/download-image
@@ -66,7 +83,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-        
+
       - name: Ensure Docker Compose is available (macOS)
         shell: bash
         run: |
@@ -79,7 +96,6 @@ jobs:
             echo "docker-compose (v1) found."
             exit 0
           fi
-          # Install docker-compose (v1) via Homebrew as a fallback
           brew update
           brew install docker-compose
           echo "Installed docker-compose."
@@ -88,7 +104,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
-          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+          JOB_ID: ${{ github.run_id }}-${{ matrix.app.name }}-${{ github.run_attempt }}
         shell: bash
         run: |
           cd samples-go/${{ matrix.app.path }}
@@ -100,8 +116,26 @@ jobs:
         run: |
           pkill -f "bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh" || true
 
+      - name: Clean up Docker artifacts
+        if: always()
+        continue-on-error: true
+        env:
+          JOB_ID: ${{ github.run_id }}-${{ matrix.app.name }}-${{ github.run_attempt }}
+        run: |
+          # Only remove containers scoped to THIS job's JOB_ID.
+          echo "Cleaning up Docker artifacts for JOB_ID=${JOB_ID}..."
+          for prefix in ginApp_ mongoDb_ keploy_ginmongo_ echoApp_ postgresDb_ keploy_; do
+            ids=$(docker ps -aq --filter "name=${prefix}${JOB_ID}" 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done
+          docker network rm "keploy-network-${JOB_ID}" 2>/dev/null || true
+
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true

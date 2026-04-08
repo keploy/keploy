@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,6 +32,10 @@ var CaptureHook CaptureFunc = Capture
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
+
+// LargeBodyThreshold is the size threshold (1MB) above which response bodies
+// are skipped during recording and only body size is stored.
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
@@ -104,11 +109,34 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		return
 	}
 
+	// If response body exceeds 1MB, mark it as skipped and store only the size
+	var respBodySkipped bool
+	var respBodySize int64
+	if len(respBody) > LargeBodyThreshold {
+		respBodySkipped = true
+		respBodySize = int64(len(respBody))
+		logger.Debug("response body exceeds 1MB during recording, storing only body size",
+			zap.Int64("body_size_bytes", respBodySize),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		respBody = []byte{} // clear the body — only size is stored
+	}
+
+	hasBinaryFile := false
+	for _, fd := range formData {
+		if len(fd.Paths) > 0 {
+			hasBinaryFile = true
+			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			break
+		}
+	}
+
 	testCase := &models.TestCase{
-		Version: models.GetVersion(),
-		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
-		Kind:    models.HTTP,
-		Created: time.Now().Unix(),
+		Version:       models.GetVersion(),
+		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
+		Kind:          models.HTTP,
+		Created:       time.Now().Unix(),
+		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
@@ -124,6 +152,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			StatusCode:    resp.StatusCode,
 			Header:        pkg.ToYamlHTTPHeader(resp.Header),
 			Body:          string(respBody),
+			BodySkipped:   respBodySkipped,
+			BodySize:      respBodySize,
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
@@ -137,7 +167,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true)
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true, false)
 		}
 	}
 	select {
@@ -158,7 +188,8 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		}
 	}
 
-	var passThrough bool
+	hasInclude := false
+	matchedInclude := false
 
 	type cond struct {
 		eligible bool
@@ -172,8 +203,8 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			filter.BypassRule.Path == "" &&
 			filter.BypassRule.Port == 0)
 
-		opts := models.OutgoingOptions{Rules: []models.BypassRule{filter.BypassRule}}
-		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), opts)
+		outgoingOpts := models.OutgoingOptions{Rules: []models.BypassRule{filter.BypassRule}}
+		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), outgoingOpts)
 
 		//  2. URL-method rule
 		urlMethodEligible := len(filter.URLMethods) > 0
@@ -215,6 +246,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			{headerEligible, headerMatch},
 		}
 
+		isMatch := false
 		switch filter.MatchType {
 		case models.AND:
 			pass := true
@@ -230,8 +262,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				}
 			}
 			if seen && pass {
-				passThrough = true
-				return passThrough
+				isMatch = true
 			}
 
 		case models.OR:
@@ -239,14 +270,29 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		default:
 			for _, c := range conds {
 				if c.eligible && c.match {
-					passThrough = true
-					return passThrough
+					isMatch = true
+					break
 				}
+			}
+		}
+
+		if filter.FilterPolicy == models.Include {
+			hasInclude = true
+			if isMatch {
+				matchedInclude = true
+			}
+		} else { // Exclude (default)
+			if isMatch {
+				return true // Exclude ALWAYS takes priority
 			}
 		}
 	}
 
-	return passThrough
+	if hasInclude && !matchedInclude {
+		return true
+	}
+
+	return false
 }
 
 func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
@@ -277,15 +323,54 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			continue
 		}
 
-		value, err := io.ReadAll(part)
-		if err != nil {
-			utils.LogError(logger, err, "Error reading part value")
-			continue
+		fileName := part.FileName()
+		var fileNames []string
+		var values []string
+		var paths []string
+
+		if fileName != "" {
+			file, err := os.CreateTemp("", "keploy-multipart-*.bin")
+			if err != nil {
+				utils.LogError(logger, err, "Error creating temp file")
+				continue
+			}
+			tempPath := file.Name()
+			_, err = io.Copy(file, part)
+			if err != nil {
+				utils.LogError(logger, err, "Error copying part to temp file")
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "Error closing temp file")
+				}
+				if rerr := os.Remove(tempPath); rerr != nil {
+					utils.LogError(logger, rerr, "Error removing temp file", zap.String("path", tempPath))
+				}
+				continue
+			}
+			if err := file.Close(); err != nil {
+				utils.LogError(logger, err, "Error closing temp file")
+				if rerr := os.Remove(tempPath); rerr != nil {
+					utils.LogError(logger, rerr, "Error removing temp file", zap.String("path", tempPath))
+				}
+				continue
+			}
+
+			paths = append(paths, tempPath)
+			fileNames = append(fileNames, fileName)
+		} else {
+
+			value, err := io.ReadAll(part)
+			if err != nil {
+				utils.LogError(logger, err, "Error reading part value")
+				continue
+			}
+			values = append(values, string(value))
 		}
 
 		formData = append(formData, models.FormData{
-			Key:    key,
-			Values: []string{string(value)},
+			Key:       key,
+			Values:    values,
+			FileNames: fileNames,
+			Paths:     paths,
 		})
 	}
 

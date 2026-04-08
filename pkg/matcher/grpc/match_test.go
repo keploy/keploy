@@ -64,6 +64,21 @@ func TestMatch_JSONComparison(t *testing.T) {
 			expectedMatch:  false,
 			description:    "Should handle mixed JSON and non-JSON gracefully",
 		},
+		{
+			name: "Protoscope field reorder with different indentation",
+			expectedData: `9: {  3: {    1: {      2: {2: 0.0}   # 0x0i64
+  1: {"candidateCnt"}}
+  1: {      2: {3: {"OVS"}}
+  1: {"type"}}}}`,
+			actualData: `9: {  3: {    1: {      2: {3: {"OVS"}}
+  1: {"type"}}
+  1: {      2: {2: 0.0}   # 0x0i64
+  1: {"candidateCnt"}}}}`,
+			noiseConfig:    map[string]map[string][]string{},
+			ignoreOrdering: false,
+			expectedMatch:  true,
+			description:    "Should match protoscope text where field order (and thus indentation) differs but content is identical",
+		},
 	}
 
 	for _, tt := range tests {
@@ -106,7 +121,7 @@ func TestMatch_JSONComparison(t *testing.T) {
 			}
 
 			// Run the match
-			matched, result := Match(tc, actualResp, tt.noiseConfig, tt.ignoreOrdering, logger)
+			matched, result := Match(tc, actualResp, tt.noiseConfig, tt.ignoreOrdering, logger, true)
 
 			// Check the result
 			if matched != tt.expectedMatch {
@@ -184,13 +199,13 @@ func TestMatch_IgnoreOrdering(t *testing.T) {
 	noiseConfig := map[string]map[string][]string{}
 
 	// Test with ignoreOrdering = false (should not match)
-	matchedStrict, _ := Match(tc, actualResp, noiseConfig, false, logger)
+	matchedStrict, _ := Match(tc, actualResp, noiseConfig, false, logger, true)
 	if matchedStrict {
 		t.Error("Expected arrays with different ordering to not match when ignoreOrdering=false")
 	}
 
 	// Test with ignoreOrdering = true (should match)
-	matchedIgnoreOrder, _ := Match(tc, actualResp, noiseConfig, true, logger)
+	matchedIgnoreOrder, _ := Match(tc, actualResp, noiseConfig, true, logger, true)
 	if !matchedIgnoreOrder {
 		t.Error("Expected arrays with different ordering to match when ignoreOrdering=true")
 	}

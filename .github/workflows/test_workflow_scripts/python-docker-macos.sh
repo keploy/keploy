@@ -16,8 +16,10 @@ find_available_port() {
     echo $port
 }
 
-# Find 4 available ports
-APP_PORT=$(find_available_port 8080)
+# python uses base range 14000-15999, offset by JOB_ID hash
+PORT_OFFSET=$(( $(echo "$JOB_ID" | cksum | awk '{print $1}') % 400 ))
+BASE_PORT=$(( 14000 + PORT_OFFSET * 5 ))
+APP_PORT=$(find_available_port $BASE_PORT)
 DB_PORT=$(find_available_port $((APP_PORT + 1)))
 PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
 DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
@@ -27,20 +29,23 @@ APP_CONTAINER="flaskApp_${JOB_ID}"
 DB_CONTAINER="mongo_${JOB_ID}"
 KEPLOY_CONTAINER="keploy_${JOB_ID}"
 APP_IMAGE="flask-app_${JOB_ID}:1.0"
+NETWORK_NAME="keploy-network-${JOB_ID}"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
+echo "Using network: $NETWORK_NAME"
 
 # Cleanup function to remove containers
 cleanup() {
-    echo "Cleaning up containers..."
+    echo "Cleaning up containers and network for job ${JOB_ID}..."
     docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_1" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_2" >/dev/null 2>&1 || true
+    docker rm -f "${APP_CONTAINER}_test_1" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
-    docker rm -f mongo >/dev/null 2>&1 || true
-    echo "Cleanup completed"
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    echo "Cleanup completed for job ${JOB_ID}"
 }
 
 # Set trap to run cleanup on script exit (success, failure, or interrupt)
@@ -58,14 +63,15 @@ for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -
     fi
 done
 
-# --- Networking: create once, quietly ---
-if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
-  docker network create keploy-network
-fi
+# --- Networking: create a job-scoped network to avoid collisions ---
+docker network rm "$NETWORK_NAME" 2>/dev/null || true
+docker network create "$NETWORK_NAME"
 
 # --- Start fresh Mongo (force remove any stale one first) ---
-docker rm -f mongo >/dev/null 2>&1 || true
-docker run --name $DB_CONTAINER --rm --net keploy-network -p $DB_PORT:27017 -d mongo
+docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker run --name "$DB_CONTAINER" --rm \
+  --net "$NETWORK_NAME" --network-alias mongo \
+  -p "${DB_PORT}:27017" -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
@@ -123,7 +129,7 @@ for i in 1 2; do
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
   "$RECORD_BIN" record \
-    -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --rm --name $container_name $APP_IMAGE" \
+    -c "docker run -p $APP_PORT:$APP_PORT --net $NETWORK_NAME --rm --name $container_name $APP_IMAGE" \
     --container-name "$container_name" \
     --generate-github-actions=false \
     --proxy-port $PROXY_PORT \
@@ -162,7 +168,7 @@ docker stop $DB_CONTAINER >/dev/null 2>&1 || true
 test_container="${APP_CONTAINER}_test_1"
 echo "Starting test mode..."
 "$REPLAY_BIN" test \
-  -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --name $test_container $APP_IMAGE" \
+  -c "docker run --rm -p $APP_PORT:$APP_PORT --net $NETWORK_NAME --name $test_container $APP_IMAGE" \
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \

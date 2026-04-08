@@ -128,3 +128,56 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+  run_schema_match_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/schema_match_linux.yml
+
+  # Gate job: the single required status check for branch protection.
+  # Re-running only this job is pointless — it re-checks all upstream results.
+  gate:
+    name: CI Gate (Linux)
+    if: always()
+    needs:
+      - build-and-upload
+      - upload-latest
+      - build-docker-image
+      - run_golang_linux
+      - run_golang_wsl
+      - run_java_linux
+      - run_node_linux
+      - run_node_docker
+      - run_python_docker
+      - run_python_linux
+      - run_golang_docker
+      - run_fuzzer_linux
+      - run_node_mapping
+      - run_grpc_linux
+      - run_schema_match_linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-and-upload.result }}" \
+            "${{ needs.upload-latest.result }}" \
+            "${{ needs.build-docker-image.result }}" \
+            "${{ needs.run_golang_linux.result }}" \
+            "${{ needs.run_golang_wsl.result }}" \
+            "${{ needs.run_java_linux.result }}" \
+            "${{ needs.run_node_linux.result }}" \
+            "${{ needs.run_node_docker.result }}" \
+            "${{ needs.run_python_docker.result }}" \
+            "${{ needs.run_python_linux.result }}" \
+            "${{ needs.run_golang_docker.result }}" \
+            "${{ needs.run_fuzzer_linux.result }}" \
+            "${{ needs.run_node_mapping.result }}" \
+            "${{ needs.run_grpc_linux.result }}" \
+            "${{ needs.run_schema_match_linux.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."

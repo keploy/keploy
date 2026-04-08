@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package utils
 
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -47,7 +48,7 @@ func ReexecWithSudo(logger *zap.Logger) {
 	// Append original arguments (skip the first one which is the program name)
 	args = append(args, os.Args[1:]...)
 
-	logger.Info("Docker command detected, re-executing with sudo for elevated privileges...")
+	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
 
 	// Use syscall.Exec to replace the current process
@@ -63,12 +64,19 @@ func ReexecWithSudo(logger *zap.Logger) {
 
 // ShouldReexecWithSudo checks if keploy should re-execute itself with sudo.
 // Returns true if:
-// 1. A Docker/Docker Compose command is detected in the -c/--command flag
-// 2. Keploy is NOT currently running as root
+// 1. A Docker/Docker Compose command is detected in the -c/--command flag, OR
+// 2. The "cloud replay" subcommand is being used (it generates a docker-compose internally)
+// AND Keploy is NOT currently running as root.
 func ShouldReexecWithSudo() bool {
 	// Already running as root - no need to re-exec
 	if os.Geteuid() == 0 {
 		return false
+	}
+
+	// Check if this is a "cloud replay" command, which always needs root
+	// because it generates and runs a docker-compose file internally.
+	if isCloudReplayCmd(os.Args) {
+		return true
 	}
 
 	// Extract the command from arguments
@@ -82,28 +90,53 @@ func ShouldReexecWithSudo() bool {
 	return IsDockerCmd(cmdType)
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
-func ExtractCommandFromArgs(args []string) string {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
+// isCloudReplayCmd checks if the args represent the "keploy cloud replay" subcommand.
+func isCloudReplayCmd(args []string) bool {
+	// It is tolerant of flags that may appear before or between subcommands,
+	// e.g. `keploy --debug cloud replay` or `keploy cloud --debug replay`.
+	if len(args) < 3 {
+		return false
+	}
 
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
-			if i+1 < len(args) {
-				return args[i+1]
+	// Skip args[0] (program name) and search for "cloud" followed by "replay".
+	for i := 1; i < len(args); i++ {
+		if args[i] != "cloud" {
+			continue
+		}
+
+		// Look ahead for "replay", allowing flags and their separate values between
+		// "cloud" and "replay" (e.g. `cloud --config /tmp/cfg replay`).
+		for j := i + 1; j < len(args); j++ {
+			token := args[j]
+			if token == "replay" {
+				return true
 			}
-			return ""
-		}
 
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+			// End-of-options marker; next token must be the subcommand.
+			if token == "--" {
+				if j+1 < len(args) && args[j+1] == "replay" {
+					return true
+				}
+				break
+			}
+
+			// If this is not a flag, this isn't "cloud replay".
+			if !strings.HasPrefix(token, "-") {
+				break
+			}
+
+			// Flag with inline value (`--config=/tmp/cfg`) is fully consumed.
+			if strings.Contains(token, "=") {
+				continue
+			}
+
+			// Heuristically treat the next non-flag token as a flag value and skip it.
+			// If the next token is "replay", keep it as the subcommand candidate.
+			if j+1 < len(args) && args[j+1] != "replay" && !strings.HasPrefix(args[j+1], "-") {
+				j++
+			}
 		}
 	}
-	return ""
+
+	return false
 }

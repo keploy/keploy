@@ -1,11 +1,14 @@
-// Package telemetry provides functionality for telemetry data collection.
+// Package telemetry collects anonymous usage metrics.
 package telemetry
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"net/http"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -20,36 +23,62 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
+	mu             sync.Mutex // guards closed + inflight.Add to prevent Add/Wait race
+	inflight       sync.WaitGroup
+	inflightN      atomic.Int64
+	closed         atomic.Bool
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 
 func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+	gm := opt.GlobalMap
+	if gm == nil {
+		gm = &sync.Map{}
+	}
 	return &Telemetry{
 		Enabled:        opt.Enabled,
 		logger:         logger,
 		KeployVersion:  opt.Version,
-		GlobalMap:      opt.GlobalMap,
+		GlobalMap:      gm,
 		InstallationID: opt.InstallationID,
-		client:         &http.Client{Timeout: 10 * time.Second},
+		client:         &http.Client{Timeout: 2 * time.Second}, // matches Shutdown drain timeout
 	}
 }
 
-func (tel *Telemetry) Ping() {
+func (tel *Telemetry) Ping(ctx context.Context) {
 	if !tel.Enabled {
 		return
 	}
 	go func() {
-		for {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if tel.closed.Load() {
+				return
+			}
 			tel.SendTelemetry("Ping")
-			time.Sleep(5 * time.Minute)
+		}
+		for {
+			if tel.closed.Load() {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tel.SendTelemetry("Ping")
+			}
 		}
 	}()
 }
@@ -61,7 +90,7 @@ func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runSt
 		"Test-Set":     testSet,
 		"Run-Status":   runStatus,
 	}
-	go tel.SendTelemetry("TestSetRun", dataMap)
+	tel.sendTracked("TestSetRun", dataMap)
 }
 
 func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{}) {
@@ -74,18 +103,16 @@ func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus 
 	for k, v := range metadata {
 		dataMap[k] = v
 	}
-	go tel.SendTelemetry("TestRun", dataMap)
+	tel.sendTracked("TestRun", dataMap)
 }
 
-// MockTestRun is Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 	dataMap := map[string]interface{}{
 		"Utilized-Mocks": utilizedMocks,
 	}
-	go tel.SendTelemetry("MockTestRun", dataMap)
+	tel.sendTracked("MockTestRun", dataMap)
 }
 
-// RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{}) {
 	mockMap := make(map[string]interface{}, len(mockTotal))
 	for k, v := range mockTotal {
@@ -99,21 +126,20 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 	for k, v := range metadata {
 		dataMap[k] = v
 	}
-	go tel.SendTelemetry("RecordedTestSuite", dataMap)
+	tel.sendTracked("RecordedTestSuite", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestAndMocks() {
 	dataMap := map[string]interface{}{
 		"mocks": make(map[string]int),
 	}
-	go tel.SendTelemetry("RecordedTestAndMocks", dataMap)
+	tel.SendTelemetry("RecordedTestAndMocks", dataMap)
 }
 
 func (tel *Telemetry) GenerateUT() {
-	go tel.SendTelemetry("GenerateUT")
+	tel.SendTelemetry("GenerateUT")
 }
 
-// RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 	mockMap := make(map[string]interface{}, len(mockTotal))
 	for k, v := range mockTotal {
@@ -122,63 +148,121 @@ func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 	dataMap := map[string]interface{}{
 		"mocks": mockMap,
 	}
-	go tel.SendTelemetry("RecordedMocks", dataMap)
+	tel.SendTelemetry("RecordedMocks", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
 	dataMap := map[string]interface{}{
 		"mock": mockType,
 	}
-	go tel.SendTelemetry("RecordedTestCaseMock", dataMap)
+	tel.SendTelemetry("RecordedTestCaseMock", dataMap)
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
-	if tel.Enabled {
-		event := models.TeleEvent{
-			EventType: eventType,
-			CreatedAt: time.Now().Unix(),
+	tel.sendEvent(eventType, false, output...)
+}
+
+func (tel *Telemetry) sendTracked(eventType string, output ...map[string]interface{}) {
+	tel.sendEvent(eventType, true, output...)
+}
+
+func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[string]interface{}) {
+	if !tel.Enabled {
+		return
+	}
+
+	if tracked {
+		tel.mu.Lock()
+		if tel.closed.Load() {
+			tel.mu.Unlock()
+			return
 		}
-		if len(output) > 0 {
-			event.Meta = output[0]
-		} else {
-			event.Meta = map[string]interface{}{}
+		tel.inflight.Add(1)
+		tel.inflightN.Add(1)
+		tel.mu.Unlock()
+	} else if tel.closed.Load() {
+		return
+	}
+
+	event := models.TeleEvent{
+		EventType: eventType,
+		CreatedAt: time.Now().Unix(),
+	}
+	if len(output) > 0 && output[0] != nil {
+		event.Meta = output[0]
+	} else {
+		event.Meta = map[string]interface{}{}
+	}
+
+	tel.GlobalMap.Range(func(key, value interface{}) bool {
+		if k, ok := key.(string); ok {
+			event.Meta[k] = value
+		}
+		return true
+	})
+
+	event.InstallationID = tel.InstallationID
+	event.OS = runtime.GOOS
+	event.KeployVersion = tel.KeployVersion
+	event.Arch = runtime.GOARCH
+
+	go func() {
+		if tracked {
+			defer func() {
+				tel.inflightN.Add(-1)
+				tel.inflight.Done()
+			}()
 		}
 
-		// Merge global map entries into event meta
-		tel.GlobalMap.Range(func(key, value interface{}) bool {
-			if k, ok := key.(string); ok {
-				event.Meta[k] = value
-			}
-			return true
-		})
+		func() {
+			defer func() { _ = recover() }()
+			event.IsCI, event.CIProvider = detectCI()
+			event.GitRepo = detectGitRepo()
+		}()
 
-		event.InstallationID = tel.InstallationID
-		event.OS = runtime.GOOS
-		event.KeployVersion = tel.KeployVersion
-		event.Arch = runtime.GOARCH
-		bin, err := marshalEvent(event, tel.logger)
+		bin, err := marshalEvent(event)
 		if err != nil {
-			tel.logger.Debug("failed to marshal event", zap.Error(err))
 			return
 		}
 
 		req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))
 		if err != nil {
-			tel.logger.Debug("failed to create request for analytics", zap.Error(err))
 			return
 		}
-
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
 		resp, err := tel.client.Do(req)
 		if err != nil {
-			tel.logger.Debug("failed to send request for analytics", zap.Error(err))
 			return
 		}
-		_, err = unmarshalResp(resp, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to unmarshal response", zap.Error(err))
-			return
-		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+}
+
+func (tel *Telemetry) Shutdown() {
+	if !tel.Enabled {
+		return
+	}
+	tel.mu.Lock()
+	if !tel.closed.CompareAndSwap(false, true) {
+		tel.mu.Unlock()
+		return
+	}
+	tel.mu.Unlock()
+	if tel.inflightN.Load() == 0 {
+		return
+	}
+	if tel.logger != nil {
+		tel.logger.Info("Cleaning up running operations...")
+	}
+	done := make(chan struct{})
+	go func() {
+		tel.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 	}
 }
