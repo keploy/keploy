@@ -6,7 +6,6 @@ import (
 
 type GrpcSpec struct {
 	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
-	Noise            []string                      `json:"noise,omitempty" yaml:"noise,omitempty"`
 	GrpcReq          GrpcReq                       `json:"grpcReq" yaml:"grpcReq"`
 	GrpcResp         GrpcResp                      `json:"grpcResp" yaml:"grpcResp"`
 	AppPort          uint16                        `json:"app_port" yaml:"app_port,omitempty"`

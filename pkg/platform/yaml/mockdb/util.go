@@ -20,6 +20,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
+		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
 	}
 	switch mock.Kind {
@@ -52,7 +53,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		mongoSpec := models.MongoSpec{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Requests:         requests,
 			Response:         responses,
 			CreatedAt:        mock.Spec.Created,
@@ -69,7 +70,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.HTTP:
 		httpSpec := models.HTTPSchema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Request:          *mock.Spec.HTTPReq,
 			Response:         *mock.Spec.HTTPResp,
 			Created:          mock.Spec.Created,
@@ -92,7 +93,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		dnsSpec := models.DNSSchema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Request:          dnsReq,
 			Response:         dnsResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -106,7 +107,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.GENERIC:
 		genericSpec := models.GenericSchema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			GenericRequests:  mock.Spec.GenericRequests,
 			GenericResponses: mock.Spec.GenericResponses,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -120,7 +121,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.REDIS:
 		redisSpec := models.RedisSchema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			RedisRequests:    mock.Spec.RedisRequests,
 			RedisResponses:   mock.Spec.RedisResponses,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -134,7 +135,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.KAFKA:
 		kafkaSpec := models.KafkaSchema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			KafkaRequests:    mock.Spec.KafkaRequests,
 			KafkaResponses:   mock.Spec.KafkaResponses,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -170,7 +171,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 
 		sqlSpec := postgres.Spec{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Requests:         requests,
 			Response:         responses,
 			CreatedAt:        mock.Spec.Created,
@@ -185,7 +186,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.GRPC_EXPORT:
 		gRPCSpec := models.GrpcSpec{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			GrpcReq:          *mock.Spec.GRPCReq,
 			GrpcResp:         *mock.Spec.GRPCResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -227,7 +228,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 
 		sqlSpec := mysql.Spec{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Requests:         requests,
 			Response:         responses,
 			CreatedAt:        mock.Spec.Created,
@@ -250,7 +251,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		http2Spec := models.HTTP2Schema{
 			Metadata:         mock.Spec.Metadata,
-			Noise:            mock.Spec.Noise,
+
 			Request:          http2Req,
 			Response:         http2Resp,
 			Created:          mock.Spec.Created,
@@ -278,6 +279,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Version:      m.Version,
 			Name:         m.Name,
 			Kind:         m.Kind,
+			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")
@@ -296,7 +298,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 			mock.Spec = models.MockSpec{
 				Metadata:         httpSpec.Metadata,
-				Noise:            httpSpec.Noise,
+
 				HTTPReq:          &httpSpec.Request,
 				HTTPResp:         &httpSpec.Response,
 				Created:          httpSpec.Created,
@@ -316,7 +318,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         metadata,
-				Noise:            dnsSpec.Noise,
+
 				DNSReq:           &dnsSpec.Request,
 				DNSResp:          &dnsSpec.Response,
 				ReqTimestampMock: dnsSpec.ReqTimestampMock,
@@ -344,7 +346,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         grpcSpec.Metadata,
-				Noise:            grpcSpec.Noise,
+
 				GRPCResp:         &grpcSpec.GrpcResp,
 				GRPCReq:          &grpcSpec.GrpcReq,
 				ReqTimestampMock: grpcSpec.ReqTimestampMock,
@@ -359,7 +361,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         genericSpec.Metadata,
-				Noise:            genericSpec.Noise,
+
 				GenericRequests:  genericSpec.GenericRequests,
 				GenericResponses: genericSpec.GenericResponses,
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
@@ -374,7 +376,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         redisSpec.Metadata,
-				Noise:            redisSpec.Noise,
+
 				RedisRequests:    redisSpec.RedisRequests,
 				RedisResponses:   redisSpec.RedisResponses,
 				ReqTimestampMock: redisSpec.ReqTimestampMock,
@@ -389,7 +391,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         kafkaSpec.Metadata,
-				Noise:            kafkaSpec.Noise,
+
 				KafkaRequests:    kafkaSpec.KafkaRequests,
 				KafkaResponses:   kafkaSpec.KafkaResponses,
 				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
@@ -433,7 +435,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:         http2Spec.Metadata,
-				Noise:            http2Spec.Noise,
+
 				HTTP2Req:         &http2Spec.Request,
 				HTTP2Resp:        &http2Spec.Response,
 				Created:          http2Spec.Created,
@@ -453,7 +455,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.Spec) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
 		Metadata:         yamlSpec.Metadata,
-		Noise:            yamlSpec.Noise,
+
 		Created:          yamlSpec.CreatedAt,
 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
 		ResTimestampMock: yamlSpec.ResTimestampMock,
@@ -764,7 +766,7 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
 		Metadata:         yamlSpec.Metadata,
-		Noise:            yamlSpec.Noise,
+
 		Created:          yamlSpec.CreatedAt,
 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
 		ResTimestampMock: yamlSpec.ResTimestampMock,
@@ -858,7 +860,7 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
 		Metadata:         yamlSpec.Metadata,
-		Noise:            yamlSpec.Noise,
+
 		Created:          yamlSpec.CreatedAt,
 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
 		ResTimestampMock: yamlSpec.ResTimestampMock,
