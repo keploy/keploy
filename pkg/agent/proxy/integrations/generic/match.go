@@ -2,7 +2,6 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 
 	"go.keploy.io/server/v3/pkg"
@@ -101,14 +100,36 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+			nc := util.NewNoiseChecker(mock.Noise)
+			var simSum float64
+			var simCount int
 			for requestIndex, reqBuff := range reqBuffs {
-				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
+
+				// Skip noisy (obfuscated) buffers — don't let them influence similarity
+				if nc != nil && nc.IsNoisy(mockData) {
+					continue
+				}
+
+				encoded, _ := util.DecodeBase64(mockData)
 
 				similarity := fuzzyCheck(encoded, reqBuff)
-
-				if mxSim < similarity {
-					mxSim = similarity
+				simSum += similarity
+				simCount++
+			}
+			// Compute average similarity across non-noisy buffers.
+			// If all buffers are noisy, treat as neutral (1.0) so the
+			// mock remains matchable — schema/length already matched.
+			if simCount > 0 {
+				avgSim := simSum / float64(simCount)
+				if avgSim > mxSim {
+					mxSim = avgSim
+					mxIdx = idx
+				}
+			} else if len(reqBuffs) > 0 {
+				// All buffers were noisy — neutral match
+				if 1.0 > mxSim {
+					mxSim = 1.0
 					mxIdx = idx
 				}
 			}
@@ -128,9 +149,16 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+			nc := util.NewNoiseChecker(mock.Noise)
 			matched := true // Flag to track if all requests match
 
 			for requestIndex, reqBuff := range reqBuffs {
+				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
+
+				// If mock data is noisy (obfuscated), skip comparison for this buffer
+				if nc != nil && nc.IsNoisy(mockData) {
+					continue
+				}
 
 				bufStr := string(reqBuff)
 				if !util.IsASCII(string(reqBuff)) {
@@ -138,7 +166,7 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 				}
 
 				// Compare the encoded data
-				if mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+				if mockData != bufStr {
 					matched = false
 					break // Exit the loop if any request doesn't match
 				}

@@ -103,6 +103,10 @@ type SetupOptions struct {
 	ConfigPath        string
 	ExtraArgs         []string
 	EnableSampling    int
+	// InMemoryCompose holds docker-compose YAML content to avoid writing sensitive
+	// environment variables to disk. When non-nil, SetupCompose uses this content
+	// directly instead of reading from a file path extracted from the command.
+	InMemoryCompose []byte
 }
 
 type RunOptions struct {
