@@ -383,7 +383,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				reqBodyCapture.Reset()
 				if err != nil {
 					captureEnabled = false
-					logger.Warn("Failed to serialize forwarded request for capturing", zap.Error(err))
+					logger.Debug("Failed to serialize forwarded request for capturing", zap.Error(err))
 				}
 			}
 		}
@@ -467,7 +467,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				respBodyCapture.Reset()
 				if err != nil {
 					captureEnabled = false
-					logger.Warn("Failed to serialize forwarded response for capturing", zap.Error(err))
+					logger.Debug("Failed to serialize forwarded response for capturing", zap.Error(err))
 				}
 			}
 		}

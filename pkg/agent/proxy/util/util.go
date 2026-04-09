@@ -162,7 +162,10 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			return
 		default:
 			if stopOnRecordingPause && isRecordingPaused() {
-				errChannel <- ErrRecordingPausedDueToMemoryPressure
+				select {
+				case errChannel <- ErrRecordingPausedDueToMemoryPressure:
+				default:
+				}
 				return
 			}
 

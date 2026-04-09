@@ -23,7 +23,7 @@ const (
 	defaultCheckInterval = 500 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
 	pauseThresholdRatio  = 0.80
-	resumeThresholdRatio = 0.80
+	resumeThresholdRatio = 0.70
 )
 
 var recordingPaused atomic.Bool
@@ -35,6 +35,7 @@ type guard struct {
 	memoryLimitMB     uint64
 	lastReclaim       time.Time
 	underPressure     bool
+	readFailCount     int
 }
 
 type cgroupLayout struct {
@@ -102,7 +103,8 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	}
 
 	logger.Info("Enabled keploy-agent memory guard",
-		zap.Uint64("memory_limit_mb", g.memoryLimitMB),
+		zap.Uint64("memory_limit_mb", g.memoryLimitMB))
+	logger.Debug("Memory guard cgroup details",
 		zap.Int("cgroup_version", layout.version),
 		zap.String("memory_current_path", g.memoryCurrentPath))
 
@@ -122,9 +124,16 @@ func (g *guard) run(ctx context.Context) {
 		case <-ticker.C:
 			currentBytes, err := readMemoryCurrent(g.memoryCurrentPath)
 			if err != nil {
-				g.logger.Warn("failed to read keploy-agent memory usage", zap.String("path", g.memoryCurrentPath), zap.Error(err))
+				g.readFailCount++
+				if g.readFailCount == 1 || g.readFailCount%120 == 0 { // log first failure, then every ~60s
+					g.logger.Warn("failed to read keploy-agent memory usage",
+						zap.String("path", g.memoryCurrentPath),
+						zap.Int("consecutive_failures", g.readFailCount),
+						zap.Error(err))
+				}
 				continue
 			}
+			g.readFailCount = 0
 
 			pauseThreshold := thresholdBytes(g.limitBytes, pauseThresholdRatio)
 			resumeThreshold := thresholdBytes(g.limitBytes, resumeThresholdRatio)

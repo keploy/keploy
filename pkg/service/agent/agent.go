@@ -82,8 +82,9 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
-		a.logger.Error("failed to start keploy-agent memory guard", zap.Error(err))
-		return err
+		a.logger.Warn("failed to start keploy-agent memory guard, continuing without memory-aware recording. "+
+			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
+			zap.Error(err))
 	}
 
 	select {

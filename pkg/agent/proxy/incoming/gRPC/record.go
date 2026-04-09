@@ -209,7 +209,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 				destStream.CloseSend()
 				return
 			}
-			if captureEnabled {
+			if captureEnabled && !memoryguard.IsRecordingPaused() {
 				reqBuf.Write(reqMsg.data)
 			}
 			if err := destStream.SendMsg(reqMsg); err != nil {
@@ -240,7 +240,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 			if respErr != nil { // Handles io.EOF and status errors
 				return
 			}
-			if captureEnabled {
+			if captureEnabled && !memoryguard.IsRecordingPaused() {
 				respBuf.Write(respMsg.data)
 			}
 			if err := clientStream.SendMsg(respMsg); err != nil {
@@ -282,7 +282,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		}
 	}
 
-	if captureEnabled {
+	if captureEnabled && !memoryguard.IsRecordingPaused() {
 		http2Stream := &pkg.HTTP2Stream{
 			ID:       0,
 			GRPCReq:  grpcReq,
