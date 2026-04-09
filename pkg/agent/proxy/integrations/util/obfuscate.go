@@ -13,7 +13,10 @@ type NoiseChecker struct {
 }
 
 // Global cache for compiled regexes to avoid recompiling the same patterns
-// across multiple mock comparisons.
+// across multiple mock comparisons. Bounded to maxNoiseCacheSize entries;
+// when the limit is reached the cache is cleared to reclaim memory.
+const maxNoiseCacheSize = 1024
+
 var (
 	noiseCacheMu sync.RWMutex
 	noiseCache   = make(map[string]*regexp.Regexp)
@@ -31,6 +34,10 @@ func getCachedRegexp(pattern string) *regexp.Regexp {
 		return nil // invalid pattern — silently skipped; not user-actionable
 	}
 	noiseCacheMu.Lock()
+	// Evict all entries when cache is full to bound memory usage.
+	if len(noiseCache) >= maxNoiseCacheSize {
+		noiseCache = make(map[string]*regexp.Regexp)
+	}
 	if old := noiseCache[pattern]; old == nil {
 		noiseCache[pattern] = compiled
 	} else {

@@ -532,7 +532,7 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
 		}
 		dist := levenshtein.ComputeDistance(req, mock)
 		if dist == 0 {
-			return 0, 0
+			return idx, 0
 		}
 		if dist < minDist {
 			minDist = dist
@@ -619,12 +619,12 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
 	mxSim := -1.0
 	mxIdx := -1
+	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+	reqShingles := util.CreateShingles(reqBuff, k)
 	for idx := range tcsMocks {
 		mockBody := []byte(mockStrings[idx])
-		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := util.CreateShingles(mockBody, k)
-		shingles2 := util.CreateShingles(reqBuff, k)
-		similarity := util.JaccardSimilarity(shingles1, shingles2)
+		mockShingles := util.CreateShingles(mockBody, k)
+		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
 		if mxSim < similarity {
 			mxSim = similarity
 			mxIdx = idx
