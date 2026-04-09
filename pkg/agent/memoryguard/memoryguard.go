@@ -129,7 +129,8 @@ func (g *guard) run(ctx context.Context) {
 			if err != nil {
 				g.readFailCount++
 				if g.readFailCount == 1 || g.readFailCount%120 == 0 { // log first failure, then every ~60s
-					g.logger.Warn("failed to read keploy-agent memory usage",
+					g.logger.Warn("failed to read keploy-agent memory usage; "+
+						"ensure /sys/fs/cgroup is mounted in the container or set --memory-limit=0 to disable",
 						zap.String("path", g.memoryCurrentPath),
 						zap.Int("consecutive_failures", g.readFailCount),
 						zap.Error(err))
@@ -169,7 +170,8 @@ func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
 	applyPausedState(true)
 	now := time.Now()
 	if !alreadyPaused {
-		g.logger.Warn("Pausing keploy-agent recording due to memory pressure",
+		g.logger.Warn("Pausing keploy-agent recording due to memory pressure. "+
+			"Consider increasing --memory-limit, enabling sampling, or reducing request concurrency",
 			zap.Int64("memory_usage_bytes", currentBytes),
 			zap.Int64("pause_threshold_bytes", pauseThreshold),
 			zap.Int64("memory_limit_bytes", g.limitBytes),
@@ -206,12 +208,12 @@ func readMemoryCurrent(path string) (int64, error) {
 
 	value := strings.TrimSpace(string(data))
 	if value == "" {
-		return 0, fmt.Errorf("empty memory.current")
+		return 0, fmt.Errorf("empty cgroup memory usage file: %s", path)
 	}
 
 	currentBytes, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("parse memory.current: %w", err)
+		return 0, fmt.Errorf("parse cgroup memory usage file %s: %w", path, err)
 	}
 
 	return currentBytes, nil
