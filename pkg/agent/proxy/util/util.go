@@ -110,7 +110,7 @@ func IsHTTPReq(buf []byte) bool {
 	}
 	if isRequest {
 		// Cap the search range first to avoid scanning large non-HTTP payloads.
-		const maxScan = 8198 // 8192 + len(" HTTP/")
+		maxScan := 8192 + len(httpVersionMarker)
 		scanBuf := buf
 		if len(scanBuf) > maxScan {
 			scanBuf = scanBuf[:maxScan]
