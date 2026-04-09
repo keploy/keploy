@@ -55,6 +55,10 @@ type Config struct {
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
+	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
+	// sensitive environment variables (secrets, tokens) to disk. When set, the
+	// compose command uses "-f -" and pipes this content via stdin.
+	InMemoryCompose []byte `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Agent struct {
