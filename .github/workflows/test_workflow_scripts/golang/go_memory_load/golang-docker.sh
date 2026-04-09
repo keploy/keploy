@@ -7,7 +7,7 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
-KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-250m}"
+KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-200m}"
 MIXED_API_START_VUS="${MIXED_API_START_VUS:-2}"
 MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
@@ -277,7 +277,7 @@ start_memory_monitor() {
 
     threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
     if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
-        threshold_bytes="$((250 * 1024 * 1024))"
+        threshold_bytes="$((200 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
