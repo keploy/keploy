@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +35,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		select {
 		case pm.samplingSem <- struct{}{}:
 			acquiredLock = true
-			logger.Debug("Acquired 1 of 5 sampling slots for capture")
 		case <-ctx.Done():
 			return
 		default:
@@ -44,7 +42,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// We do not block. We set acquiredLock to false.
 			// This connection will be proxied normally and marked closed, but WILL NOT be captured.
 			acquiredLock = false
-			logger.Debug("Sampling limit reached (5/5). Ignoring request for capture.")
 		}
 	}
 
@@ -57,7 +54,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				} else if pm.sampling && pm.samplingSem != nil {
 					<-pm.samplingSem
 				}
-				logger.Debug("Lock released")
 			})
 		}
 	}
@@ -82,7 +78,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
-		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
+		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
+			zap.String("final_app_addr", finalAppAddr),
+			zap.Error(err),
+		)
 		return
 	}
 	defer upConn.Close()
@@ -90,27 +89,25 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	clientReader := bufio.NewReader(clientConn)
 	upstreamReader := bufio.NewReader(upConn)
 
-	// forceCloseMode is true if we are running in Sync or Sampling mode.
-	// In these modes, we strictly disable Keep-Alive and drop the loop after one request.
+	// forceCloseMode is true if we are running in sync or sampling mode.
+	// In these modes, disable keep-alive and drop the loop after one request.
 	forceCloseMode := pm.synchronous || pm.sampling
 
 	for {
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				logger.Debug("Client closed the keep-alive connection.", zap.String("client", clientConn.RemoteAddr().String()))
-			} else {
-				logger.Warn("Failed to read client request", zap.Error(err))
+			if !errors.Is(err, io.EOF) {
+				logger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
 			}
 			return
 		}
 		reqTimestamp := time.Now()
+
 		var chunked bool = false
 
-		// Request modifications for Sync/Sampling modes
+		// Request modifications for sync/sampling modes.
 		if forceCloseMode {
 			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
-				logger.Debug("Detected chunked request. Releasing lock early.")
 				releaseLock()
 				chunked = true
 			} else if pm.synchronous && acquiredLock {
@@ -120,86 +117,200 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				}
 			}
 
-			// Requirement: "mark the connection as closed for keep alive"
-			// This applies to ALL requests in these modes, even chunked or ignored (6th+) requests.
+			// Mark the connection closed for keep-alive in these modes even if
+			// we are only proxying and not capturing.
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
 
-		reqData, err := httputil.DumpRequest(req, true)
-		if err != nil {
-			logger.Error("Failed to dump request for capturing", zap.Error(err))
-			req.Body.Close()
-			return
+		// Determine whether capture is already known to be disabled for this exchange.
+		// Skip tee/buffering to avoid overhead when capture will be skipped anyway.
+		captureEligible := !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+
+		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if captureEligible && req.Body != nil && req.Body != http.NoBody {
+			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
 		if err := req.Write(upConn); err != nil {
-			logger.Error("Failed to forward request to upstream", zap.Error(err))
+			logger.Error("Failed to forward request to upstream. Verify the upstream application is running and reachable at the resolved address.",
+				zap.Error(err),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Bool("request_capture_truncated", reqCapture.Truncated()),
+			)
 			req.Body.Close()
 			return
 		}
-		req.Body.Close()
+		req.Body.Close() // Close explicitly to avoid defer leak in loop.
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			logger.Error("Failed to read upstream response", zap.Error(err))
+			logger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
+				zap.Error(err),
+				zap.Duration("time_since_request_received", time.Since(reqTimestamp)),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+			)
 			return
 		}
 
-		// Response modifications for Sync/Sampling modes
+		// Response modifications for sync/sampling modes.
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
-				logger.Debug("Detected chunked response. Releasing lock early.")
 				releaseLock()
 				chunked = true
 			}
 
-			// Close the connection on the response side as well
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
 
 		respTimestamp := time.Now()
-		respData, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			logger.Error("Failed to dump response for capturing", zap.Error(err))
-			resp.Body.Close()
-			return
+		// Re-evaluate capture eligibility after response headers (chunked may have changed).
+		captureEligible = !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
+			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
 		if err := resp.Write(clientConn); err != nil {
-			logger.Error("Failed to forward response to client", zap.Error(err))
+			logger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
+				zap.Error(err),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.Bool("response_capture_truncated", respCapture.Truncated()),
+				zap.Duration("exchange_duration", time.Since(reqTimestamp)),
+			)
 			resp.Body.Close()
 			return
 		}
-		resp.Body.Close()
+		resp.Body.Close() // Close explicitly.
 
-		// Capture Evaluation
 		shouldCapture := true
 		if forceCloseMode {
 			if chunked {
 				shouldCapture = false
+				logger.Debug("Skipping testcase capture for streaming exchange",
+					zap.Bool("synchronous_mode", pm.synchronous),
+					zap.Bool("sampling_mode", pm.sampling),
+					zap.Int64("request_bytes_seen", reqCapture.Total()),
+					zap.Int64("response_bytes_seen", respCapture.Total()),
+				)
 			} else if pm.sampling && !acquiredLock {
 				shouldCapture = false
 			}
 		}
 
-		// Only parse and invoke the hook if it's eligible for capture
-		if shouldCapture {
-			parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
-			if err == nil {
-				parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
-				if err == nil {
-					go func() {
-						defer parsedHTTPReq.Body.Close()
-						defer parsedHTTPRes.Body.Close()
-						hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
-					}()
-				}
+		if reqCapture.Truncated() || respCapture.Truncated() {
+			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
+				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.String("url", req.URL.String()),
+				zap.String("method", req.Method),
+				zap.Int("status_code", resp.StatusCode),
+				zap.String("response_content_type", resp.Header.Get("Content-Type")),
+			)
+			if forceCloseMode {
+				return
 			}
+			continue
 		}
 
-		// Break the keep-alive loop and exit if we are in sync/sampling mode
+		if !shouldCapture {
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		exchangeCaptureSize, err := capturedExchangeSize(req, resp, reqCapture.Bytes(), respCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
+				zap.Error(err),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+		if exchangeCaptureSize > maxHTTPCombinedCaptureBytes {
+			logger.Debug("Skipping HTTP capture because combined request and response exceeded capture budget",
+				zap.Int("capture_budget_bytes", maxHTTPCombinedCaptureBytes),
+				zap.Int("captured_exchange_bytes", exchangeCaptureSize),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.String("url", req.URL.String()),
+				zap.String("method", req.Method),
+				zap.Int("status_code", resp.StatusCode),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		// Capture parsing is best-effort: the exchange has already been proxied
+		// successfully, so parse failures should not terminate the connection.
+		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
+				zap.Error(err),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
+		if err != nil {
+			logger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
+				zap.Error(err),
+				zap.Int("captured_request_dump_bytes", len(reqData)),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
+				zap.Error(err),
+				zap.Int("status_code", resp.StatusCode),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.Int("captured_response_bytes", len(respCapture.Bytes())),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
+		if err != nil {
+			logger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
+				zap.Error(err),
+				zap.Int("captured_response_dump_bytes", len(respData)),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.Int("status_code", resp.StatusCode),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		go func() {
+			defer parsedHTTPReq.Body.Close()
+			defer parsedHTTPRes.Body.Close()
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+		}()
+
 		if forceCloseMode {
 			return
 		}
