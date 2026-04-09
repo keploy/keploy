@@ -480,6 +480,51 @@ func TestFilterMocks_678(t *testing.T) {
 	})
 }
 
+func TestFilterConfigMocks_PrioritizesLateMockByRequestTime_3738(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	testReqTime := time.Date(2026, time.February, 12, 6, 39, 20, 766944656, time.UTC)
+	testRespTime := time.Date(2026, time.February, 12, 6, 39, 20, 820398862, time.UTC)
+
+	staleData := &models.Mock{
+		Name:    "mock-62",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: time.Date(2026, time.February, 12, 6, 38, 43, 559270267, time.UTC),
+			ResTimestampMock: time.Date(2026, time.February, 12, 6, 38, 43, 565339949, time.UTC),
+		},
+	}
+	countQuery := &models.Mock{
+		Name:    "mock-137",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: time.Date(2026, time.February, 12, 6, 39, 20, 767839595, time.UTC),
+			ResTimestampMock: time.Date(2026, time.February, 12, 6, 39, 20, 809483263, time.UTC),
+		},
+	}
+	trailingData := &models.Mock{
+		Name:    "mock-138",
+		Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: time.Date(2026, time.February, 12, 6, 39, 20, 809891000, time.UTC),
+			ResTimestampMock: time.Date(2026, time.February, 12, 6, 39, 20, 820711000, time.UTC),
+		},
+	}
+
+	filtered, unfiltered := filterByTimeStamp(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	require.Len(t, filtered, 2)
+	assert.ElementsMatch(t, []string{"mock-137", "mock-138"}, []string{filtered[0].Name, filtered[1].Name})
+	require.Len(t, unfiltered, 1)
+	assert.Equal(t, "mock-62", unfiltered[0].Name)
+
+	result := FilterConfigMocks(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	require.Len(t, result, 3)
+	assert.Equal(t, "mock-137", result[0].Name)
+	assert.Equal(t, "mock-138", result[1].Name)
+	assert.Equal(t, "mock-62", result[2].Name)
+}
+
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
 // including IPv4, IPv6, and hostnames, both with and without ports.
 func TestHasExplicitPort_IPv6_777(t *testing.T) {

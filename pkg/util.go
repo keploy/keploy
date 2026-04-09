@@ -1168,7 +1168,12 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			continue
 		}
 
-		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+		// Prefer mocks whose request started during the test-case window.
+		// Response timestamps can trail the captured test-case response by a few
+		// microseconds, especially for the last outgoing dependency call in a test.
+		// Using the request-start time keeps those mocks in the filtered set while
+		// still excluding stale mocks from earlier test cases.
+		if !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue

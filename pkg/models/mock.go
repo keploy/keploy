@@ -41,6 +41,11 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	// Noise holds exact-match regex patterns for obfuscated values.
+	// During mock matching, any stored value matching a pattern in this
+	// list is skipped (treated as noise). Written by the enterprise
+	// secret-protection obfuscator.
+	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
 }
 
 type TestModeInfo struct {
