@@ -122,6 +122,31 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 	return nil
 }
 
+// MarshalCompose serialises the Compose struct to YAML bytes without writing to disk.
+func (idc *Impl) MarshalCompose(compose *Compose) ([]byte, error) {
+	data, err := yaml.Marshal(compose)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal compose to YAML: %w", err)
+	}
+	return data, nil
+}
+
+// FindContainerInCompose searches for a container within an already-parsed Compose
+// structure. This is the in-memory equivalent of FindContainerInComposeFiles.
+func (idc *Impl) FindContainerInCompose(compose *Compose, containerName string) (*ComposeServiceInfo, error) {
+	networks, ports, service, found := idc.findContainerInServices(compose, containerName)
+	if !found {
+		return nil, fmt.Errorf("container '%s' not found in compose", containerName)
+	}
+	return &ComposeServiceInfo{
+		// ComposePath is intentionally empty — content lives in memory.
+		Networks:       networks,
+		Ports:          ports,
+		Compose:        compose,
+		AppServiceName: service,
+	}, nil
+}
+
 // IsContainerRunning check if the container is already running or not, required for docker start command.
 func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 
