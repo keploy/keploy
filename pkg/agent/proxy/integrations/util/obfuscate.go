@@ -117,7 +117,7 @@ func StripNoisyFields(data interface{}, nc *NoiseChecker) interface{} {
 		}
 		return result
 	case []interface{}:
-		var result []interface{}
+		result := make([]interface{}, 0, len(v))
 		for _, item := range v {
 			if nc.IsNoisyValue(item) {
 				continue
@@ -140,19 +140,18 @@ func HasExtraNonNoisyKeys(mockVal, reqVal interface{}, nc *NoiseChecker) bool {
 		if !ok {
 			return false
 		}
-		// Build set of mock keys (excluding noisy ones)
+		// Build set of all mock keys — noisy keys are still valid keys,
+		// we only skip their value comparison, not their presence.
 		mockKeys := make(map[string]struct{}, len(mv))
-		for k, v := range mv {
-			if !nc.IsNoisyValue(v) {
-				mockKeys[k] = struct{}{}
-			}
+		for k := range mv {
+			mockKeys[k] = struct{}{}
 		}
 		for k := range rv {
 			if _, exists := mockKeys[k]; !exists {
 				return true
 			}
 		}
-		// Recurse into shared keys
+		// Recurse into shared non-noisy keys
 		for k, mockField := range mv {
 			if nc.IsNoisyValue(mockField) {
 				continue

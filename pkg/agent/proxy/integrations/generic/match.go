@@ -2,7 +2,6 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 
 	"go.keploy.io/server/v3/pkg"
@@ -112,7 +111,6 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 					continue
 				}
 
-				_ = base64.StdEncoding.EncodeToString(reqBuff)
 				encoded, _ := util.DecodeBase64(mockData)
 
 				similarity := fuzzyCheck(encoded, reqBuff)

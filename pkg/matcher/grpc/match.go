@@ -236,7 +236,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", zap.Error(err))
 			decodedDataNormal = false
 		} else if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, nil)
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
 			decodedDataNormal = jsonComparisonResult.IsExact()
 			if err != nil {
 				logger.Error("Failed to perform JSON diff with noise control", zap.Error(err))

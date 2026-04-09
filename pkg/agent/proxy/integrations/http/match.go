@@ -521,8 +521,9 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	return bodyMatched, nil
 }
 
-// Fuzzy match helper for string matching
-func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
+// findStringMatch returns the index of the closest mock string and the
+// Levenshtein distance so callers don't need to recompute it.
+func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
 	for idx, mock := range mockStrings {
@@ -531,14 +532,14 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 		}
 		dist := levenshtein.ComputeDistance(req, mock)
 		if dist == 0 {
-			return 0
+			return 0, 0
 		}
 		if dist < minDist {
 			minDist = dist
 			bestMatch = idx
 		}
 	}
-	return bestMatch
+	return bestMatch, minDist
 }
 
 // TODO: generalize the function to work with any type of integration
@@ -597,9 +598,8 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	// String-based fuzzy matching (Levenshtein distance)
 	reqStr := string(reqBuff)
 	if util.IsASCII(reqStr) {
-		idx := h.findStringMatch(reqStr, mockStrings)
+		idx, dist := h.findStringMatch(reqStr, mockStrings)
 		if idx != -1 {
-			dist := levenshtein.ComputeDistance(reqStr, mockStrings[idx])
 			maxLen := len(reqStr)
 			if len(mockStrings[idx]) > maxLen {
 				maxLen = len(mockStrings[idx])
