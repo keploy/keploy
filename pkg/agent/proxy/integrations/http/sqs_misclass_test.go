@@ -10,8 +10,8 @@ import (
 // identifies HTTP traffic and rejects non-HTTP binary data that happens to
 // start with an HTTP method prefix.
 func TestHTTPMatchTypeRequestLineValidation(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	h := &HTTP{Logger: logger}
+	
+	h := &HTTP{Logger: zap.NewNop()}
 
 	tests := []struct {
 		name    string

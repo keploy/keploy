@@ -20,6 +20,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// maxRequestLineScan caps how far into the first line we scan for " HTTP/".
+const maxRequestLineScan = 8192
+
 func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
 		Initializer: New, Priority: 100,
@@ -73,8 +76,8 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		if end == -1 {
 			end = len(buf)
 		}
-		if end > 8192 {
-			end = 8192
+		if end > maxRequestLineScan {
+			end = maxRequestLineScan
 		}
 		if !bytes.Contains(buf[:end], []byte(" HTTP/")) {
 			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
