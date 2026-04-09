@@ -77,18 +77,37 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 	return bytes.Contains(buf, endOfHeaders)
 }
 
+// IsHTTPReq checks if buf looks like an HTTP request or response.
+// For requests, it verifies " HTTP/" appears in the first line to avoid
+// false positives from binary protocols starting with method-like bytes.
 func IsHTTPReq(buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+	isResponse := bytes.HasPrefix(buf, []byte("HTTP/"))
+	isRequest := bytes.HasPrefix(buf, []byte("GET ")) ||
+		bytes.HasPrefix(buf, []byte("POST ")) ||
+		bytes.HasPrefix(buf, []byte("PUT ")) ||
+		bytes.HasPrefix(buf, []byte("PATCH ")) ||
+		bytes.HasPrefix(buf, []byte("DELETE ")) ||
+		bytes.HasPrefix(buf, []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buf, []byte("HEAD ")) ||
+		bytes.HasPrefix(buf, []byte("CONNECT "))
 
-	return isHTTP
+	if !isRequest && !isResponse {
+		return false
+	}
+	if isRequest {
+		end := bytes.IndexByte(buf, '\n')
+		if end == -1 {
+			end = len(buf)
+		}
+		const maxScan = 8198 // 8192 + len(" HTTP/")
+		if end > maxScan {
+			end = maxScan
+		}
+		if !bytes.Contains(buf[:end], []byte(" HTTP/")) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsHTTP2Preface checks if the buffer starts with the HTTP/2 client connection preface.
