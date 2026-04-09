@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/service/pii"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -280,6 +281,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			if r.config.Record.DetectPII {
+				r.warnPIIDetections(testCase)
+			}
+
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -715,6 +720,47 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+func (r *Recorder) warnPIIDetections(testCase *models.TestCase) {
+	if testCase == nil {
+		return
+	}
+
+	detections := make([]pii.Detection, 0)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
+	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
+
+	// Scan request body; prefer the inline body but fall back to noting
+	// offloaded bodies so the user is aware PII scanning was skipped.
+	reqBody := testCase.HTTPReq.Body
+	if reqBody == "" && testCase.HTTPReq.BodyRef.Path != "" {
+		r.logger.Warn(fmt.Sprintf(
+			"Potential PII in %s request body was offloaded (>1 MB) and could not be scanned in-memory. "+
+				"Review the asset file at %s manually or add redaction rules in the keploy config.",
+			testCase.Name, testCase.HTTPReq.BodyRef.Path,
+		))
+	}
+	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
+
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPResp.Header, "response.header")...)
+	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
+
+	testCaseName := testCase.Name
+	if strings.TrimSpace(testCaseName) == "" {
+		testCaseName = "unknown-test-case"
+	}
+
+	for _, detection := range detections {
+		r.logger.Warn(fmt.Sprintf(
+			"Potential PII detected in %s: %s matches %s. "+
+				"Consider adding a redaction rule in the keploy config or removing the sensitive value before recording.",
+			testCaseName,
+			detection.Field,
+			detection.PatternType,
+		))
+	}
 }
 
 // SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
