@@ -1251,6 +1251,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	p.errDrainOnce.Do(func() {
 		var discarded atomic.Int64
 		go func() {
+			defer utils.Recover(p.logger)
 			for {
 				select {
 				case <-ctx.Done():
