@@ -395,7 +395,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	// First pass: exact string match (fastest path)
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
-			h.Logger.Info("http mock matched",
+			h.Logger.Debug("http mock matched",
 				zap.String("mock", mock.Name),
 				zap.Float64("match_percentage", 100.0),
 				zap.String("match_type", "exact_body"))
@@ -415,7 +415,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
 		if nc.IsNoisy(mockBody) {
-			h.Logger.Info("http mock matched",
+			h.Logger.Debug("http mock matched",
 				zap.String("mock", mock.Name),
 				zap.Float64("match_percentage", 100.0),
 				zap.Int("noisy_fields_skipped", 1),
@@ -579,7 +579,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			h.Logger.Info("http mock matched",
+			h.Logger.Debug("http mock matched",
 				zap.String("mock", mock.Name),
 				zap.Float64("match_percentage", 100.0),
 				zap.String("match_type", "fuzzy_exact"))
@@ -608,7 +608,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 			if maxLen > 0 {
 				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
 			}
-			h.Logger.Info("http mock matched",
+			h.Logger.Debug("http mock matched",
 				zap.String("mock", tcsMocks[idx].Name),
 				zap.Float64("match_percentage", pct),
 				zap.String("match_type", "fuzzy_levenshtein"))
@@ -631,7 +631,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 		}
 	}
 	if mxIdx != -1 {
-		h.Logger.Info("http mock matched",
+		h.Logger.Debug("http mock matched",
 			zap.String("mock", tcsMocks[mxIdx].Name),
 			zap.Float64("match_percentage", mxSim*100),
 			zap.String("match_type", "fuzzy_jaccard"))

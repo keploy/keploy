@@ -17,7 +17,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: feat/obfuscation-aware-matching
+          integration-ref: d7b33468d911e08e7e82642a792059a621d22dba  # feat/obfuscation-aware-matching pinned to SHA
 
       - name: Build Keploy (non-race)
         run: |
@@ -67,7 +67,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: feat/obfuscation-aware-matching
+          integration-ref: d7b33468d911e08e7e82642a792059a621d22dba  # feat/obfuscation-aware-matching pinned to SHA
 
       - name: Build image
         run: |

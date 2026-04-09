@@ -289,7 +289,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
 				}); hookErr != nil {
-					r.logger.Error("BeforeTestCaseInsert hook failed",
+					r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
 						zap.String("testSetID", newTestSetID),
 						zap.String("testCaseName", testCase.Name))
@@ -306,7 +306,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 						TestCase: testCase, TestSetID: newTestSetID,
 					}); hookErr != nil {
-						r.logger.Error("AfterTestCaseInsert hook failed",
+						r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 							zap.Error(hookErr),
 							zap.String("testSetID", newTestSetID),
 							zap.String("testCaseName", testCase.Name))
@@ -339,7 +339,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
-				r.logger.Error("BeforeMockInsert hook failed",
+				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
 					zap.Error(hookErr),
 					zap.String("testSetID", newTestSetID),
 					zap.String("mockName", mock.Name),
@@ -355,7 +355,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
 				}); hookErr != nil {
-					r.logger.Error("AfterMockInsert hook failed",
+					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
 						zap.String("testSetID", newTestSetID),
 						zap.String("mockName", mock.Name),

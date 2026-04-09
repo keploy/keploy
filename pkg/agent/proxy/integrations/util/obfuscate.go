@@ -2,7 +2,6 @@ package util
 
 import (
 	"encoding/json"
-	"log"
 	"regexp"
 	"sync"
 )
@@ -29,8 +28,7 @@ func getCachedRegexp(pattern string) *regexp.Regexp {
 	}
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		log.Printf("WARNING: invalid noise regex pattern %q: %v — pattern will be ignored", pattern, err)
-		return nil
+		return nil // invalid pattern — silently skipped; not user-actionable
 	}
 	noiseCacheMu.Lock()
 	if old := noiseCache[pattern]; old == nil {
@@ -170,6 +168,10 @@ func HasExtraNonNoisyKeys(mockVal, reqVal interface{}, nc *NoiseChecker) bool {
 		rv, ok := reqVal.([]interface{})
 		if !ok {
 			return false
+		}
+		// Request array has more elements than mock array — extra data
+		if len(rv) > len(mv) {
+			return true
 		}
 		for i := 0; i < len(mv) && i < len(rv); i++ {
 			if nc.IsNoisyValue(mv[i]) {
