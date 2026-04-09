@@ -289,7 +289,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
 				}); hookErr != nil {
-					r.logger.Error("BeforeTestCaseInsert hook failed", zap.Error(hookErr))
+					r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+						zap.Error(hookErr),
+						zap.String("testSetID", newTestSetID),
+						zap.String("testCaseName", testCase.Name))
 				}
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {
@@ -303,7 +306,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 						TestCase: testCase, TestSetID: newTestSetID,
 					}); hookErr != nil {
-						r.logger.Error("AfterTestCaseInsert hook failed", zap.Error(hookErr))
+						r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
+							zap.Error(hookErr),
+							zap.String("testSetID", newTestSetID),
+							zap.String("testCaseName", testCase.Name))
 					}
 				}
 			} else {
@@ -333,7 +339,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
-				r.logger.Error("BeforeMockInsert hook failed", zap.Error(hookErr))
+				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+					zap.Error(hookErr),
+					zap.String("testSetID", newTestSetID),
+					zap.String("mockName", mock.Name),
+					zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
@@ -345,7 +355,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
 				}); hookErr != nil {
-					r.logger.Error("AfterMockInsert hook failed", zap.Error(hookErr))
+					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
+						zap.Error(hookErr),
+						zap.String("testSetID", newTestSetID),
+						zap.String("mockName", mock.Name),
+						zap.String("mockKind", mock.GetKind()))
 				}
 				if tempID != "" && mock.Name != "" {
 					correlationMap.Store(tempID, models.MockEntry{
