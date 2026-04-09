@@ -102,15 +102,13 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
 			nc := util.NewNoiseChecker(mock.Noise)
+			var simSum float64
+			var simCount int
 			for requestIndex, reqBuff := range reqBuffs {
 				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
 
-				// If mock data is noisy (obfuscated), give it a perfect similarity score
+				// Skip noisy (obfuscated) buffers — don't let them influence similarity
 				if nc != nil && nc.IsNoisy(mockData) {
-					if 1.0 > mxSim {
-						mxSim = 1.0
-						mxIdx = idx
-					}
 					continue
 				}
 
@@ -118,9 +116,14 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 				encoded, _ := util.DecodeBase64(mockData)
 
 				similarity := fuzzyCheck(encoded, reqBuff)
-
-				if mxSim < similarity {
-					mxSim = similarity
+				simSum += similarity
+				simCount++
+			}
+			// Compute average similarity across non-noisy buffers
+			if simCount > 0 {
+				avgSim := simSum / float64(simCount)
+				if avgSim > mxSim {
+					mxSim = avgSim
 					mxIdx = idx
 				}
 			}

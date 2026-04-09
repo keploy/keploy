@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"log"
 	"regexp"
 	"sync"
 )
@@ -28,7 +29,8 @@ func getCachedRegexp(pattern string) *regexp.Regexp {
 	}
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil // skip invalid patterns silently
+		log.Printf("WARNING: invalid noise regex pattern %q: %v — pattern will be ignored", pattern, err)
+		return nil
 	}
 	noiseCacheMu.Lock()
 	if old := noiseCache[pattern]; old == nil {
@@ -127,6 +129,59 @@ func StripNoisyFields(data interface{}, nc *NoiseChecker) interface{} {
 		return result
 	default:
 		return data
+	}
+}
+
+// HasExtraNonNoisyKeys checks whether reqVal contains keys not present in
+// mockVal (excluding keys whose mock value is noisy). Returns true if extra
+// non-noisy keys exist, meaning the request is not an exact match.
+func HasExtraNonNoisyKeys(mockVal, reqVal interface{}, nc *NoiseChecker) bool {
+	switch mv := mockVal.(type) {
+	case map[string]interface{}:
+		rv, ok := reqVal.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		// Build set of mock keys (excluding noisy ones)
+		mockKeys := make(map[string]struct{}, len(mv))
+		for k, v := range mv {
+			if !nc.IsNoisyValue(v) {
+				mockKeys[k] = struct{}{}
+			}
+		}
+		for k := range rv {
+			if _, exists := mockKeys[k]; !exists {
+				return true
+			}
+		}
+		// Recurse into shared keys
+		for k, mockField := range mv {
+			if nc.IsNoisyValue(mockField) {
+				continue
+			}
+			if reqField, exists := rv[k]; exists {
+				if HasExtraNonNoisyKeys(mockField, reqField, nc) {
+					return true
+				}
+			}
+		}
+		return false
+	case []interface{}:
+		rv, ok := reqVal.([]interface{})
+		if !ok {
+			return false
+		}
+		for i := 0; i < len(mv) && i < len(rv); i++ {
+			if nc.IsNoisyValue(mv[i]) {
+				continue
+			}
+			if HasExtraNonNoisyKeys(mv[i], rv[i], nc) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
 	}
 }
 

@@ -141,7 +141,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, nil
 		}
 
-		h.Logger.Info("http mock schema match results",
+		h.Logger.Debug("http mock schema match results",
 			zap.Int("schema_matched", len(schemaMatched)),
 			zap.Int("total_http_mocks", len(unfilteredMocks)))
 
@@ -442,7 +442,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		if total > 0 {
 			pct = float64(matched) / float64(total) * 100
 		}
-		h.Logger.Info("http mock match score (noise-aware)",
+		h.Logger.Debug("http mock match score (noise-aware)",
 			zap.String("mock", mock.Name),
 			zap.Int("matched_fields", matched),
 			zap.Int("total_fields", total),
@@ -450,7 +450,11 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 			zap.Float64("match_percentage", pct))
 
 		if matched == total {
-			return true, mock
+			// Verify the request has no extra non-noisy keys beyond
+			// what the mock defines — otherwise this isn't truly exact.
+			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) {
+				return true, mock
+			}
 		}
 	}
 
@@ -510,7 +514,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 		}
 	}
 
-	h.Logger.Info("http mock body key match results",
+	h.Logger.Debug("http mock body key match results",
 		zap.Int("body_key_matched", len(bodyMatched)),
 		zap.Int("schema_matched", len(schemaMatched)))
 
