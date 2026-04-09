@@ -91,7 +91,7 @@ func TestHTTPMatchTypeRequestLineValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := h.MatchType(nil, []byte(tt.payload))
 			if got != tt.want {
-				t.Errorf("MatchType(%q) = %v, want %v", tt.name, got, tt.want)
+				t.Errorf("MatchType(%q [%d bytes]) = %v, want %v", tt.name, len(tt.payload), got, tt.want)
 			}
 		})
 	}

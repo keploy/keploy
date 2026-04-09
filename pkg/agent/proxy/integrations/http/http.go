@@ -47,11 +47,11 @@ type FinalHTTP struct {
 	ResTimestampMock time.Time
 }
 
-// MatchType determines if the outgoing network call is HTTP by checking for a
-// well-formed HTTP request line (METHOD path HTTP/version) or response status
-// line (HTTP/version status). Checking for " HTTP/" in the first line prevents
-// false positives from binary protocols that happen to start with ASCII bytes
-// matching an HTTP method prefix.
+// MatchType determines if the outgoing network call is HTTP by checking for
+// a well-formed HTTP request line (METHOD path HTTP/version) or a response
+// status prefix (HTTP/version). For requests, it verifies " HTTP/" appears in
+// the first line to prevent false positives from binary protocols that start
+// with method-like ASCII bytes. Response detection only checks the prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	isResponse := bytes.HasPrefix(buf, []byte("HTTP/"))
 	isRequest := bytes.HasPrefix(buf, []byte("GET ")) ||
