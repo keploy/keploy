@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -994,8 +995,8 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 }
 
 // getOrCreateEnvNode finds the 'environment' node inside a service, creating
-// a SequenceNode if none exists. This avoids repeated linear scans when
-// multiple env helpers are called on the same service.
+// a SequenceNode if none exists. It centralizes the lookup/create logic for
+// environment mutations performed by helper methods.
 func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
 	for i := 0; i < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
@@ -1061,11 +1062,19 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 		for _, node := range envNode.Content {
 			if strings.HasPrefix(node.Value, prefix) {
 				existingVal := strings.TrimPrefix(node.Value, prefix)
-				if strings.Contains(existingVal, appendValue) {
-					// Value already present — skip to avoid double-injection.
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
 					return
 				}
-				node.Value = node.Value + " " + appendValue
+				node.Value = node.Value + " " + strings.Join(missing, " ")
 				return
 			}
 		}
@@ -1079,11 +1088,19 @@ func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue
 		for i := 0; i < len(envNode.Content)-1; i += 2 {
 			if envNode.Content[i].Value == envKey {
 				existingVal := envNode.Content[i+1].Value
-				if strings.Contains(existingVal, appendValue) {
-					// Value already present — skip to avoid double-injection.
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
 					return
 				}
-				envNode.Content[i+1].Value = existingVal + " " + appendValue
+				envNode.Content[i+1].Value = existingVal + " " + strings.Join(missing, " ")
 				return
 			}
 		}
