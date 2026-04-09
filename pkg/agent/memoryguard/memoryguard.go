@@ -128,17 +128,18 @@ func (g *guard) run(ctx context.Context) {
 			currentBytes, err := readMemoryCurrent(g.memoryCurrentPath)
 			if err != nil {
 				g.readFailCount++
-				if g.readFailCount == 1 || g.readFailCount%120 == 0 { // log first failure, then every ~60s
+				if g.readFailCount == 1 {
 					g.logger.Warn("failed to read keploy-agent memory usage; "+
 						"ensure /sys/fs/cgroup is mounted in the container or set --memory-limit=0 to disable",
 						zap.String("path", g.memoryCurrentPath),
-						zap.Int("consecutive_failures", g.readFailCount),
 						zap.Error(err))
 				}
-				// If reads keep failing while paused, unpause to avoid permanently dropping recordings
-				if g.underPressure && g.readFailCount >= 20 { // ~10s of consecutive failures
-					g.logger.Info("Unpausing recording after repeated memory read failures — memory guard is effectively disabled")
+				// After ~10s of consecutive failures, disable the guard entirely
+				if g.readFailCount >= 20 {
+					g.logger.Info("Disabling memory guard after persistent read failures",
+						zap.Int("consecutive_failures", g.readFailCount))
 					g.resetPressure()
+					return
 				}
 				continue
 			}

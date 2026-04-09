@@ -341,6 +341,13 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
+		if pressureCloseMode && !forceCloseMode {
+			releaseLock()
+			req.Close = true
+			req.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
+
 		var reqData []byte
 		if captureEnabled {
 			if isIngressRecordingPaused() {
@@ -410,6 +417,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
+		if pressureCloseMode && !forceCloseMode {
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
+
 		respTimestamp := time.Now()
 		var respData []byte
 		if captureEnabled {
