@@ -272,6 +272,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		return err
 	}
 
+	// Start the continuous error drain so the error channel never fills up.
+	// This must happen before any connections are handled.
+	p.StartErrorDrain(ctx)
+
 	// set up the CA for tls connections
 	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
 	if err != nil {
