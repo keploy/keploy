@@ -22,6 +22,13 @@ type Client interface {
 
 	// Function for generating keploy-agent service configuration
 	ModifyComposeForAgent(compose *Compose, opts models.SetupOptions, appContainerName string) error
+
+	// FindContainerInCompose searches for a container within an already-parsed Compose
+	// structure (used when compose content is held in memory rather than on disk).
+	FindContainerInCompose(compose *Compose, containerName string) (*ComposeServiceInfo, error)
+
+	// MarshalCompose serialises a Compose structure to YAML bytes without touching disk.
+	MarshalCompose(compose *Compose) ([]byte, error)
 }
 
 type NetworkInfo struct {
