@@ -19,3 +19,11 @@ type KafkaSchema struct {
 	ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 }
+
+type HbaseSchema struct {
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	HbaseRequests    []Payload         `json:"RequestBin,omitempty"`
+	HbaseResponses   []Payload         `json:"ResponseBin,omitempty"`
+	ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
+}
