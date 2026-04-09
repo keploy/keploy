@@ -32,6 +32,7 @@ const (
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
+	Aerospike   Kind = "Aerospike"
 )
 
 type Mock struct {
@@ -66,6 +67,8 @@ type MockSpec struct {
 	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	KafkaRequests       []Payload           `json:"kafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
 	KafkaResponses      []Payload           `json:"kafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
+	AerospikeRequests   []Payload           `json:"aerospikeRequests,omitempty" bson:"aerospike_requests,omitempty"`
+	AerospikeResponses  []Payload           `json:"aerospikeResponses,omitempty" bson:"aerospike_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`

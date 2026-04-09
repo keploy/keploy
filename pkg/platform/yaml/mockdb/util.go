@@ -118,6 +118,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
 			return nil, err
 		}
+	case models.Aerospike:
+		aerospikeSpec := models.AerospikeSchema{
+			Metadata:           mock.Spec.Metadata,
+			AerospikeRequests:  mock.Spec.AerospikeRequests,
+			AerospikeResponses: mock.Spec.AerospikeResponses,
+			ReqTimestampMock:   mock.Spec.ReqTimestampMock,
+			ResTimestampMock:   mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(aerospikeSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the aerospike input-output as yaml")
+			return nil, err
+		}
 	case models.REDIS:
 		redisSpec := models.RedisSchema{
 			Metadata: mock.Spec.Metadata,
@@ -366,6 +379,20 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				GenericResponses: genericSpec.GenericResponses,
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
 				ResTimestampMock: genericSpec.ResTimestampMock,
+			}
+		case models.Aerospike:
+			aerospikeSpec := models.AerospikeSchema{}
+			err := m.Spec.Decode(&aerospikeSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into aerospike mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:           aerospikeSpec.Metadata,
+				AerospikeRequests:  aerospikeSpec.AerospikeRequests,
+				AerospikeResponses: aerospikeSpec.AerospikeResponses,
+				ReqTimestampMock:   aerospikeSpec.ReqTimestampMock,
+				ResTimestampMock:   aerospikeSpec.ResTimestampMock,
 			}
 		case models.REDIS:
 			redisSpec := models.RedisSchema{}
