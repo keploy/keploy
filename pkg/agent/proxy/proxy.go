@@ -55,6 +55,13 @@ type Proxy struct {
 
 	integrationsPriority []ParserPriority
 	errChannel           chan error
+
+	// activeTestErrors accumulates mock-not-found errors during active test execution.
+	// The continuous error drain goroutine routes errors here when non-nil,
+	// and discards errors when nil (no test running). This prevents the
+	// errChannel from filling up with background noise (OTel, health checks).
+	activeTestErrors atomic.Pointer[testErrorAccumulator]
+	errDrainOnce     sync.Once
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -264,6 +271,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
+
+	// Start the continuous error drain so the error channel never fills up.
+	// This must happen before any connections are handled.
+	p.StartErrorDrain(ctx)
 
 	// set up the CA for tls connections
 	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
@@ -1215,45 +1226,130 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.GetConsumedMocks(), nil
 }
 
-// GetErrorChannel returns the error channel for external monitoring
+// testErrorAccumulator collects errors during an active test case.
+// It is goroutine-safe via an internal mutex.
+type testErrorAccumulator struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (a *testErrorAccumulator) add(err error) {
+	a.mu.Lock()
+	a.errs = append(a.errs, err)
+	a.mu.Unlock()
+}
+
+func (a *testErrorAccumulator) drain() []error {
+	a.mu.Lock()
+	e := a.errs
+	a.errs = nil
+	a.mu.Unlock()
+	return e
+}
+
+// StartErrorDrain launches a background goroutine that continuously reads from
+// errChannel so it never fills up. Errors are routed to the activeTestErrors
+// accumulator when a test is running, and discarded otherwise.
+// This prevents background services (OTel, health checks) from saturating the
+// 100-slot error channel and blocking test coordination.
+func (p *Proxy) StartErrorDrain(ctx context.Context) {
+	p.errDrainOnce.Do(func() {
+		var discarded atomic.Int64
+		go func() {
+			defer utils.Recover(p.logger)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case err, ok := <-p.errChannel:
+					if !ok {
+						return
+					}
+					if acc := p.activeTestErrors.Load(); acc != nil {
+						acc.add(err)
+					} else {
+						// Log only the first discard and then every 100th to reduce noise.
+						n := discarded.Add(1)
+						if n == 1 || n%100 == 0 {
+							p.logger.Debug("discarding mock error outside active test",
+								zap.Error(err), zap.Int64("totalDiscarded", n))
+						}
+					}
+				}
+			}
+		}()
+	})
+}
+
+// BeginTestErrorCapture starts collecting errors for the current test case.
+// Call EndTestErrorCapture when the test finishes to retrieve collected errors.
+func (p *Proxy) BeginTestErrorCapture() {
+	p.activeTestErrors.Store(&testErrorAccumulator{})
+}
+
+// EndTestErrorCapture stops collecting errors and returns all accumulated errors.
+func (p *Proxy) EndTestErrorCapture() []error {
+	if acc := p.activeTestErrors.Swap(nil); acc != nil {
+		return acc.drain()
+	}
+	return nil
+}
+
+// GetErrorChannel returns the error channel for external monitoring.
+// When StartErrorDrain is active, this channel is continuously drained by the
+// background goroutine. Direct consumers (monitorProxyErrors) will compete
+// for reads. Prefer using BeginTestErrorCapture/EndTestErrorCapture instead.
 func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }
 
-// GetMockErrors drains all mock-not-found errors from the error channel and returns them.
-// This is used by the HTTP agent transport where channel-based monitoring isn't available.
+// GetMockErrors drains all mock-not-found errors and returns them.
+// When StartErrorDrain is active, it reads from the test accumulator instead
+// of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
-	var errs []models.UnmatchedCall
-	for {
-		select {
-		case err, ok := <-p.errChannel:
-			if !ok {
-				return errs, nil
-			}
-			if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
-				if parserErr.MismatchReport != nil {
-					errs = append(errs, models.UnmatchedCall{
-						Protocol:      parserErr.MismatchReport.Protocol,
-						ActualSummary: parserErr.MismatchReport.ActualSummary,
-						ClosestMock:   parserErr.MismatchReport.ClosestMock,
-						Diff:          parserErr.MismatchReport.Diff,
-						NextSteps:     parserErr.MismatchReport.NextSteps,
-					})
+	var rawErrs []error
+
+	// Prefer test accumulator if active (StartErrorDrain is running)
+	if acc := p.activeTestErrors.Load(); acc != nil {
+		rawErrs = acc.drain()
+	} else {
+		// Fallback: drain from channel directly (legacy path)
+	drainLoop:
+		for {
+			select {
+			case err, ok := <-p.errChannel:
+				if !ok {
+					break drainLoop
 				}
+				rawErrs = append(rawErrs, err)
+			default:
+				break drainLoop
 			}
-		default:
-			return errs, nil
 		}
 	}
+
+	var errs []models.UnmatchedCall
+	for _, err := range rawErrs {
+		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+			if parserErr.MismatchReport != nil {
+				errs = append(errs, models.UnmatchedCall{
+					Protocol:      parserErr.MismatchReport.Protocol,
+					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					ClosestMock:   parserErr.MismatchReport.ClosestMock,
+					Diff:          parserErr.MismatchReport.Diff,
+					NextSteps:     parserErr.MismatchReport.NextSteps,
+				})
+			}
+		}
+	}
+	return errs, nil
 }
 
-// SendError sends an error to the error channel for external monitoring
+// SendError sends an error to the error channel for external monitoring.
 func (p *Proxy) SendError(err error) {
 	select {
 	case p.errChannel <- err:
-		// Error sent successfully
 	default:
-		// Channel is full, log the error instead
 		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
 	}
 }
