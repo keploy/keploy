@@ -328,6 +328,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				logger.Debug("Detected chunked request. Releasing lock early.")
 				releaseLock()
 				chunked = true
+				captureEnabled = false
 			} else if captureEnabled && pm.synchronous && acquiredLock {
 				mgr := syncMock.Get()
 				if !mgr.GetFirstReqSeen() {
