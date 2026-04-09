@@ -44,20 +44,46 @@ type FinalHTTP struct {
 	ResTimestampMock time.Time
 }
 
-// MatchType function determines if the outgoing network call is HTTP by comparing the
-// message format with that of an HTTP text message.
+// MatchType determines if the outgoing network call is HTTP by checking for a
+// well-formed HTTP request line (METHOD path HTTP/version) or response status
+// line (HTTP/version status). Checking for " HTTP/" in the first line prevents
+// false positives from binary protocols that happen to start with ASCII bytes
+// matching an HTTP method prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
-	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", isHTTP))
-	return isHTTP
+	isResponse := bytes.HasPrefix(buf, []byte("HTTP/"))
+	isRequest := bytes.HasPrefix(buf, []byte("GET ")) ||
+		bytes.HasPrefix(buf, []byte("POST ")) ||
+		bytes.HasPrefix(buf, []byte("PUT ")) ||
+		bytes.HasPrefix(buf, []byte("PATCH ")) ||
+		bytes.HasPrefix(buf, []byte("DELETE ")) ||
+		bytes.HasPrefix(buf, []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buf, []byte("HEAD ")) ||
+		bytes.HasPrefix(buf, []byte("CONNECT "))
+
+	if !isRequest && !isResponse {
+		h.Logger.Debug("determined the protocol is not HTTP", zap.Bool("isHTTP", false))
+		return false
+	}
+
+	// For requests, verify the first line contains " HTTP/" to confirm it's a
+	// valid HTTP request line and not a binary protocol that coincidentally
+	// starts with method-like ASCII bytes.
+	if isRequest {
+		end := bytes.IndexByte(buf, '\n')
+		if end == -1 {
+			end = len(buf)
+		}
+		if end > 8192 {
+			end = 8192
+		}
+		if !bytes.Contains(buf[:end], []byte(" HTTP/")) {
+			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
+			return false
+		}
+	}
+
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", true))
+	return true
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
