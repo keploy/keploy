@@ -16,6 +16,11 @@ import (
 // retains the original connection and remains responsible for lifecycle
 // management.
 //
+// SafeConn implements the same parser-facing contract as SimulatedConn
+// (enterprise low-latency mode): Close and SetDeadline are no-ops, and
+// parsers must not rely on them for lifecycle management. This ensures
+// parsers behave identically regardless of which proxy mode is active.
+//
 // SafeConn satisfies net.Conn so it can be used wherever parsers expect
 // a connection — including gRPC's singleConnListener and http2.Server.
 type SafeConn struct {

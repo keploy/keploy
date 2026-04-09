@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"io"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -9,22 +10,40 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// RecordConn is the connection interface exposed to parsers during
+// record mode. It deliberately omits Close and SetDeadline — the
+// proxy owns connection lifecycle, and parsers must not call either.
+//
+// Both SafeConn (standard proxy) and SimulatedConn (low-latency
+// sockmap proxy) satisfy this interface. Parsers that need a full
+// net.Conn (e.g. gRPC, HTTP/2 libraries) can type-assert with
+// conn.(net.Conn); the underlying types do implement net.Conn, but
+// Close is a no-op in both implementations.
+type RecordConn interface {
+	io.Reader
+	io.Writer
+	RemoteAddr() net.Addr
+	LocalAddr() net.Addr
+}
+
 // RecordSession bundles all resources a parser needs during record
 // mode. It replaces the previous pattern of passing individual
 // net.Conn parameters plus smuggling errgroup, connection IDs, and
 // other values through context.
 //
-// Connections are SafeConn wrappers where Close() and SetDeadline()
-// are no-ops. The proxy retains the real connections and manages
-// their lifecycle.
+// Connections implement RecordConn — Close and SetDeadline are not
+// part of the interface. The proxy retains the real connections and
+// manages their lifecycle. The underlying types also implement
+// net.Conn (with Close as a no-op) for compatibility with libraries
+// like gRPC and HTTP/2 that require net.Conn.
 type RecordSession struct {
-	// Ingress is the client-side connection (SafeConn).
+	// Ingress is the client-side connection.
 	// Read: client requests. Write: server responses back to client.
-	Ingress net.Conn
+	Ingress RecordConn
 
-	// Egress is the destination-side connection (SafeConn).
+	// Egress is the destination-side connection.
 	// Read: server responses. Write: client requests forwarded to server.
-	Egress net.Conn
+	Egress RecordConn
 
 	// Mocks channel for sending recorded mock objects.
 	Mocks chan<- *models.Mock
@@ -116,4 +135,19 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 		h(m)
 		prev(m)
 	}
+}
+
+// IngressConn returns Ingress as a net.Conn. The underlying types
+// (SafeConn, SimulatedConn) always implement net.Conn with Close
+// as a no-op, so this assertion is safe. Use this when passing
+// connections to libraries (gRPC, HTTP/2) or internal functions
+// that require net.Conn.
+func (s *RecordSession) IngressConn() net.Conn {
+	return s.Ingress.(net.Conn)
+}
+
+// EgressConn returns Egress as a net.Conn. Same contract as
+// IngressConn — Close is a no-op on the underlying type.
+func (s *RecordSession) EgressConn() net.Conn {
+	return s.Egress.(net.Conn)
 }

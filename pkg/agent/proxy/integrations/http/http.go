@@ -137,12 +137,12 @@ func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSes
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.IngressConn())
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
+	err = h.encodeHTTP(ctx, reqBuf, session.IngressConn(), session.EgressConn(), session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err

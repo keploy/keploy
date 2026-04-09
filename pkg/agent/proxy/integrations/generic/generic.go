@@ -50,13 +50,13 @@ func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.Reco
 func (g *Generic) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.IngressConn())
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
 		return err
 	}
 
-	err = encodeGeneric(ctx, logger, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
+	err = encodeGeneric(ctx, logger, reqBuf, session.IngressConn(), session.EgressConn(), session.Mocks, session.Opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err
