@@ -103,6 +103,14 @@ stop_memory_monitor() {
 final_cleanup() {
     local rc=$?
     stop_memory_monitor
+
+    section "Keploy Memory Log"
+    if [ -f "$MEMORY_USAGE_LOG" ]; then
+        cat "$MEMORY_USAGE_LOG"
+    else
+        echo "Keploy memory log not found."
+    fi
+
     if [ "$rc" -ne 0 ]; then
         echo "go-memory-load workflow failed (exit code=$rc)"
         dump_logs
@@ -302,7 +310,7 @@ start_memory_monitor() {
                 exit 0
             fi
 
-            if [ "$usage_bytes" -ge 0 ] && [ "$usage_bytes" -gt "$threshold_bytes" ]; then
+            if [ "$usage_bytes" -ge 0 ] && [ "$usage_bytes" -ge "$threshold_bytes" ]; then
                 echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB during ${phase_name}. Observed usage: ${usage_raw}." > "$MEMORY_VIOLATION_FILE"
                 docker kill "$keploy_container" >/dev/null 2>&1 || true
                 kill -TERM "$phase_pid" 2>/dev/null || true
