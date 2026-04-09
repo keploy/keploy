@@ -36,6 +36,7 @@ type guard struct {
 	lastReclaim       time.Time
 	underPressure     bool
 	readFailCount     int
+	prevMemLimit      int64
 }
 
 type cgroupLayout struct {
@@ -93,13 +94,14 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	// this headroom the GC won't kick in until the cgroup is already at
 	// the OOM boundary, causing connection drops and I/O disruptions.
 	goMemLimit := int64(float64(limitBytes) * 0.9)
-	debug.SetMemoryLimit(goMemLimit)
+	prevMemLimit := debug.SetMemoryLimit(goMemLimit)
 
 	g := &guard{
 		logger:            logger,
 		memoryCurrentPath: memoryCurrentPath,
 		limitBytes:        limitBytes,
 		memoryLimitMB:     memoryLimitMB,
+		prevMemLimit:      prevMemLimit,
 	}
 
 	logger.Info("Enabled keploy-agent memory guard",
@@ -116,6 +118,7 @@ func (g *guard) run(ctx context.Context) {
 	ticker := time.NewTicker(defaultCheckInterval)
 	defer ticker.Stop()
 	defer g.resetPressure()
+	defer debug.SetMemoryLimit(g.prevMemLimit)
 
 	for {
 		select {
@@ -496,17 +499,27 @@ func buildMountedCgroupPath(mountPoint, mountRoot, cgroupPath, usageFile string)
 }
 
 func findMemoryUsagePathByIdentifier(layout cgroupLayout, identifiers []string) (string, error) {
+	const maxWalkDepth = 8 // bound the search to avoid slow walks over large cgroup trees
+
 	type match struct {
 		path  string
 		idLen int
 		depth int
 	}
 
+	mountDepth := strings.Count(filepath.Clean(layout.mountPoint), string(os.PathSeparator))
+
 	best := match{}
 	err := filepath.WalkDir(layout.mountPoint, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+
+		currentDepth := strings.Count(path, string(os.PathSeparator)) - mountDepth
+		if d.IsDir() && currentDepth > maxWalkDepth {
+			return filepath.SkipDir
+		}
+
 		if d.IsDir() || d.Name() != layout.usageFile {
 			return nil
 		}
