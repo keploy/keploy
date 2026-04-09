@@ -145,6 +145,12 @@ func (m *Mock) DeepCopy() *Mock {
 		ConnectionID: m.ConnectionID,
 	}
 
+	// Deep copy the Noise slice so mutations to one copy don't affect the other.
+	if len(m.Noise) > 0 {
+		c.Noise = make([]string, len(m.Noise))
+		copy(c.Noise, m.Noise)
+	}
+
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.
 	if m.Spec.Metadata != nil {
 		c.Spec.Metadata = make(map[string]string, len(m.Spec.Metadata))
