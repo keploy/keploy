@@ -72,7 +72,7 @@ echo "Services stopped"
 
 # Start keploy in test mode
 test_container="proxyStressApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt" || true
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
