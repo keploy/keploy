@@ -52,8 +52,6 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			// Extract services from the flag
-
 			err = contract.GenerateFromTests(ctx)
 
 			if err != nil {
