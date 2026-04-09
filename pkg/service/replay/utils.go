@@ -15,6 +15,7 @@ import (
 
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -30,7 +31,7 @@ type TestReportVerdict struct {
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
-	noise := globalNoise
+	noise := CloneGlobalNoise(globalNoise)
 
 	if _, ok := noise["body"]; !ok {
 		noise["body"] = make(map[string][]string)
@@ -53,12 +54,26 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
+func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
+	cloned := make(config.GlobalNoise, len(src))
+	for section, fields := range src {
+		fieldCopy := make(map[string][]string, len(fields))
+		for field, patterns := range fields {
+			patternCopy := make([]string, len(patterns))
+			copy(patternCopy, patterns)
+			fieldCopy[field] = patternCopy
+		}
+		cloned[section] = fieldCopy
+	}
+	return cloned
+}
+
 // PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
 // It merges global and test-set specific noise, then extracts only the header noise.
 func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
-	noiseConfig := globalNoise
+	noiseConfig := CloneGlobalNoise(globalNoise)
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	// Extract only header noise for mock matching
@@ -120,6 +135,30 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 		delete(map1, key)
 	}
 	return map1
+}
+
+// effectiveStreamMockWindow calculates the effective time window for streaming mocks.
+// It returns the start time (request timestamp) and end time (anchor + timeout),
+// where anchor is the later of request/response timestamps (falling back to time.Now).
+// The timeout is calculated using pkg.ComputeStreamingTimeoutSeconds which considers the test case's timeout configuration.
+func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+
+	reqTs := tc.HTTPReq.Timestamp
+	respTs := tc.HTTPResp.Timestamp
+	timeoutSeconds := pkg.ComputeStreamingTimeoutSeconds(tc, defaultAPITimeout)
+
+	anchor := reqTs
+	if anchor.IsZero() || (!respTs.IsZero() && respTs.After(anchor)) {
+		anchor = respTs
+	}
+	if anchor.IsZero() {
+		anchor = time.Now().UTC()
+	}
+
+	return reqTs, anchor.Add(time.Duration(timeoutSeconds) * time.Second)
 }
 
 func timeWithUnits(duration time.Duration) string {
@@ -204,6 +243,46 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 		}
 	}
 	return true
+}
+
+// upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
+// consumed during the replay of a specific test case.
+func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, consumedMocks []models.MockState) {
+	if actualTestMockMappings == nil || testCaseID == "" || len(consumedMocks) == 0 {
+		return
+	}
+
+	newMocks := make([]models.MockEntry, 0, len(consumedMocks))
+	for _, m := range consumedMocks {
+		timestamp := m.Timestamp
+		if m.ReqTimestampMock != "" {
+			if parsedReqTime, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+				timestamp = parsedReqTime.Unix()
+			}
+		}
+
+		newMocks = append(newMocks, models.MockEntry{
+			Name:             m.Name,
+			Kind:             string(m.Kind),
+			Timestamp:        timestamp,
+			ReqTimestampMock: m.ReqTimestampMock,
+			ResTimestampMock: m.ResTimestampMock,
+		})
+	}
+
+	// If the test case already has an entry, append the new mocks to it.
+	for i := range actualTestMockMappings.TestCases {
+		if actualTestMockMappings.TestCases[i].ID == testCaseID {
+			actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
+			return
+		}
+	}
+
+	// No existing entry — create a new one.
+	actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
+		ID:    testCaseID,
+		Mocks: newMocks,
+	})
 }
 
 type TestFailure struct {

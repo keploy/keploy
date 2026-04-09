@@ -224,7 +224,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			// Stream each test case as JSON
-			a.logger.Debug("Sending test case", zap.Any("test_case", t))
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
 			header.Set("Content-Disposition", `form-data; name="metadata"`)
