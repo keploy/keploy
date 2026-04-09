@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"log"
 	"regexp"
 	"sync"
 )
@@ -60,6 +61,8 @@ func NewNoiseChecker(patterns []string) *NoiseChecker {
 	for _, p := range patterns {
 		if re := getCachedRegexp(p); re != nil {
 			compiled = append(compiled, re)
+		} else {
+			log.Printf("keploy: ignoring invalid noise regex pattern %q in Mock.Noise — check the pattern syntax", p)
 		}
 	}
 	if len(compiled) == 0 {
@@ -140,8 +143,10 @@ func StripNoisyFields(data interface{}, nc *NoiseChecker) interface{} {
 }
 
 // HasExtraNonNoisyKeys checks whether reqVal contains keys not present in
-// mockVal (excluding keys whose mock value is noisy). Returns true if extra
-// non-noisy keys exist, meaning the request is not an exact match.
+// mockVal. All mock keys are treated as present regardless of whether their
+// values are noisy — only value comparison/recursion is skipped for noisy
+// fields. Returns true if the request has extra keys at any non-noisy
+// nesting level, or extra array elements beyond the mock's length.
 func HasExtraNonNoisyKeys(mockVal, reqVal interface{}, nc *NoiseChecker) bool {
 	switch mv := mockVal.(type) {
 	case map[string]interface{}:

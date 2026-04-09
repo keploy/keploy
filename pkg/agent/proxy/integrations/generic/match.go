@@ -117,11 +117,19 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 				simSum += similarity
 				simCount++
 			}
-			// Compute average similarity across non-noisy buffers
+			// Compute average similarity across non-noisy buffers.
+			// If all buffers are noisy, treat as neutral (1.0) so the
+			// mock remains matchable — schema/length already matched.
 			if simCount > 0 {
 				avgSim := simSum / float64(simCount)
 				if avgSim > mxSim {
 					mxSim = avgSim
+					mxIdx = idx
+				}
+			} else if len(reqBuffs) > 0 {
+				// All buffers were noisy — neutral match
+				if 1.0 > mxSim {
+					mxSim = 1.0
 					mxIdx = idx
 				}
 			}
