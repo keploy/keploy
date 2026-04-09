@@ -34,6 +34,7 @@ type NetworkTrafficDoc struct {
 	Kind         models.Kind         `json:"kind" yaml:"kind"`
 	Name         string              `json:"name" yaml:"name"`
 	Spec         yamlLib.Node        `json:"spec" yaml:"spec"`
+	Noise        []string            `json:"noise,omitempty" yaml:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
