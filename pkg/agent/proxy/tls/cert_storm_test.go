@@ -46,42 +46,42 @@ func helperCA(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 }
 
 // helperClientHello creates a mock ClientHelloInfo backed by a real TCP connection.
-// It returns the ClientHelloInfo and a cleanup function that tears down both sides.
-func helperClientHello(t *testing.T, hostname string) (*tls.ClientHelloInfo, func()) {
-	t.Helper()
+// Returns (hello, cleanup, err). The caller must call cleanup() when done.
+// Uses error return instead of t.Fatal so it is safe to call from goroutines.
+func helperClientHello(hostname string) (*tls.ClientHelloInfo, func(), error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return nil, func() {}, err
 	}
-	// dialDone is closed once the dial goroutine finishes, so cleanup can wait for it.
 	dialDone := make(chan struct{})
 	go func() {
 		defer close(dialDone)
-		conn, err := net.Dial("tcp", ln.Addr().String())
-		if err != nil {
+		conn, dialErr := net.Dial("tcp", ln.Addr().String())
+		if dialErr != nil {
 			return
 		}
-		// Block until the connection is closed externally (by cleanup closing the listener/conn).
 		buf := make([]byte, 1)
-		_, _ = conn.Read(buf) // returns when the peer closes
+		_, _ = conn.Read(buf)
 		conn.Close()
 	}()
 	srvConn, err := ln.Accept()
 	if err != nil {
 		ln.Close()
-		t.Fatal(err)
+		<-dialDone
+		return nil, func() {}, err
 	}
 	cleanup := func() {
 		srvConn.Close()
 		ln.Close()
-		<-dialDone // wait for the dial goroutine to exit
+		<-dialDone
 	}
-	return &tls.ClientHelloInfo{ServerName: hostname, Conn: srvConn}, cleanup
+	return &tls.ClientHelloInfo{ServerName: hostname, Conn: srvConn}, cleanup, nil
 }
 
 // resetCertCacheForTest resets the cert cache so tests start with a clean state.
+// nolint:govet // intentional sync.Once reassignment for test isolation
 func resetCertCacheForTest() {
-	certCacheOnce = sync.Once{}
+	certCacheOnce = sync.Once{} //nolint:govet // test-only: resetting Once for isolation
 	certCache = nil
 }
 
@@ -99,6 +99,7 @@ func TestCertCacheHit(t *testing.T) {
 		wg        sync.WaitGroup
 		certCount atomic.Int32
 		serials   sync.Map
+		errCount  atomic.Int32
 	)
 
 	start := time.Now()
@@ -106,18 +107,22 @@ func TestCertCacheHit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			hello, cleanup := helperClientHello(t, hostname)
+			hello, cleanup, err := helperClientHello(hostname)
+			if err != nil {
+				errCount.Add(1)
+				return
+			}
 			defer cleanup()
 
 			cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
 			if err != nil {
-				t.Errorf("CertForClient failed: %v", err)
+				errCount.Add(1)
 				return
 			}
 			certCount.Add(1)
 			leaf, err := x509.ParseCertificate(cert.Certificate[0])
 			if err != nil {
-				t.Errorf("ParseCertificate failed: %v", err)
+				errCount.Add(1)
 				return
 			}
 			serials.Store(leaf.SerialNumber.String(), true)
@@ -126,19 +131,23 @@ func TestCertCacheHit(t *testing.T) {
 	wg.Wait()
 	elapsed := time.Since(start)
 
-	// Count unique serials
+	if errCount.Load() > 0 {
+		t.Errorf("%d goroutines encountered errors", errCount.Load())
+	}
+
 	uniqueSerials := 0
 	serials.Range(func(_, _ interface{}) bool { uniqueSerials++; return true })
 
-	t.Logf("Concurrency: %d, Unique certs: %d, Time: %s", concurrency, uniqueSerials, elapsed)
+	t.Logf("Concurrency: %d, Unique certs: %d, Errors: %d, Time: %s",
+		concurrency, uniqueSerials, errCount.Load(), elapsed)
 
-	if certCount.Load() != concurrency {
-		t.Fatalf("expected %d certs, got %d", concurrency, certCount.Load())
+	if certCount.Load() == 0 {
+		t.Fatal("no certificates were generated")
 	}
 
 	// With caching, the vast majority should share 1 cert.
-	// Due to concurrent first-access race, a few goroutines may generate before
-	// the first one stores the result. Allow up to 5 unique certs (generous).
+	// Due to concurrent first-access race, a few goroutines may generate
+	// before the first one stores the result. Allow up to 5 unique certs.
 	if uniqueSerials > 5 {
 		t.Errorf("expected at most 5 unique certs (cache hit), got %d — cache not working", uniqueSerials)
 	}
@@ -155,21 +164,23 @@ func TestCertCacheDistinctHostnames(t *testing.T) {
 	caKey, caCert := helperCA(t)
 
 	hostnames := []string{"a.example.com", "b.example.com", "c.example.com"}
-	seen := make(map[string]string) // serial → hostname
+	seen := make(map[string]string)
 
 	for _, h := range hostnames {
-		hello, cleanup := helperClientHello(t, h)
+		hello, cleanup, err := helperClientHello(h)
+		if err != nil {
+			t.Fatalf("helperClientHello(%q): %v", h, err)
+		}
 		cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
 		cleanup()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("CertForClient(%q): %v", h, err)
 		}
 		leaf, err := x509.ParseCertificate(cert.Certificate[0])
 		if err != nil {
-			t.Fatalf("ParseCertificate failed for %q: %v", h, err)
+			t.Fatalf("ParseCertificate(%q): %v", h, err)
 		}
 		serial := leaf.SerialNumber.String()
-
 		if prev, dup := seen[serial]; dup {
 			t.Errorf("hostname %q got same serial as %q — cache key collision", h, prev)
 		}
@@ -188,7 +199,10 @@ func TestCertCacheEmptyServerName(t *testing.T) {
 	logger := zap.NewNop()
 	caKey, caCert := helperCA(t)
 
-	hello, cleanup := helperClientHello(t, "")
+	hello, cleanup, err := helperClientHello("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cleanup()
 
 	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
@@ -205,34 +219,35 @@ func TestCertCacheEmptyServerName(t *testing.T) {
 func BenchmarkCertForClient(b *testing.B) {
 	resetCertCacheForTest()
 	logger := zap.NewNop()
-	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Bench CA"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
-		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		b.Fatal(err)
 	}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
-	caCert, _ := x509.ParseCertificate(der)
-
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	defer ln.Close()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Bench CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		b.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(der)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		go func() {
-			conn, _ := net.Dial("tcp", ln.Addr().String())
-			if conn != nil {
-				buf := make([]byte, 1)
-				conn.Read(buf)
-				conn.Close()
-			}
-		}()
-		srvConn, _ := ln.Accept()
-		// Use a unique hostname per iteration so the benchmark measures actual
-		// cert generation rather than cache hits.
-		host := fmt.Sprintf("bench-%d.example.com", i)
-		hello := &tls.ClientHelloInfo{ServerName: host, Conn: srvConn}
+		hello, cleanup, hErr := helperClientHello(fmt.Sprintf("bench-%d.example.com", i))
+		if hErr != nil {
+			b.Fatal(hErr)
+		}
 		_, _ = CertForClient(logger, hello, caKey, caCert, time.Time{})
-		srvConn.Close()
+		cleanup()
 	}
 }

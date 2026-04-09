@@ -494,7 +494,12 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// it here, before caching, ensures all concurrent consumers see a
 	// fully-initialized certificate.
 	if serverTLSCert.Leaf == nil {
-		serverTLSCert.Leaf, _ = x509.ParseCertificate(serverTLSCert.Certificate[0])
+		leaf, parseErr := x509.ParseCertificate(serverTLSCert.Certificate[0])
+		if parseErr != nil {
+			logger.Debug("failed to pre-parse certificate leaf, skipping cache", zap.Error(parseErr))
+			return &serverTLSCert, nil
+		}
+		serverTLSCert.Leaf = leaf
 	}
 
 	// Cache the generated certificate for reuse by subsequent connections
