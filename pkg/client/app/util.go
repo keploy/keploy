@@ -13,22 +13,40 @@ import (
 
 // ensureInMemoryComposeFlags rewrites the docker compose command to use stdin
 // ("-f -") for in-memory content and injects the exit-code-from flags.
+// It tokenizes the arguments and collapses all -f/--file flags into a single
+// "-f -" to avoid producing multiple stdin readers when the original command
+// specifies more than one compose file.
 func ensureInMemoryComposeFlags(appCmd, serviceName string) string {
-	// Replace any existing "-f <path>" with "-f -" so docker compose reads from stdin.
-	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
-	re := regexp.MustCompile(pattern)
-	if re.MatchString(appCmd) {
-		appCmd = re.ReplaceAllString(appCmd, "-f -")
-	} else {
-		// No -f flag present; inject "-f -" before "up".
-		upIdx := strings.Index(appCmd, " up")
-		if upIdx != -1 {
-			appCmd = appCmd[:upIdx] + " -f -" + appCmd[upIdx:]
-		} else {
-			appCmd += " -f -"
+	parts := strings.Fields(appCmd)
+
+	// Strip every existing -f/--file flag and its value.
+	cleaned := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		if (parts[i] == "-f" || parts[i] == "--file") && i+1 < len(parts) {
+			i++ // skip the path argument
+			continue
 		}
+		if strings.HasPrefix(parts[i], "-f=") || strings.HasPrefix(parts[i], "--file=") {
+			continue
+		}
+		cleaned = append(cleaned, parts[i])
 	}
-	return ensureComposeExitOnAppFailure(appCmd, serviceName)
+
+	// Inject a single "-f -" right before "up" (or at the end when "up" is absent).
+	injected := false
+	result := make([]string, 0, len(cleaned)+2)
+	for _, p := range cleaned {
+		if p == "up" && !injected {
+			result = append(result, "-f", "-")
+			injected = true
+		}
+		result = append(result, p)
+	}
+	if !injected {
+		result = append(result, "-f", "-")
+	}
+
+	return ensureComposeExitOnAppFailure(strings.Join(result, " "), serviceName)
 }
 
 func findComposeFile(cmd string) []string {

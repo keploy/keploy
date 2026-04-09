@@ -499,8 +499,13 @@ func (a *App) composeDown() {
 	switch {
 	case len(a.composeContent) > 0:
 		// In-memory mode: pipe compose YAML via stdin, no file on disk.
+		// Preserve project-scoping flags (-p/--project-name, --project-directory)
+		// from the original command so teardown targets the correct project.
 		a.logger.Debug("Running docker compose down using in-memory compose content")
-		downCmd = exec.Command("docker", "compose", "-f", "-", "down")
+		args := []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "down")
+		downCmd = exec.Command("docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
@@ -514,6 +519,23 @@ func (a *App) composeDown() {
 		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
 			zap.Error(err), zap.String("output", string(output)))
 	}
+}
+
+// extractProjectFlags returns any project-scoping flags (-p/--project-name,
+// --project-directory) found in the given docker compose command.
+func extractProjectFlags(cmd string) []string {
+	parts := strings.Fields(cmd)
+	var flags []string
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory") && i+1 < len(parts):
+			flags = append(flags, parts[i], parts[i+1])
+			i++
+		case strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
+			flags = append(flags, parts[i])
+		}
+	}
+	return flags
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
