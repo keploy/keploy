@@ -250,10 +250,9 @@ func TestIsTime_VariousFormats_808(t *testing.T) {
 	}
 }
 
-// TestToHTTPHeader_WithTimeValue_909 verifies that the ToHTTPHeader function correctly
-// converts a map of strings to an http.Header object. It specifically checks that
-// header values recognized as timestamps are not split by commas, while other
-// comma-separated values are correctly split into slices.
+// TestToHTTPHeader_WithTimeValue_909 verifies that the ToHTTPHeader function keeps
+// legacy stored header strings intact. A comma inside the stored scalar represents
+// the exact recorded value unless an exact header-values map is provided separately.
 func TestToHTTPHeader_WithTimeValue_909(t *testing.T) {
 	// Arrange
 	mockHeader := map[string]string{
@@ -268,8 +267,57 @@ func TestToHTTPHeader_WithTimeValue_909(t *testing.T) {
 	// Assert
 	require.NotNil(t, httpHeader)
 	assert.Equal(t, []string{"Tue, 17 Jan 2023 16:34:58 IST"}, httpHeader["Date"])
-	assert.Equal(t, []string{"value1", "value2"}, httpHeader["X-Custom-Header"])
+	assert.Equal(t, []string{"value1,value2"}, httpHeader["X-Custom-Header"])
 	assert.Equal(t, []string{"application/json"}, httpHeader["Content-Type"])
+}
+
+func TestToHTTPHeader_WithExactHeaderValues_909(t *testing.T) {
+	mockHeader := map[string]string{
+		"X-Custom-Header": "value1,value2",
+		"Set-Cookie":      "a=1,b=2",
+	}
+	exactHeaderValues := map[string][]string{
+		"X-Custom-Header": {"value1", "value2"},
+		"Set-Cookie":      {"a=1", "b=2"},
+	}
+
+	httpHeader := ToHTTPHeaderWithExact(mockHeader, exactHeaderValues)
+
+	require.NotNil(t, httpHeader)
+	assert.Equal(t, []string{"value1", "value2"}, httpHeader["X-Custom-Header"])
+	assert.Equal(t, []string{"a=1", "b=2"}, httpHeader["Set-Cookie"])
+}
+
+func TestSimulateHTTP_PreservesCommaSeparatedHeaderValue_909(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, []string{"CC1,CC2,CC3"}, r.Header.Values("Compatible-Components"))
+		assert.Equal(t, "CC1,CC2,CC3", r.Header.Get("Compatible-Components"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "comma-separated-header",
+		HTTPReq: models.HTTPReq{
+			Method: models.Method(http.MethodGet),
+			URL:    server.URL,
+			Header: map[string]string{
+				"Compatible-Components": "CC1,CC2,CC3",
+			},
+			HeaderValues: map[string][]string{
+				"Compatible-Components": {"CC1,CC2,CC3"},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and

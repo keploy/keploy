@@ -78,6 +78,23 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// ToExactHTTPHeaderValues preserves ambiguous header values that cannot be
+// reconstructed safely from the legacy map[string]string representation.
+func ToExactHTTPHeaderValues(httpHeader http.Header) map[string][]string {
+	var exactHeaderValues map[string][]string
+
+	for key, values := range httpHeader {
+		if len(values) > 1 || (len(values) == 1 && strings.Contains(values[0], ",")) {
+			if exactHeaderValues == nil {
+				exactHeaderValues = make(map[string][]string)
+			}
+			exactHeaderValues[key] = append([]string(nil), values...)
+		}
+	}
+
+	return exactHeaderValues
+}
+
 // CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
 // with an input header value (as a slice of strings). It normalizes whitespace,
 // splits the mock header value by commas, trims spaces, sorts both sets of values,
@@ -124,16 +141,26 @@ func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string)
 }
 
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
+	return ToHTTPHeaderWithExact(mockHeader, nil)
+}
+
+func ToHTTPHeaderWithExact(mockHeader map[string]string, exactHeaderValues map[string][]string) http.Header {
 	header := http.Header{}
-	for i, j := range mockHeader {
-		match := IsTime(j)
-		if match {
-			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
-			header[i] = []string{j}
+
+	for key, values := range exactHeaderValues {
+		if len(values) == 0 {
 			continue
 		}
-		header[i] = strings.Split(j, ",")
+		header[key] = append([]string(nil), values...)
 	}
+
+	for key, value := range mockHeader {
+		if _, ok := header[key]; ok {
+			continue
+		}
+		header[key] = []string{value}
+	}
+
 	return header
 }
 
@@ -386,7 +413,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.Header = ToHTTPHeaderWithExact(tc.HTTPReq.Header, tc.HTTPReq.HeaderValues)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
@@ -484,6 +511,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		StatusMessage: statusMessage,
 		Body:          string(respBody),
 		Header:        ToYamlHTTPHeader(httpResp.Header),
+		HeaderValues:  ToExactHTTPHeaderValues(httpResp.Header),
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
@@ -805,7 +833,7 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 func MakeCurlCommand(tc models.HTTPReq) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
-	header := ToHTTPHeader(tc.Header)
+	header := ToHTTPHeaderWithExact(tc.Header, tc.HeaderValues)
 
 	for k, v := range ToYamlHTTPHeader(header) {
 		if k != "Content-Length" {

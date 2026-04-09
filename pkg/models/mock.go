@@ -182,10 +182,34 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
+		if m.Spec.HTTPReq.Header != nil {
+			httpReqCopy.Header = make(map[string]string, len(m.Spec.HTTPReq.Header))
+			for k, v := range m.Spec.HTTPReq.Header {
+				httpReqCopy.Header[k] = v
+			}
+		}
+		if m.Spec.HTTPReq.HeaderValues != nil {
+			httpReqCopy.HeaderValues = make(map[string][]string, len(m.Spec.HTTPReq.HeaderValues))
+			for k, v := range m.Spec.HTTPReq.HeaderValues {
+				httpReqCopy.HeaderValues[k] = append([]string(nil), v...)
+			}
+		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {
 		httpRespCopy := *m.Spec.HTTPResp
+		if m.Spec.HTTPResp.Header != nil {
+			httpRespCopy.Header = make(map[string]string, len(m.Spec.HTTPResp.Header))
+			for k, v := range m.Spec.HTTPResp.Header {
+				httpRespCopy.Header[k] = v
+			}
+		}
+		if m.Spec.HTTPResp.HeaderValues != nil {
+			httpRespCopy.HeaderValues = make(map[string][]string, len(m.Spec.HTTPResp.HeaderValues))
+			for k, v := range m.Spec.HTTPResp.HeaderValues {
+				httpRespCopy.HeaderValues[k] = append([]string(nil), v...)
+			}
+		}
 		c.Spec.HTTPResp = &httpRespCopy
 	}
 	if m.Spec.GRPCReq != nil {

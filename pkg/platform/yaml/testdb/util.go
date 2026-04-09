@@ -38,7 +38,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		doc.Curl = tc.Curl
 
 		// find noisy fields only for HTTP responses
-		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+		m, err := FlattenHTTPResponse(pkg.ToHTTPHeaderWithExact(tc.HTTPResp.Header, tc.HTTPResp.HeaderValues), tc.HTTPResp.Body)
 		if err != nil {
 			msg := "error in flattening http response"
 			utils.LogError(logger, err, msg)
