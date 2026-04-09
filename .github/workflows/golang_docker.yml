@@ -20,9 +20,6 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
-          - name: proxy-stress-test
-            path: proxy-stress-test
-            script_dir: proxy_stress_test
         config:
           - job: record_latest_replay_build
             record_src: latest
