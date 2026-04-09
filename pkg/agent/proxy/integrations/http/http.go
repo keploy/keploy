@@ -20,6 +20,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// httpMethodPrefixes are pre-computed to avoid per-call []byte allocations.
+var (
+	httpResponsePrefix = []byte("HTTP/")
+	httpMethodGET      = []byte("GET ")
+	httpMethodPOST     = []byte("POST ")
+	httpMethodPUT      = []byte("PUT ")
+	httpMethodPATCH    = []byte("PATCH ")
+	httpMethodDELETE   = []byte("DELETE ")
+	httpMethodOPTIONS  = []byte("OPTIONS ")
+	httpMethodHEAD     = []byte("HEAD ")
+	httpMethodCONNECT  = []byte("CONNECT ")
+	httpVersionMarker  = []byte(" HTTP/")
+)
+
 // maxRequestLineScan caps how far into the first line we scan for " HTTP/".
 const maxRequestLineScan = 8192
 
@@ -53,15 +67,15 @@ type FinalHTTP struct {
 // the first line to prevent false positives from binary protocols that start
 // with method-like ASCII bytes. Response detection only checks the prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isResponse := bytes.HasPrefix(buf, []byte("HTTP/"))
-	isRequest := bytes.HasPrefix(buf, []byte("GET ")) ||
-		bytes.HasPrefix(buf, []byte("POST ")) ||
-		bytes.HasPrefix(buf, []byte("PUT ")) ||
-		bytes.HasPrefix(buf, []byte("PATCH ")) ||
-		bytes.HasPrefix(buf, []byte("DELETE ")) ||
-		bytes.HasPrefix(buf, []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf, []byte("HEAD ")) ||
-		bytes.HasPrefix(buf, []byte("CONNECT "))
+	isResponse := bytes.HasPrefix(buf, httpResponsePrefix)
+	isRequest := bytes.HasPrefix(buf, httpMethodGET) ||
+		bytes.HasPrefix(buf, httpMethodPOST) ||
+		bytes.HasPrefix(buf, httpMethodPUT) ||
+		bytes.HasPrefix(buf, httpMethodPATCH) ||
+		bytes.HasPrefix(buf, httpMethodDELETE) ||
+		bytes.HasPrefix(buf, httpMethodOPTIONS) ||
+		bytes.HasPrefix(buf, httpMethodHEAD) ||
+		bytes.HasPrefix(buf, httpMethodCONNECT)
 
 	if !isRequest && !isResponse {
 		h.Logger.Debug("determined the protocol is not HTTP", zap.Bool("isHTTP", false))
@@ -79,7 +93,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		if end > maxRequestLineScan {
 			end = maxRequestLineScan
 		}
-		if !bytes.Contains(buf[:end], []byte(" HTTP/")) {
+		if !bytes.Contains(buf[:end], httpVersionMarker) {
 			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
 			return false
 		}
