@@ -489,8 +489,19 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
 
+	// Pre-populate Leaf to avoid a data race: crypto/tls lazily parses
+	// Certificate.Leaf on first use, which is not goroutine-safe. Parsing
+	// it here, before caching, ensures all concurrent consumers see a
+	// fully-initialized certificate.
+	if serverTLSCert.Leaf == nil {
+		serverTLSCert.Leaf, _ = x509.ParseCertificate(serverTLSCert.Certificate[0])
+	}
+
 	// Cache the generated certificate for reuse by subsequent connections
 	// to the same hostname, avoiding redundant key generation and signing.
+	// NOTE: The cache key only uses hostname. In practice, caPrivKey and
+	// caCertParsed are constant for the lifetime of a Proxy instance, and
+	// backdate is constant per test run, so hostname is sufficient.
 	if dstURL != "" {
 		getCertCache().Add(dstURL, &serverTLSCert)
 	}
