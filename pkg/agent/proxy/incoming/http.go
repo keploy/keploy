@@ -103,14 +103,26 @@ func wrapBodyForCapture(body io.ReadCloser, capture io.Writer) io.ReadCloser {
 	}
 }
 
+// captureTimestamp records the wall-clock time at which a chunk of data
+// was captured at a given byte offset in the capture buffer.
+type captureTimestamp struct {
+	offset int
+	ts     time.Time
+}
+
 // captureWriter is a non-blocking writer that buffers data for async test case
 // capture. It silently stops capturing (without returning errors) when memory
 // pressure is detected or the buffer exceeds maxSize, so it never blocks or
 // slows the primary forwarding path.
+//
+// It also records a timestamp for each Write call so that parseCapturedHTTP
+// can assign accurate request/response timestamps instead of using time.Now()
+// at parse time (which runs after the connection closes).
 type captureWriter struct {
 	buf     bytes.Buffer
 	stopped bool
 	maxSize int
+	times   []captureTimestamp
 }
 
 func (w *captureWriter) Write(p []byte) (int, error) {
@@ -123,8 +135,10 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 		// allocated memory to the GC. bytes.Buffer.Reset() only resets the
 		// length but keeps the capacity, so a 5MB buffer would still hold 5MB.
 		w.buf = bytes.Buffer{}
+		w.times = nil
 		return len(p), nil
 	}
+	w.times = append(w.times, captureTimestamp{offset: w.buf.Len(), ts: time.Now()})
 	w.buf.Write(p)
 	return len(p), nil
 }
@@ -133,6 +147,37 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 // Must only be called after forwarding goroutines have finished (after done channels).
 func (w *captureWriter) free() {
 	w.buf = bytes.Buffer{}
+	w.times = nil
+}
+
+// timestampAtOffset returns the approximate wall-clock time at which the byte
+// at the given offset was written to the capture buffer. It searches the
+// recorded timestamps in reverse to find the last chunk that starts at or
+// before the requested offset.
+func timestampAtOffset(times []captureTimestamp, offset int) time.Time {
+	for i := len(times) - 1; i >= 0; i-- {
+		if times[i].offset <= offset {
+			return times[i].ts
+		}
+	}
+	if len(times) > 0 {
+		return times[0].ts
+	}
+	return time.Now()
+}
+
+// countingReader wraps an io.Reader and counts the total bytes read from it.
+// Used together with bufio.Reader.Buffered() to compute the byte offset of
+// the next unconsumed message in the original capture buffer.
+type countingReader struct {
+	r     io.Reader
+	count int
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.count += n
+	return n, err
 }
 
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
@@ -517,12 +562,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// than necessary, especially when memory may be near the container limit.
 	// Copy the data out first (for async parsing), then free immediately.
 	var reqBytes, respBytes []byte
+	var reqTimes, respTimes []captureTimestamp
 	if reqCapture != nil && respCapture != nil && !reqCapture.stopped && !respCapture.stopped {
 		if reqCapture.buf.Len() > 0 && respCapture.buf.Len() > 0 {
 			reqBytes = make([]byte, reqCapture.buf.Len())
 			copy(reqBytes, reqCapture.buf.Bytes())
 			respBytes = make([]byte, respCapture.buf.Len())
 			copy(respBytes, respCapture.buf.Bytes())
+			// Preserve timestamp slices before freeing — the background
+			// goroutine references the same underlying arrays.
+			reqTimes = reqCapture.times
+			respTimes = respCapture.times
 		}
 	}
 	// Free regardless of whether capture succeeded or was stopped
@@ -534,7 +584,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	}
 
 	if len(reqBytes) > 0 && len(respBytes) > 0 {
-		go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, t, appPort)
+		go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, reqTimes, respTimes, t, appPort)
 	}
 }
 
@@ -543,20 +593,32 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 // request/response pairs from keep-alive connections. This runs in a background
 // goroutine after the connection closes, with zero impact on the client-server
 // communication.
-func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *zap.Logger, reqData, respData []byte, t chan *models.TestCase, appPort uint16) {
-	reqReader := bufio.NewReader(bytes.NewReader(reqData))
-	respReader := bufio.NewReader(bytes.NewReader(respData))
+//
+// reqTimes/respTimes carry the wall-clock timestamps recorded by captureWriter
+// during live forwarding, so test cases get accurate timestamps that align with
+// the mocks recorded by the outgoing proxy. Without these, all test cases would
+// get post-connection-close timestamps and the mock-to-test mapping would break.
+func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *zap.Logger, reqData, respData []byte, reqTimes, respTimes []captureTimestamp, t chan *models.TestCase, appPort uint16) {
+	reqCounting := &countingReader{r: bytes.NewReader(reqData)}
+	respCounting := &countingReader{r: bytes.NewReader(respData)}
+	reqReader := bufio.NewReader(reqCounting)
+	respReader := bufio.NewReader(respCounting)
 
 	for {
 		if isIngressRecordingPaused() {
 			return
 		}
 
+		// Byte offset of the start of this request in the original capture
+		// buffer = total bytes read from underlying reader minus bytes still
+		// buffered by bufio.Reader (read-ahead that hasn't been consumed yet).
+		reqOffset := reqCounting.count - reqReader.Buffered()
+		reqTimestamp := timestampAtOffset(reqTimes, reqOffset)
+
 		req, err := http.ReadRequest(reqReader)
 		if err != nil {
 			return
 		}
-		reqTimestamp := time.Now()
 
 		// Set Host header to match pkg.ParseHTTPRequest behavior
 		req.Header.Set("Host", req.Host)
@@ -574,7 +636,6 @@ func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *za
 		if err != nil {
 			return
 		}
-		respTimestamp := time.Now()
 
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -582,6 +643,14 @@ func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *za
 			return
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+		// Byte offset right after this response — the timestamp at this
+		// position approximates when the last byte of the response arrived.
+		respEndOffset := respCounting.count - respReader.Buffered()
+		respTimestamp := timestampAtOffset(respTimes, respEndOffset)
+		if respTimestamp.Before(reqTimestamp) {
+			respTimestamp = reqTimestamp
+		}
 
 		hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, appPort)
 	}
