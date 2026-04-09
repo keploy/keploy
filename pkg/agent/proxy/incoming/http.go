@@ -69,7 +69,7 @@ func (b *httpBodyCaptureBuffer) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 	if b.state == nil || !b.state.reserve(len(p)) {
-		b.buf.Reset()
+		b.buf = bytes.Buffer{} // release backing array for GC
 		return len(p), nil
 	}
 

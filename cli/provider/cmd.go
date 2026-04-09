@@ -969,14 +969,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
-		if cmd.Name() == "record" && c.cfg.Record.MemoryLimit > 0 {
-			cmdType := utils.CmdType(c.cfg.CommandType)
-			if cmdType != utils.DockerRun && cmdType != utils.DockerCompose {
-				c.logger.Info("memory-limit is only supported for docker run and docker compose recording; ignoring it for this command type",
-					zap.String("cmd-type", c.cfg.CommandType))
-				c.cfg.Record.MemoryLimit = 0
-			}
-		}
+		// memory-limit non-Docker gate is applied after flag parsing below
 
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
@@ -1084,6 +1077,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if _, err := memoryguard.LimitBytes(c.cfg.Record.MemoryLimit); err != nil {
 				utils.LogError(c.logger, err, "invalid memory limit for keploy agent")
 				return err
+			}
+			if c.cfg.Record.MemoryLimit > 0 {
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType != utils.DockerRun && cmdType != utils.DockerCompose {
+					c.logger.Info("memory-limit is only supported for docker run and docker compose recording; ignoring it for this command type",
+						zap.String("cmd-type", c.cfg.CommandType))
+					c.cfg.Record.MemoryLimit = 0
+				}
 			}
 
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")

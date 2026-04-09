@@ -135,6 +135,11 @@ func (g *guard) run(ctx context.Context) {
 						zap.Int("consecutive_failures", g.readFailCount),
 						zap.Error(err))
 				}
+				// If reads keep failing while paused, unpause to avoid permanently dropping recordings
+				if g.underPressure && g.readFailCount >= 20 { // ~10s of consecutive failures
+					g.logger.Info("Unpausing recording after repeated memory read failures — memory guard is effectively disabled")
+					g.resetPressure()
+				}
 				continue
 			}
 			g.readFailCount = 0
