@@ -54,13 +54,14 @@ type Proxy struct {
 	Integrations map[integrations.IntegrationType]integrations.Integrations
 
 	integrationsPriority []ParserPriority
-	errChannel chan error
+	errChannel           chan error
 
 	// activeTestErrors accumulates mock-not-found errors during active test execution.
 	// The continuous error drain goroutine routes errors here when non-nil,
 	// and discards errors when nil (no test running). This prevents the
 	// errChannel from filling up with background noise (OTel, health checks).
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
+	errDrainOnce     sync.Once
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -1243,23 +1244,31 @@ func (a *testErrorAccumulator) drain() []error {
 // This prevents background services (OTel, health checks) from saturating the
 // 100-slot error channel and blocking test coordination.
 func (p *Proxy) StartErrorDrain(ctx context.Context) {
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case err, ok := <-p.errChannel:
-				if !ok {
+	p.errDrainOnce.Do(func() {
+		var discarded atomic.Int64
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
 					return
-				}
-				if acc := p.activeTestErrors.Load(); acc != nil {
-					acc.add(err)
-				} else {
-					p.logger.Debug("discarding mock error outside active test", zap.Error(err))
+				case err, ok := <-p.errChannel:
+					if !ok {
+						return
+					}
+					if acc := p.activeTestErrors.Load(); acc != nil {
+						acc.add(err)
+					} else {
+						// Log only the first discard and then every 100th to reduce noise.
+						n := discarded.Add(1)
+						if n == 1 || n%100 == 0 {
+							p.logger.Debug("discarding mock error outside active test",
+								zap.Error(err), zap.Int64("totalDiscarded", n))
+						}
+					}
 				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // BeginTestErrorCapture starts collecting errors for the current test case.
@@ -1295,17 +1304,17 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		rawErrs = acc.drain()
 	} else {
 		// Fallback: drain from channel directly (legacy path)
+	drainLoop:
 		for {
 			select {
 			case err, ok := <-p.errChannel:
 				if !ok {
-					break
+					break drainLoop
 				}
 				rawErrs = append(rawErrs, err)
-				continue
 			default:
+				break drainLoop
 			}
-			break
 		}
 	}
 

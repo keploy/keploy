@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"net"
 	"sync"
@@ -45,20 +46,24 @@ func helperCA(t *testing.T) (*ecdsa.PrivateKey, *x509.Certificate) {
 }
 
 // helperClientHello creates a mock ClientHelloInfo backed by a real TCP connection.
+// It returns the ClientHelloInfo and a cleanup function that tears down both sides.
 func helperClientHello(t *testing.T, hostname string) (*tls.ClientHelloInfo, func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	// dialDone is closed once the dial goroutine finishes, so cleanup can wait for it.
+	dialDone := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(dialDone)
 		conn, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			return
 		}
-		<-done
+		// Block until the connection is closed externally (by cleanup closing the listener/conn).
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf) // returns when the peer closes
 		conn.Close()
 	}()
 	srvConn, err := ln.Accept()
@@ -69,6 +74,7 @@ func helperClientHello(t *testing.T, hostname string) (*tls.ClientHelloInfo, fun
 	cleanup := func() {
 		srvConn.Close()
 		ln.Close()
+		<-dialDone // wait for the dial goroutine to exit
 	}
 	return &tls.ClientHelloInfo{ServerName: hostname, Conn: srvConn}, cleanup
 }
@@ -109,7 +115,11 @@ func TestCertCacheHit(t *testing.T) {
 				return
 			}
 			certCount.Add(1)
-			leaf, _ := x509.ParseCertificate(cert.Certificate[0])
+			leaf, err := x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				t.Errorf("ParseCertificate failed: %v", err)
+				return
+			}
 			serials.Store(leaf.SerialNumber.String(), true)
 		}()
 	}
@@ -154,7 +164,10 @@ func TestCertCacheDistinctHostnames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		leaf, _ := x509.ParseCertificate(cert.Certificate[0])
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			t.Fatalf("ParseCertificate failed for %q: %v", h, err)
+		}
 		serial := leaf.SerialNumber.String()
 
 		if prev, dup := seen[serial]; dup {
@@ -187,7 +200,8 @@ func TestCertCacheEmptyServerName(t *testing.T) {
 	}
 }
 
-// BenchmarkCertForClient measures cert generation cost per call.
+// BenchmarkCertForClient measures cert generation cost per call by using
+// unique hostnames to bypass the cache and exercise the full signing path.
 func BenchmarkCertForClient(b *testing.B) {
 	resetCertCacheForTest()
 	logger := zap.NewNop()
@@ -214,7 +228,10 @@ func BenchmarkCertForClient(b *testing.B) {
 			}
 		}()
 		srvConn, _ := ln.Accept()
-		hello := &tls.ClientHelloInfo{ServerName: "bench.example.com", Conn: srvConn}
+		// Use a unique hostname per iteration so the benchmark measures actual
+		// cert generation rather than cache hits.
+		host := fmt.Sprintf("bench-%d.example.com", i)
+		hello := &tls.ClientHelloInfo{ServerName: host, Conn: srvConn}
 		_, _ = CertForClient(logger, hello, caKey, caCert, time.Time{})
 		srvConn.Close()
 	}
