@@ -90,8 +90,8 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		if end == -1 {
 			end = len(buf)
 		}
-		if end > maxRequestLineScan {
-			end = maxRequestLineScan
+		if end > maxRequestLineScan+len(httpVersionMarker) {
+			end = maxRequestLineScan + len(httpVersionMarker)
 		}
 		if !bytes.Contains(buf[:end], httpVersionMarker) {
 			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
