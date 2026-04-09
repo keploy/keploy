@@ -52,7 +52,8 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// When in-memory compose content is provided, pipe it via stdin and skip PTY.
 	// PTY takes over the terminal's stdin/stdout so it cannot coexist with an
 	// explicit stdin reader; the non-PTY path handles this case correctly.
-	if len(stdin) > 0 {
+	// We check for nil (not length) so that a non-nil empty slice still disables PTY.
+	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
@@ -61,7 +62,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// puts it in a background process group which causes the OS to pause it.
 	// A PTY gives Docker Compose its own terminal to work with.
 	// Skip PTY when stdin content is provided (in-memory compose mode).
-	if cmdType == DockerCompose && isTTY && len(stdin) == 0 {
+	if cmdType == DockerCompose && isTTY && stdin == nil {
 		// For PTY, we use Setsid to create a new session instead of Setpgid
 		// This allows the PTY to become the controlling terminal
 		cmd.SysProcAttr = &syscall.SysProcAttr{

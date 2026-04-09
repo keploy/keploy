@@ -531,7 +531,7 @@ func extractProjectFlags(cmd string) []string {
 		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory") && i+1 < len(parts):
 			flags = append(flags, parts[i], parts[i+1])
 			i++
-		case strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
+		case strings.HasPrefix(parts[i], "-p=") || strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
 			flags = append(flags, parts[i])
 		}
 	}
