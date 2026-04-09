@@ -3,7 +3,6 @@ package integrations
 import (
 	"net"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
