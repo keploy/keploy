@@ -41,6 +41,11 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	// Noise holds exact-match regex patterns for obfuscated values.
+	// During mock matching, any stored value matching a pattern in this
+	// list is skipped (treated as noise). Written by the enterprise
+	// secret-protection obfuscator.
+	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
 }
 
 type TestModeInfo struct {
@@ -138,6 +143,12 @@ func (m *Mock) DeepCopy() *Mock {
 			SortOrder:  sortOrder,
 		},
 		ConnectionID: m.ConnectionID,
+	}
+
+	// Deep copy the Noise slice so mutations to one copy don't affect the other.
+	if len(m.Noise) > 0 {
+		c.Noise = make([]string, len(m.Noise))
+		copy(c.Noise, m.Noise)
 	}
 
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.

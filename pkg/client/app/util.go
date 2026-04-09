@@ -11,6 +11,60 @@ import (
 	"go.uber.org/zap"
 )
 
+// composeSubcommands lists the docker compose subcommands that mark the end of
+// global options. "-f -" must be injected before the first subcommand token.
+var composeSubcommands = map[string]bool{
+	"up": true, "down": true, "run": true, "exec": true, "ps": true,
+	"logs": true, "build": true, "config": true, "create": true,
+	"events": true, "images": true, "kill": true, "pause": true,
+	"port": true, "pull": true, "push": true, "restart": true,
+	"rm": true, "start": true, "stop": true, "top": true, "unpause": true,
+}
+
+// ensureInMemoryComposeFlags rewrites the docker compose command to use stdin
+// ("-f -") for in-memory content and injects the exit-code-from flags.
+// It tokenizes the arguments, strips all -f/--file flags (including dangling
+// ones without a value), and injects a single "-f -" before the first compose
+// subcommand to avoid producing multiple stdin readers.
+func ensureInMemoryComposeFlags(appCmd, serviceName string) string {
+	parts := strings.Fields(appCmd)
+
+	// Strip every existing -f/--file flag and its value, including dangling
+	// -f/--file tokens that appear without a following value.
+	cleaned := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		if parts[i] == "-f" || parts[i] == "--file" {
+			// Skip the value if one follows.
+			if i+1 < len(parts) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(parts[i], "-f=") || strings.HasPrefix(parts[i], "--file=") {
+			continue
+		}
+		cleaned = append(cleaned, parts[i])
+	}
+
+	// Inject a single "-f -" before the first compose subcommand so the flag
+	// stays in the global-options position. If no subcommand is found, append
+	// at the end as a fallback.
+	injected := false
+	result := make([]string, 0, len(cleaned)+2)
+	for _, p := range cleaned {
+		if !injected && composeSubcommands[p] {
+			result = append(result, "-f", "-")
+			injected = true
+		}
+		result = append(result, p)
+	}
+	if !injected {
+		result = append(result, "-f", "-")
+	}
+
+	return ensureComposeExitOnAppFailure(strings.Join(result, " "), serviceName)
+}
+
 func findComposeFile(cmd string) []string {
 
 	cmdArgs := strings.Fields(cmd)

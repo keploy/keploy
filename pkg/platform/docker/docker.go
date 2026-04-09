@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +121,31 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 		return err
 	}
 	return nil
+}
+
+// MarshalCompose serialises the Compose struct to YAML bytes without writing to disk.
+func (idc *Impl) MarshalCompose(compose *Compose) ([]byte, error) {
+	data, err := yaml.Marshal(compose)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal compose to YAML: %w", err)
+	}
+	return data, nil
+}
+
+// FindContainerInCompose searches for a container within an already-parsed Compose
+// structure. This is the in-memory equivalent of FindContainerInComposeFiles.
+func (idc *Impl) FindContainerInCompose(compose *Compose, containerName string) (*ComposeServiceInfo, error) {
+	networks, ports, service, found := idc.findContainerInServices(compose, containerName)
+	if !found {
+		return nil, fmt.Errorf("container '%s' not found in compose", containerName)
+	}
+	return &ComposeServiceInfo{
+		// ComposePath is intentionally empty — content lives in memory.
+		Networks:       networks,
+		Ports:          ports,
+		Compose:        compose,
+		AppServiceName: service,
+	}, nil
 }
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.
@@ -993,36 +1019,55 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
-// Helper to add/update an environment variable
-func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
-	var envNode *yaml.Node
-
-	// Find 'environment' key
+// getOrCreateEnvNode finds the 'environment' node inside a service, creating
+// a SequenceNode if none exists. It centralizes the lookup/create logic for
+// environment mutations performed by helper methods.
+func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
 	for i := 0; i < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
-			envNode = serviceNode.Content[i+1]
-			break
+			return serviceNode.Content[i+1]
 		}
 	}
 
-	// Create 'environment' if missing
-	if envNode == nil {
-		envNode = &yaml.Node{Kind: yaml.SequenceNode}
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
-			envNode,
-		)
-	}
+	// Not found — create it.
+	envNode := &yaml.Node{Kind: yaml.SequenceNode}
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+		envNode,
+	)
+	return envNode
+}
+
+// Helper to add/update an environment variable.
+// If the key already exists, its value is replaced (upsert semantics).
+func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
+	envNode := idc.getOrCreateEnvNode(serviceNode)
 
 	// Handle Sequence (array) style environment: ["KEY=VAL"]
 	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				// Key already exists — update in place.
+				node.Value = fmt.Sprintf("%s=%s", envKey, envValue)
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content, &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Value: fmt.Sprintf("%s=%s", envKey, envValue),
 		})
+		return
 	}
 	// Handle Mapping (dict) style environment: { KEY: VAL }
 	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				// Key already exists — update in place.
+				envNode.Content[i+1].Value = envValue
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envKey},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envValue},
@@ -1030,13 +1075,64 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 }
 
-// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS)
+// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS).
+// If the key already exists, the new value is appended (space-separated).
+// If it does not exist, a new entry is created.
 func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
-	// Logic: Find existing key. If found, append string " " + value. If not, create it.
-	// (Simplified implementation reuse addServiceEnvVar for now, assuming override is fine or strictly adding)
-	// For Java Tool Options, users rarely hardcode it in compose, but if they do, we ideally append.
-	// For simplicity in this iteration:
-	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+	envNode := idc.getOrCreateEnvNode(serviceNode)
+
+	// Handle Sequence (array) style: ["KEY=VAL", ...]
+	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				existingVal := strings.TrimPrefix(node.Value, prefix)
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				node.Value = node.Value + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
+
+	// Handle Mapping (dict) style: { KEY: VAL }
+	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				existingVal := envNode.Content[i+1].Value
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				envNode.Content[i+1].Value = existingVal + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
 }
 
 // Helper to ensure top-level volumes exists
