@@ -86,14 +86,17 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	// valid HTTP request line and not a binary protocol that coincidentally
 	// starts with method-like ASCII bytes.
 	if isRequest {
-		end := bytes.IndexByte(buf, '\n')
+		// Cap the search range first to bound the scan cost on large non-HTTP payloads.
+		scanBuf := buf
+		maxScan := maxRequestLineScan + len(httpVersionMarker)
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
 		if end == -1 {
-			end = len(buf)
+			end = len(scanBuf)
 		}
-		if end > maxRequestLineScan+len(httpVersionMarker) {
-			end = maxRequestLineScan + len(httpVersionMarker)
-		}
-		if !bytes.Contains(buf[:end], httpVersionMarker) {
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
 			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
 			return false
 		}

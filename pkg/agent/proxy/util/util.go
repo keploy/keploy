@@ -77,33 +77,49 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 	return bytes.Contains(buf, endOfHeaders)
 }
 
+// Pre-computed byte slices for IsHTTPReq to avoid per-call allocations.
+var (
+	httpRespPrefix    = []byte("HTTP/")
+	httpGET           = []byte("GET ")
+	httpPOST          = []byte("POST ")
+	httpPUT           = []byte("PUT ")
+	httpPATCH         = []byte("PATCH ")
+	httpDELETE        = []byte("DELETE ")
+	httpOPTIONS       = []byte("OPTIONS ")
+	httpHEAD          = []byte("HEAD ")
+	httpCONNECT       = []byte("CONNECT ")
+	httpVersionMarker = []byte(" HTTP/")
+)
+
 // IsHTTPReq checks if buf looks like an HTTP request or response.
 // For requests, it verifies " HTTP/" appears in the first line to avoid
 // false positives from binary protocols starting with method-like bytes.
 func IsHTTPReq(buf []byte) bool {
-	isResponse := bytes.HasPrefix(buf, []byte("HTTP/"))
-	isRequest := bytes.HasPrefix(buf, []byte("GET ")) ||
-		bytes.HasPrefix(buf, []byte("POST ")) ||
-		bytes.HasPrefix(buf, []byte("PUT ")) ||
-		bytes.HasPrefix(buf, []byte("PATCH ")) ||
-		bytes.HasPrefix(buf, []byte("DELETE ")) ||
-		bytes.HasPrefix(buf, []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf, []byte("HEAD ")) ||
-		bytes.HasPrefix(buf, []byte("CONNECT "))
+	isResponse := bytes.HasPrefix(buf, httpRespPrefix)
+	isRequest := bytes.HasPrefix(buf, httpGET) ||
+		bytes.HasPrefix(buf, httpPOST) ||
+		bytes.HasPrefix(buf, httpPUT) ||
+		bytes.HasPrefix(buf, httpPATCH) ||
+		bytes.HasPrefix(buf, httpDELETE) ||
+		bytes.HasPrefix(buf, httpOPTIONS) ||
+		bytes.HasPrefix(buf, httpHEAD) ||
+		bytes.HasPrefix(buf, httpCONNECT)
 
 	if !isRequest && !isResponse {
 		return false
 	}
 	if isRequest {
-		end := bytes.IndexByte(buf, '\n')
-		if end == -1 {
-			end = len(buf)
-		}
+		// Cap the search range first to avoid scanning large non-HTTP payloads.
 		const maxScan = 8198 // 8192 + len(" HTTP/")
-		if end > maxScan {
-			end = maxScan
+		scanBuf := buf
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
 		}
-		if !bytes.Contains(buf[:end], []byte(" HTTP/")) {
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
 			return false
 		}
 	}
