@@ -170,7 +170,7 @@ func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
 	applyPausedState(true)
 	now := time.Now()
 	if !alreadyPaused {
-		g.logger.Warn("Pausing keploy-agent recording due to memory pressure. "+
+		g.logger.Info("Pausing keploy-agent recording due to memory pressure. "+
 			"Consider increasing --memory-limit, enabling sampling, or reducing request concurrency",
 			zap.Int64("memory_usage_bytes", currentBytes),
 			zap.Int64("pause_threshold_bytes", pauseThreshold),
