@@ -403,7 +403,16 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		}
 	}
 
-	// Second pass: noise-aware match for mocks with obfuscated values
+	// Second pass: noise-aware match for mocks with obfuscated values.
+	// Pre-parse request body once to avoid repeated JSON parsing per mock.
+	isReqJSON := pkg.IsJSON(body)
+	var reqData interface{}
+	if isReqJSON {
+		if err := json.Unmarshal(body, &reqData); err != nil {
+			isReqJSON = false
+		}
+	}
+
 	for _, mock := range schemaMatched {
 		nc := util.NewNoiseChecker(mock.Noise)
 		if nc == nil {
@@ -424,15 +433,12 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		}
 
 		// JSON-level comparison skipping noisy fields
-		if !pkg.IsJSON([]byte(mockBody)) || !pkg.IsJSON(body) {
+		if !isReqJSON || !pkg.IsJSON([]byte(mockBody)) {
 			continue
 		}
 
-		var mockData, reqData interface{}
+		var mockData interface{}
 		if err := json.Unmarshal([]byte(mockBody), &mockData); err != nil {
-			continue
-		}
-		if err := json.Unmarshal(body, &reqData); err != nil {
 			continue
 		}
 
@@ -542,27 +548,33 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
 	return bestMatch, minDist
 }
 
-// TODO: generalize the function to work with any type of integration
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-
+// jaccardBestMatch finds the mock body with the highest Jaccard similarity
+// to reqBuff. mockBodies are pre-decoded/stripped byte slices so the caller
+// controls noise handling. Returns the best index and similarity score.
+func (h *HTTP) jaccardBestMatch(mockBodies [][]byte, reqBuff []byte) (int, float64) {
 	mxSim := -1.0
 	mxIdx := -1
-	// find the fuzzy hash of the mocks
-	for idx, mock := range mocks {
-		encoded, _ := decode(mock.Spec.HTTPReq.Body)
-		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := util.CreateShingles(encoded, k)
-		shingles2 := util.CreateShingles(reqBuff, k)
-		similarity := util.JaccardSimilarity(shingles1, shingles2)
-
-		// log.Debugf("Jaccard Similarity:%f\n", similarity)
-
-		if mxSim < similarity {
+	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+	reqShingles := util.CreateShingles(reqBuff, k)
+	for idx, body := range mockBodies {
+		mockShingles := util.CreateShingles(body, k)
+		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
+		if similarity > mxSim {
 			mxSim = similarity
 			mxIdx = idx
 		}
 	}
-	return mxIdx
+	return mxIdx, mxSim
+}
+
+// findBinaryMatch decodes mock bodies and delegates to jaccardBestMatch.
+func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+	bodies := make([][]byte, len(mocks))
+	for i, mock := range mocks {
+		bodies[i], _ = decode(mock.Spec.HTTPReq.Body)
+	}
+	idx, _ := h.jaccardBestMatch(bodies, reqBuff)
+	return idx
 }
 
 // PerformFuzzyMatch performs fuzzy matching on the request body.
@@ -617,19 +629,11 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	}
 
 	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
-	mxSim := -1.0
-	mxIdx := -1
-	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-	reqShingles := util.CreateShingles(reqBuff, k)
-	for idx := range tcsMocks {
-		mockBody := []byte(mockStrings[idx])
-		mockShingles := util.CreateShingles(mockBody, k)
-		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
-		if mxSim < similarity {
-			mxSim = similarity
-			mxIdx = idx
-		}
+	mockBodies := make([][]byte, len(mockStrings))
+	for i := range mockStrings {
+		mockBodies[i] = []byte(mockStrings[i])
 	}
+	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
 	if mxIdx != -1 {
 		h.Logger.Debug("http mock matched",
 			zap.String("mock", tcsMocks[mxIdx].Name),

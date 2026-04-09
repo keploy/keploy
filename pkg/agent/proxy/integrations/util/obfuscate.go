@@ -22,26 +22,28 @@ var (
 	noiseCache   = make(map[string]*regexp.Regexp)
 )
 
+// getCachedRegexp returns a compiled regex for pattern, using a bounded cache.
+// Invalid patterns are cached as nil entries to avoid repeated compile attempts.
 func getCachedRegexp(pattern string) *regexp.Regexp {
 	noiseCacheMu.RLock()
-	re := noiseCache[pattern]
+	re, found := noiseCache[pattern]
 	noiseCacheMu.RUnlock()
-	if re != nil {
-		return re
+	if found {
+		return re // may be nil for previously-invalid patterns
 	}
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil // invalid pattern — silently skipped; not user-actionable
+		compiled = nil // will be cached as negative result
 	}
 	noiseCacheMu.Lock()
 	// Evict all entries when cache is full to bound memory usage.
 	if len(noiseCache) >= maxNoiseCacheSize {
 		noiseCache = make(map[string]*regexp.Regexp)
 	}
-	if old := noiseCache[pattern]; old == nil {
-		noiseCache[pattern] = compiled
-	} else {
+	if old, exists := noiseCache[pattern]; exists {
 		compiled = old
+	} else {
+		noiseCache[pattern] = compiled
 	}
 	noiseCacheMu.Unlock()
 	return compiled
