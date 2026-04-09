@@ -77,18 +77,51 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 	return bytes.Contains(buf, endOfHeaders)
 }
 
-func IsHTTPReq(buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+// Pre-computed byte slices for IsHTTPReq to avoid per-call allocations.
+var (
+	httpGET           = []byte("GET ")
+	httpPOST          = []byte("POST ")
+	httpPUT           = []byte("PUT ")
+	httpPATCH         = []byte("PATCH ")
+	httpDELETE        = []byte("DELETE ")
+	httpOPTIONS       = []byte("OPTIONS ")
+	httpHEAD          = []byte("HEAD ")
+	httpCONNECT       = []byte("CONNECT ")
+	httpVersionMarker = []byte(" HTTP/")
+)
 
-	return isHTTP
+// IsHTTPReq checks if buf looks like an HTTP request by verifying
+// a method prefix and " HTTP/" version marker in the first line.
+// It does NOT match HTTP responses (use bytes.HasPrefix for "HTTP/").
+func IsHTTPReq(buf []byte) bool {
+	isRequest := bytes.HasPrefix(buf, httpGET) ||
+		bytes.HasPrefix(buf, httpPOST) ||
+		bytes.HasPrefix(buf, httpPUT) ||
+		bytes.HasPrefix(buf, httpPATCH) ||
+		bytes.HasPrefix(buf, httpDELETE) ||
+		bytes.HasPrefix(buf, httpOPTIONS) ||
+		bytes.HasPrefix(buf, httpHEAD) ||
+		bytes.HasPrefix(buf, httpCONNECT)
+
+	if !isRequest {
+		return false
+	}
+	{
+		// Cap the search range first to avoid scanning large non-HTTP payloads.
+		maxScan := 8192 + len(httpVersionMarker)
+		scanBuf := buf
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsHTTP2Preface checks if the buffer starts with the HTTP/2 client connection preface.
