@@ -10,7 +10,7 @@ func TestIsHTTPReq(t *testing.T) {
 	}{
 		{"GET request", []byte("GET / HTTP/1.1\r\n"), true},
 		{"POST request", []byte("POST /api HTTP/1.1\r\n"), true},
-		{"HTTP response", []byte("HTTP/1.1 200 OK\r\n"), true},
+		{"HTTP response (not a request)", []byte("HTTP/1.1 200 OK\r\n"), false},
 		{"CONNECT tunnel", []byte("CONNECT host:443 HTTP/1.1\r\n"), true},
 		{"binary with POST prefix", []byte("POST \x00\x01binary"), false},
 		{"binary with GET prefix", []byte("GET \xff\xfe\x00"), false},

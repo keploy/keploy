@@ -79,7 +79,6 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 
 // Pre-computed byte slices for IsHTTPReq to avoid per-call allocations.
 var (
-	httpRespPrefix    = []byte("HTTP/")
 	httpGET           = []byte("GET ")
 	httpPOST          = []byte("POST ")
 	httpPUT           = []byte("PUT ")
@@ -91,11 +90,10 @@ var (
 	httpVersionMarker = []byte(" HTTP/")
 )
 
-// IsHTTPReq checks if buf looks like an HTTP request or response.
-// For requests, it verifies " HTTP/" appears in the first line to avoid
-// false positives from binary protocols starting with method-like bytes.
+// IsHTTPReq checks if buf looks like an HTTP request by verifying
+// a method prefix and " HTTP/" version marker in the first line.
+// It does NOT match HTTP responses (use bytes.HasPrefix for "HTTP/").
 func IsHTTPReq(buf []byte) bool {
-	isResponse := bytes.HasPrefix(buf, httpRespPrefix)
 	isRequest := bytes.HasPrefix(buf, httpGET) ||
 		bytes.HasPrefix(buf, httpPOST) ||
 		bytes.HasPrefix(buf, httpPUT) ||
@@ -105,10 +103,10 @@ func IsHTTPReq(buf []byte) bool {
 		bytes.HasPrefix(buf, httpHEAD) ||
 		bytes.HasPrefix(buf, httpCONNECT)
 
-	if !isRequest && !isResponse {
+	if !isRequest {
 		return false
 	}
-	if isRequest {
+	{
 		// Cap the search range first to avoid scanning large non-HTTP payloads.
 		maxScan := 8192 + len(httpVersionMarker)
 		scanBuf := buf
