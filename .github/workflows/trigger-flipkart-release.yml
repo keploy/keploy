@@ -2,47 +2,39 @@ name: Trigger Flipkart Enterprise Release
 
 on:
   push:
-    branches:
-      - flipkart
+    tags:
+      - 'flipkart-*'
 
 jobs:
   trigger-release:
-    name: Trigger Enterprise Release for Flipkart
-    if: contains(github.event.head_commit.message, 'release')
+    name: Trigger Enterprise Release for Flipkart Tag
     runs-on: ubuntu-latest
     steps:
-      - name: Extract release suffix from commit message
-        id: extract
+      - name: Validate Flipkart tag name
+        id: tag
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          # Extract the first word after 'release' (case-insensitive).
-          # Can be a number or any text:
-          #   "release 1"           → SUFFIX="1"
-          #   "release 2.1"         → SUFFIX="2.1"
-          #   "release mysql-fix"   → SUFFIX="mysql-fix"
-          #   "release hotfix-auth" → SUFFIX="hotfix-auth"
-          SUFFIX=$(echo "$COMMIT_MSG" | grep -ioP 'release\s+\K\S+' | head -1)
-          if [ -z "$SUFFIX" ]; then
-            echo "❌ Could not extract release suffix from commit message: $COMMIT_MSG"
-            echo "   Expected format: 'release <version>', e.g. 'release 1' or 'release 2.1'"
+          RELEASE_TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$RELEASE_TAG" =~ ^flipkart-[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+            echo "❌ Invalid Flipkart tag: $RELEASE_TAG"
+            echo "   Expected format: flipkart-<name> using only letters, numbers, and hyphens."
             exit 1
           fi
-          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
-          echo "Extracted release suffix: $SUFFIX"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Validated Flipkart release tag: $RELEASE_TAG"
 
       - name: Trigger Woodpecker pipeline
         env:
           WOODPECKER_SERVER: ${{ secrets.WOODPECKER_SERVER }}
           WOODPECKER_TOKEN: ${{ secrets.WOODPECKER_TOKEN }}
           WOODPECKER_ENTERPRISE_REPO_ID: ${{ secrets.WOODPECKER_ENTERPRISE_REPO_ID }}
-          RELEASE_SUFFIX: ${{ steps.extract.outputs.suffix }}
+          RELEASE_TAG: ${{ steps.tag.outputs.release_tag }}
         run: |
           echo "Triggering Flipkart enterprise release pipeline..."
-          echo "OSS commit: ${{ github.sha }}"
-          echo "Release suffix: ${RELEASE_SUFFIX}"
+          echo "OSS tag: ${RELEASE_TAG}"
+          echo "Tag commit: ${{ github.sha }}"
 
           PAYLOAD=$(cat <<INNEREOF
-          {"branch": "ci/flipkart-release-pipeline", "variables": {"RELEASE_TARGET": "flipkart", "FLIPKART_RELEASE_SUFFIX": "${RELEASE_SUFFIX}"}}
+          {"branch": "ci/flipkart-release-pipeline", "variables": {"RELEASE_TARGET": "flipkart", "FLIPKART_RELEASE_TAG": "${RELEASE_TAG}"}}
           INNEREOF
           )
 
