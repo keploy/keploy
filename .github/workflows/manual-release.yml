@@ -29,7 +29,7 @@ jobs:
           WOODPECKER_SERVER: ${{ secrets.WOODPECKER_SERVER }}
           WOODPECKER_TOKEN: ${{ secrets.WOODPECKER_TOKEN }}
           WOODPECKER_ENTERPRISE_REPO_ID: ${{ secrets.WOODPECKER_ENTERPRISE_REPO_ID }}
-          ENTERPRISE_BRANCH: ci/flipkart-release-pipeline
+          ENTERPRISE_BRANCH: main
           OSS_COMMIT_SHA: ${{ steps.commit.outputs.commit_sha }}
         run: |
           set -e
