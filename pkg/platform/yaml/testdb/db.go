@@ -265,9 +265,6 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	if err := writer.Flush(); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
 	}
-	if err := tmpFile.Sync(); err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to sync temp file: %w", err)
-	}
 	// Set file permissions to 0777 to match the original CreateYamlFile behavior
 	if err := tmpFile.Chmod(0o777); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to chmod temp file: %w", err)

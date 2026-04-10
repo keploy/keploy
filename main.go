@@ -21,8 +21,8 @@ import (
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 
-	"runtime/pprof"
 	_ "net/http/pprof"
+	"runtime/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -74,7 +74,7 @@ func start(ctx context.Context) {
 	if memLimitMB := os.Getenv("GOMEMLIMIT_MB"); memLimitMB != "" {
 		mb, err := strconv.ParseInt(memLimitMB, 10, 64)
 		if err != nil || mb <= 0 {
-			logger.Warn("invalid GOMEMLIMIT_MB value, ignoring; expected a positive integer (e.g. GOMEMLIMIT_MB=150)",
+			logger.Info("invalid GOMEMLIMIT_MB value, ignoring; expected a positive integer (e.g. GOMEMLIMIT_MB=150)",
 				zap.String("value", memLimitMB))
 		} else {
 			debug.SetMemoryLimit(mb * 1024 * 1024)

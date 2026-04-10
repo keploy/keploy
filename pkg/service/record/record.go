@@ -329,6 +329,26 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
+			// Forward mock reference to global channel for orchestrator's
+			// correlation manager (used during re-record). Uses non-blocking
+			// send with a lightweight reference to avoid deep-copy storms.
+			if r.globalMockCh != nil {
+				currMockID := r.mockDB.GetCurrMockID()
+				ref := &models.Mock{
+					Version: mock.Version,
+					Kind:    mock.Kind,
+					Spec: models.MockSpec{
+						Metadata:         mock.Spec.Metadata,
+						ReqTimestampMock: mock.Spec.ReqTimestampMock,
+						ResTimestampMock: mock.Spec.ResTimestampMock,
+					},
+				}
+				ref.Name = fmt.Sprintf("mock-%d", currMockID+1)
+				select {
+				case r.globalMockCh <- ref:
+				default:
+				}
+			}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
@@ -709,4 +729,3 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 
 	r.logger.Info("Created test-set config file with metadata")
 }
-
