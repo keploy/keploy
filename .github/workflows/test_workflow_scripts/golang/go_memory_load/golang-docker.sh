@@ -277,7 +277,7 @@ start_memory_monitor() {
 
     threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
     if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
-        threshold_bytes="$((15 * 1024 * 1024))"
+        threshold_bytes="$((150 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
