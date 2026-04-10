@@ -20,7 +20,7 @@ import (
 )
 
 // Record records the MySQL traffic between the client and the server.
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, tlsUpgrader models.TLSUpgrader, memLimiter *pUtil.MemoryLimiter) error {
 
 	var (
 		requests  []mysql.Request
@@ -74,7 +74,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("Record: entering relay path (non-postTLS) handleInitialHandshake",
 			zap.String("connKey", opts.ConnKey),
 			zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
-		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts)
+		upgrader := tlsUpgrader
+		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts, upgrader)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
@@ -101,8 +102,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 				// phase data is captured by SSL/GoTLS uprobes independently.
 				// Also handles the case where the client disconnected before TLS.
 				logger.Debug("TLS connections not established after SSL request; pre-TLS config mock recorded, skipping command phase",
-					zap.Any("tlsClientConn", result.tlsClientConn),
-					zap.Any("tlsDestConn", result.tlsDestConn))
+					zap.Bool("tlsClientConnNil", result.tlsClientConn == nil),
+					zap.Bool("tlsDestConnNil", result.tlsDestConn == nil))
 				return nil
 			}
 			clientConn = result.tlsClientConn
@@ -113,7 +114,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts, memLimiter)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")

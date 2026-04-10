@@ -472,6 +472,27 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Render template values in the test case before simulation
 	if err := RenderTestCaseTemplates(tc, logger); err != nil {
 		return nil, err
+	// Render any template values in the test case before simulation
+	templateData := buildTemplateDataSnapshot()
+	if len(templateData) > 0 {
+		testCaseBytes, err := json.Marshal(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the testcase for templating")
+			return nil, err
+		}
+
+		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
+		// ignoring LaTeX/HTML like {{\pi}}.
+		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+		if rerr != nil {
+			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
+		}
+
+		err = json.Unmarshal([]byte(renderedStr), &tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
+			return nil, err
+		}
 	}
 
 	grpcReq := tc.GrpcReq
@@ -486,7 +507,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Determine which port to use for test execution.
 	var err error
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
 	if err != nil {
 		return nil, err
 	}

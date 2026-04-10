@@ -188,6 +188,231 @@ func TestReadLengthEncodedIntegerEdgeCases(t *testing.T) {
 	}
 }
 
+// buildPacket constructs a MySQL wire-format packet: 3-byte payload length
+// (little-endian) + 1-byte sequence ID + payload.
+func buildPacket(seqID byte, payload []byte) []byte {
+	pktLen := len(payload)
+	return append([]byte{byte(pktLen), byte(pktLen >> 8), byte(pktLen >> 16), seqID}, payload...)
+}
+
+func TestIsEOFPacket(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   []byte
+		expect bool
+	}{
+		{
+			name:   "valid legacy EOF with CLIENT_PROTOCOL_41 (5-byte payload)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00}),
+			expect: true,
+		},
+		{
+			name:   "valid minimal EOF (1-byte payload)",
+			data:   buildPacket(1, []byte{0xFE}),
+			expect: true,
+		},
+		{
+			name:   "not EOF - wrong header byte (OK packet)",
+			data:   buildPacket(1, []byte{0x00, 0x00, 0x00, 0x02, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - wrong header byte (ERR packet)",
+			data:   buildPacket(1, []byte{0xFF, 0x48, 0x04, '#', '0'}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - payload too large (7 bytes, OK-replacing-EOF)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			expect: false, // payload=7 is NOT a legacy EOF
+		},
+		{
+			name:   "not EOF - payload too large (>9 bytes)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03}),
+			expect: false,
+		},
+		{
+			name:   "not EOF - large packet with LSB=5 (false positive prevention)",
+			data:   append([]byte{0x05, 0x01, 0x00, 0x01}, append([]byte{0xFE}, make([]byte, 260)...)...),
+			expect: false, // payloadLen=0x0105=261, not 5
+		},
+		{
+			name:   "too short - empty",
+			data:   []byte{},
+			expect: false,
+		},
+		{
+			name:   "too short - 4 bytes",
+			data:   []byte{0x01, 0x00, 0x00, 0x01},
+			expect: false,
+		},
+		{
+			name:   "truncated - header says 5 but only 2 payload bytes",
+			data:   []byte{0x05, 0x00, 0x00, 0x01, 0xFE, 0x00},
+			expect: false, // buffer too short for claimed payload
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsEOFPacket(tt.data)
+			if got != tt.expect {
+				t.Errorf("IsEOFPacket(%v) = %v, want %v", tt.data, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestIsOKReplacingEOF(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   []byte
+		expect bool
+	}{
+		{
+			name:   "valid OK-replacing-EOF (minimal)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			expect: true,
+		},
+		{
+			name:   "valid OK-replacing-EOF with session info",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02}),
+			expect: true,
+		},
+		{
+			name:   "legacy EOF (5-byte payload)",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "wrong header byte",
+			data:   buildPacket(1, []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "non-zero affected_rows",
+			data:   buildPacket(1, []byte{0xFE, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "non-zero last_insert_id",
+			data:   buildPacket(1, []byte{0xFE, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00}),
+			expect: false,
+		},
+		{
+			name:   "too short packet",
+			data:   []byte{0x03, 0x00, 0x00, 0x01, 0xFE, 0x00, 0x00},
+			expect: false,
+		},
+		{
+			name:   "inconsistent payload length",
+			data:   []byte{0xFF, 0x00, 0x00, 0x01, 0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00},
+			expect: false,
+		},
+		{
+			name:   "nil data",
+			data:   nil,
+			expect: false,
+		},
+		{
+			name:   "text row with 0xFE lenenc (8-byte integer, non-zero low bytes)",
+			data:   buildPacket(1, []byte{0xFE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}),
+			expect: false, // affected_rows != 0
+		},
+		{
+			name: "text row with 0xFE lenenc and zero low bytes (false-positive edge case)",
+			data: func() []byte {
+				// Simulate a text row where 0xFE lenenc has 0x00 0x00 as first
+				// two bytes of the 8-byte integer, followed by large data.
+				// The total payload exceeds maxOKReplacingEOFPayload.
+				payload := make([]byte, 2000)
+				payload[0] = 0xFE // lenenc marker
+				payload[1] = 0x00 // low byte of integer
+				payload[2] = 0x00 // second byte of integer
+				// rest is data, all zeros
+				return buildPacket(1, payload)
+			}(),
+			expect: false, // exceeds maxOKReplacingEOFPayload
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsOKReplacingEOF(tt.data)
+			if got != tt.expect {
+				t.Errorf("IsOKReplacingEOF(%v) = %v, want %v", tt.data, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestIsResultSetTerminator(t *testing.T) {
+	tests := []struct {
+		name         string
+		data         []byte
+		deprecateEOF bool
+		expect       bool
+	}{
+		{
+			name:         "legacy EOF, deprecateEOF=false",
+			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00}),
+			deprecateEOF: false,
+			expect:       true,
+		},
+		{
+			name:         "legacy EOF, deprecateEOF=true",
+			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00}),
+			deprecateEOF: true,
+			expect:       true,
+		},
+		{
+			name:         "OK-replacing-EOF, deprecateEOF=true",
+			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			deprecateEOF: true,
+			expect:       true,
+		},
+		{
+			name:         "OK-replacing-EOF, deprecateEOF=false",
+			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
+			deprecateEOF: false,
+			expect:       false, // OK-replacing-EOF should only terminate when deprecateEOF is negotiated
+		},
+		{
+			name:         "OK-replacing-EOF with session info (>7 bytes), deprecateEOF=false",
+			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03}),
+			deprecateEOF: false,
+			expect:       false, // Not legacy EOF (payload > 7), and deprecateEOF is false
+		},
+		{
+			name:         "binary row (starts with 0x00), deprecateEOF=true",
+			data:         buildPacket(1, []byte{0x00, 0x00, 0x01, 0x41}),
+			deprecateEOF: true,
+			expect:       false,
+		},
+		{
+			name:         "text row, deprecateEOF=true",
+			data:         buildPacket(1, []byte{0x05, 'h', 'e', 'l', 'l', 'o'}),
+			deprecateEOF: true,
+			expect:       false,
+		},
+		{
+			name:         "ERR packet",
+			data:         buildPacket(1, []byte{0xFF, 0x48, 0x04, '#', '2', '8', '0', '0', '0', 'e', 'r', 'r'}),
+			deprecateEOF: false,
+			expect:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsResultSetTerminator(tt.data, tt.deprecateEOF)
+			if got != tt.expect {
+				t.Errorf("IsResultSetTerminator(%v, %v) = %v, want %v", tt.data, tt.deprecateEOF, got, tt.expect)
+			}
+		})
+	}
+}
+
 func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 	testCases := []struct {
 		name string
