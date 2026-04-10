@@ -1,0 +1,57 @@
+name: Manual Release Trigger
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-release:
+    name: Trigger release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve commit
+        id: commit
+        run: |
+          set -e
+          commit_sha="$(git ls-remote https://github.com/keploy/keploy.git refs/heads/flipkart | awk '{print $1}')"
+          if [ -z "$commit_sha" ]; then
+            echo "Failed to resolve source branch head"
+            exit 1
+          fi
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved latest flipkart branch commit to ${commit_sha}"
+
+      - name: Trigger enterprise pipeline
+        env:
+          WOODPECKER_SERVER: ${{ secrets.WOODPECKER_SERVER }}
+          WOODPECKER_TOKEN: ${{ secrets.WOODPECKER_TOKEN }}
+          WOODPECKER_ENTERPRISE_REPO_ID: ${{ secrets.WOODPECKER_ENTERPRISE_REPO_ID }}
+          ENTERPRISE_BRANCH: ci/flipkart-release-pipeline
+          OSS_COMMIT_SHA: ${{ steps.commit.outputs.commit_sha }}
+        run: |
+          set -e
+          echo "Triggering enterprise pipeline on branch: ${ENTERPRISE_BRANCH}"
+          echo "Using OSS commit: ${OSS_COMMIT_SHA}"
+
+          PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"branch": os.environ["ENTERPRISE_BRANCH"], "variables": {"OSS_COMMIT_SHA": os.environ["OSS_COMMIT_SHA"]}}))')
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${WOODPECKER_SERVER}/api/repos/${WOODPECKER_ENTERPRISE_REPO_ID}/pipelines" \
+            -H "Authorization: Bearer ${WOODPECKER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Pipeline triggered successfully (HTTP $HTTP_CODE)"
+            echo "$BODY"
+          else
+            echo "Failed to trigger pipeline (HTTP $HTTP_CODE)"
+            echo "$BODY"
+            exit 1
+          fi
