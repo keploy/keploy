@@ -6,6 +6,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   trigger-release:
     name: Trigger release
@@ -16,13 +20,16 @@ jobs:
         id: commit
         run: |
           set -e
-          commit_sha="$(git ls-remote https://github.com/keploy/keploy.git refs/heads/flipkart | awk '{print $1}')"
+          source_repo="https://github.com/keploy/keploy.git"
+          source_branch="flipkart"
+          commit_sha="$(git ls-remote "${source_repo}" "refs/heads/${source_branch}" | awk '{print $1}')"
           if [ -z "$commit_sha" ]; then
-            echo "Failed to resolve source branch head"
+            echo "Failed to resolve the head commit for branch '${source_branch}' from repository '${source_repo}'."
+            echo "Verify that the branch exists and that GitHub is reachable from this runner, then retry."
             exit 1
           fi
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
-          echo "Resolved latest flipkart branch commit to ${commit_sha}"
+          echo "Resolved latest ${source_branch} branch commit to ${commit_sha}"
 
       - name: Trigger enterprise pipeline
         env:
@@ -33,12 +40,26 @@ jobs:
           OSS_COMMIT_SHA: ${{ steps.commit.outputs.commit_sha }}
         run: |
           set -e
+
+          if [ -z "${WOODPECKER_SERVER:-}" ]; then
+            echo "Missing required secret: WOODPECKER_SERVER. Configure the repository secret and retry."
+            exit 1
+          fi
+          if [ -z "${WOODPECKER_TOKEN:-}" ]; then
+            echo "Missing required secret: WOODPECKER_TOKEN. Configure the repository secret and retry."
+            exit 1
+          fi
+          if [ -z "${WOODPECKER_ENTERPRISE_REPO_ID:-}" ]; then
+            echo "Missing required secret: WOODPECKER_ENTERPRISE_REPO_ID. Configure the repository secret and retry."
+            exit 1
+          fi
+
           echo "Triggering enterprise pipeline on branch: ${ENTERPRISE_BRANCH}"
           echo "Using OSS commit: ${OSS_COMMIT_SHA}"
 
           PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"branch": os.environ["ENTERPRISE_BRANCH"], "variables": {"OSS_COMMIT_SHA": os.environ["OSS_COMMIT_SHA"]}}))')
 
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
             "${WOODPECKER_SERVER}/api/repos/${WOODPECKER_ENTERPRISE_REPO_ID}/pipelines" \
             -H "Authorization: Bearer ${WOODPECKER_TOKEN}" \
             -H "Content-Type: application/json" \
