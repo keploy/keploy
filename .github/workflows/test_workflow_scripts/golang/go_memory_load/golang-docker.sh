@@ -277,7 +277,7 @@ start_memory_monitor() {
 
     threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
     if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
-        threshold_bytes="$((150 * 1024 * 1024))"
+        threshold_bytes="$((160 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
@@ -382,7 +382,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit 150 --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
