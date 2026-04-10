@@ -387,11 +387,13 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
+	var bodyAssessment *models.FailureAssessment
 	if !decodedDataNormal {
 		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
 			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
 				currentCategories = append(currentCategories, assess.Category...)
+				bodyAssessment = assess
 			} else {
 				currentRisk = models.High
 				currentCategories = append(currentCategories, models.InternalFailure)
@@ -414,8 +416,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 
 	result.FailureInfo = models.FailureInfo{
-		Risk:     currentRisk,
-		Category: uniqueCategories,
+		Risk:       currentRisk,
+		Category:   uniqueCategories,
+		Assessment: bodyAssessment,
 	}
 
 	return matched, result

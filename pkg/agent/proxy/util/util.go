@@ -77,18 +77,51 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 	return bytes.Contains(buf, endOfHeaders)
 }
 
-func IsHTTPReq(buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+// Pre-computed byte slices for IsHTTPReq to avoid per-call allocations.
+var (
+	httpGET           = []byte("GET ")
+	httpPOST          = []byte("POST ")
+	httpPUT           = []byte("PUT ")
+	httpPATCH         = []byte("PATCH ")
+	httpDELETE        = []byte("DELETE ")
+	httpOPTIONS       = []byte("OPTIONS ")
+	httpHEAD          = []byte("HEAD ")
+	httpCONNECT       = []byte("CONNECT ")
+	httpVersionMarker = []byte(" HTTP/")
+)
 
-	return isHTTP
+// IsHTTPReq checks if buf looks like an HTTP request by verifying
+// a method prefix and " HTTP/" version marker in the first line.
+// It does NOT match HTTP responses (use bytes.HasPrefix for "HTTP/").
+func IsHTTPReq(buf []byte) bool {
+	isRequest := bytes.HasPrefix(buf, httpGET) ||
+		bytes.HasPrefix(buf, httpPOST) ||
+		bytes.HasPrefix(buf, httpPUT) ||
+		bytes.HasPrefix(buf, httpPATCH) ||
+		bytes.HasPrefix(buf, httpDELETE) ||
+		bytes.HasPrefix(buf, httpOPTIONS) ||
+		bytes.HasPrefix(buf, httpHEAD) ||
+		bytes.HasPrefix(buf, httpCONNECT)
+
+	if !isRequest {
+		return false
+	}
+	{
+		// Cap the search range first to avoid scanning large non-HTTP payloads.
+		maxScan := 8192 + len(httpVersionMarker)
+		scanBuf := buf
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsHTTP2Preface checks if the buffer starts with the HTTP/2 client connection preface.
@@ -140,8 +173,11 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// ReadBuffConn is used to read the buffer from the connection
-func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
+// ReadBuffConn is used to read the buffer from the connection.
+// If ml is non-nil and the memory limit is exceeded, it sends
+// ErrMemoryLimitExceeded on errChannel and returns, allowing the
+// parser to fall back to passthrough mode.
+func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, ml *MemoryLimiter) {
 	//TODO: where to close the errChannel
 	for {
 		select {
@@ -149,6 +185,15 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			// errChannel <- ctx.Err()
 			return
 		default:
+			// Check memory limit BEFORE reading. TryAcquire in the
+			// previous iteration sets the exceeded flag; checking here
+			// avoids reading a buffer that can't be tracked without
+			// dropping data from the TCP stream.
+			if ml != nil && ml.IsExceeded() {
+				errChannel <- ErrMemoryLimitExceeded
+				return
+			}
+
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
@@ -159,8 +204,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
-
+					if logger.Core().Enabled(zap.DebugLevel) {
+						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+					}
 				}
 				errChannel <- err
 				return
@@ -168,6 +214,16 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
+
+			// Track cumulative buffered bytes. TryAcquire increments the
+			// counter; the consumer (e.g. encodeGeneric's for/select loop)
+			// MUST call ml.Release(len(buffer)) after forwarding each
+			// buffer so the limiter can clear the exceeded flag via
+			// hysteresis. The buffer is always forwarded to avoid data loss.
+			if ml != nil {
+				ml.TryAcquire(int64(len(buffer)))
+			}
+
 			bufferChannel <- buffer
 		}
 	}
@@ -248,7 +304,6 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 		return nil, readErr
 	}
 
-	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
 	return initialBuf, nil
 }
 
@@ -398,7 +453,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
-func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffChan chan []byte, errChan chan error, peer Peer) error {
+func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffChan chan []byte, errChan chan error, peer Peer, ml *MemoryLimiter) error {
 	//get the error group from the context
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -416,7 +471,7 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 	g.Go(func() error {
 		defer Recover(logger, client, dest)
 		defer close(buffChan)
-		ReadBuffConn(ctx, logger, conn, buffChan, errChan)
+		ReadBuffConn(ctx, logger, conn, buffChan, errChan, ml)
 		return nil
 	})
 
@@ -474,13 +529,13 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 		}(destConn)
 
-		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel, nil)
 	}()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
 		defer close(clientBufferChannel)
-		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel, nil)
 	}()
 
 	for {

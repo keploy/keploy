@@ -698,7 +698,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -1276,7 +1276,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
 	}
+	// Build a lookup of mock name -> summary and protocol from the mock registry (once per test set).
+	type mockInfo struct {
+		summary  string
+		protocol string
+	}
+	mockLookup := map[string]mockInfo{}
+	if r.mockDB != nil {
+		if allMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now(), nil, nil); err == nil {
+			for _, mock := range allMocks {
+				mockLookup[mock.Name] = mockInfo{
+					summary:  models.MockSummaryFromSpec(mock),
+					protocol: string(mock.Kind),
+				}
+			}
+		}
+	}
+
+	// Separate replay into regular and streaming buckets. Regular tests can use the
+	// iterative replay path from main, while streaming tests are replayed sequentially
+	// afterwards so long-lived connections do not block the normal flow.
+	type streamingTest struct {
+		testCase      *models.TestCase
+		expectedMocks []string
+	}
+
 	var activeTestCases []*models.TestCase
+	var streamingTests []streamingTest
 	for _, testCase := range testCases {
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
@@ -1299,6 +1325,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			ignored++
 			continue
 		}
+
+		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+			tcCopy := *testCase
+			expectedMockNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
+			for i, m := range expectedTestMockMappings[testCase.Name] {
+				expectedMockNames[i] = m.Name
+			}
+			streamingTests = append(streamingTests, streamingTest{
+				testCase:      &tcCopy,
+				expectedMocks: expectedMockNames,
+			})
+			r.logger.Debug("deferring streaming test case",
+				zap.String("testcase", testCase.Name),
+				zap.String("testset", testSetID))
+			continue
+		}
+
 		activeTestCases = append(activeTestCases, testCase)
 	}
 
@@ -1318,7 +1361,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		for idx, testCase := range testsToRun {
 
 			// check if its the last test case running
-			if idx == len(testCases)-1 && r.isLastTestSet {
+			if idx == len(testsToRun)-1 && r.isLastTestSet && len(streamingTests) == 0 {
 				r.isLastTestCase = true
 				testCase.IsLast = true
 			}
@@ -1338,7 +1381,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, err, "failed to insert test case result")
+					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
 				}
 				ignored++
@@ -1551,40 +1594,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 			}
 
-			if len(consumedMocks) > 0 {
-				var newMocks []models.MockEntry
-				for _, m := range consumedMocks {
-					timestamp := m.Timestamp
-					if m.ReqTimestampMock != "" {
-						if parsedReqTime, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
-							timestamp = parsedReqTime.Unix()
-						}
-					}
-
-					newMocks = append(newMocks, models.MockEntry{
-						Name:             m.Name,
-						Kind:             string(m.Kind),
-						Timestamp:        timestamp,
-						ReqTimestampMock: m.ReqTimestampMock,
-						ResTimestampMock: m.ResTimestampMock,
-					})
-				}
-
-				found := false
-				for i, t := range actualTestMockMappings.TestCases {
-					if t.ID == testCase.Name {
-						actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
-						found = true
-						break
-					}
-				}
-				if !found {
-					actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
-						ID:    testCase.Name,
-						Mocks: newMocks,
-					})
-				}
-			}
+			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -1688,6 +1698,81 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
 						testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
+					}
+					// Populate matched/unmatched calls for failed/obsolete test cases
+					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
+						matchedMocks := consumedMocks
+						if !r.instrument {
+							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
+								matchedMocks = fetched
+							}
+						}
+						for _, m := range matchedMocks {
+							if m.Kind != models.DNS {
+								info := mockLookup[m.Name]
+								protocol := info.protocol
+								if protocol == "" {
+									protocol = string(m.Kind)
+								}
+								testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
+									MockName: m.Name,
+									Protocol: protocol,
+									Summary:  info.summary,
+								})
+							}
+						}
+						// Populate unmatched calls from mock errors (channel-based for in-process)
+						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
+							if f.MismatchReport != nil {
+								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
+									Protocol:      f.MismatchReport.Protocol,
+									ActualSummary: f.MismatchReport.ActualSummary,
+									ClosestMock:   f.MismatchReport.ClosestMock,
+									Diff:          f.MismatchReport.Diff,
+									NextSteps:     f.MismatchReport.NextSteps,
+								})
+							}
+						}
+						// Fetch mock errors via HTTP API (for remote agent / k8s-proxy mode only)
+						if !r.instrument {
+							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
+								for _, me := range mockErrors {
+									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
+								}
+							}
+						}
+					}
+					if mockSetMismatch && testStatus == models.TestStatusObsolete {
+						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
+						for _, m := range expectedMocks {
+							isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+							if !isDNS {
+								if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+									isDNS = true
+								}
+							}
+							if !isDNS {
+								resolvedKind := m.Kind
+								if resolvedKind == "" {
+									if kind, ok := mockKindByName[m.Name]; ok {
+										resolvedKind = string(kind)
+									}
+								}
+								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
+							}
+						}
+						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
+						for _, m := range consumedMocks {
+							if m.Kind != models.DNS {
+								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+							}
+						}
+						testCaseResult.FailureInfo.MockMismatch = &models.MockMismatchInfo{
+							ExpectedMocks: expectedMockInfos,
+							ActualMocks:   actualMockInfos,
+						}
 					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
 				} else {
@@ -1729,6 +1814,308 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert final test case result")
 			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
+	if loopErr != nil {
+		runTestSetCtxCancel()
+	}
+
+	// ====== Phase 2: Execute deferred streaming tests sequentially ======
+	// Only run Phase 2 if Phase 1 completed without fatal errors and there are deferred tests.
+	if loopErr == nil && !exitLoop && len(streamingTests) > 0 {
+		r.logger.Info("Now executing streaming tests",
+			zap.String("testset", testSetID),
+			zap.Int("count", len(streamingTests)))
+
+		for i, deferred := range streamingTests {
+			tc := deferred.testCase
+
+			// Set isLastTestCase on the last deferred streaming test: it is the true last
+			// test to execute in the entire run, so finalization must trigger here, not in Phase 1.
+			if i == len(streamingTests)-1 && r.isLastTestSet {
+				r.isLastTestCase = true
+				tc.IsLast = true
+			}
+
+			// Check for exit signals before each streaming test
+			select {
+			case <-exitLoopChan:
+				testSetStatus = testSetStatusByErrChan
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
+
+			// Mock Window: Calculate the effective mock filter window for streaming
+			// using the request timestamp to the response timestamp plus a timeout buffer.
+			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
+				loopErr = err
+				break
+			}
+
+			// Proxy Monitor: Start a per-test proxy error monitor.
+			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
+			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
+
+			// Execute: Call SimulateRequest synchronously (blocks until stream is done).
+			started := time.Now().UTC()
+			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
+
+			// Cleanup: Cancel the proxy error monitor immediately after simulation.
+			streamProxyErrCancel()
+
+			if simErr != nil {
+				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
+					break
+				}
+				continue
+			}
+
+			httpResp, ok := resp.(*models.HTTPResp)
+			var hadStreamingMismatch bool              // Track if streaming comparison failed
+			var streamMismatch *pkg.StreamMismatchInfo // Detailed mismatch info for body result
+
+			// Calculate mock mismatch early so we can use emitFailureLogs in streaming comparison
+			mockNames := make([]string, 0)
+			if r.instrument {
+				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				} else {
+					for _, m := range consumedMocks {
+						totalConsumedMocks[m.Name] = m
+						mockNames = append(mockNames, m.Name)
+					}
+				}
+			}
+
+			expectedMocks := deferred.expectedMocks
+			mockSetMismatch := false
+			hasExpectedMocks := len(expectedMocks) > 0
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+			}
+			emitFailureLogs := !mockSetMismatch
+
+			if !ok {
+				// Handle streaming response type
+				streamResp, streamOk := resp.(*pkg.StreamingHTTPResponse)
+				if streamOk {
+					noiseConfig := r.config.Test.GlobalNoise.Global
+					if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+						noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+					}
+					streamBodyNoise := map[string][]string{}
+					if bodyNoise, ok := noiseConfig["body"]; ok {
+						streamBodyNoise = cloneNoiseMap(bodyNoise)
+					}
+					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
+
+					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					if closeErr := streamResp.Reader.Close(); closeErr != nil {
+						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
+					}
+
+					if streamErr != nil {
+						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						failure++
+						testSetStatus = models.TestSetStatusFailed
+						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
+						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+						if loopErr != nil {
+							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+							break
+						}
+						continue
+					}
+
+					if !streamMatched {
+						r.logger.Error("streaming response mismatch detected", zap.String("testcase", tc.Name))
+						hadStreamingMismatch = true
+						streamMismatch = streamMismatchInfo
+						// Suppress HTTP matcher logs since we detected streaming mismatch
+						emitFailureLogs = false
+						// Create HTTPResp with captured body for proper diff display
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          capturedBody,
+							Header:        streamResp.Header,
+						}
+						// Will be compared by CompareHTTPResp below
+					} else {
+						bodyForMatcher := capturedBody
+						if streamMatched {
+							bodyForMatcher = tc.HTTPResp.Body
+						}
+
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          bodyForMatcher,
+							Header:        streamResp.Header,
+						}
+					}
+				} else {
+					errMsg := fmt.Sprintf("invalid response type for streaming HTTP test case, got %T", resp)
+					r.logger.Error(errMsg)
+					failure++
+					testSetStatus = models.TestSetStatusFailed
+					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errMsg)
+					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					if loopErr != nil {
+						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
+						break
+					}
+					continue
+				}
+			}
+
+			// Update consumed mocks map.
+			if r.instrument {
+				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				}
+				for _, m := range consumedMocks {
+					totalConsumedMocks[m.Name] = m
+				}
+			}
+
+			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
+			// Override testPass if streaming comparison failed
+			// (HTTP matcher skips body comparison for non-JSON bodies by default)
+			if hadStreamingMismatch {
+				testPass = false
+				// Add body result showing the mismatched frame diff
+				if streamMismatch != nil {
+					expectedFrameDisplay := fmt.Sprintf("Frame %d: %s", streamMismatch.FrameIndex, streamMismatch.ExpectedFrame)
+					actualFrameDisplay := fmt.Sprintf("Frame %d: %s", streamMismatch.FrameIndex, streamMismatch.ActualFrame)
+					if streamMismatch.Reason != "" {
+						actualFrameDisplay = fmt.Sprintf("Frame %d (%s): %s", streamMismatch.FrameIndex, streamMismatch.Reason, streamMismatch.ActualFrame)
+					}
+					testResult.BodyResult = append(testResult.BodyResult, models.BodyResult{
+						Normal:   false,
+						Type:     models.Plain,
+						Expected: expectedFrameDisplay,
+						Actual:   actualFrameDisplay,
+					})
+					// Display the streaming frame diff in same format as HTTP matcher
+					logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+					logDiffs.PushBodyDiff(expectedFrameDisplay, actualFrameDisplay, nil)
+					_ = logDiffs.Render()
+				}
+				// Log failure message in same format as HTTP matcher
+				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(false)))
+				// Print user-facing failure message with red color on test case ID only (matching HTTP matcher style)
+				fmt.Printf("\nTestrun failed for testcase with id: \"%s%s%s\"\n\n--------------------------------------------------------------------\n\n",
+					"\033[91m", tc.Name, "\033[0m")
+			}
+
+			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks)
+
+			// Log consumed mocks for streaming test
+			r.logger.Debug("consumed mocks for streaming test case",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", tc.Name),
+				zap.Strings("mockNames", mockNames))
+
+			if mockSetMismatch {
+				if testPass {
+					r.logger.Debug("mock mapping mismatch ignored because streaming testcase passed",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+				} else {
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
+				}
+			}
+
+			if !hadStreamingMismatch {
+				if !testPass {
+					r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
+				} else {
+					r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(tc.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
+				}
+			}
+
+			//  Record: Update counters and persist result.
+			var testStatus models.TestStatus
+			if testPass {
+				testStatus = models.TestStatusPassed
+				success++
+				for _, m := range consumedMocks {
+					passingTotalConsumedMocks[m.Name] = m
+				}
+			} else if mockSetMismatch {
+				testStatus = models.TestStatusObsolete
+				obsolete++
+			} else {
+				testStatus = models.TestStatusFailed
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+			}
+
+			if testResult != nil {
+				testCaseResult := &models.TestResult{
+					Kind:       models.HTTP,
+					Name:       testSetID,
+					Status:     testStatus,
+					Started:    started.Unix(),
+					Completed:  time.Now().UTC().Unix(),
+					TestCaseID: tc.Name,
+					Req: models.HTTPReq{
+						Method:     tc.HTTPReq.Method,
+						ProtoMajor: tc.HTTPReq.ProtoMajor,
+						ProtoMinor: tc.HTTPReq.ProtoMinor,
+						URL:        tc.HTTPReq.URL,
+						URLParams:  tc.HTTPReq.URLParams,
+						Header:     tc.HTTPReq.Header,
+						Body:       tc.HTTPReq.Body,
+						Binary:     tc.HTTPReq.Binary,
+						Form:       tc.HTTPReq.Form,
+						Timestamp:  tc.HTTPReq.Timestamp,
+					},
+					Res:          *httpResp,
+					TestCasePath: filepath.Join(r.config.Path, testSetID),
+					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:        tc.Noise,
+					Result:       *testResult,
+					TimeTaken:    time.Since(started).String(),
+				}
+
+				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
+					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+				}
+
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+					break
+				}
+			} else {
+				utils.LogError(r.logger, nil, "streaming test result is nil")
+				break
+			}
 		}
 	}
 
@@ -1853,7 +2240,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && r.instrument {
+	// When PreserveFailedMocks is enabled (k8s-proxy autoreplay), skip pruning if any test
+	// failed or was marked obsolete so all recorded mocks remain available for UI inspection.
+	skipPruning := r.config.Test.PreserveFailedMocks && (failure > 0 || obsolete > 0)
+	if r.config.Test.RemoveUnusedMocks && r.instrument && !skipPruning {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
 			added := retainNoisyTestCaseMocks(noisyTestCases, actualTestMockMappings, passingTotalConsumedMocks)
@@ -2612,7 +3002,7 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		}
 	}
 
-	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, cmdCancel, 25*time.Second)
+	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, cmdCancel, 25*time.Second, nil)
 	if cmdErr.Err != nil {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}

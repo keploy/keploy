@@ -55,6 +55,10 @@ type Config struct {
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
+	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
+	// sensitive environment variables (secrets, tokens) to disk. When set, the
+	// compose command uses "-f -" and pipes this content via stdin.
+	InMemoryCompose []byte `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Agent struct {
@@ -91,6 +95,10 @@ type Record struct {
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// MaxBufferMemoryMB sets the maximum memory (in MB) for proxy record
+	// buffers. The zero value (default) means unlimited — no memory limit
+	// is enforced and all traffic is recorded.
+	MaxBufferMemoryMB uint64 `json:"maxBufferMemoryMB" yaml:"maxBufferMemoryMB" mapstructure:"maxBufferMemoryMB"`
 }
 
 type ReRecord struct {
@@ -100,6 +108,7 @@ type ReRecord struct {
 	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
 	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	SSEPort       uint32          `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
 	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
 	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
@@ -136,6 +145,8 @@ type Test struct {
 	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                   uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort               uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	SSEPort                uint32              `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
+	Protocol               ProtocolConfig      `json:"protocol" yaml:"protocol" mapstructure:"protocol"`
 	APITimeout             uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	SkipCoverage           bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
 	CoverageReportPath     string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
@@ -143,7 +154,8 @@ type Test struct {
 	MongoPassword          string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language               models.Language     `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks      bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
-	FallBackOnMiss         bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"` // Deprecated: this flag is ignored. Replay is now always deterministic.
+	PreserveFailedMocks    bool                `json:"preserveFailedMocks" yaml:"preserveFailedMocks" mapstructure:"preserveFailedMocks"` // skip mock pruning when tests fail (set by k8s-proxy autoreplay)
+	FallBackOnMiss         bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`                // Deprecated: this flag is ignored. Replay is now always deterministic.
 	JacocoAgentPath        string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath               string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking                bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
@@ -185,8 +197,21 @@ type ReplaceWith struct {
 }
 
 type ReplaceWithMap struct {
-	URL map[string]string `json:"url" yaml:"url" mapstructure:"url"`
+	URL  map[string]string `json:"url" yaml:"url" mapstructure:"url"`
+	Port map[uint32]uint32 `json:"port" yaml:"port" mapstructure:"port"`
 }
+
+// ProtocolSettings holds per-protocol configuration. Add new fields here
+// to extend all protocols without changing the map structure.
+type ProtocolSettings struct {
+	Port uint32 `json:"port" yaml:"port" mapstructure:"port"`
+}
+
+// ProtocolConfig maps protocol names (e.g. "http", "sse", "grpc") to their
+// settings. The map schema allows additional protocol names in the config
+// without schema changes, but only protocols recognized by the application
+// are currently used by the replay and protocol-handling logic.
+type ProtocolConfig map[string]ProtocolSettings
 
 type SelectedTests struct {
 	TestSet string   `json:"testSet" yaml:"testSet" mapstructure:"testSet"`
