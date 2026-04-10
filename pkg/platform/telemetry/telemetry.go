@@ -295,6 +295,11 @@ func (tel *Telemetry) Shutdown() {
 	if !tel.Enabled {
 		return
 	}
+
+	// Flush remaining recording counters BEFORE setting closed,
+	// since sendTracked rejects events when closed is true.
+	tel.flushRecordingCounters()
+
 	tel.mu.Lock()
 	if !tel.closed.CompareAndSwap(false, true) {
 		tel.mu.Unlock()
@@ -302,21 +307,12 @@ func (tel *Telemetry) Shutdown() {
 	}
 	tel.mu.Unlock()
 
-	// Signal the flush loop to perform final flush and exit.
+	// Signal the flush loop to exit (it won't flush again since counters are already drained).
 	close(tel.closeCh)
 
-	// Only wait for flushDone if there are outstanding counters or inflight events.
+	// Only wait for flushDone if there are inflight events.
 	// In idle runs the flush loop may never have started, so waiting would
 	// introduce an unnecessary shutdown delay.
-	if tel.recordedTests.Load() == 0 && tel.recordedMocks.Load() == 0 && tel.inflightN.Load() == 0 {
-		return
-	}
-
-	select {
-	case <-tel.flushDone:
-	case <-time.After(2 * time.Second):
-	}
-
 	if tel.inflightN.Load() == 0 {
 		return
 	}
