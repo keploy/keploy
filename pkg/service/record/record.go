@@ -31,7 +31,6 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
-	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
 }
 
@@ -323,19 +322,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			// Send a copy to global mock channel for correlation manager if available
-			if r.globalMockCh != nil {
-				currMockID := r.mockDB.GetCurrMockID()
-				// Create a deep copy of the mock to avoid race conditions
-				mockCopy := *mock
-				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
-				select {
-				case r.globalMockCh <- &mockCopy:
-					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
-				default:
-					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
-				}
-			}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
@@ -717,8 +703,3 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	r.logger.Info("Created test-set config file with metadata")
 }
 
-// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
-func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
-	r.globalMockCh = mockCh
-	r.logger.Info("Global mock channel set for record service")
-}

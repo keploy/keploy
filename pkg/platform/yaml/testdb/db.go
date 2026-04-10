@@ -2,7 +2,7 @@
 package testdb
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -221,27 +221,55 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 	yamlTc.Name = tcsName
 
-	var buf bytes.Buffer
-	encoder := yamlLib.NewEncoder(&buf)
-	encoder.SetIndent(2) // Set indent to 2 spaces to match the original style
-	err = encoder.Encode(&yamlTc)
-	if err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, err
-	}
-	data := buf.Bytes()
-
-	_, err = yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	// Stream YAML directly to disk instead of buffering in memory.
+	// This avoids allocating a large bytes.Buffer per test case.
+	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
-	data = append([]byte(utils.GetVersionAsComment()), data...)
-
-	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
+	yamlPath := filepath.Join(tcsPath, tcsName+".yaml")
+	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*.yaml.tmp")
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writer := bufio.NewWriter(tmpFile)
+	if version := utils.GetVersionAsComment(); version != "" {
+		if _, err := writer.WriteString(version); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
+		}
+	}
+
+	encoder := yamlLib.NewEncoder(writer)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&yamlTc); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close temp file: %w", err)
+	}
+	cleanup = false
+
+	if err := os.Rename(tmpPath, yamlPath); err != nil {
+		os.Remove(tmpPath)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	return tcsInfo{name: tcsName, path: tcsPath}, nil

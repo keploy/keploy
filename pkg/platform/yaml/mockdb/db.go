@@ -289,25 +289,45 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	lock.Lock()
 	defer lock.Unlock()
 
-	data, err := yamlLib.Marshal(&mockYaml)
+	// Stream YAML directly to the file instead of marshaling to []byte first.
+	isFileEmpty, err := yaml.CreateYamlFile(ctx, ys.Logger, mockPath, mockFileName)
 	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to create yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
 		return err
 	}
 
-	exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName)
+	yamlFilePath := filepath.Join(mockPath, mockFileName+".yaml")
+	file, err := os.OpenFile(yamlFilePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
-		return err
+		return fmt.Errorf("failed to open mock file for append: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+
+	if isFileEmpty {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				return fmt.Errorf("failed to write version comment: %w", err)
+			}
+		}
+	} else {
+		if _, err := writer.WriteString("---\n"); err != nil {
+			return fmt.Errorf("failed to write document separator: %w", err)
+		}
 	}
 
-	if !exists {
-		data = append([]byte(utils.GetVersionAsComment()), data...)
+	encoder := yamlLib.NewEncoder(writer)
+	if err := encoder.Encode(&mockYaml); err != nil {
+		return fmt.Errorf("failed to encode mock yaml: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush mock writer: %w", err)
 	}
 
-	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
-	if err != nil {
-		return err
-	}
 	return nil
 }
 

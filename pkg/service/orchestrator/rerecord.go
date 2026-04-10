@@ -29,9 +29,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	// Start the mock routing goroutine
 	go o.mockCorrelationManager.routeMocks()
 
-	// Set the global mock channel on the record service
-	o.record.SetGlobalMockChannel(o.GetGlobalMockChannel())
-
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	var stopReason string
 	var err error

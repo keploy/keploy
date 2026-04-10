@@ -4,9 +4,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
@@ -18,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"runtime/pprof"
+	_ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -50,6 +55,44 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+
+	// Start pprof HTTP server for live profiling if PPROF_PORT is set
+	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
+		go func() {
+			addr := "localhost:" + pprofPort
+			logger.Info("pprof server starting", zap.String("addr", addr))
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				logger.Error("pprof server failed", zap.Error(err))
+			}
+		}()
+	}
+
+	// Set soft memory limit for GC if GOMEMLIMIT_MB is set.
+	// This makes Go's GC more aggressive when approaching the limit,
+	// reducing peak memory during load without affecting normal operation.
+	if memLimitMB := os.Getenv("GOMEMLIMIT_MB"); memLimitMB != "" {
+		if mb, err := strconv.ParseInt(memLimitMB, 10, 64); err == nil && mb > 0 {
+			debug.SetMemoryLimit(mb * 1024 * 1024)
+			logger.Info("GOMEMLIMIT set", zap.Int64("MB", mb))
+		}
+	}
+
+	// Start background memory monitor that forces OS memory release after load drops.
+	// Go's runtime uses MADV_FREE which delays actual RSS reduction; this goroutine
+	// detects sharp heap drops and calls FreeOSMemory to release pages immediately.
+	go func() {
+		var prevInUse uint64
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
+				debug.FreeOSMemory()
+			}
+			prevInUse = m.HeapInuse
+		}
+	}()
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
