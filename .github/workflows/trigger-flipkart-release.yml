@@ -42,7 +42,7 @@ jobs:
           echo "Release suffix: ${RELEASE_SUFFIX}"
 
           PAYLOAD=$(cat <<INNEREOF
-          {"branch": "main", "variables": {"RELEASE_TARGET": "flipkart", "FLIPKART_RELEASE_SUFFIX": "${RELEASE_SUFFIX}"}}
+          {"branch": "ci/flipkart-release-pipeline", "variables": {"RELEASE_TARGET": "flipkart", "FLIPKART_RELEASE_SUFFIX": "${RELEASE_SUFFIX}"}}
           INNEREOF
           )
 
