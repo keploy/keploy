@@ -300,13 +300,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		reqTimestamp := time.Now()
 
 		var chunked bool = false
+		// pressureCloseMode unifies forceCloseMode with memory pressure.
+		// When true, expected close errors are handled gracefully (DEBUG level),
+		// the sampling lock is released early, and the loop exits after one exchange.
+		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
+		captureEnabled := !isIngressRecordingPaused()
 
 		// Request modifications for sync/sampling modes.
 		if forceCloseMode {
 			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
 				releaseLock()
 				chunked = true
-			} else if pm.synchronous && acquiredLock {
+				captureEnabled = false
+			} else if captureEnabled && pm.synchronous && acquiredLock {
 				mgr := syncMock.Get()
 				if !mgr.GetFirstReqSeen() {
 					mgr.SetFirstRequestSignaled()
@@ -318,11 +324,28 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
+		// Memory pressure without forceClose: release lock and close connection
+		// to free resources quickly.
+		if pressureCloseMode && !forceCloseMode {
+			releaseLock()
+			req.Close = true
+			req.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
 
-		// Determine whether capture is already known to be disabled for this exchange.
+		// Determine whether capture is eligible for this exchange.
 		// Skip tee/buffering to avoid overhead when capture will be skipped anyway.
-		// Also skip capture when memory pressure is active.
-		captureEligible := !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock) && !isIngressRecordingPaused()
+		captureEligible := captureEnabled && !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+
+		// Re-check memory pressure right before attaching capture buffers.
+		if captureEligible && isIngressRecordingPaused() {
+			pressureCloseMode = true
+			captureEligible = false
+			captureEnabled = false
+			releaseLock()
+			req.Close = true
+			req.Header.Set("Connection", "close")
+		}
 
 		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && req.Body != nil && req.Body != http.NoBody {
@@ -330,6 +353,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := req.Write(upConn); err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress request write ended during close-under-pressure path", zap.Error(err))
+				req.Body.Close()
+				return
+			}
 			logger.Error("Failed to forward request to upstream. Verify the upstream application is running and reachable at the resolved address.",
 				zap.Error(err),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -340,8 +368,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		req.Body.Close() // Close explicitly to avoid defer leak in loop.
 
+		// Re-check memory pressure after forwarding the request.
+		if !pressureCloseMode && isIngressRecordingPaused() {
+			pressureCloseMode = true
+			captureEnabled = false
+			releaseLock()
+		}
+
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress upstream closed while finishing close-under-pressure path", zap.Error(err))
+				return
+			}
 			logger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
 				zap.Error(err),
 				zap.Duration("time_since_request_received", time.Since(reqTimestamp)),
@@ -360,17 +399,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
+		if pressureCloseMode && !forceCloseMode {
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
+			captureEnabled = false
+		}
 
 		respTimestamp := time.Now()
+
 		// Re-evaluate capture eligibility after response headers (chunked may have changed).
 		// Also re-check memory pressure in case it started mid-exchange.
-		captureEligible = !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock) && !isIngressRecordingPaused()
+		captureEligible = captureEnabled && !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+		if captureEligible && isIngressRecordingPaused() {
+			pressureCloseMode = true
+			captureEligible = false
+			captureEnabled = false
+			releaseLock()
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
+		}
+
 		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			if pressureCloseMode && isIngressExpectedCloseErr(err) {
+				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
+				resp.Body.Close()
+				return
+			}
 			logger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
 				zap.Error(err),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
@@ -382,7 +441,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		resp.Body.Close() // Close explicitly.
 
-		shouldCapture := true
+		// Final memory pressure check before capture evaluation.
+		if !pressureCloseMode && isIngressRecordingPaused() {
+			pressureCloseMode = true
+			captureEnabled = false
+			releaseLock()
+		}
+
+		shouldCapture := captureEnabled
 		if forceCloseMode {
 			if chunked {
 				shouldCapture = false
@@ -411,14 +477,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
 		}
 
 		if !shouldCapture {
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -431,7 +497,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -446,7 +512,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.String("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -461,7 +527,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -474,7 +540,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("captured_request_dump_bytes", len(reqData)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -488,7 +554,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Int("captured_response_bytes", len(respCapture.Bytes())),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -501,7 +567,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Int("status_code", resp.StatusCode),
 			)
-			if forceCloseMode {
+			if forceCloseMode || pressureCloseMode {
 				return
 			}
 			continue
@@ -513,7 +579,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
-		if forceCloseMode {
+		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
+		if pressureCloseMode {
 			return
 		}
 	}
