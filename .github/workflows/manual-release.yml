@@ -2,12 +2,6 @@ name: Manual Release Trigger
 
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Branch, tag, or ref to resolve. Leave empty to use the selected workflow ref.
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -22,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Resolve commit
         id: commit
@@ -30,7 +24,7 @@ jobs:
           set -e
           commit_sha="$(git rev-parse HEAD)"
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
-          echo "Resolved commit: $commit_sha"
+          echo "Resolved ${GITHUB_REF_NAME} to ${commit_sha}"
 
       - name: Trigger enterprise pipeline
         env:
