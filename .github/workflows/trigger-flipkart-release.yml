@@ -1,0 +1,40 @@
+name: Trigger Flipkart Enterprise Release
+
+on:
+  push:
+    branches:
+      - flipkart
+
+jobs:
+  trigger-release:
+    name: Trigger Enterprise Release for Flipkart
+    if: contains(github.event.head_commit.message, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Woodpecker pipeline
+        env:
+          WOODPECKER_SERVER: ${{ secrets.WOODPECKER_SERVER }}
+          WOODPECKER_TOKEN: ${{ secrets.WOODPECKER_TOKEN }}
+          WOODPECKER_ENTERPRISE_REPO_ID: ${{ secrets.WOODPECKER_ENTERPRISE_REPO_ID }}
+        run: |
+          echo "Triggering Flipkart enterprise release pipeline..."
+          echo "OSS commit: ${{ github.sha }}"
+          echo "Commit message: ${{ github.event.head_commit.message }}"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${WOODPECKER_SERVER}/api/repos/${WOODPECKER_ENTERPRISE_REPO_ID}/pipelines" \
+            -H "Authorization: Bearer ${WOODPECKER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"branch": "main", "variables": {"RELEASE_TARGET": "flipkart"}}')
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Pipeline triggered successfully (HTTP $HTTP_CODE)"
+            echo "$BODY"
+          else
+            echo "Failed to trigger pipeline (HTTP $HTTP_CODE)"
+            echo "$BODY"
+            exit 1
+          fi
