@@ -347,6 +347,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				select {
 				case r.globalMockCh <- ref:
 				default:
+					r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
+						zap.String("mockName", ref.Name))
 				}
 			}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{

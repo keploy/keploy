@@ -82,27 +82,29 @@ func start(ctx context.Context) {
 		}
 	}
 
-	// Start background memory monitor that forces OS memory release after load drops.
-	// Go's runtime uses MADV_FREE which delays actual RSS reduction; this goroutine
-	// detects sharp heap drops and calls FreeOSMemory to release pages immediately.
-	go func() {
-		var prevInUse uint64
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				var m runtime.MemStats
-				runtime.ReadMemStats(&m)
-				if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
-					debug.FreeOSMemory()
+	// Start background memory monitor only when GOMEMLIMIT_MB is set.
+	// Calls FreeOSMemory on sharp heap drops to force fast OS page release.
+	// Gated to avoid periodic ReadMemStats overhead for commands that don't need it.
+	if os.Getenv("GOMEMLIMIT_MB") != "" {
+		go func() {
+			var prevInUse uint64
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					var m runtime.MemStats
+					runtime.ReadMemStats(&m)
+					if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
+						debug.FreeOSMemory()
+					}
+					prevInUse = m.HeapInuse
 				}
-				prevInUse = m.HeapInuse
 			}
-		}
-	}()
+		}()
+	}
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff

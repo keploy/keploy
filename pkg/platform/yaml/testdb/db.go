@@ -276,7 +276,13 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 
 	// Use remove-then-rename for cross-platform compatibility (Windows)
 	if _, statErr := os.Stat(yamlPath); statErr == nil {
-		os.Remove(yamlPath)
+		if err := os.Remove(yamlPath); err != nil {
+			os.Remove(tmpPath)
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase yaml: %w", err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		os.Remove(tmpPath)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase yaml: %w", statErr)
 	}
 	if err := os.Rename(tmpPath, yamlPath); err != nil {
 		os.Remove(tmpPath)

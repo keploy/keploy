@@ -302,8 +302,16 @@ func (tel *Telemetry) Shutdown() {
 	}
 	tel.mu.Unlock()
 
-	// Signal the flush loop to perform final flush and exit
+	// Signal the flush loop to perform final flush and exit.
 	close(tel.closeCh)
+
+	// Only wait for flushDone if there are outstanding counters or inflight events.
+	// In idle runs the flush loop may never have started, so waiting would
+	// introduce an unnecessary shutdown delay.
+	if tel.recordedTests.Load() == 0 && tel.recordedMocks.Load() == 0 && tel.inflightN.Load() == 0 {
+		return
+	}
+
 	select {
 	case <-tel.flushDone:
 	case <-time.After(2 * time.Second):
