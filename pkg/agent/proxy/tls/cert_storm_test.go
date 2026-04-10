@@ -89,7 +89,7 @@ func resetCertCacheForTest() {
 // reuse a single cached certificate instead of generating 42 unique ones.
 func TestCertCacheHit(t *testing.T) {
 	resetCertCacheForTest()
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	caKey, caCert := helperCA(t)
 
 	const hostname = "api.wise-sandbox.com"
@@ -145,11 +145,10 @@ func TestCertCacheHit(t *testing.T) {
 		t.Fatal("no certificates were generated")
 	}
 
-	// With caching, the vast majority should share 1 cert.
-	// Due to concurrent first-access race, a few goroutines may generate
-	// before the first one stores the result. Allow up to 5 unique certs.
-	if uniqueSerials > 5 {
-		t.Errorf("expected at most 5 unique certs (cache hit), got %d — cache not working", uniqueSerials)
+	// The cache now coalesces concurrent cold misses for the same hostname,
+	// so every goroutine should receive the same generated certificate.
+	if uniqueSerials != 1 {
+		t.Errorf("expected exactly 1 unique cert from cache reuse, got %d", uniqueSerials)
 	}
 
 	if elapsed > 10*time.Second {

@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 //go:embed asset/ca.crt
@@ -373,8 +374,9 @@ var setLogLevelOnce sync.Once
 // N concurrent CONNECT tunnels to the same host cause N parallel cert generations,
 // saturating CPU in resource-constrained environments (e.g., K8s pods).
 var (
-	certCache     *expirable.LRU[string, *tls.Certificate]
-	certCacheOnce sync.Once
+	certCache           *expirable.LRU[string, *tls.Certificate]
+	certCacheOnce       sync.Once
+	certGenerationGroup singleflight.Group
 )
 
 const (
@@ -432,8 +434,37 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
 			return cached, nil
 		}
+
+		certValue, err, _ := certGenerationGroup.Do(dstURL, func() (any, error) {
+			if cached, ok := getCertCache().Get(dstURL); ok {
+				logger.Debug("reusing cached certificate after singleflight wait", zap.String("hostname", dstURL))
+				return cached, nil
+			}
+
+			generatedCert, err := generateCertForClient(logger, dstURL, caPrivKey, caCertParsed, backdate)
+			if err != nil {
+				return nil, err
+			}
+
+			getCertCache().Add(dstURL, generatedCert)
+			return generatedCert, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		cachedCert, ok := certValue.(*tls.Certificate)
+		if !ok {
+			return nil, fmt.Errorf("unexpected certificate type %T for hostname %q", certValue, dstURL)
+		}
+
+		return cachedCert, nil
 	}
 
+	return generateCertForClient(logger, dstURL, caPrivKey, caCertParsed, backdate)
+}
+
+func generateCertForClient(logger *zap.Logger, dstURL string, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	serverReq := &csr.CertificateRequest{
 		CN: dstURL,
 		Hosts: []string{
@@ -507,9 +538,5 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// NOTE: The cache key only uses hostname. In practice, caPrivKey and
 	// caCertParsed are constant for the lifetime of a Proxy instance, and
 	// backdate is constant per test run, so hostname is sufficient.
-	if dstURL != "" {
-		getCertCache().Add(dstURL, &serverTLSCert)
-	}
-
 	return &serverTLSCert, nil
 }
