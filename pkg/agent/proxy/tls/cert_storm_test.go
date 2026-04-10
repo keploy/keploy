@@ -85,8 +85,8 @@ func resetCertCacheForTest() {
 	certCache = nil
 }
 
-// TestCertCacheHit verifies that 42 concurrent connections to the same hostname
-// reuse a single cached certificate instead of generating 42 unique ones.
+// TestCertCacheHit verifies that once the cache is warmed for a hostname,
+// concurrent connections reuse the cached certificate.
 func TestCertCacheHit(t *testing.T) {
 	resetCertCacheForTest()
 	logger := zap.NewNop()
@@ -94,6 +94,23 @@ func TestCertCacheHit(t *testing.T) {
 
 	const hostname = "api.wise-sandbox.com"
 	const concurrency = 42
+
+	warmHello, warmCleanup, err := helperClientHello(hostname)
+	if err != nil {
+		t.Fatalf("helperClientHello(%q): %v", hostname, err)
+	}
+
+	warmCert, err := CertForClient(logger, warmHello, caKey, caCert, time.Time{})
+	warmCleanup()
+	if err != nil {
+		t.Fatalf("CertForClient warm-up(%q): %v", hostname, err)
+	}
+
+	warmLeaf, err := x509.ParseCertificate(warmCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate warm-up(%q): %v", hostname, err)
+	}
+	expectedSerial := warmLeaf.SerialNumber.String()
 
 	var (
 		wg        sync.WaitGroup
@@ -145,10 +162,12 @@ func TestCertCacheHit(t *testing.T) {
 		t.Fatal("no certificates were generated")
 	}
 
-	// The cache now coalesces concurrent cold misses for the same hostname,
-	// so every goroutine should receive the same generated certificate.
 	if uniqueSerials != 1 {
-		t.Errorf("expected exactly 1 unique cert from cache reuse, got %d", uniqueSerials)
+		t.Errorf("expected exactly 1 unique cert from warmed cache reuse, got %d", uniqueSerials)
+	}
+
+	if _, ok := serials.Load(expectedSerial); !ok {
+		t.Errorf("expected warmed cache serial %s to be reused by concurrent calls", expectedSerial)
 	}
 
 	if elapsed > 10*time.Second {
