@@ -255,7 +255,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Duration("WaitTimeout", timeout), zap.String("CommandType", string(cmdType)))
 
-	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
+	if err := pkg.WaitForPort(ctx, host, port, timeout, nil); err != nil {
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
 		return false, err
 	}

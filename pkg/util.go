@@ -2267,28 +2267,52 @@ func ExtractHostAndPort(curlCmd string) (string, string, error) {
 	return "", "", fmt.Errorf("no URL found in CURL command")
 }
 
-func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration) error {
+// WaitForPort polls until the given host:port is reachable or the context is
+// cancelled. When timeout is positive, it gives up after that duration. When
+// timeout is 0, it waits indefinitely (useful for watch mode). logger may be
+// nil; a no-op logger is used in that case.
+func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration, logger *zap.Logger) error {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if host == "" {
+		host = "localhost"
+	}
+
+	address := net.JoinHostPort(host, port)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	waitMsgLogged := false
+
+	// When timeout is 0, wait indefinitely (watch mode).
+	var timerCh <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timerCh = timer.C
+	}
+
 	for {
+		conn, err := net.DialTimeout("tcp", address, 800*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			logger.Info(fmt.Sprintf("Application detected on %s. Resuming...", address))
+			return nil
+		}
+
+		if !waitMsgLogged {
+			logger.Info(fmt.Sprintf("Waiting for application on %s...", address))
+			waitMsgLogged = true
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 800*time.Millisecond)
-			if err == nil {
-				err := conn.Close()
-				if err != nil {
-					return err
-				}
-				return nil
-			}
-		case <-timer.C:
+		case <-timerCh:
 			msg := "Please add delay if your application takes more time to start"
-			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
+			return fmt.Errorf("timeout after %v waiting for port %s, %s", timeout, address, msg)
+		case <-ticker.C:
 		}
 	}
 }

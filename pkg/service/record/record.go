@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -218,18 +219,22 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Command type:", zap.String("commandType", r.config.CommandType))
 
-	if r.config.CommandType == string(utils.DockerCompose) {
-
-		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
-
+	startApplicationRunner := func(ignoreEmpty bool) {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
-			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
+			if runAppError.AppErrorType == models.ErrCtxCanceled || (ignoreEmpty && runAppError == (models.AppError{})) {
 				return nil
 			}
 			appErrChan <- runAppError
 			return nil
 		})
+	}
+
+	if r.config.CommandType == string(utils.DockerCompose) {
+
+		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
+
+		startApplicationRunner(true)
 
 		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
@@ -418,14 +423,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	})
 
 	if r.config.CommandType != string(utils.DockerCompose) {
-		runAppErrGrp.Go(func() error {
-			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
-			if runAppError.AppErrorType == models.ErrCtxCanceled {
-				return nil
-			}
-			appErrChan <- runAppError
-			return nil
-		})
+		startApplicationRunner(false)
 	}
 
 	// setting a timer for recording
@@ -448,38 +446,74 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
+	watchHost := "localhost"
+	if r.config.Record.BasePath != "" {
+		parsedBaseURL, parseErr := url.Parse(r.config.Record.BasePath)
+		if parseErr == nil && parsedBaseURL.Hostname() != "" {
+			watchHost = parsedBaseURL.Hostname()
+		}
+	}
+
 	// Waiting for the error to occur in any of the go routines
-	select {
-	case appErr := <-appErrChan:
-		switch appErr.AppErrorType {
-		case models.ErrCommandError:
-			stopReason = "error in running the user application, hence stopping keploy"
-		case models.ErrUnExpected:
-			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
-		case models.ErrInternal:
-			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
-		case models.ErrAppStopped:
-			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
-			r.logger.Warn(stopReason, zap.Error(appErr))
+	for {
+		select {
+		case appErr := <-appErrChan:
+			switch appErr.AppErrorType {
+			case models.ErrCommandError:
+				stopReason = "error in running the user application, hence stopping keploy"
+			case models.ErrUnExpected:
+				stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
+			case models.ErrInternal:
+				stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
+			case models.ErrAppStopped:
+				if !r.config.Record.Watch {
+					stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
+					r.logger.Warn(stopReason, zap.Error(appErr))
+					return nil
+				}
+
+				if r.config.Port == 0 {
+					stopReason = "watch mode requires a configured application port; set `port` in your keploy config (e.g., `keploy record --port 8080 --watch`) to enable watch mode"
+					err = fmt.Errorf("%s %s", utils.Emoji, stopReason)
+					utils.LogError(r.logger, err, stopReason)
+					return fmt.Errorf("%s", stopReason)
+				}
+
+				r.logger.Info("Application exited. Watch mode active - waiting for restart...")
+				portStr := strconv.FormatUint(uint64(r.config.Port), 10)
+				waitErr := pkg.WaitForPort(ctx, watchHost, portStr, 0, r.logger)
+				if waitErr != nil {
+					if errors.Is(waitErr, context.Canceled) {
+						return nil
+					}
+					stopReason = fmt.Sprintf("failed while waiting for application restart on %s:%d in watch mode: %v", watchHost, r.config.Port, waitErr)
+					err = fmt.Errorf("%s %v", utils.Emoji, waitErr)
+					utils.LogError(r.logger, err, stopReason)
+					return fmt.Errorf("%s", stopReason)
+				}
+
+				startApplicationRunner(r.config.CommandType == string(utils.DockerCompose))
+				continue
+			case models.ErrCtxCanceled:
+				return nil
+			case models.ErrTestBinStopped:
+				stopReason = "keploy test mode binary stopped, hence stopping keploy"
+				return nil
+			default:
+				stopReason = "unknown error received from application, hence stopping keploy"
+			}
+
+		case err = <-insertTestErrChan:
+			stopReason = "error while inserting test case into db, hence stopping keploy"
+		case err = <-insertMockErrChan:
+			stopReason = "error while inserting mock into db, hence stopping keploy"
+		case <-ctx.Done():
 			return nil
-		case models.ErrCtxCanceled:
-			return nil
-		case models.ErrTestBinStopped:
-			stopReason = "keploy test mode binary stopped, hence stopping keploy"
-			return nil
-		default:
-			stopReason = "unknown error received from application, hence stopping keploy"
 		}
 
-	case err = <-insertTestErrChan:
-		stopReason = "error while inserting test case into db, hence stopping keploy"
-	case err = <-insertMockErrChan:
-		stopReason = "error while inserting mock into db, hence stopping keploy"
-	case <-ctx.Done():
-		return nil
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
-	utils.LogError(r.logger, err, stopReason)
-	return fmt.Errorf("%s", stopReason)
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {

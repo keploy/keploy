@@ -76,6 +76,7 @@ test:
   disableAutoHeaderNoise: false
 record:
   recordTimer: 0s
+  watch: false
   filters: []
   sync: false
   maxBufferMemoryMB: 0
