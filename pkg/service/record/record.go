@@ -701,13 +701,17 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase) {
 		testCaseName = "unknown-test-case"
 	}
 
-	for _, detection := range detections {
+	if len(detections) > 0 {
+		fields := make([]string, 0, len(detections))
+		for _, d := range detections {
+			fields = append(fields, fmt.Sprintf("%s (%s)", d.Field, d.PatternType))
+		}
 		r.logger.Warn(fmt.Sprintf(
-			"Potential PII detected in %s: %s matches %s. "+
-				"Consider adding a redaction rule in the keploy config or removing the sensitive value before recording.",
+			"Potential PII detected in %s (%d field(s)): %s. "+
+				"Consider adding redaction rules in the keploy config or removing sensitive values before recording.",
 			testCaseName,
-			detection.Field,
-			detection.PatternType,
+			len(detections),
+			strings.Join(fields, ", "),
 		))
 	}
 }
