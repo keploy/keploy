@@ -11,21 +11,44 @@ jobs:
     if: contains(github.event.head_commit.message, 'release')
     runs-on: ubuntu-latest
     steps:
+      - name: Extract release suffix from commit message
+        id: extract
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          # Extract text after 'release' (case-insensitive), e.g.:
+          #   "release 1"       → SUFFIX="1"
+          #   "release 2.1"     → SUFFIX="2.1"
+          #   "release hotfix"  → SUFFIX="hotfix"
+          SUFFIX=$(echo "$COMMIT_MSG" | grep -ioP 'release\s+\K\S+' | head -1)
+          if [ -z "$SUFFIX" ]; then
+            echo "❌ Could not extract release suffix from commit message: $COMMIT_MSG"
+            echo "   Expected format: 'release <version>', e.g. 'release 1' or 'release 2.1'"
+            exit 1
+          fi
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "Extracted release suffix: $SUFFIX"
+
       - name: Trigger Woodpecker pipeline
         env:
           WOODPECKER_SERVER: ${{ secrets.WOODPECKER_SERVER }}
           WOODPECKER_TOKEN: ${{ secrets.WOODPECKER_TOKEN }}
           WOODPECKER_ENTERPRISE_REPO_ID: ${{ secrets.WOODPECKER_ENTERPRISE_REPO_ID }}
+          RELEASE_SUFFIX: ${{ steps.extract.outputs.suffix }}
         run: |
           echo "Triggering Flipkart enterprise release pipeline..."
           echo "OSS commit: ${{ github.sha }}"
-          echo "Commit message: ${{ github.event.head_commit.message }}"
+          echo "Release suffix: ${RELEASE_SUFFIX}"
+
+          PAYLOAD=$(cat <<INNEREOF
+          {"branch": "main", "variables": {"RELEASE_TARGET": "flipkart", "FLIPKART_RELEASE_SUFFIX": "${RELEASE_SUFFIX}"}}
+          INNEREOF
+          )
 
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
             "${WOODPECKER_SERVER}/api/repos/${WOODPECKER_ENTERPRISE_REPO_ID}/pipelines" \
             -H "Authorization: Bearer ${WOODPECKER_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{"branch": "main", "variables": {"RELEASE_TARGET": "flipkart"}}')
+            -d "$PAYLOAD")
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')
