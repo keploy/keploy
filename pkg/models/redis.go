@@ -20,6 +20,14 @@ type KafkaSchema struct {
 	ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 }
 
+type PulsarSchema struct {
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	PulsarRequests   []Payload         `json:"pulsarRequests,omitempty" yaml:"pulsarRequests,omitempty"`
+	PulsarResponses  []Payload         `json:"pulsarResponses,omitempty" yaml:"pulsarResponses,omitempty"`
+	ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty"`
+}
+
 type AerospikeSchema struct {
 	Metadata             map[string]string `json:"metadata" yaml:"metadata"`
 	AerospikeRequests    []Payload         `json:"aerospikeRequests,omitempty" yaml:"aerospikeRequests,omitempty"`

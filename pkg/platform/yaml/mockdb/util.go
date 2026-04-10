@@ -159,6 +159,20 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
 			return nil, err
 		}
+	case models.PULSAR:
+		pulsarSpec := models.PulsarSchema{
+			Metadata: mock.Spec.Metadata,
+
+			PulsarRequests:   mock.Spec.PulsarRequests,
+			PulsarResponses:  mock.Spec.PulsarResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(pulsarSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the pulsar input-output as yaml")
+			return nil, err
+		}
 	case models.PostgresV2:
 		requests := []postgres.RequestYaml{}
 		for _, v := range mock.Spec.PostgresRequestsV2 {
@@ -423,6 +437,21 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				KafkaResponses:   kafkaSpec.KafkaResponses,
 				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
 				ResTimestampMock: kafkaSpec.ResTimestampMock,
+			}
+		case models.PULSAR:
+			pulsarSpec := models.PulsarSchema{}
+			err := m.Spec.Decode(&pulsarSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into pulsar mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata: pulsarSpec.Metadata,
+
+				PulsarRequests:   pulsarSpec.PulsarRequests,
+				PulsarResponses:  pulsarSpec.PulsarResponses,
+				ReqTimestampMock: pulsarSpec.ReqTimestampMock,
+				ResTimestampMock: pulsarSpec.ResTimestampMock,
 			}
 		case models.PostgresV2:
 

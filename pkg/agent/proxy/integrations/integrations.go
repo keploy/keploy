@@ -26,6 +26,7 @@ const (
 	MONGO_V2    IntegrationType = "mongo_v2"
 	REDIS       IntegrationType = "redis"
 	KAFKA       IntegrationType = "kafka"
+	PULSAR      IntegrationType = "pulsar"
 )
 
 type Parsers struct {
