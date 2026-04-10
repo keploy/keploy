@@ -277,7 +277,7 @@ start_memory_monitor() {
 
     threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
     if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
-        threshold_bytes="$((200 * 1024 * 1024))"
+        threshold_bytes="$((150 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
@@ -388,7 +388,7 @@ echo "Started Keploy record process with PID: $record_pid"
 
 keploy_container="$(wait_for_keploy_container 120)"
 echo "Detected Keploy container: $keploy_container"
-apply_keploy_memory_limit "$keploy_container"
+# apply_keploy_memory_limit "$keploy_container"
 start_memory_monitor "$keploy_container" "$record_pid" "record"
 
 wait_for_http "$APP_HEALTH_URL" 180
