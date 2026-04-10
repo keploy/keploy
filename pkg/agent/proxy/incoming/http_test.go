@@ -84,13 +84,12 @@ func TestHTTPBodyCaptureBufferStopsAtBudget(t *testing.T) {
 	}
 }
 
-func TestWrapBodyForCaptureStreamsAndCopies(t *testing.T) {
+func TestNewTeeReadCloserStreamsAndCopies(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
 
-	state := newHTTPCaptureState(32)
-	capture := &httpBodyCaptureBuffer{state: state}
+	capture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
 	body := io.NopCloser(strings.NewReader("payload"))
-	wrapped := wrapBodyForCapture(body, capture)
+	wrapped := newTeeReadCloser(body, capture)
 	defer wrapped.Close()
 
 	data, err := io.ReadAll(wrapped)

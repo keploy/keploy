@@ -23,6 +23,9 @@ jobs:
           - name: go-memory-load
             path: go-memory-load
             script_dir: go_memory_load
+          - name: proxy-stress-test
+            path: proxy-stress-test
+            script_dir: proxy_stress_test
         config:
           - job: record_latest_replay_build
             record_src: latest

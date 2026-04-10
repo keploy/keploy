@@ -268,7 +268,6 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
-	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
 	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
 	if err == io.EOF && len(preface) == 0 {
@@ -279,8 +278,6 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		logger.Debug("Detected HTTP/2 connection")
-
 		// Get the actual destination for gRPC on Windows
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
@@ -298,15 +295,14 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
-			logger.Error("Failed to connect to upstream gRPC server",
-				zap.String("Final_App_Address", finalAppAddr),
+			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
-		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
 }
