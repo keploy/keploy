@@ -15,10 +15,12 @@ jobs:
         id: extract
         run: |
           COMMIT_MSG="${{ github.event.head_commit.message }}"
-          # Extract text after 'release' (case-insensitive), e.g.:
-          #   "release 1"       → SUFFIX="1"
-          #   "release 2.1"     → SUFFIX="2.1"
-          #   "release hotfix"  → SUFFIX="hotfix"
+          # Extract the first word after 'release' (case-insensitive).
+          # Can be a number or any text:
+          #   "release 1"           → SUFFIX="1"
+          #   "release 2.1"         → SUFFIX="2.1"
+          #   "release mysql-fix"   → SUFFIX="mysql-fix"
+          #   "release hotfix-auth" → SUFFIX="hotfix-auth"
           SUFFIX=$(echo "$COMMIT_MSG" | grep -ioP 'release\s+\K\S+' | head -1)
           if [ -z "$SUFFIX" ]; then
             echo "❌ Could not extract release suffix from commit message: $COMMIT_MSG"
