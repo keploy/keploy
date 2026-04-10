@@ -223,11 +223,17 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 
 	// Stream YAML directly to disk instead of buffering in memory.
 	// This avoids allocating a large bytes.Buffer per test case.
+
+	// Validate the output path to prevent directory traversal
+	yamlPath, err := yaml.ValidatePath(filepath.Join(tcsPath, tcsName+".yaml"))
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
+	}
+
 	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
-	yamlPath := filepath.Join(tcsPath, tcsName+".yaml")
 	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*.yaml.tmp")
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
@@ -262,11 +268,19 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	if err := tmpFile.Sync(); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to sync temp file: %w", err)
 	}
+	// Set file permissions to 0777 to match the original CreateYamlFile behavior
+	if err := tmpFile.Chmod(0o777); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to chmod temp file: %w", err)
+	}
 	if err := tmpFile.Close(); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close temp file: %w", err)
 	}
 	cleanup = false
 
+	// Use remove-then-rename for cross-platform compatibility (Windows)
+	if _, statErr := os.Stat(yamlPath); statErr == nil {
+		os.Remove(yamlPath)
+	}
 	if err := os.Rename(tmpPath, yamlPath); err != nil {
 		os.Remove(tmpPath)
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)

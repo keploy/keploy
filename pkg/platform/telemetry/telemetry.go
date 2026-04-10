@@ -36,7 +36,8 @@ type Telemetry struct {
 	recordedTests atomic.Int64
 	recordedMocks atomic.Int64
 	flushOnce     sync.Once
-	flushDone     chan struct{}
+	flushDone     chan struct{} // closed when flush loop exits; initialized in NewTelemetry
+	closeCh       chan struct{} // signals the flush loop to stop
 }
 
 type Options struct {
@@ -58,6 +59,8 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 		GlobalMap:      gm,
 		InstallationID: opt.InstallationID,
 		client:         &http.Client{Timeout: 2 * time.Second}, // matches Shutdown drain timeout
+		flushDone:      make(chan struct{}),
+		closeCh:        make(chan struct{}),
 	}
 }
 
@@ -173,7 +176,6 @@ func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
 // pattern that previously spawned thousands of goroutines under load.
 func (tel *Telemetry) ensureFlushLoop() {
 	tel.flushOnce.Do(func() {
-		tel.flushDone = make(chan struct{})
 		go func() {
 			defer close(tel.flushDone)
 			ticker := time.NewTicker(30 * time.Second)
@@ -182,8 +184,7 @@ func (tel *Telemetry) ensureFlushLoop() {
 				select {
 				case <-ticker.C:
 					tel.flushRecordingCounters()
-				}
-				if tel.closed.Load() {
+				case <-tel.closeCh:
 					tel.flushRecordingCounters() // final flush
 					return
 				}
@@ -194,6 +195,7 @@ func (tel *Telemetry) ensureFlushLoop() {
 
 // flushRecordingCounters sends a single batched telemetry event with
 // accumulated test and mock counts, then resets the counters.
+// Uses sendTracked so Shutdown() waits for the HTTP request to complete.
 func (tel *Telemetry) flushRecordingCounters() {
 	tests := tel.recordedTests.Swap(0)
 	mocks := tel.recordedMocks.Swap(0)
@@ -204,7 +206,7 @@ func (tel *Telemetry) flushRecordingCounters() {
 		"recorded_tests": tests,
 		"recorded_mocks": mocks,
 	}
-	tel.SendTelemetry("RecordedBatch", dataMap)
+	tel.sendTracked("RecordedBatch", dataMap)
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
@@ -300,12 +302,11 @@ func (tel *Telemetry) Shutdown() {
 	}
 	tel.mu.Unlock()
 
-	// Wait for the flush loop to send final batch
-	if tel.flushDone != nil {
-		select {
-		case <-tel.flushDone:
-		case <-time.After(2 * time.Second):
-		}
+	// Signal the flush loop to perform final flush and exit
+	close(tel.closeCh)
+	select {
+	case <-tel.flushDone:
+	case <-time.After(2 * time.Second):
 	}
 
 	if tel.inflightN.Load() == 0 {

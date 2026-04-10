@@ -62,7 +62,8 @@ func start(ctx context.Context) {
 			addr := "localhost:" + pprofPort
 			logger.Info("pprof server starting", zap.String("addr", addr))
 			if err := http.ListenAndServe(addr, nil); err != nil {
-				logger.Error("pprof server failed", zap.Error(err))
+				logger.Error("pprof server failed; check that PPROF_PORT is a valid port and not already in use, or unset the env var to disable",
+					zap.String("port", pprofPort), zap.Error(err))
 			}
 		}()
 	}
@@ -71,7 +72,11 @@ func start(ctx context.Context) {
 	// This makes Go's GC more aggressive when approaching the limit,
 	// reducing peak memory during load without affecting normal operation.
 	if memLimitMB := os.Getenv("GOMEMLIMIT_MB"); memLimitMB != "" {
-		if mb, err := strconv.ParseInt(memLimitMB, 10, 64); err == nil && mb > 0 {
+		mb, err := strconv.ParseInt(memLimitMB, 10, 64)
+		if err != nil || mb <= 0 {
+			logger.Warn("invalid GOMEMLIMIT_MB value, ignoring; expected a positive integer (e.g. GOMEMLIMIT_MB=150)",
+				zap.String("value", memLimitMB))
+		} else {
 			debug.SetMemoryLimit(mb * 1024 * 1024)
 			logger.Info("GOMEMLIMIT set", zap.Int64("MB", mb))
 		}
@@ -84,13 +89,18 @@ func start(ctx context.Context) {
 		var prevInUse uint64
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
-				debug.FreeOSMemory()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
+					debug.FreeOSMemory()
+				}
+				prevInUse = m.HeapInuse
 			}
-			prevInUse = m.HeapInuse
 		}
 	}()
 

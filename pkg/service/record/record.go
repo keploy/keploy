@@ -31,7 +31,14 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
+	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
+}
+
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
+// Used by the orchestrator during re-record mode.
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
