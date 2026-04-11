@@ -63,4 +63,3 @@ type MockDB interface {
 type MappingDB interface {
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }
-

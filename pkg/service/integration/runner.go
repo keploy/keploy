@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	keployPkg "go.keploy.io/server/v3/pkg"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
-	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
