@@ -207,8 +207,14 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	switch f := frame.(type) {
 
 	case *http2.HeadersFrame:
+		// Copy the header block fragment — http2.Framer reuses its internal
+		// buffer, so f.HeaderBlockFragment() becomes invalid after the next
+		// ReadFrame() call.
+		fragCopy := make([]byte, len(f.HeaderBlockFragment()))
+		copy(fragCopy, f.HeaderBlockFragment())
+
 		if isOutgoing {
-			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			s.respHeaderFrags = append(s.respHeaderFrags, fragCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
 					return err
@@ -223,7 +229,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 				sm.checkStreamCompletion(streamID)
 			}
 		} else {
-			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			s.reqHeaderFrags = append(s.reqHeaderFrags, fragCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
 					return err
@@ -239,15 +245,18 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 
 	case *http2.ContinuationFrame:
+		contCopy := make([]byte, len(f.HeaderBlockFragment()))
+		copy(contCopy, f.HeaderBlockFragment())
+
 		if isOutgoing {
-			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			s.respHeaderFrags = append(s.respHeaderFrags, contCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
 					return err
 				}
 			}
 		} else {
-			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			s.reqHeaderFrags = append(s.reqHeaderFrags, contCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
 					return err
@@ -256,8 +265,13 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 
 	case *http2.DataFrame:
+		// Copy the data — http2.Framer reuses its internal buffer, so
+		// f.Data() becomes invalid after the next ReadFrame() call.
+		dataCopy := make([]byte, len(f.Data()))
+		copy(dataCopy, f.Data())
+
 		if isOutgoing {
-			s.respDataFrames = append(s.respDataFrames, f.Data())
+			s.respDataFrames = append(s.respDataFrames, dataCopy)
 			if f.StreamEnded() {
 				s.respEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
@@ -267,7 +281,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 				sm.checkStreamCompletion(streamID)
 			}
 		} else {
-			s.reqDataFrames = append(s.reqDataFrames, f.Data())
+			s.reqDataFrames = append(s.reqDataFrames, dataCopy)
 			if f.StreamEnded() {
 				s.reqEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
