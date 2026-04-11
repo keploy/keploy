@@ -25,6 +25,14 @@ import (
 // because it forwards the client's original HTTP/2 handshake directly to the app
 // without creating a separate gRPC session.
 func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string) error {
+	// Close connections on ctx cancellation to unblock all goroutines.
+	// This ensures no goroutine leaks during shutdown/StopIngress.
+	go func() {
+		<-ctx.Done()
+		clientConn.Close()
+		destConn.Close()
+	}()
+
 	defer func() {
 		if err := clientConn.Close(); err != nil &&
 			!strings.Contains(err.Error(), "use of closed network connection") {
@@ -36,34 +44,30 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		}
 	}()
 
-	logger.Info("starting gRPC test case capture (passthrough mode)")
+	logger.Debug("starting gRPC test case capture (passthrough mode)")
 
 	sm := pkg.NewStreamManager(logger)
 
-	// Channels for decoupled teeing — forwarders write to buffered channels
-	// instead of io.Pipe to avoid backpressure from parsers blocking forwarding.
-	clientFrameCh := make(chan []byte, 64)
-	destFrameCh := make(chan []byte, 64)
-
-	var forwardWg sync.WaitGroup
-	forwardWg.Add(2)
+	// Channels for teeing bytes to parsers. Large buffer (512) so the forwarder
+	// is never blocked by the parser in practice. If the channel fills up, the
+	// forwarder blocks (preserving stream integrity) rather than dropping bytes
+	// which would corrupt the HTTP/2 frame alignment for the parser.
+	clientFrameCh := make(chan []byte, 512)
+	destFrameCh := make(chan []byte, 512)
 
 	// Forward client → dest, tee copies to channel
 	go func() {
-		defer forwardWg.Done()
 		defer close(clientFrameCh)
 		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app")
 	}()
 
 	// Forward dest → client, tee copies to channel
 	go func() {
-		defer forwardWg.Done()
 		defer close(destFrameCh)
 		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client")
 	}()
 
 	// Single emitter goroutine to avoid duplicate test case emission.
-	// Only this goroutine calls emitCompleteStreams.
 	emitCh := make(chan struct{}, 1)
 	emitDone := make(chan struct{})
 	go func() {
@@ -71,11 +75,9 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		for range emitCh {
 			emitCompleteStreams(logger, ctx, sm, t, appPort)
 		}
-		// Final drain
 		emitCompleteStreams(logger, ctx, sm, t, appPort)
 	}()
 
-	// Signal the emitter to check for complete streams (non-blocking)
 	triggerEmit := func() {
 		select {
 		case emitCh <- struct{}{}:
@@ -98,42 +100,35 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, triggerEmit)
 	}()
 
-	// Wait for parsers to finish, then close emitter
 	parseWg.Wait()
 	close(emitCh)
 	<-emitDone
 
-	logger.Info("gRPC passthrough capture completed")
+	logger.Debug("gRPC passthrough capture completed")
 	return nil
 }
 
 // forwardAndTee reads from src, writes to dst (forwarding), and sends a copy
-// to the channel for frame parsing. The channel is buffered so the forwarder
-// is not blocked by slow parsing. If the channel is full, the copy is dropped
-// (forwarding is never interrupted).
+// to the channel for frame parsing. The channel send blocks if full to preserve
+// HTTP/2 frame stream integrity (dropping bytes would corrupt parser alignment).
+// This is safe because the parser is faster than network I/O, and ctx cancellation
+// closes the connections which unblocks the reads.
 func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, direction string) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
-			// Forward to destination — this is the critical path
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
 				logger.Debug("forward write error",
 					zap.String("direction", direction), zap.Error(wErr))
 				return
 			}
-			// Tee copy to parser (non-blocking — drop if channel full)
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			select {
-			case ch <- data:
-			default:
-				logger.Debug("parser channel full, dropping frame data",
-					zap.String("direction", direction))
-			}
+			ch <- data // blocking send — preserves stream integrity
 		}
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed") {
 				logger.Debug("forward read finished",
 					zap.String("direction", direction), zap.Error(err))
 			}
@@ -148,7 +143,6 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []by
 	pr, pw := io.Pipe()
 	defer pr.Close()
 
-	// Writer goroutine: drains channel into pipe
 	go func() {
 		defer pw.Close()
 		for data := range ch {
@@ -158,7 +152,6 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []by
 		}
 	}()
 
-	// Skip HTTP/2 client preface (24-byte magic string) on client side
 	if !isOutgoing {
 		preface := make([]byte, len(http2.ClientPreface))
 		if _, err := io.ReadFull(pr, preface); err != nil {
@@ -172,8 +165,8 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []by
 	}
 
 	framer := http2.NewFramer(nil, pr)
-	framer.ReadMetaHeaders = nil       // we handle headers ourselves
-	framer.MaxHeaderListSize = 1 << 20 // 1MB max header list
+	framer.ReadMetaHeaders = nil
+	framer.MaxHeaderListSize = 1 << 20
 
 	for {
 		select {
