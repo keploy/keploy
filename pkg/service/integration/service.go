@@ -25,7 +25,7 @@ type MockMismatch struct {
 // RunTestOpts contains the minimal inputs to run a single integration test.
 type RunTestOpts struct {
 	TestSetID  string
-	TestStepID string
+	TestStepID string // TestStepID is the test case name used to load the case from TestCaseDB.
 	ServiceURL string
 }
 
