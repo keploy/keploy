@@ -307,12 +307,16 @@ func (tel *Telemetry) Shutdown() {
 	}
 	tel.mu.Unlock()
 
-	// Signal the flush loop to exit (it won't flush again since counters are already drained).
+	// Signal the flush loop goroutine to exit.
 	close(tel.closeCh)
 
-	// Only wait for flushDone if there are inflight events.
-	// In idle runs the flush loop may never have started, so waiting would
-	// introduce an unnecessary shutdown delay.
+	// Wait for the flush loop goroutine to finish so it doesn't leak.
+	// Uses a short timeout to avoid blocking shutdown if the loop never started.
+	select {
+	case <-tel.flushDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	if tel.inflightN.Load() == 0 {
 		return
 	}
