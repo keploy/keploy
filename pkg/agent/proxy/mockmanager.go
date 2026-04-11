@@ -2,8 +2,6 @@ package proxy
 
 import (
 	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,8 +31,16 @@ type MockManager struct {
 	filteredByKind   map[models.Kind]*TreeDb
 	unfilteredByKind map[models.Kind]*TreeDb
 
-	logger        *zap.Logger
-	consumedMocks sync.Map
+	logger *zap.Logger
+
+	// consumedMu guards consumedList and consumedIndex.
+	// consumedList records MockState entries in the order they were first
+	// intercepted from the network (first call to flagMockAsUsed wins the
+	// position; subsequent calls for the same name update the state in-place
+	// without changing order).
+	consumedMu    sync.Mutex
+	consumedList  []models.MockState
+	consumedIndex map[string]int
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -56,6 +62,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:           make(map[models.Kind]*uint64),
+		consumedIndex:       make(map[string]int),
 		logger:              logger,
 	}
 }
@@ -470,80 +477,36 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 }
 
 // ---------- bookkeeping ----------
+
+// flagMockAsUsed records that a mock was consumed from the network.
+// The first call for a given name establishes its position in the consumption
+// order; subsequent calls for the same name update the stored state in-place
+// without changing its position. This preserves true network call order in
+// GetConsumedMocks.
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
-	m.consumedMocks.Store(mock.Name, mock)
+	m.consumedMu.Lock()
+	if idx, exists := m.consumedIndex[mock.Name]; exists {
+		m.consumedList[idx] = mock // update state, preserve position
+	} else {
+		m.consumedIndex[mock.Name] = len(m.consumedList)
+		m.consumedList = append(m.consumedList, mock)
+	}
+	m.consumedMu.Unlock()
 	return nil
 }
 
+// GetConsumedMocks returns and drains the list of mocks that were consumed
+// since the last call, in the order they were first intercepted from the
+// network.
 func (m *MockManager) GetConsumedMocks() []models.MockState {
-	var out []models.MockState
-
-	// Snapshot & collect first (no deletes during Range). We intentionally drain only what existed at snapshot time.
-	m.consumedMocks.Range(func(key, val interface{}) bool {
-		k, ok := key.(string)
-		if !ok {
-			if m.logger != nil {
-				m.logger.Warn("unexpected key type in consumedMocks; skipping",
-					zap.Any("keyType", fmt.Sprintf("%T", key)))
-			}
-			return true // skip this entry
-		}
-		if st, ok := val.(models.MockState); ok {
-			out = append(out, st)
-		} else if m.logger != nil {
-			m.logger.Warn("unexpected value type in consumedMocks; skipping",
-				zap.String("key", k),
-				zap.Any("valueType", fmt.Sprintf("%T", val)))
-		}
-		return true
-	})
-
-	// Sort: prefer numeric suffix after the last '-' (e.g., name-123); else lexicographic
-	type withSuffix struct {
-		st   models.MockState
-		name string
-		num  int
-		has  bool
-	}
-	numericSuffix := func(name string) (int, bool) {
-		i := strings.LastIndexByte(name, '-')
-		if i < 0 || i+1 >= len(name) {
-			return 0, false
-		}
-		n, err := strconv.Atoi(name[i+1:])
-		if err != nil {
-			return 0, false
-		}
-		return n, true
-	}
-
-	ws := make([]withSuffix, len(out))
-	for i, st := range out {
-		n, ok := numericSuffix(st.Name)
-		ws[i] = withSuffix{st: st, name: st.Name, num: n, has: ok}
-	}
-	sort.SliceStable(ws, func(i, j int) bool {
-		a, b := ws[i], ws[j]
-		if a.has && b.has {
-			if a.num != b.num {
-				return a.num < b.num
-			}
-			// tie-break numerics by name for determinism
-			return a.name < b.name
-		}
-		return a.name < b.name
-	})
-	for i := range out {
-		out[i] = ws[i].st
-	}
-
-	// Now clear those entries from the map we just drained
-	for _, st := range out {
-		m.consumedMocks.Delete(st.Name)
-	}
+	m.consumedMu.Lock()
+	out := append([]models.MockState(nil), m.consumedList...)
+	m.consumedList = m.consumedList[:0]
+	m.consumedIndex = make(map[string]int)
+	m.consumedMu.Unlock()
 	return out
 }
 

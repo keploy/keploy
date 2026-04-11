@@ -82,6 +82,29 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	return testSetReports, nil
 }
 
+func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseName string) (*models.TestCase, error) {
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+	testPath, err := yaml.ValidatePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := yaml.ReadFile(ctx, ts.logger, testPath, testCaseName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("test case %q is empty", testCaseName)
+	}
+	var doc *yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("test case %q is nil after unmarshal", testCaseName)
+	}
+	return Decode(doc, ts.logger)
+}
+
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 
