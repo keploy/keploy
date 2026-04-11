@@ -178,7 +178,14 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 
 	streamID := frame.Header().StreamID
 	if streamID == 0 {
-		// connection control; ignore here
+		// Handle SETTINGS frames to keep HPACK decoders in sync with
+		// the negotiated dynamic table size. Without this, the decoders
+		// stay at the initial MaxDynamicTableSize (8192) and fail to
+		// decode headers when the peer negotiates a larger table via
+		// SETTINGS_HEADER_TABLE_SIZE.
+		if sf, ok := frame.(*http2.SettingsFrame); ok && !sf.IsAck() {
+			sm.updateDecoderTableSize(sf, isOutgoing)
+		}
 		return nil
 	}
 
@@ -272,6 +279,33 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	}
 
 	return nil
+}
+
+// updateDecoderTableSize reads SETTINGS_HEADER_TABLE_SIZE from a SETTINGS
+// frame and updates the appropriate HPACK decoder.
+//
+// SETTINGS from the client (isOutgoing=false) tells the server what table size
+// the client's decoder supports → the server's encoder will use that size →
+// we update decoderOut (which decodes server responses).
+//
+// SETTINGS from the server (isOutgoing=true) tells the client what table size
+// the server's decoder supports → the client's encoder will use that size →
+// we update decoderIn (which decodes client requests).
+func (sm *DefaultStreamManager) updateDecoderTableSize(sf *http2.SettingsFrame, isOutgoing bool) {
+	sf.ForeachSetting(func(s http2.Setting) error {
+		if s.ID == http2.SettingHeaderTableSize {
+			if isOutgoing {
+				sm.decoderIn.SetMaxDynamicTableSize(s.Val)
+				sm.logger.Debug("updated request HPACK decoder table size from server SETTINGS",
+					zap.Uint32("new_size", s.Val))
+			} else {
+				sm.decoderOut.SetMaxDynamicTableSize(s.Val)
+				sm.logger.Debug("updated response HPACK decoder table size from client SETTINGS",
+					zap.Uint32("new_size", s.Val))
+			}
+		}
+		return nil
+	})
 }
 
 // processHeaderBlock decodes accumulated header fragments for the given side
