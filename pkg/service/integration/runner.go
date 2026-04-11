@@ -56,14 +56,21 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	}
 
 	// 2. Load mocks and get the expected mock names for this test case.
-	expectedMocks, err := r.loadMocks(ctx, opts.TestSetID, tc.Name)
+	expectedMocks, err := r.loadMocks(ctx, opts.TestSetID, tc.Name, tc.HTTPReq.Timestamp)
 	if err != nil {
-		r.logger.Error("failed to load mocks", zap.String("testCase", tc.Name), zap.Error(err))
+		r.logger.Error("failed to load mocks; verify the recorded mocks exist and the mock store is accessible, then rerun the test",
+			zap.String("testCase", tc.Name),
+			zap.String("testSetID", opts.TestSetID),
+			zap.Error(err),
+		)
+		return &TestResult{Passed: false, Error: fmt.Sprintf("failed to load mocks for test case %q: %v", tc.Name, err), Noise: tc.Noise}
 	}
 
 	// 3. Wait for app.
 	if opts.ServiceURL != "" {
-		waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger)
+		if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+			return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
+		}
 	}
 
 	// 4. Global noise.
@@ -72,8 +79,11 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	// to rule out config mocks from consumed list
 	_, err = r.instrumentation.GetConsumedMocks(ctx)
 	if err != nil {
-		r.logger.Debug("failed to get consumed mocks", zap.Error(err))
-		return nil
+		return &TestResult{
+			Passed: false,
+			Error:  fmt.Sprintf("failed to get consumed mocks: %v. Verify the instrumentation is running correctly and retry the test", err),
+			Noise:  tc.Noise,
+		}
 	}
 
 	// 5. Execute: rewrite URL, fire HTTP request, compare response.
@@ -135,9 +145,16 @@ func (r *Runner) loadTestCase(ctx context.Context, testSetID, testCaseName strin
 	return r.testCaseDB.GetTestCase(ctx, testSetID, testCaseName)
 }
 
-func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string) ([]string, error) {
-	if r.instrumentation == nil || r.mockDB == nil {
-		return nil, nil
+func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, backdate time.Time) ([]string, error) {
+
+	if r.instrumentation == nil && r.mockDB == nil {
+		return nil, fmt.Errorf("mock loading requires instrumentation and mockDB; initialize both dependencies before running integration tests with mocks")
+	}
+	if r.instrumentation == nil {
+		return nil, fmt.Errorf("mock loading requires instrumentation; initialize the instrumentation dependency before running integration tests with mocks")
+	}
+	if r.mockDB == nil {
+		return nil, fmt.Errorf("mock loading requires mockDB; initialize the mock database dependency before running integration tests with mocks")
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -147,7 +164,13 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string) 
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
 		cancel()
-		_ = g.Wait()
+		if err := g.Wait(); err != nil {
+			r.logger.Error("mock teardown failed; check agent shutdown and cleanup logs to identify the failing teardown step",
+				zap.Error(err),
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseName", testCaseName),
+			)
+		}
 	}()
 
 	// Setup eBPF hooks / proxy.
@@ -163,8 +186,22 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string) 
 		}
 	}
 
-	// Enable mock-outgoing mode.
-	if err := r.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{Mocking: true}); err != nil {
+	// Enable mock-outgoing mode with full config options.
+	outOpts := models.OutgoingOptions{
+		Mocking:  true,
+		Backdate: backdate,
+	}
+	if r.config != nil {
+		outOpts.Rules = r.config.BypassRules
+		outOpts.MongoPassword = r.config.Test.MongoPassword
+		outOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
+	}
+	// Extract header noise for mock matching (mirrors replay behavior).
+	if headerNoise, ok := r.globalNoise["header"]; ok {
+		outOpts.NoiseConfig = map[string]map[string][]string{"header": headerNoise}
+	}
+	if err := r.instrumentation.MockOutgoing(ctx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
 
@@ -199,6 +236,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string) 
 		AfterTime:       afterTime,
 		BeforeTime:      beforeTime,
 		UseMappingBased: true,
+		MockMapping:     expected,
 	}
 	if err := r.instrumentation.UpdateMockParams(ctx, params); err != nil {
 		return expected, fmt.Errorf("failed to update mock params: %w", err)
@@ -260,10 +298,10 @@ func (r *Runner) checkMockMismatches(ctx context.Context, expected []string) *Mo
 	}
 }
 
-func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) {
+func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
-		return
+		return fmt.Errorf("invalid service URL %q: check the ServiceURL and ensure it includes a valid host", serviceURL)
 	}
 	host := parsed.Hostname()
 	port := parsed.Port()
@@ -278,7 +316,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 
 	if conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond); dialErr == nil {
 		_ = conn.Close()
-		return
+		return nil
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -289,13 +327,12 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	for {
 		select {
 		case <-waitCtx.Done():
-			logger.Warn("timed out waiting for app", zap.String("addr", addr))
-			return
+			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
 		case <-ticker.C:
 			if conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond); dialErr == nil {
 				_ = conn.Close()
-				logger.Info("app is reachable", zap.String("addr", addr))
-				return
+				logger.Debug("app is reachable", zap.String("addr", addr))
+				return nil
 			}
 		}
 	}

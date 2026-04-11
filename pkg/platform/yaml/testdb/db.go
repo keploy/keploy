@@ -83,6 +83,10 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 }
 
 func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseName string) (*models.TestCase, error) {
+	// Validate testCaseName to prevent directory traversal.
+	if filepath.Base(testCaseName) != testCaseName || strings.Contains(testCaseName, "..") {
+		return nil, fmt.Errorf("invalid test case name %q: must not contain path separators or '..'", testCaseName)
+	}
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	testPath, err := yaml.ValidatePath(path)
 	if err != nil {
