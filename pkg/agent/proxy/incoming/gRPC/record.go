@@ -145,9 +145,15 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []by
 
 	go func() {
 		defer pw.Close()
+		var writeErr bool
 		for data := range ch {
-			if _, err := pw.Write(data); err != nil {
-				return
+			// Keep draining the channel even after a pipe write error so the
+			// forwarder's blocking ch<-data never hangs. We just stop writing
+			// to the pipe (parser is done), but the channel must be consumed.
+			if !writeErr {
+				if _, err := pw.Write(data); err != nil {
+					writeErr = true
+				}
 			}
 		}
 	}()
