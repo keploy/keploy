@@ -317,12 +317,20 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		}
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	encoder := yamlLib.NewEncoder(writer)
 	if err := encoder.Encode(&mockYaml); err != nil {
 		return fmt.Errorf("failed to encode mock yaml: %w", err)
 	}
 	if err := encoder.Close(); err != nil {
 		return fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to flush mock writer: %w", err)

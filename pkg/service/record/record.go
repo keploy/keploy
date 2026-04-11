@@ -329,28 +329,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			// Forward mock reference to global channel for orchestrator's
-			// correlation manager (used during re-record). Uses non-blocking
-			// send with a lightweight reference to avoid deep-copy storms.
-			if r.globalMockCh != nil {
-				currMockID := r.mockDB.GetCurrMockID()
-				ref := &models.Mock{
-					Version: mock.Version,
-					Kind:    mock.Kind,
-					Spec: models.MockSpec{
-						Metadata:         mock.Spec.Metadata,
-						ReqTimestampMock: mock.Spec.ReqTimestampMock,
-						ResTimestampMock: mock.Spec.ResTimestampMock,
-					},
-				}
-				ref.Name = fmt.Sprintf("mock-%d", currMockID+1)
-				select {
-				case r.globalMockCh <- ref:
-				default:
-					r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
-						zap.String("mockName", ref.Name))
-				}
-			}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
@@ -387,6 +365,35 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				// Forward a lightweight mock reference to the orchestrator's
+				// correlation manager after InsertMock succeeds, so mappings
+				// only reference persisted mocks. Metadata map is copied to
+				// avoid data races with concurrent goroutines.
+				if r.globalMockCh != nil {
+					var metadata map[string]string
+					if mock.Spec.Metadata != nil {
+						metadata = make(map[string]string, len(mock.Spec.Metadata))
+						for k, v := range mock.Spec.Metadata {
+							metadata[k] = v
+						}
+					}
+					ref := &models.Mock{
+						Version: mock.Version,
+						Kind:    mock.Kind,
+						Name:    mock.Name,
+						Spec: models.MockSpec{
+							Metadata:         metadata,
+							ReqTimestampMock: mock.Spec.ReqTimestampMock,
+							ResTimestampMock: mock.Spec.ResTimestampMock,
+						},
+					}
+					select {
+					case r.globalMockCh <- ref:
+					default:
+						r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
+							zap.String("mockName", ref.Name))
+					}
+				}
 			}
 		}
 		return nil
