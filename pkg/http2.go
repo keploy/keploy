@@ -305,17 +305,25 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 // SETTINGS from the server (isOutgoing=true) tells the client what table size
 // the server's decoder supports → the client's encoder will use that size →
 // we update decoderIn (which decodes client requests).
+// maxHPACKDynamicTableSize caps the HPACK dynamic table to prevent unbounded
+// memory growth from a peer advertising a very large table via SETTINGS.
+const maxHPACKDynamicTableSize uint32 = 64 * 1024
+
 func (sm *DefaultStreamManager) updateDecoderTableSize(sf *http2.SettingsFrame, isOutgoing bool) {
 	sf.ForeachSetting(func(s http2.Setting) error {
 		if s.ID == http2.SettingHeaderTableSize {
+			size := s.Val
+			if size > maxHPACKDynamicTableSize {
+				size = maxHPACKDynamicTableSize
+			}
 			if isOutgoing {
-				sm.decoderIn.SetMaxDynamicTableSize(s.Val)
+				sm.decoderIn.SetMaxDynamicTableSize(size)
 				sm.logger.Debug("updated request HPACK decoder table size from server SETTINGS",
-					zap.Uint32("new_size", s.Val))
+					zap.Uint32("requested_size", s.Val), zap.Uint32("applied_size", size))
 			} else {
-				sm.decoderOut.SetMaxDynamicTableSize(s.Val)
+				sm.decoderOut.SetMaxDynamicTableSize(size)
 				sm.logger.Debug("updated response HPACK decoder table size from client SETTINGS",
-					zap.Uint32("new_size", s.Val))
+					zap.Uint32("requested_size", s.Val), zap.Uint32("applied_size", size))
 			}
 		}
 		return nil

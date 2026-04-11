@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -39,70 +40,97 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 
 	sm := pkg.NewStreamManager(logger)
 
-	// Pipes for teeing captured bytes to the frame parsers.
-	// The forwarding goroutines write copies of the bytes to these pipes.
-	// The parser goroutines read from them using http2.NewFramer.
-	clientPipeR, clientPipeW := io.Pipe()
-	destPipeR, destPipeW := io.Pipe()
-	defer clientPipeW.Close()
-	defer destPipeW.Close()
+	// Channels for decoupled teeing — forwarders write to buffered channels
+	// instead of io.Pipe to avoid backpressure from parsers blocking forwarding.
+	clientFrameCh := make(chan []byte, 64)
+	destFrameCh := make(chan []byte, 64)
 
-	done := make(chan struct{})
+	var forwardWg sync.WaitGroup
+	forwardWg.Add(2)
 
-	// Forward client → dest, tee to clientPipe for parsing
+	// Forward client → dest, tee copies to channel
 	go func() {
-		forwardAndTee(clientConn, destConn, clientPipeW, logger, "client→app")
-		clientPipeW.Close()
+		defer forwardWg.Done()
+		defer close(clientFrameCh)
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app")
 	}()
 
-	// Forward dest → client, tee to destPipe for parsing
+	// Forward dest → client, tee copies to channel
 	go func() {
-		forwardAndTee(destConn, clientConn, destPipeW, logger, "app→client")
-		destPipeW.Close()
+		defer forwardWg.Done()
+		defer close(destFrameCh)
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client")
 	}()
+
+	// Single emitter goroutine to avoid duplicate test case emission.
+	// Only this goroutine calls emitCompleteStreams.
+	emitCh := make(chan struct{}, 1)
+	emitDone := make(chan struct{})
+	go func() {
+		defer close(emitDone)
+		for range emitCh {
+			emitCompleteStreams(logger, ctx, sm, t, appPort)
+		}
+		// Final drain
+		emitCompleteStreams(logger, ctx, sm, t, appPort)
+	}()
+
+	// Signal the emitter to check for complete streams (non-blocking)
+	triggerEmit := func() {
+		select {
+		case emitCh <- struct{}{}:
+		default:
+		}
+	}
+
+	var parseWg sync.WaitGroup
+	parseWg.Add(2)
 
 	// Parse client→app frames (requests)
 	go func() {
-		parseFrames(ctx, logger, clientPipeR, sm, false)
-		emitCompleteStreams(logger, ctx, sm, t, appPort)
+		defer parseWg.Done()
+		parseFramesFromChan(ctx, logger, clientFrameCh, sm, false, triggerEmit)
 	}()
 
-	// Parse app→client frames (responses) and emit test cases
+	// Parse app→client frames (responses)
 	go func() {
-		defer close(done)
-		parseFrames(ctx, logger, destPipeR, sm, true)
-		emitCompleteStreams(logger, ctx, sm, t, appPort)
+		defer parseWg.Done()
+		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, triggerEmit)
 	}()
 
-	// Wait for the response parser to finish (both directions done)
-	select {
-	case <-ctx.Done():
-		logger.Info("gRPC passthrough capture stopped (context cancelled)")
-		return ctx.Err()
-	case <-done:
-		// Emit any remaining complete streams
-		emitCompleteStreams(logger, ctx, sm, t, appPort)
-		logger.Info("gRPC passthrough capture completed")
-		return nil
-	}
+	// Wait for parsers to finish, then close emitter
+	parseWg.Wait()
+	close(emitCh)
+	<-emitDone
+
+	logger.Info("gRPC passthrough capture completed")
+	return nil
 }
 
-// forwardAndTee reads from src, writes to dst (forwarding), and also writes
-// a copy to tee (for frame parsing). This is the core of the passthrough —
-// bytes flow from client to app (and back) untouched.
-func forwardAndTee(src, dst net.Conn, tee *io.PipeWriter, logger *zap.Logger, direction string) {
+// forwardAndTee reads from src, writes to dst (forwarding), and sends a copy
+// to the channel for frame parsing. The channel is buffered so the forwarder
+// is not blocked by slow parsing. If the channel is full, the copy is dropped
+// (forwarding is never interrupted).
+func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, direction string) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
-			// Forward to destination
+			// Forward to destination — this is the critical path
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
 				logger.Debug("forward write error",
 					zap.String("direction", direction), zap.Error(wErr))
 				return
 			}
-			// Tee to parser (ignore write errors — parser may have closed)
-			_, _ = tee.Write(buf[:n])
+			// Tee copy to parser (non-blocking — drop if channel full)
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			select {
+			case ch <- data:
+			default:
+				logger.Debug("parser channel full, dropping frame data",
+					zap.String("direction", direction))
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -114,15 +142,26 @@ func forwardAndTee(src, dst net.Conn, tee *io.PipeWriter, logger *zap.Logger, di
 	}
 }
 
-// parseFrames uses Go's standard http2.NewFramer to parse HTTP/2 frames from
-// a reader and feeds them to the DefaultStreamManager. No manual binary
-// parsing — the standard library handles frame boundaries, types, and flags.
-func parseFrames(ctx context.Context, logger *zap.Logger, reader io.Reader, sm *pkg.DefaultStreamManager, isOutgoing bool) {
-	// The client side starts with the HTTP/2 preface (24-byte magic string)
-	// which is NOT a frame. We need to skip it before creating the Framer.
+// parseFramesFromChan reconstructs HTTP/2 frames from byte chunks received
+// via channel, then feeds them to the DefaultStreamManager.
+func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []byte, sm *pkg.DefaultStreamManager, isOutgoing bool, triggerEmit func()) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	// Writer goroutine: drains channel into pipe
+	go func() {
+		defer pw.Close()
+		for data := range ch {
+			if _, err := pw.Write(data); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Skip HTTP/2 client preface (24-byte magic string) on client side
 	if !isOutgoing {
 		preface := make([]byte, len(http2.ClientPreface))
-		if _, err := io.ReadFull(reader, preface); err != nil {
+		if _, err := io.ReadFull(pr, preface); err != nil {
 			logger.Debug("failed to read HTTP/2 client preface", zap.Error(err))
 			return
 		}
@@ -132,7 +171,7 @@ func parseFrames(ctx context.Context, logger *zap.Logger, reader io.Reader, sm *
 		}
 	}
 
-	framer := http2.NewFramer(nil, reader)
+	framer := http2.NewFramer(nil, pr)
 	framer.ReadMetaHeaders = nil       // we handle headers ourselves
 	framer.MaxHeaderListSize = 1 << 20 // 1MB max header list
 
@@ -154,16 +193,15 @@ func parseFrames(ctx context.Context, logger *zap.Logger, reader io.Reader, sm *
 		now := time.Now()
 		if err := sm.HandleFrame(frame, isOutgoing, now); err != nil {
 			logger.Debug("stream manager error", zap.Error(err))
-			// Don't stop — continue parsing other frames
 		}
 
-		// Check for complete streams after each frame
-		emitCompleteStreams(logger, ctx, sm, nil, 0)
+		triggerEmit()
 	}
 }
 
 // emitCompleteStreams checks the stream manager for complete request/response
-// pairs and sends them as test cases.
+// pairs and sends them as test cases. Only called from the single emitter
+// goroutine to prevent duplicate emissions.
 func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.DefaultStreamManager, t chan *models.TestCase, appPort uint16) {
 	if t == nil {
 		return
@@ -179,7 +217,7 @@ func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.Defaul
 		if path, ok := stream.GRPCReq.Headers.PseudoHeaders[":path"]; ok {
 			method = path
 		}
-		logger.Info("captured gRPC test case (passthrough)", zap.String("method", method))
+		logger.Debug("captured gRPC test case (passthrough)", zap.String("method", method))
 		Utils.CaptureGRPC(ctx, logger, t, stream, appPort)
 		sm.CleanupStream(stream.ID)
 	}
