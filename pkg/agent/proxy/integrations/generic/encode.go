@@ -2,225 +2,198 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
-	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
-	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
+// captureTeeWriter forwards data to dest (critical path) and non-blocking
+// tees a copy to a capture channel. If the channel is full or recording is
+// paused, capture is silently dropped — forwarding is never affected.
+type captureTeeWriter struct {
+	dest    io.Writer
+	ch      chan []byte
+	stopped bool
+}
+
+func (w *captureTeeWriter) Write(p []byte) (int, error) {
+	// Forward to destination first — this is the critical path.
+	n, err := w.dest.Write(p)
+	if err != nil {
+		return n, err
+	}
+	// Non-blocking tee to capture channel.
+	if !w.stopped {
+		if memoryguard.IsRecordingPaused() {
+			w.stopped = true
+			return n, nil
+		}
+		buf := make([]byte, len(p))
+		copy(buf, p)
+		select {
+		case w.ch <- buf:
+		default:
+			w.stopped = true
+		}
+	}
+	return n, nil
+}
+
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
-	var genericRequests []models.Payload
-
-	bufStr := string(reqBuf)
-	dataType := models.String
-	if !util.IsASCII(string(reqBuf)) {
-		bufStr = util.EncodeBase64(reqBuf)
-		dataType = "binary"
-	}
-
-	if bufStr != "" {
-		genericRequests = append(genericRequests, models.Payload{
-			Origin: models.FromClient,
-			Message: []models.OutputBinary{
-				{
-					Type: dataType,
-					Data: bufStr,
-				},
-			},
-		})
-	}
+	// Forward initial request buffer to destination immediately.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
+
+	// If recording is already paused, pure passthrough.
+	if memoryguard.IsRecordingPaused() {
+		return forwardBidirectional(clientConn, destConn)
+	}
+
+	// Capture channels — background goroutine reads these to create mocks.
+	// Buffered to absorb brief processing delays without blocking forwarding.
+	clientCapChan := make(chan []byte, 256)
+	destCapChan := make(chan []byte, 256)
+
+	// Seed initial request buffer into capture.
+	initialBuf := make([]byte, len(reqBuf))
+	copy(initialBuf, reqBuf)
+	clientCapChan <- initialBuf
+
+	// Start background mock creator.
+	go createGenericMocksAsync(ctx, logger, clientCapChan, destCapChan)
+
+	// Forward bidirectionally at wire speed with non-blocking capture tee.
+	done := make(chan struct{}, 2)
+	go func() {
+		defer close(clientCapChan)
+		tee := &captureTeeWriter{dest: destConn, ch: clientCapChan}
+		_, _ = io.Copy(tee, clientConn)
+		done <- struct{}{}
+	}()
+	go func() {
+		defer close(destCapChan)
+		tee := &captureTeeWriter{dest: clientConn, ch: destCapChan}
+		_, _ = io.Copy(tee, destConn)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	return nil
+}
+
+// forwardBidirectional does raw TCP passthrough without any capture.
+func forwardBidirectional(clientConn, destConn net.Conn) error {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		done <- struct{}{}
+	}
+	go cp(destConn, clientConn)
+	go cp(clientConn, destConn)
+	<-done
+	<-done
+	return nil
+}
+
+// createGenericMocksAsync reads captured data from both channels and creates
+// mock entries based on request-response alternation. Runs in a background
+// goroutine — never blocks the forwarding path.
+func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, destCh <-chan []byte) {
+	var genericRequests []models.Payload
 	var genericResponses []models.Payload
-
-	clientBuffChan := make(chan []byte)
-	destBuffChan := make(chan []byte)
-	// Two reader goroutines can each report one terminal error.
-	errChan := make(chan error, 2)
-	//TODO: where to close the error channel since it is used in both the go routines
-	//close(errChan)
-
-	// read requests from client
-	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, true)
-	if err != nil {
-		return fmt.Errorf("error reading from client:%v", err)
-	}
-
-	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, true)
-	if err != nil {
-		return fmt.Errorf("error reading from destination:%v", err)
-	}
-
-	prevChunkWasReq := false
-	var reqTimestampMock = time.Now()
+	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
+	reqTimestampMock := time.Now()
 	var resTimestampMock time.Time
 
-	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Int("genericReqs", len(genericRequests)), zap.Int("genericResps", len(genericResponses)))
-	for {
+	flushMock := func() {
+		if len(genericRequests) == 0 || len(genericResponses) == 0 {
+			return
+		}
+		metadata := make(map[string]string)
+		metadata["type"] = "config"
+		if connID, ok := ctx.Value(models.ClientConnectionIDKey).(string); ok {
+			metadata["connID"] = connID
+		}
+		mock := &models.Mock{
+			Version: models.GetVersion(),
+			Name:    "mocks",
+			Kind:    models.GENERIC,
+			Spec: models.MockSpec{
+				GenericRequests:  genericRequests,
+				GenericResponses: genericResponses,
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampMock,
+				Metadata:         metadata,
+			},
+		}
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.AddMock(mock)
+		}
+		genericRequests = nil
+		genericResponses = nil
+	}
+
+	for clientCh != nil || destCh != nil {
 		select {
 		case <-ctx.Done():
+			flushMock()
+			return
+		case buf, ok := <-clientCh:
+			if !ok {
+				clientCh = nil
+				continue
+			}
+			// New request after response — previous exchange complete.
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponsesCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponsesCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-
-				metadata := make(map[string]string)
-				metadata["type"] = "config"
-				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-				// Save the mock
-				mock := &models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequestsCopy,
-						GenericResponses: genericResponsesCopy,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-						Metadata:         metadata,
-					},
-				}
-				if mgr := syncMock.Get(); mgr != nil {
-					mgr.AddMock(mock)
-					return ctx.Err()
-				}
-				return ctx.Err()
-			}
-		case buffer := <-clientBuffChan:
-			// Write the request message to the destination
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write request message to the destination server")
-				return err
-			}
-
-			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponseCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponseCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-				reqTS := reqTimestampMock
-				resTS := resTimestampMock
-				go func(reqs []models.Payload, resps []models.Payload, reqTimestamp, resTimestamp time.Time) {
-					metadata := make(map[string]string)
-					metadata["type"] = "config"
-					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-					// create the mock
-					mock := &models.Mock{
-						Version: models.GetVersion(),
-						Name:    "mocks",
-						Kind:    models.GENERIC,
-						Spec: models.MockSpec{
-							GenericRequests:  reqs,
-							GenericResponses: resps,
-							ReqTimestampMock: reqTimestamp,
-							ResTimestampMock: resTimestamp,
-							Metadata:         metadata,
-						},
-					}
-					if mgr := syncMock.Get(); mgr != nil {
-						mgr.AddMock(mock)
-					}
-
-				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
-				genericRequests = []models.Payload{}
-				genericResponses = []models.Payload{}
-			}
-
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = util.EncodeBase64(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				genericRequests = append(genericRequests, models.Payload{
-					Origin: models.FromClient,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
-			prevChunkWasReq = true
-		case buffer := <-destBuffChan:
-			if prevChunkWasReq {
-				// store the request timestamp
+				flushMock()
 				reqTimestampMock = time.Now()
 			}
-			// Write the response message to the client
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write response message to the client")
-				return err
-			}
+			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
+			prevChunkWasReq = true
 
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffDataType = "binary"
+		case buf, ok := <-destCh:
+			if !ok {
+				destCh = nil
+				continue
 			}
-
-			if bufStr != "" {
-				genericResponses = append(genericResponses, models.Payload{
-					Origin: models.FromServer,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
+			if prevChunkWasReq {
+				reqTimestampMock = time.Now()
 			}
-
+			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
 			resTimestampMock = time.Now()
-
-			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			prevChunkWasReq = false
-		case err := <-errChan:
-			if err == io.EOF {
-				return nil
-			}
-			if errors.Is(err, pUtil.ErrRecordingPausedDueToMemoryPressure) {
-				logger.Debug("memory pressure detected, falling back to passthrough for this connection")
-				// Use bidirectional io.Copy on the existing connections
-				// instead of pUtil.PassThrough which dials a new connection.
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
-				return nil
-			}
-			return err
 		}
+	}
+	flushMock()
+}
+
+func encodePayload(buf []byte, origin models.OriginType) models.Payload {
+	bufStr := string(buf)
+	dataType := models.String
+	if !util.IsASCII(string(buf)) {
+		bufStr = util.EncodeBase64(buf)
+		dataType = "binary"
+	}
+	return models.Payload{
+		Origin: origin,
+		Message: []models.OutputBinary{
+			{
+				Type: dataType,
+				Data: bufStr,
+			},
+		},
 	}
 }

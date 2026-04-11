@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -88,81 +89,111 @@ func (b *httpBodyCaptureBuffer) Reset() {
 	b.buf.Reset()
 }
 
-// captureTimestamp records the wall-clock time at which a chunk of data
-// was captured at a given byte offset in the capture buffer.
-type captureTimestamp struct {
-	offset int
-	ts     time.Time
-}
-
-// captureWriter is a non-blocking writer that buffers data for async test case
-// capture. It silently stops capturing (without returning errors) when memory
-// pressure is detected or the buffer exceeds maxSize, so it never blocks or
-// slows the primary forwarding path.
+// asyncPipeFeeder is a non-blocking writer used in the forwarding path.
+// It copies incoming bytes to a buffered channel; a separate bridge goroutine
+// drains the channel into an io.PipeWriter. This guarantees the forwarding
+// goroutine (io.Copy) is never blocked by capture — even if the parser is slow
+// or CaptureHook blocks on a full channel.
 //
-// It also records a timestamp for each Write call so that parseCapturedHTTP
-// can assign accurate request/response timestamps instead of using time.Now()
-// at parse time (which runs after the connection closes).
-type captureWriter struct {
-	buf     bytes.Buffer
-	stopped bool
-	maxSize int
-	times   []captureTimestamp
+// Graceful degradation: when memory pressure is detected, the max capture size
+// is exceeded, or the channel fills up, the feeder silently stops capturing.
+// The forwarding path is never affected.
+type asyncPipeFeeder struct {
+	ch      chan []byte
+	pw      *io.PipeWriter
+	closed  atomic.Bool
+	written atomic.Int64
+	maxSize int64
+	logger  *zap.Logger
 }
 
-func (w *captureWriter) Write(p []byte) (int, error) {
-	if w.stopped {
+// newAsyncPipeFeeder creates a feeder and returns the pipe reader end for
+// the streaming parser. The bridge goroutine is started automatically.
+func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) (*asyncPipeFeeder, *io.PipeReader) {
+	pr, pw := io.Pipe()
+	f := &asyncPipeFeeder{
+		// 512 slots ≈ 16MB at 32KB/chunk. Must be large enough that
+		// the channel never overflows during normal operation — a single
+		// 5MB response body needs ~160 slots, and brief pipeline stalls
+		// (parser transitioning between request/response reads) can
+		// cause data to accumulate. Overflowing kills capture for the
+		// rest of the connection because the HTTP stream becomes
+		// unrecoverable.
+		ch:      make(chan []byte, 512),
+		pw:      pw,
+		maxSize: int64(maxSize),
+		logger:  logger,
+	}
+	go f.bridge()
+	return f, pr
+}
+
+// bridge drains the buffered channel into the pipe writer. It runs in its
+// own goroutine so the forwarding goroutine never blocks on pipe writes.
+// Exits when the channel is closed (by Close) or on pipe write error.
+func (f *asyncPipeFeeder) bridge() {
+	defer f.pw.Close()
+	for chunk := range f.ch {
+		if _, err := f.pw.Write(chunk); err != nil {
+			// Pipe reader closed (parser done). Mark closed so Write()
+			// stops enqueuing, then drain remaining channel items to
+			// prevent the forwarding goroutine from blocking on send.
+			f.closed.Store(true)
+			for range f.ch {
+			}
+			return
+		}
+	}
+}
+
+// Write copies p and enqueues it for the bridge goroutine. It never blocks
+// the caller. Called only from the forwarding goroutine (via io.MultiWriter).
+func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
+	if f.closed.Load() {
 		return len(p), nil
 	}
-	if isIngressRecordingPaused() || (w.maxSize > 0 && w.buf.Len()+len(p) > w.maxSize) {
-		w.stopped = true
-		// Replace with zero-value buffer to immediately release the underlying
-		// allocated memory to the GC. bytes.Buffer.Reset() only resets the
-		// length but keeps the capacity, so a 5MB buffer would still hold 5MB.
-		w.buf = bytes.Buffer{}
-		w.times = nil
+	if isIngressRecordingPaused() {
+		f.closed.Store(true)
 		return len(p), nil
 	}
-	w.times = append(w.times, captureTimestamp{offset: w.buf.Len(), ts: time.Now()})
-	w.buf.Write(p)
+	newTotal := f.written.Add(int64(len(p)))
+	if f.maxSize > 0 && newTotal > f.maxSize {
+		f.closed.Store(true)
+		return len(p), nil
+	}
+	// Copy data — the original slice belongs to io.Copy's reusable buffer.
+	buf := make([]byte, len(p))
+	copy(buf, p)
+	select {
+	case f.ch <- buf:
+	default:
+		// Channel full — parser can't keep up. Stop capture for this
+		// connection. Remaining test cases on this connection will be lost.
+		f.closed.Store(true)
+		if f.logger != nil {
+			f.logger.Warn("Capture channel full — dropping remaining test cases on this connection. "+
+				"This may indicate responses too large for the channel buffer.",
+				zap.Int64("total_bytes_written", f.written.Load()),
+				zap.Int("chunk_size", len(p)),
+				zap.Int("channel_capacity", cap(f.ch)),
+			)
+		}
+	}
 	return len(p), nil
 }
 
-// free releases the capture buffer's underlying memory to the GC.
-// Must only be called after forwarding goroutines have finished (after done channels).
-func (w *captureWriter) free() {
-	w.buf = bytes.Buffer{}
-	w.times = nil
-}
-
-// timestampAtOffset returns the approximate wall-clock time at which the byte
-// at the given offset was written to the capture buffer. It searches the
-// recorded timestamps in reverse to find the last chunk that starts at or
-// before the requested offset.
-func timestampAtOffset(times []captureTimestamp, offset int) time.Time {
-	for i := len(times) - 1; i >= 0; i-- {
-		if times[i].offset <= offset {
-			return times[i].ts
-		}
-	}
-	if len(times) > 0 {
-		return times[0].ts
-	}
-	return time.Now()
-}
-
-// countingReader wraps an io.Reader and counts the total bytes read from it.
-// Used together with bufio.Reader.Buffered() to compute the byte offset of
-// the next unconsumed message in the original capture buffer.
-type countingReader struct {
-	r     io.Reader
-	count int
-}
-
-func (cr *countingReader) Read(p []byte) (int, error) {
-	n, err := cr.r.Read(p)
-	cr.count += n
-	return n, err
+// Close signals the bridge goroutine to exit. Must be called after the
+// forwarding goroutine finishes (after io.Copy returns). Write() is
+// never called after Close() — they run on the same goroutine — so
+// there is no send-on-closed-channel race.
+//
+// Important: we do NOT close f.pw here. The bridge goroutine must first
+// drain all remaining channel items into the pipe so the parser sees
+// every byte. The bridge's deferred f.pw.Close() runs after the drain
+// completes, giving the parser a clean EOF only after all data is written.
+func (f *asyncPipeFeeder) Close() {
+	f.closed.Store(true)
+	close(f.ch)
 }
 
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
@@ -270,18 +301,26 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}
 	defer upConn.Close()
 
-	// forceCloseMode is true if we are running in sync or sampling mode.
-	// In these modes, disable keep-alive and drop the loop after one request.
-	forceCloseMode := pm.synchronous || pm.sampling
+	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
+	// (strict one-at-a-time ordering with forced close). Sampling mode now
+	// uses the zero-copy path for both tracked and bypass connections.
+	forceCloseMode := pm.synchronous
 
 	if !forceCloseMode {
-		// Normal mode: transparent TCP passthrough with async test case capture.
-		// Raw bytes are forwarded between client and upstream with zero HTTP
-		// parsing overhead. A copy is captured in side buffers and parsed
-		// asynchronously after the connection closes to create test cases.
-		// When memory pressure is detected, the side-copy stops but forwarding
-		// continues unimpacted.
-		releaseLock()
+		// Sampling bypass: no lock, no capture — raw TCP passthrough.
+		if pm.sampling && !acquiredLock {
+			forwardRawTCP(clientConn, upConn)
+			return
+		}
+		// Normal mode OR sampling-tracked: zero-copy TCP passthrough with
+		// streaming capture. Forwarding runs at wire speed via io.Copy;
+		// capture is fully decoupled via non-blocking asyncPipeFeeders.
+		// For sampling-tracked, the semaphore stays held (via defer
+		// releaseLock) until the connection closes, limiting concurrent
+		// captures to the configured slot count.
+		if !pm.sampling {
+			releaseLock() // Normal mode has no sampling lock to hold
+		}
 		pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, t, actualPort)
 		return
 	}
@@ -467,7 +506,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			shouldCapture = false
 		}
 
-		if reqCapture.Truncated() || respCapture.Truncated() {
+		if shouldCapture && (reqCapture.Truncated() || respCapture.Truncated()) {
 			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
 				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -477,10 +516,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
 			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
+			shouldCapture = false
 		}
 
 		if !shouldCapture {
@@ -490,90 +526,85 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			continue
 		}
 
-		exchangeCaptureSize, err := capturedExchangeSize(req, resp, reqCapture.Bytes(), respCapture.Bytes())
-		if err != nil {
-			logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
-				zap.Error(err),
-				zap.Int64("request_bytes_seen", reqCapture.Total()),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
-		if exchangeCaptureSize > maxHTTPCombinedCaptureBytes {
-			logger.Debug("Skipping HTTP capture because combined request and response exceeded capture budget",
-				zap.Int("capture_budget_bytes", maxHTTPCombinedCaptureBytes),
-				zap.Int("captured_exchange_bytes", exchangeCaptureSize),
-				zap.Int64("request_bytes_seen", reqCapture.Total()),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-				zap.String("url", req.URL.String()),
-				zap.String("method", req.Method),
-				zap.Int("status_code", resp.StatusCode),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
-
-		// Capture parsing is best-effort: the exchange has already been proxied
-		// successfully, so parse failures should not terminate the connection.
-		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
-		if err != nil {
-			logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
-				zap.Error(err),
-				zap.Int64("request_bytes_seen", reqCapture.Total()),
-				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
-
-		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
-		if err != nil {
-			logger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
-				zap.Error(err),
-				zap.Int("captured_request_dump_bytes", len(reqData)),
-				zap.Int64("request_bytes_seen", reqCapture.Total()),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
-
-		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
-		if err != nil {
-			logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
-				zap.Error(err),
-				zap.Int("status_code", resp.StatusCode),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-				zap.Int("captured_response_bytes", len(respCapture.Bytes())),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
-		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
-		if err != nil {
-			logger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
-				zap.Error(err),
-				zap.Int("captured_response_dump_bytes", len(respData)),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-				zap.Int("status_code", resp.StatusCode),
-			)
-			if forceCloseMode || pressureCloseMode {
-				return
-			}
-			continue
-		}
+		// Move ALL capture parsing to a background goroutine so the
+		// sampling semaphore is released immediately (via defer releaseLock
+		// when this function returns). For large payloads the dump+parse
+		// cycle allocates 8MB+ of intermediate copies; doing that while
+		// holding the semaphore starves other connections of capture slots
+		// and drives up p95 latency under load.
+		//
+		// Snapshot the capture buffer bytes — the goroutine will own them.
+		reqBodyBytes := reqCapture.Bytes()
+		respBodyBytes := respCapture.Bytes()
+		reqBytesTotal := reqCapture.Total()
+		respBytesTotal := respCapture.Total()
 
 		go func() {
+			exchangeCaptureSize, err := capturedExchangeSize(req, resp, reqBodyBytes, respBodyBytes)
+			if err != nil {
+				logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
+					zap.Error(err),
+					zap.Int64("request_bytes_seen", reqBytesTotal),
+					zap.Int64("response_bytes_seen", respBytesTotal),
+				)
+				return
+			}
+			if exchangeCaptureSize > maxHTTPCombinedCaptureBytes {
+				logger.Debug("Skipping HTTP capture because combined request and response exceeded capture budget",
+					zap.Int("capture_budget_bytes", maxHTTPCombinedCaptureBytes),
+					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
+					zap.Int64("request_bytes_seen", reqBytesTotal),
+					zap.Int64("response_bytes_seen", respBytesTotal),
+					zap.String("url", req.URL.String()),
+					zap.String("method", req.Method),
+					zap.Int("status_code", resp.StatusCode),
+				)
+				return
+			}
+
+			// Capture parsing is best-effort: the exchange has already been
+			// proxied successfully, so parse failures just skip the test case.
+			reqData, err := dumpCapturedRequest(req, reqBodyBytes)
+			if err != nil {
+				logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
+					zap.Error(err),
+					zap.Int64("request_bytes_seen", reqBytesTotal),
+					zap.Int("captured_request_bytes", len(reqBodyBytes)),
+				)
+				return
+			}
+
+			parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
+			if err != nil {
+				logger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
+					zap.Error(err),
+					zap.Int("captured_request_dump_bytes", len(reqData)),
+					zap.Int64("request_bytes_seen", reqBytesTotal),
+				)
+				return
+			}
+
+			respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respBodyBytes)
+			if err != nil {
+				logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
+					zap.Error(err),
+					zap.Int("status_code", resp.StatusCode),
+					zap.Int64("response_bytes_seen", respBytesTotal),
+					zap.Int("captured_response_bytes", len(respBodyBytes)),
+				)
+				return
+			}
+			parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
+			if err != nil {
+				logger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
+					zap.Error(err),
+					zap.Int("captured_response_dump_bytes", len(respData)),
+					zap.Int64("response_bytes_seen", respBytesTotal),
+					zap.Int("status_code", resp.StatusCode),
+				)
+				return
+			}
+
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
 			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
@@ -588,42 +619,59 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 // handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
 // non-sampling) mode. It forwards raw TCP bytes bidirectionally between client
-// and upstream with zero HTTP parsing overhead on the critical path. A copy of
-// the bytes is captured in side buffers. After the connection closes, the
-// captured data is parsed asynchronously to create test cases. When memory
-// pressure is detected, the side-copy stops but forwarding continues unimpacted.
+// and upstream with zero HTTP parsing overhead on the critical path.
+//
+// Capture is fully decoupled from forwarding: byte streams are piped through
+// non-blocking asyncPipeFeeders to a streaming parser (parseStreamingHTTP)
+// that emits test cases as soon as each HTTP exchange completes — without
+// waiting for the connection to close. When memory pressure is detected or
+// the capture size limit is reached, the feeders silently stop capturing
+// while forwarding continues unimpacted.
 func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16) {
-	logger.Debug("Using zero-copy TCP passthrough with async capture")
+	logger.Debug("Using zero-copy TCP passthrough with streaming capture")
 
 	captureEnabled := !isIngressRecordingPaused()
-	var reqCapture, respCapture *captureWriter
+	var reqFeeder, respFeeder *asyncPipeFeeder
 	if captureEnabled {
-		reqCapture = &captureWriter{maxSize: hooksUtils.MaxTestCaseSize}
-		respCapture = &captureWriter{maxSize: hooksUtils.MaxTestCaseSize}
+		var reqPipeR, respPipeR *io.PipeReader
+		// maxSize=0 disables the per-feeder total-bytes limit. With
+		// streaming capture the parser consumes data incrementally, so
+		// in-flight memory is bounded by the channel buffer plus one
+		// request/response body in the parser. The per-test-case size
+		// limit is enforced downstream in CaptureHook.
+		reqFeeder, reqPipeR = newAsyncPipeFeeder(0, logger)
+		respFeeder, respPipeR = newAsyncPipeFeeder(0, logger)
+		go pm.parseStreamingHTTP(ctx, logger, reqPipeR, respPipeR, t, appPort)
 	}
 
 	done := make(chan struct{}, 2)
 
-	// client → upstream (with optional side-copy for capture)
+	// client → upstream (with optional non-blocking side-copy for capture)
 	go func() {
 		var dst io.Writer = upConn
-		if reqCapture != nil {
-			dst = io.MultiWriter(upConn, reqCapture)
+		if reqFeeder != nil {
+			dst = io.MultiWriter(upConn, reqFeeder)
 		}
 		_, _ = io.Copy(dst, clientConn)
+		if reqFeeder != nil {
+			reqFeeder.Close()
+		}
 		if tc, ok := upConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
 
-	// upstream → client (with optional side-copy for capture)
+	// upstream → client (with optional non-blocking side-copy for capture)
 	go func() {
 		var dst io.Writer = clientConn
-		if respCapture != nil {
-			dst = io.MultiWriter(clientConn, respCapture)
+		if respFeeder != nil {
+			dst = io.MultiWriter(clientConn, respFeeder)
 		}
 		_, _ = io.Copy(dst, upConn)
+		if respFeeder != nil {
+			respFeeder.Close()
+		}
 		if tc, ok := clientConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
@@ -632,64 +680,37 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 	<-done
 	<-done
-
-	// Immediately free capture buffers to release memory back to GC.
-	// This is critical: we must not hold onto multi-MB buffers any longer
-	// than necessary, especially when memory may be near the container limit.
-	// Copy the data out first (for async parsing), then free immediately.
-	var reqBytes, respBytes []byte
-	var reqTimes, respTimes []captureTimestamp
-	if reqCapture != nil && respCapture != nil && !reqCapture.stopped && !respCapture.stopped {
-		if reqCapture.buf.Len() > 0 && respCapture.buf.Len() > 0 {
-			reqBytes = make([]byte, reqCapture.buf.Len())
-			copy(reqBytes, reqCapture.buf.Bytes())
-			respBytes = make([]byte, respCapture.buf.Len())
-			copy(respBytes, respCapture.buf.Bytes())
-			// Preserve timestamp slices before freeing — the background
-			// goroutine references the same underlying arrays.
-			reqTimes = reqCapture.times
-			respTimes = respCapture.times
-		}
-	}
-	// Free regardless of whether capture succeeded or was stopped
-	if reqCapture != nil {
-		reqCapture.free()
-	}
-	if respCapture != nil {
-		respCapture.free()
-	}
-
-	if len(reqBytes) > 0 && len(respBytes) > 0 {
-		go pm.parseCapturedHTTP(ctx, logger, reqBytes, respBytes, reqTimes, respTimes, t, appPort)
-	}
+	// No post-hoc parsing needed — test cases were emitted incrementally
+	// by parseStreamingHTTP as each HTTP exchange completed.
 }
 
-// parseCapturedHTTP parses raw HTTP request/response bytes captured during
-// zero-copy passthrough and creates test cases. It handles multiple
-// request/response pairs from keep-alive connections. This runs in a background
-// goroutine after the connection closes, with zero impact on the client-server
-// communication.
+// parseStreamingHTTP reads from request and response pipes concurrently with
+// live forwarding, emitting test cases as soon as each HTTP exchange completes.
+// This avoids waiting for the connection to close before capturing test cases.
 //
-// reqTimes/respTimes carry the wall-clock timestamps recorded by captureWriter
-// during live forwarding, so test cases get accurate timestamps that align with
-// the mocks recorded by the outgoing proxy. Without these, all test cases would
-// get post-connection-close timestamps and the mock-to-test mapping would break.
-func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *zap.Logger, reqData, respData []byte, reqTimes, respTimes []captureTimestamp, t chan *models.TestCase, appPort uint16) {
-	reqCounting := &countingReader{r: bytes.NewReader(reqData)}
-	respCounting := &countingReader{r: bytes.NewReader(respData)}
-	reqReader := bufio.NewReader(reqCounting)
-	respReader := bufio.NewReader(respCounting)
+// http.ReadRequest / http.ReadResponse act as natural delimiters — HTTP/1.1 is
+// self-framing (headers end with \r\n\r\n, body length from Content-Length or
+// chunked encoding), so no custom delimiter detection is needed.
+//
+// Timestamps are taken at parse time which closely tracks when bytes actually
+// flowed through the forwarding path, since the pipe feeds data as fast as the
+// network delivers it.
+func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *zap.Logger,
+	reqR *io.PipeReader, respR *io.PipeReader, t chan *models.TestCase, appPort uint16) {
+	defer reqR.Close()
+	defer respR.Close()
+
+	reqReader := bufio.NewReader(reqR)
+	respReader := bufio.NewReader(respR)
 
 	for {
 		if isIngressRecordingPaused() {
 			return
 		}
 
-		// Byte offset of the start of this request in the original capture
-		// buffer = total bytes read from underlying reader minus bytes still
-		// buffered by bufio.Reader (read-ahead that hasn't been consumed yet).
-		reqOffset := reqCounting.count - reqReader.Buffered()
-		reqTimestamp := timestampAtOffset(reqTimes, reqOffset)
+		// Timestamp taken just before reading — approximates when the
+		// first byte of this request arrived from the client.
+		reqTimestamp := time.Now()
 
 		req, err := http.ReadRequest(reqReader)
 		if err != nil {
@@ -720,16 +741,42 @@ func (pm *IngressProxyManager) parseCapturedHTTP(ctx context.Context, logger *za
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
-		// Byte offset right after this response — the timestamp at this
-		// position approximates when the last byte of the response arrived.
-		respEndOffset := respCounting.count - respReader.Buffered()
-		respTimestamp := timestampAtOffset(respTimes, respEndOffset)
+		// Timestamp taken right after reading the full response body —
+		// approximates when the last byte of the response was forwarded.
+		respTimestamp := time.Now()
 		if respTimestamp.Before(reqTimestamp) {
 			respTimestamp = reqTimestamp
 		}
 
-		hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, appPort)
+		// Emit in a goroutine so the parser loop is never blocked by
+		// CaptureHook (e.g. if the test case channel is temporarily full).
+		go hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, appPort)
 	}
+}
+
+// forwardRawTCP does bidirectional TCP forwarding between two connections
+// with zero HTTP parsing overhead. Used for sampling-bypass connections
+// where capture is not needed — bytes flow straight through via io.Copy.
+// Keep-alive is preserved (no Connection: close injected), so the client
+// can reuse the connection for multiple requests.
+func forwardRawTCP(clientConn, upConn net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upConn, clientConn)
+		if tc, ok := upConn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(clientConn, upConn)
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
 }
 
 func isChunked(te []string) bool {
