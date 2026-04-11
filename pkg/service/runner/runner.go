@@ -28,7 +28,7 @@ type Runner struct {
 }
 
 // NewRunner creates a Runner with all dependencies.
-func NewRunner(
+func New(
 	logger *zap.Logger,
 	testCaseDB TestCaseDB,
 	instrumentation Instrumentation,
