@@ -301,6 +301,11 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
+
+		// Pass replayConn so RecordIncoming sees the full byte stream including
+		// the preface. RecordIncoming's forwardAndTee will forward everything
+		// (including the preface) to the upstream app, which is what cmux needs
+		// to see the original handshake.
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)

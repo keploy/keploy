@@ -3,378 +3,233 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
+	"golang.org/x/net/http2"
 )
 
-func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, destAddr string) error {
-	return recordIncomingTestCase(ctx, logger, clientConn, destConn, t, appPort, destAddr)
-}
+// RecordIncoming captures an incoming gRPC conversation by forwarding raw bytes
+// bidirectionally between the client and the upstream app, while parsing HTTP/2
+// frames using Go's standard library (http2.NewFramer) and tracking stream state
+// via DefaultStreamManager.
+//
+// This passthrough approach is compatible with cmux and any other listener wrapper
+// because it forwards the client's original HTTP/2 handshake directly to the app
+// without creating a separate gRPC session.
+func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string) error {
+	// Close connections on ctx cancellation to unblock all goroutines.
+	// This ensures no goroutine leaks during shutdown/StopIngress.
+	go func() {
+		<-ctx.Done()
+		clientConn.Close()
+		destConn.Close()
+	}()
 
-func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, destAddr string) error {
-	proxy := &grpcTestCaseProxy{
-		logger:    logger,
-		destConn:  destConn,
-		testCases: t,
-		ctx:       ctx,
-		appPort:   appPort,
-		destAddr:  destAddr,
-	}
-
-	// Defer connection closures with nil checks
 	defer func() {
 		if err := clientConn.Close(); err != nil &&
 			!strings.Contains(err.Error(), "use of closed network connection") {
-			logger.Error("failed to close client connection in test case mode", zap.Error(err))
+			logger.Debug("failed to close client connection", zap.Error(err))
 		}
-		// Close the proxy's destConn (which may have been replaced with a new connection)
-		if proxy.destConn != nil {
-			if err := proxy.destConn.Close(); err != nil &&
-				!strings.Contains(err.Error(), "use of closed network connection") {
-				logger.Error("failed to close destination connection in test case mode", zap.Error(err))
-			}
-		}
-
-		if proxy.cc != nil {
-			if err := proxy.cc.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-				logger.Debug("failed to close gRPC client connection in test case mode", zap.Error(err))
-			}
+		if err := destConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Debug("failed to close destination connection", zap.Error(err))
 		}
 	}()
 
-	srv := grpc.NewServer(
-		grpc.UnknownServiceHandler(proxy.handler),
-		grpc.ForceServerCodec(new(rawCodec)),
-	)
+	logger.Debug("starting gRPC test case capture (passthrough mode)")
 
-	lis := newSingleConnListener(clientConn)
-	logger.Info("starting gRPC test case capture server")
+	sm := pkg.NewStreamManager(logger)
 
-	srvErr := make(chan error, 1)
+	// Channels for teeing bytes to parsers. Large buffer (512) so the forwarder
+	// is never blocked by the parser in practice. If the channel fills up, the
+	// forwarder blocks (preserving stream integrity) rather than dropping bytes
+	// which would corrupt the HTTP/2 frame alignment for the parser.
+	clientFrameCh := make(chan []byte, 512)
+	destFrameCh := make(chan []byte, 512)
 
+	// Forward client → dest, tee copies to channel
 	go func() {
-		err := srv.Serve(lis)
-		logger.Debug("gRPC server has stopped, sending error to channel", zap.Error(err))
-		srvErr <- err
+		defer close(clientFrameCh)
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app")
 	}()
 
-	select {
-	case <-ctx.Done():
-		go srv.GracefulStop()
-		logger.Debug("waiting for gRPC test case capture server to stop")
-		err := <-srvErr
-		logger.Info("gRPC test case capture server stopped gracefully", zap.Error(err))
-		return ctx.Err()
-	case err := <-srvErr:
-		switch {
-		case err == nil,
-			err == io.EOF,
-			strings.Contains(err.Error(), "connection reset by peer"),
-			strings.Contains(err.Error(), "use of closed network connection"):
-			logger.Info("gRPC test case capture server stopped gracefully")
-			return nil
+	// Forward dest → client, tee copies to channel
+	go func() {
+		defer close(destFrameCh)
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client")
+	}()
+
+	// Single emitter goroutine to avoid duplicate test case emission.
+	emitCh := make(chan struct{}, 1)
+	emitDone := make(chan struct{})
+	go func() {
+		defer close(emitDone)
+		for range emitCh {
+			emitCompleteStreams(logger, ctx, sm, t, appPort)
+		}
+		emitCompleteStreams(logger, ctx, sm, t, appPort)
+	}()
+
+	triggerEmit := func() {
+		select {
+		case emitCh <- struct{}{}:
 		default:
-			logger.Error("gRPC test case capture server failed", zap.Error(err))
-			return err
-		}
-	}
-}
-
-type grpcTestCaseProxy struct {
-	logger    *zap.Logger
-	destConn  net.Conn
-	testCases chan *models.TestCase // Note: This is now a TestCase channel
-	ctx       context.Context
-	ccMu      sync.Mutex
-	cc        *grpc.ClientConn
-	appPort   uint16
-	destAddr  string // destination address for creating new connections
-}
-
-func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn, error) {
-	p.ccMu.Lock()
-	defer p.ccMu.Unlock()
-
-	if p.cc != nil {
-		s := p.cc.GetState()
-		p.logger.Debug("checking gRPC client connection state", zap.String("state", s.String()))
-		// If connection is not READY or CONNECTING, the underlying TCP connection may be closed.
-		// We need to create a new connection to the destination.
-		if s != connectivity.Ready && s != connectivity.Connecting {
-			p.logger.Debug("gRPC client connection is not usable, will create new one", zap.String("state", s.String()))
-			_ = p.cc.Close()
-			p.cc = nil
-			// Close the old destConn and create a new one
-			if p.destConn != nil {
-				_ = p.destConn.Close()
-			}
-			newConn, err := net.DialTimeout("tcp4", p.destAddr, 3*time.Second)
-			if err != nil {
-				p.logger.Error("failed to create new destination connection", zap.Error(err))
-				return nil, err
-			}
-			p.destConn = newConn
-			p.logger.Debug("created new destination connection", zap.String("destAddr", p.destAddr))
-		} else {
-			// Connection is READY or CONNECTING, reuse it
-			return p.cc, nil
 		}
 	}
 
-	p.logger.Debug("creating new gRPC client connection")
+	var parseWg sync.WaitGroup
+	parseWg.Add(2)
 
-	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
-
-	target := p.destConn.RemoteAddr().String()
-	cc, err := grpc.DialContext(
-		ctx,
-		target,
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(passthroughCodec{})),
-	)
-	if err != nil {
-		return nil, err
-	}
-	p.cc = cc
-	return cc, nil
-}
-
-func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStream) error {
-	p.logger.Debug("received gRPC call for test case capture")
-	startTime := time.Now()
-	clientCtx := clientStream.Context()
-	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
-	captureEnabled := !memoryguard.IsRecordingPaused()
-
-	md, _ := metadata.FromIncomingContext(clientCtx)
-	p.logger.Debug("proxying gRPC request for test case capture", zap.String("method", fullMethod))
-
-	destClientConn, err := p.getClientConn(clientCtx)
-	if err != nil {
-		p.logger.Debug("failed to dial destination server", zap.Error(err))
-		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
-	}
-
-	downstreamCtx, cancelDownstream := context.WithCancel(clientCtx)
-	defer cancelDownstream()
-
-	cleanMD := metadata.New(nil)
-	for k, v := range md {
-		if strings.HasPrefix(k, ":") {
-			continue
-		}
-		cleanMD[k] = v
-	}
-
-	downstreamCtx = metadata.NewOutgoingContext(downstreamCtx, cleanMD)
-	destStream, err := destClientConn.NewStream(downstreamCtx, &grpc.StreamDesc{
-		StreamName:    fullMethod,
-		ServerStreams: true,
-		ClientStreams: true,
-	}, fullMethod)
-	if err != nil {
-		p.logger.Error("failed to create new stream to destination", zap.Error(err))
-		return status.Errorf(codes.Internal, "failed to create stream to destination: %v", err)
-	}
-
-	var wg sync.WaitGroup
-	var reqErr, respErr error
-	var reqBuf, respBuf bytes.Buffer
-
-	wg.Add(1)
+	// Parse client→app frames (requests)
 	go func() {
-		defer wg.Done()
-		for {
-			reqMsg := new(rawMessage)
-			reqErr = clientStream.RecvMsg(reqMsg)
-			if reqErr != nil { // Handles io.EOF and other errors
-				destStream.CloseSend()
-				return
-			}
-			if captureEnabled && !memoryguard.IsRecordingPaused() {
-				reqBuf.Write(reqMsg.data)
-			}
-			if err := destStream.SendMsg(reqMsg); err != nil {
-				reqErr = err
-				return
-			}
-		}
+		defer parseWg.Done()
+		parseFramesFromChan(ctx, logger, clientFrameCh, sm, false, triggerEmit)
 	}()
 
-	respHeader := metadata.MD{}
-	wg.Add(1)
+	// Parse app→client frames (responses)
 	go func() {
-		defer wg.Done()
-		header, err := destStream.Header()
-		if err != nil {
-			respErr = err
-			return
-		}
-
-		respHeader = header
-		if err := clientStream.SendHeader(header); err != nil {
-			respErr = err
-			return
-		}
-		for {
-			respMsg := new(rawMessage)
-			respErr = destStream.RecvMsg(respMsg)
-			if respErr != nil { // Handles io.EOF and status errors
-				return
-			}
-			if captureEnabled && !memoryguard.IsRecordingPaused() {
-				respBuf.Write(respMsg.data)
-			}
-			if err := clientStream.SendMsg(respMsg); err != nil {
-				respErr = err
-				return
-			}
-		}
+		defer parseWg.Done()
+		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, triggerEmit)
 	}()
 
-	// Wait for both goroutines to finish data transfer.
-	wg.Wait()
+	parseWg.Wait()
+	close(emitCh)
+	<-emitDone
 
-	endTime := time.Now()
-	destTrailers := destStream.Trailer()
-	clientStream.SetTrailer(destTrailers)
-
-	grpcReq := &models.GrpcReq{
-		Body:      createLengthPrefixedMessage(reqBuf.Bytes()),
-		Headers:   p.grpcMetadataToHeaders(md, fullMethod, false),
-		Timestamp: startTime,
-	}
-
-	grpcResp := &models.GrpcResp{
-		Body:      createLengthPrefixedMessage(respBuf.Bytes()),
-		Headers:   p.grpcMetadataToHeaders(respHeader, "", true),
-		Trailers:  p.grpcMetadataToHeaders(destTrailers, "", true),
-		Timestamp: endTime,
-	}
-
-	if st, ok := status.FromError(respErr); ok && respErr != nil {
-		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = fmt.Sprintf("%d", st.Code())
-		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = st.Message()
-	} else {
-		if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
-			grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
-		}
-		if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]; !ok {
-			grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
-		}
-	}
-
-	if captureEnabled && !memoryguard.IsRecordingPaused() {
-		http2Stream := &pkg.HTTP2Stream{
-			ID:       0,
-			GRPCReq:  grpcReq,
-			GRPCResp: grpcResp,
-		}
-
-		Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
-	}
-
-	if s, ok := status.FromError(respErr); ok && respErr != nil {
-		return s.Err()
-	}
-
+	logger.Debug("gRPC passthrough capture completed")
 	return nil
 }
 
-func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod string, isResponse bool) models.GrpcHeaders {
-	hdr := models.GrpcHeaders{
-		PseudoHeaders:   make(map[string]string),
-		OrdinaryHeaders: make(map[string]string),
-	}
-
-	for k, v := range md {
-		val := strings.Join(v, ", ")
-		if strings.HasPrefix(k, ":") {
-			hdr.PseudoHeaders[k] = val
-		} else {
-			hdr.OrdinaryHeaders[k] = val
-		}
-	}
-
-	if !isResponse {
-		// :method
-		if _, ok := hdr.PseudoHeaders[":method"]; !ok {
-			hdr.PseudoHeaders[":method"] = "POST"
-		}
-
-		// :scheme (keep http as we dial over the provided net.Conn)
-		if _, ok := hdr.PseudoHeaders[":scheme"]; !ok {
-			hdr.PseudoHeaders[":scheme"] = "http"
-		}
-
-		// :path — prefer fullMethod; ensure it's non-empty and starts with '/'
-		if _, ok := hdr.PseudoHeaders[":path"]; !ok || hdr.PseudoHeaders[":path"] == "" {
-			if fullMethod != "" {
-				if !strings.HasPrefix(fullMethod, "/") {
-					fullMethod = "/" + fullMethod
+// forwardAndTee reads from src, writes to dst (forwarding), and sends a copy
+// to the channel for frame parsing. The channel send blocks if full to preserve
+// HTTP/2 frame stream integrity (dropping bytes would corrupt parser alignment).
+// This is safe because the parser is faster than network I/O, and ctx cancellation
+// closes the connections which unblocks the reads.
+//
+// When memory pressure is detected, the tee stops permanently for this
+// connection (cannot resume without corrupting the parser's frame alignment).
+// Forwarding continues unimpacted.
+func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, direction string) {
+	buf := make([]byte, 32*1024)
+	teeActive := !memoryguard.IsRecordingPaused()
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if _, wErr := dst.Write(buf[:n]); wErr != nil {
+				logger.Debug("forward write error",
+					zap.String("direction", direction), zap.Error(wErr))
+				return
+			}
+			if teeActive {
+				if memoryguard.IsRecordingPaused() {
+					teeActive = false
+				} else {
+					data := make([]byte, n)
+					copy(data, buf[:n])
+					ch <- data // blocking send — preserves stream integrity
 				}
-				hdr.PseudoHeaders[":path"] = fullMethod
-			} else {
-				// absolute last resort to avoid "missing :path header"
-				hdr.PseudoHeaders[":path"] = "/"
 			}
 		}
-
-		// :authority — derive from Host header if present, else from destConn
-		if _, ok := hdr.PseudoHeaders[":authority"]; !ok || hdr.PseudoHeaders[":authority"] == "" {
-			if p.destConn != nil && p.destConn.RemoteAddr() != nil {
-				hdr.PseudoHeaders[":authority"] = p.destConn.RemoteAddr().String()
+		if err != nil {
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed") {
+				logger.Debug("forward read finished",
+					zap.String("direction", direction), zap.Error(err))
 			}
+			return
 		}
-
-		if _, ok := hdr.OrdinaryHeaders["te"]; !ok {
-			hdr.OrdinaryHeaders["te"] = "trailers"
-		}
-	} else {
-		if _, ok := hdr.PseudoHeaders[":status"]; !ok {
-			hdr.PseudoHeaders[":status"] = "200"
-		}
-		if ct, ok := hdr.OrdinaryHeaders["content-type"]; ok &&
-			strings.HasPrefix(ct, "application/grpc") {
-			hdr.OrdinaryHeaders["content-type"] = "application/grpc"
-		}
-	}
-	return hdr
-}
-
-func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
-	// The original implementation stored the raw bytes as a string, which can
-	// safely hold binary data in Go. We will follow this for consistency with
-	// the existing fuzzy matching logic.
-	return models.GrpcLengthPrefixedMessage{
-		// Compression flag is 0 for uncompressed.
-		CompressionFlag: 0,
-		// MessageLength is the length of the raw data.
-		MessageLength: uint32(len(data)),
-		// DecodedData holds the text representation of the wire data.
-		DecodedData: prettyPrintWire(data, 0),
 	}
 }
 
-func prettyPrintWire(b []byte, _ int) string {
-	// The indent argument is ignored as protoscope handles formatting automatically.
-	return protoscope.Write(b, protoscope.WriterOptions{})
+// parseFramesFromChan reconstructs HTTP/2 frames from byte chunks received
+// via channel, then feeds them to the DefaultStreamManager.
+func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []byte, sm *pkg.DefaultStreamManager, isOutgoing bool, triggerEmit func()) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	go func() {
+		defer pw.Close()
+		var writeErr bool
+		for data := range ch {
+			// Keep draining the channel even after a pipe write error so the
+			// forwarder's blocking ch<-data never hangs. We just stop writing
+			// to the pipe (parser is done), but the channel must be consumed.
+			if !writeErr {
+				if _, err := pw.Write(data); err != nil {
+					writeErr = true
+				}
+			}
+		}
+	}()
+
+	if !isOutgoing {
+		preface := make([]byte, len(http2.ClientPreface))
+		if _, err := io.ReadFull(pr, preface); err != nil {
+			logger.Debug("failed to read HTTP/2 client preface", zap.Error(err))
+			return
+		}
+		if !bytes.Equal(preface, []byte(http2.ClientPreface)) {
+			logger.Debug("unexpected bytes instead of HTTP/2 preface")
+			return
+		}
+	}
+
+	framer := http2.NewFramer(nil, pr)
+	framer.ReadMetaHeaders = nil
+	framer.MaxHeaderListSize = 1 << 20
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		frame, err := framer.ReadFrame()
+		if err != nil {
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed") {
+				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
+			}
+			return
+		}
+
+		now := time.Now()
+		if err := sm.HandleFrame(frame, isOutgoing, now); err != nil {
+			logger.Debug("stream manager error", zap.Error(err))
+		}
+
+		triggerEmit()
+	}
+}
+
+// emitCompleteStreams checks the stream manager for complete request/response
+// pairs and sends them as test cases. Only called from the single emitter
+// goroutine to prevent duplicate emissions.
+func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.DefaultStreamManager, t chan *models.TestCase, appPort uint16) {
+	if t == nil || memoryguard.IsRecordingPaused() {
+		return
+	}
+
+	streams := sm.GetCompleteStreams()
+	for _, stream := range streams {
+		if stream.GRPCReq == nil || stream.GRPCResp == nil {
+			continue
+		}
+
+		method := ""
+		if path, ok := stream.GRPCReq.Headers.PseudoHeaders[":path"]; ok {
+			method = path
+		}
+		logger.Debug("captured gRPC test case (passthrough)", zap.String("method", method))
+		Utils.CaptureGRPC(ctx, logger, t, stream, appPort)
+		sm.CleanupStream(stream.ID)
+	}
 }
