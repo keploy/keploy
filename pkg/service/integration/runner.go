@@ -56,7 +56,10 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	}
 
 	// 2. Load mocks and get the expected mock names for this test case.
-	expectedMocks, err := r.loadMocks(ctx, opts.TestSetID, tc.Name, tc.HTTPReq.Timestamp)
+	expectedMocks, cleanup, err := r.loadMocks(ctx, opts.TestSetID, tc.Name, tc.HTTPReq.Timestamp)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		r.logger.Error("failed to load mocks; verify the recorded mocks exist and the mock store is accessible, then rerun the test",
 			zap.String("testCase", tc.Name),
@@ -92,10 +95,19 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("test execution failed: %v", execErr), Noise: tc.Noise}
 	}
 
-	diffJSON, _ := json.Marshal(respCompare)
-
 	// 6. Check mock mismatches (expected from mapping vs actually consumed).
 	mismatch := r.checkMockMismatches(ctx, expectedMocks)
+
+	diffJSON, err := json.Marshal(respCompare)
+	if err != nil {
+		return &TestResult{
+			Passed:         false,
+			Error:          fmt.Sprintf("failed to serialize response diff: %v", err),
+			Diff:           fmt.Sprintf("%+v", respCompare),
+			MockMismatches: mismatch,
+			Noise:          tc.Noise,
+		}
+	}
 
 	return &TestResult{
 		Passed:         passed,
@@ -145,21 +157,24 @@ func (r *Runner) loadTestCase(ctx context.Context, testSetID, testCaseName strin
 	return r.testCaseDB.GetTestCase(ctx, testSetID, testCaseName)
 }
 
-func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, backdate time.Time) ([]string, error) {
+func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, backdate time.Time) ([]string, func(), error) {
 
 	if r.instrumentation == nil && r.mockDB == nil {
-		return nil, fmt.Errorf("mock loading requires instrumentation and mockDB; initialize both dependencies before running integration tests with mocks")
+		return nil, nil, fmt.Errorf("mock loading requires instrumentation and mockDB; initialize both dependencies before running integration tests with mocks")
 	}
 	if r.instrumentation == nil {
-		return nil, fmt.Errorf("mock loading requires instrumentation; initialize the instrumentation dependency before running integration tests with mocks")
+		return nil, nil, fmt.Errorf("mock loading requires instrumentation; initialize the instrumentation dependency before running integration tests with mocks")
 	}
 	if r.mockDB == nil {
-		return nil, fmt.Errorf("mock loading requires mockDB; initialize the mock database dependency before running integration tests with mocks")
+		return nil, nil, fmt.Errorf("mock loading requires mockDB; initialize the mock database dependency before running integration tests with mocks")
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
-	defer func() {
+
+	// cleanup tears down the instrumentation context. The caller must defer
+	// this so mocks remain active throughout test execution.
+	cleanup := func() {
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
@@ -171,7 +186,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 				zap.String("testCaseName", testCaseName),
 			)
 		}
-	}()
+	}
 
 	// Setup eBPF hooks / proxy.
 	if r.config != nil {
@@ -182,7 +197,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
 		}); err != nil {
-			return nil, fmt.Errorf("setup failed: %w", err)
+			return nil, cleanup, fmt.Errorf("setup failed: %w", err)
 		}
 	}
 
@@ -202,7 +217,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 		outOpts.NoiseConfig = map[string]map[string][]string{"header": headerNoise}
 	}
 	if err := r.instrumentation.MockOutgoing(ctx, outOpts); err != nil {
-		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
+		return nil, cleanup, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
 
 	// Resolve which mocks are needed.
@@ -219,16 +234,16 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	beforeTime := time.Now()
 	filtered, err := r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return expected, fmt.Errorf("failed to get filtered mocks: %w", err)
+		return expected, cleanup, fmt.Errorf("failed to get filtered mocks: %w", err)
 	}
 	unfiltered, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return expected, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		return expected, cleanup, fmt.Errorf("failed to get unfiltered mocks: %w", err)
 	}
 
 	// Push to proxy.
 	if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		return expected, fmt.Errorf("failed to store mocks: %w", err)
+		return expected, cleanup, fmt.Errorf("failed to store mocks: %w", err)
 	}
 
 	// Send filter params.
@@ -239,7 +254,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 		MockMapping:     expected,
 	}
 	if err := r.instrumentation.UpdateMockParams(ctx, params); err != nil {
-		return expected, fmt.Errorf("failed to update mock params: %w", err)
+		return expected, cleanup, fmt.Errorf("failed to update mock params: %w", err)
 	}
 
 	if err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx); err != nil {
@@ -248,7 +263,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 
 	r.logger.Info("mocks loaded", zap.String("testSetID", testSetID),
 		zap.Int("filtered", len(filtered)), zap.Int("unfiltered", len(unfiltered)))
-	return expected, nil
+	return expected, cleanup, nil
 }
 
 func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool) {
