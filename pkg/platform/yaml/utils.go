@@ -209,8 +209,17 @@ func NextIndexForPrefix(path, prefix string) (int, error) {
 	if prefix == "" {
 		return 1, nil
 	}
-	if _, err := ValidatePath(prefix); err != nil {
-		return 1, err
+	// Reject a prefix that could escape its containing directory
+	// (path separators or parent references). The slug builder never
+	// emits these, but NextIndexForPrefix is exported so keep the
+	// guard in place for future callers.
+	if strings.ContainsAny(prefix, `/\`) || strings.Contains(prefix, "..") {
+		return 0, fmt.Errorf("invalid prefix %q: must not contain path separators", prefix)
+	}
+	// The directory path itself is what we actually read from, so
+	// validate that here instead of validating the slug prefix.
+	if _, err := ValidatePath(path); err != nil {
+		return 0, err
 	}
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {

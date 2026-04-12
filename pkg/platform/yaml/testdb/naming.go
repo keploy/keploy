@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	maxSlugLen  = 40
-	fallbackTC  = "test"
-	slugSuffMin = 1
+	maxSlugLen = 40
+	fallbackTC = "test"
 )
 
 var (

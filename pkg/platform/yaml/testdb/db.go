@@ -57,6 +57,27 @@ func NewWithNaming(logger *zap.Logger, tcsPath string, strategy NamingStrategy) 
 	}
 }
 
+// ParseNamingStrategy converts a user-supplied config string into a
+// NamingStrategy, tolerating whitespace and case differences. Empty or
+// unrecognised values fall back to NamingDescriptive — when the logger
+// is non-nil an unrecognised value is surfaced as a warning so config
+// typos are easier to spot.
+func ParseNamingStrategy(s string, logger *zap.Logger) NamingStrategy {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", string(NamingDescriptive):
+		return NamingDescriptive
+	case string(NamingSequential):
+		return NamingSequential
+	default:
+		if logger != nil {
+			logger.Warn("unknown record.testCaseNaming value; falling back to descriptive",
+				zap.String("value", s),
+				zap.Strings("supported", []string{string(NamingDescriptive), string(NamingSequential)}))
+		}
+		return NamingDescriptive
+	}
+}
+
 type tcsInfo struct {
 	name string
 	path string

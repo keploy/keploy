@@ -112,6 +112,31 @@ func TestSanitizeSlug(t *testing.T) {
 	}
 }
 
+func TestParseNamingStrategy(t *testing.T) {
+	cases := []struct {
+		in   string
+		want NamingStrategy
+	}{
+		{"", NamingDescriptive},
+		{"descriptive", NamingDescriptive},
+		{"DESCRIPTIVE", NamingDescriptive},
+		{"  Descriptive  ", NamingDescriptive},
+		{"sequential", NamingSequential},
+		{"SEQUENTIAL", NamingSequential},
+		{"  sequential\n", NamingSequential},
+		{"unknown", NamingDescriptive},
+		{"test-N", NamingDescriptive},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got := ParseNamingStrategy(c.in, nil)
+			if got != c.want {
+				t.Fatalf("ParseNamingStrategy(%q)=%q want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestIsIDSegment(t *testing.T) {
 	ids := []string{
 		"1", "42", "0",
