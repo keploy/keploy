@@ -327,7 +327,9 @@ const maxNameClaimAttempts = 32
 // retries. WriteFile later truncates the placeholder we created here
 // and replaces it with the encoded testcase body.
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
-	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+	// Match permission modes with yaml.CreateYamlFile so auto-named
+	// and explicitly-named test cases land with identical perms.
+	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
 	var lastName string
@@ -338,7 +340,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		}
 		lastName = name
 		target := filepath.Join(tcsPath, name+".yaml")
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o777)
 		if err == nil {
 			_ = f.Close()
 			return name, nil
