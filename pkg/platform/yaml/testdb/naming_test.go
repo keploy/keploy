@@ -3,6 +3,7 @@ package testdb
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -253,6 +254,54 @@ func TestClaimName_ConcurrentCallersGetUniqueNames(t *testing.T) {
 	for name, count := range seen {
 		if count != 1 {
 			t.Errorf("name %q claimed %d times", name, count)
+		}
+	}
+}
+
+func TestUpsert_PlaceholderCleanedUpOnError(t *testing.T) {
+	// Drive upsert into a failure path by making saveAssets unable
+	// to create its assets subdirectory: place a regular file at the
+	// path that saveAssets will try to MkdirAll. upsert must then
+	// remove the placeholder claimName reserved so the testset
+	// directory does not accumulate stale 0-byte files (which would
+	// also skew future NextIndexForPrefix scans).
+	parent := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	testSetID := "leak-check"
+	testSetDir := filepath.Join(parent, testSetID)
+	tcsDir := filepath.Join(testSetDir, "tests")
+	if err := os.MkdirAll(testSetDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Block the assets directory — saveAssets does
+	// os.MkdirAll(filepath.Join(ts.TcsPath, testSetID, "assets", tcsName), ...)
+	// which fails with ENOTDIR when "assets" is a regular file.
+	if err := os.WriteFile(filepath.Join(testSetDir, "assets"), []byte("blocked"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+
+	// Request a body large enough that saveAssets actually tries to
+	// offload it (>LargeBodyThreshold, which is 1 MiB).
+	bigBody := strings.Repeat("x", LargeBodyThreshold+1)
+	tc := &models.TestCase{
+		Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    "http://api.test/users",
+			Body:   bigBody,
+		},
+	}
+	if _, err := ts.upsert(t.Context(), testSetID, tc); err == nil {
+		t.Fatalf("expected upsert to fail when assets dir is blocked")
+	}
+
+	entries, err := os.ReadDir(tcsDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".yaml") {
+			t.Errorf("placeholder leaked: %s", e.Name())
 		}
 	}
 }

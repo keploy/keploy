@@ -244,15 +244,34 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
+	var reservedPlaceholder bool
 	if tc.Name == "" {
 		claimed, err := ts.claimName(tcsPath, tc)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
 		tcsName = claimed
+		reservedPlaceholder = true
 	} else {
 		tcsName = tc.Name
 	}
+
+	// If anything after the atomic filename reservation fails before
+	// we successfully write the final yaml, remove the empty
+	// placeholder we left behind in claimName so the testset
+	// directory doesn't accumulate stale 0-byte files that would
+	// also skew subsequent NextIndexForPrefix scans.
+	writeSucceeded := false
+	defer func() {
+		if reservedPlaceholder && !writeSucceeded {
+			placeholder := filepath.Join(tcsPath, tcsName+".yaml")
+			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
+				ts.logger.Warn("failed to remove placeholder after upsert error",
+					zap.String("path", placeholder),
+					zap.Error(rmErr))
+			}
+		}
+	}()
 
 	err := ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
@@ -288,6 +307,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
+	writeSucceeded = true
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
 }
 
@@ -327,9 +347,14 @@ const maxNameClaimAttempts = 32
 // retries. WriteFile later truncates the placeholder we created here
 // and replaces it with the encoded testcase body.
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
-	// Match permission modes with yaml.CreateYamlFile so auto-named
-	// and explicitly-named test cases land with identical perms.
-	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
+	// Use the same restrictive modes Go's os.Create would pick
+	// (0o755 for directories, 0o644 for files) rather than
+	// yaml.CreateYamlFile's legacy 0o777. The explicit-name path
+	// still goes through CreateYamlFile today, but adopting that
+	// looser mode for newly introduced code would entrench a
+	// world-writable default the rest of the codebase should move
+	// off of.
+	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
 	var lastName string
@@ -340,7 +365,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		}
 		lastName = name
 		target := filepath.Join(tcsPath, name+".yaml")
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o777)
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			_ = f.Close()
 			return name, nil
