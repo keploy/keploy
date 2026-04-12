@@ -154,7 +154,10 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 
 	if _, err := os.Stat(yamlPath); err != nil {
 		if !os.IsNotExist(err) {
-			utils.LogError(Logger, err, "failed to stat the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			utils.LogError(Logger, err,
+				"failed to stat yaml file — check filesystem permissions and that the configured keploy path is readable/writable by this process",
+				zap.String("path directory", path),
+				zap.String("yaml", fileName))
 			return false, err
 		}
 		if ctx.Err() == nil || ctx.Err() == context.Canceled {
