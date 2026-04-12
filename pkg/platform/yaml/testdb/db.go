@@ -339,8 +339,11 @@ func (ts *TestYaml) generateName(tcsPath string, tc *models.TestCase) (string, e
 // maxNameClaimAttempts bounds the retry loop in claimName so a
 // persistent filesystem error can't spin forever. It must comfortably
 // exceed the number of recorders a user could realistically run
-// against the same testset directory in parallel.
-const maxNameClaimAttempts = 32
+// against the same testset directory in parallel. The per-attempt
+// cost is a single directory scan plus one failed OpenFile, so
+// raising the bound is cheap; the value is sized well above any
+// plausible concurrent-recorder count.
+const maxNameClaimAttempts = 256
 
 // claimName atomically reserves a unique filename for an auto-named
 // test case. It calls generateName, then attempts to create the target

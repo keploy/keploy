@@ -94,6 +94,51 @@ func TestBuildTestCaseSlug_GRPC(t *testing.T) {
 	}
 }
 
+func TestBuildTestCaseSlug_NilSafe(t *testing.T) {
+	if got := BuildTestCaseSlug(nil); got != fallbackTC {
+		t.Fatalf("nil input got=%q want=%q", got, fallbackTC)
+	}
+}
+
+func TestBuildTestCaseSlug_UnsupportedKindFallback(t *testing.T) {
+	// A testcase with a non-HTTP, non-gRPC Kind and no HTTPReq
+	// should land on a stable, kind-tagged fallback rather than
+	// silently slugging an empty URL.
+	tc := &models.TestCase{Kind: models.REDIS}
+	got := BuildTestCaseSlug(tc)
+	if got != "test-redis" {
+		t.Fatalf("redis kind got=%q want=test-redis", got)
+	}
+}
+
+func TestBuildTestCaseSlug_UnsupportedKindButHTTPReq(t *testing.T) {
+	// Unknown Kind but HTTPReq is populated — we still produce a
+	// useful slug from the request rather than falling back.
+	tc := &models.TestCase{
+		Kind: "Unknown",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    "http://api.test/users",
+		},
+	}
+	if got := BuildTestCaseSlug(tc); got != "get-users" {
+		t.Fatalf("got=%q want=get-users", got)
+	}
+}
+
+func TestBuildTestCaseSlug_HTTP2Kind(t *testing.T) {
+	tc := &models.TestCase{
+		Kind: models.HTTP2,
+		HTTPReq: models.HTTPReq{
+			Method: "POST",
+			URL:    "http://api.test/items",
+		},
+	}
+	if got := BuildTestCaseSlug(tc); got != "post-items" {
+		t.Fatalf("got=%q want=post-items", got)
+	}
+}
+
 func TestBuildTestCaseSlug_GRPC_MissingPseudoHeader(t *testing.T) {
 	tc := &models.TestCase{Kind: models.GRPC_EXPORT}
 	// nil map

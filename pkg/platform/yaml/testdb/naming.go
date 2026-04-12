@@ -25,13 +25,31 @@ var (
 
 // BuildTestCaseSlug returns a descriptive slug derived from a recorded
 // test case. It never includes a trailing counter — the caller is
-// responsible for disambiguation.
+// responsible for disambiguation. A nil input or an unrecognised
+// Kind (Redis/Kafka/Mongo/…) yields a stable fallback so the
+// function is always safe to call.
 func BuildTestCaseSlug(tc *models.TestCase) string {
+	if tc == nil {
+		return fallbackTC
+	}
 	switch tc.Kind {
+	case models.HTTP, models.HTTP2:
+		return slugForHTTP(tc)
 	case models.GRPC_EXPORT:
 		return slugForGRPC(tc)
 	default:
-		return slugForHTTP(tc)
+		// The captured TestCase wasn't HTTP or gRPC (or the Kind
+		// field is empty on older recordings). Try HTTP first —
+		// that's the overwhelmingly common case and will still
+		// produce a sensible slug as long as HTTPReq is populated —
+		// and fall back to a kind-tagged placeholder otherwise.
+		if tc.HTTPReq.Method != "" || tc.HTTPReq.URL != "" {
+			return slugForHTTP(tc)
+		}
+		if kind := sanitizeSlug(string(tc.Kind)); kind != "" {
+			return fallbackTC + "-" + kind
+		}
+		return fallbackTC
 	}
 }
 
