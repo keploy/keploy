@@ -194,6 +194,14 @@ func TestGenerateName_SequentialMode(t *testing.T) {
 	}
 }
 
+func TestClaimName_RejectsTraversalPath(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+	tc := httpTC("GET", "http://api.test/users")
+	if _, err := ts.claimName("/tmp/../etc/keploy", tc); err == nil {
+		t.Fatalf("expected claimName to reject traversal path")
+	}
+}
+
 func TestClaimName_Basic(t *testing.T) {
 	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
 	dir := filepath.Join(t.TempDir(), "tests")
