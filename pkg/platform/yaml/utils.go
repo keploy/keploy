@@ -218,9 +218,16 @@ func NextIndexForPrefix(path, prefix string) (int, error) {
 	}
 	// The directory path itself is what we actually read from, so
 	// validate that here instead of validating the slug prefix.
-	if _, err := ValidatePath(path); err != nil {
+	// Capture and reuse the (potentially normalised) return value
+	// so a future hardening of ValidatePath — e.g. calling
+	// filepath.Clean — automatically flows through to the ReadDir
+	// and HasPrefix checks below without leaving this function
+	// silently using the raw input.
+	validatedPath, err := ValidatePath(path)
+	if err != nil {
 		return 0, err
 	}
+	path = validatedPath
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		if os.IsNotExist(err) {

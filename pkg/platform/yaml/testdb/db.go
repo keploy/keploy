@@ -357,9 +357,11 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 	// Modes match yaml.CreateYamlFile (0o755 directories, 0o644
 	// files). The effective file mode is further masked by the
 	// process umask.
-	if _, err := yaml.ValidatePath(tcsPath); err != nil {
+	validatedPath, err := yaml.ValidatePath(tcsPath)
+	if err != nil {
 		return "", fmt.Errorf("validate testcase directory: %w", err)
 	}
+	tcsPath = validatedPath
 	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
@@ -373,7 +375,15 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		target := filepath.Join(tcsPath, name+".yaml")
 		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
-			_ = f.Close()
+			// Surface any Close error to the caller — on networked
+			// filesystems (NFS, SMB) Close is when some writes are
+			// actually flushed, so a broken reservation must not
+			// proceed. Remove the half-reserved file first so a
+			// retry picks a fresh name rather than EEXIST-looping.
+			if closeErr := f.Close(); closeErr != nil {
+				_ = os.Remove(target)
+				return "", fmt.Errorf("close reserved testcase file %q: %w", name, closeErr)
+			}
 			return name, nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
