@@ -266,7 +266,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		if reservedPlaceholder && !writeSucceeded {
 			placeholder := filepath.Join(tcsPath, tcsName+".yaml")
 			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
-				ts.logger.Warn("failed to remove placeholder after upsert error",
+				// This is a secondary failure during error handling —
+				// the primary upsert error is already returned to the
+				// caller. Surface the cleanup miss at Debug so it
+				// stays discoverable without polluting normal logs.
+				ts.logger.Debug("failed to remove placeholder after upsert error",
 					zap.String("path", placeholder),
 					zap.Error(rmErr))
 			}
@@ -347,13 +351,14 @@ const maxNameClaimAttempts = 32
 // retries. WriteFile later truncates the placeholder we created here
 // and replaces it with the encoded testcase body.
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
-	// Use the same restrictive modes Go's os.Create would pick
-	// (0o755 for directories, 0o644 for files) rather than
-	// yaml.CreateYamlFile's legacy 0o777. The explicit-name path
-	// still goes through CreateYamlFile today, but adopting that
-	// looser mode for newly introduced code would entrench a
-	// world-writable default the rest of the codebase should move
-	// off of.
+	// Intentionally stricter than yaml.CreateYamlFile's legacy 0o777:
+	// directories 0o755, files 0o644 (same defaults Go's os.Create and
+	// os.MkdirAll pick when the caller doesn't care). A separate
+	// hardening pass can bring the explicit-name path through
+	// CreateYamlFile down to the same modes — doing that in this PR
+	// would bloat the diff and risk breaking unrelated flows that
+	// happen to rely on 0o777. Tracked inline so a future reviewer
+	// doesn't re-litigate the discrepancy.
 	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
