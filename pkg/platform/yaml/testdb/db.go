@@ -22,15 +22,38 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// NamingStrategy selects how default test case filenames are generated
+// during recording.
+type NamingStrategy string
+
+const (
+	// NamingDescriptive derives slugs from the HTTP method+path or
+	// gRPC service/method of the recorded request.
+	NamingDescriptive NamingStrategy = "descriptive"
+	// NamingSequential preserves the legacy test-N.yaml numbering.
+	NamingSequential NamingStrategy = "sequential"
+)
+
 type TestYaml struct {
-	TcsPath string
-	logger  *zap.Logger
+	TcsPath        string
+	logger         *zap.Logger
+	namingStrategy NamingStrategy
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
+	return NewWithNaming(logger, tcsPath, NamingDescriptive)
+}
+
+// NewWithNaming constructs a TestYaml that uses the given naming
+// strategy for test cases without an explicit name.
+func NewWithNaming(logger *zap.Logger, tcsPath string, strategy NamingStrategy) *TestYaml {
+	if strategy == "" {
+		strategy = NamingDescriptive
+	}
 	return &TestYaml{
-		TcsPath: tcsPath,
-		logger:  logger,
+		TcsPath:        tcsPath,
+		logger:         logger,
+		namingStrategy: strategy,
 	}
 }
 
@@ -201,11 +224,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
-		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+		generated, err := ts.generateName(tcsPath, tc)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
-		tcsName = fmt.Sprintf("test-%v", lastIndx)
+		tcsName = generated
 	} else {
 		tcsName = tc.Name
 	}
@@ -245,6 +268,27 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
+}
+
+// generateName produces a default filename for a recorded test case
+// based on the active naming strategy. Descriptive mode derives a slug
+// from the request and appends a collision-resolving suffix; sequential
+// mode preserves the legacy test-N numbering.
+func (ts *TestYaml) generateName(tcsPath string, tc *models.TestCase) (string, error) {
+	if ts.namingStrategy == NamingSequential {
+		idx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("test-%d", idx), nil
+	}
+
+	slug := BuildTestCaseSlug(tc)
+	idx, err := yaml.NextIndexForPrefix(tcsPath, slug)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%d", slug, idx), nil
 }
 
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {

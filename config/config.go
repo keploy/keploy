@@ -91,6 +91,10 @@ type Record struct {
 	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// TestCaseNaming controls how default test case filenames are generated.
+	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
+	// "sequential" preserves the legacy `test-N.yaml` numbering.
+	TestCaseNaming    string          `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`

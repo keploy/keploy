@@ -196,6 +196,47 @@ func ValidatePath(path string) (string, error) {
 	return path, nil
 }
 
+// NextIndexForPrefix scans path for yaml files named "{prefix}-{N}.yaml"
+// and returns the next sequential index (max+1, starting at 1). It is
+// used to disambiguate descriptive test case slugs when multiple
+// recordings share the same endpoint.
+func NextIndexForPrefix(path, prefix string) (int, error) {
+	if prefix == "" {
+		return 1, nil
+	}
+	if _, err := ValidatePath(prefix); err != nil {
+		return 1, err
+	}
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		return 1, nil
+	}
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return 1, nil
+	}
+	lastIndex := 0
+	for _, v := range files {
+		name := filepath.Base(v.Name())
+		if filepath.Ext(name) != ".yaml" {
+			continue
+		}
+		stem := name[:len(name)-len(".yaml")]
+		if !strings.HasPrefix(stem, prefix+"-") {
+			continue
+		}
+		numStr := stem[len(prefix)+1:]
+		idx, err := strconv.Atoi(numStr)
+		if err != nil {
+			continue
+		}
+		if idx > lastIndex {
+			lastIndex = idx
+		}
+	}
+	return lastIndex + 1, nil
+}
+
 // FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
 func FindLastIndex(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))

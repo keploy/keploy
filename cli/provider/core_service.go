@@ -106,7 +106,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	testDB := testdb.New(logger, c.Path)
+	testDB := testdb.NewWithNaming(logger, c.Path, testdb.NamingStrategy(c.Record.TestCaseNaming))
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
