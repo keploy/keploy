@@ -3,6 +3,7 @@ package testdb
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -189,6 +190,70 @@ func TestGenerateName_SequentialMode(t *testing.T) {
 	}
 	if got != "test-4" {
 		t.Fatalf("got=%q want=test-4", got)
+	}
+}
+
+func TestClaimName_Basic(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+	dir := filepath.Join(t.TempDir(), "tests")
+	tc := httpTC("GET", "http://api.test/users")
+	name, err := ts.claimName(dir, tc)
+	if err != nil {
+		t.Fatalf("claimName: %v", err)
+	}
+	if name != "get-users-1" {
+		t.Fatalf("got=%q want=get-users-1", name)
+	}
+	// placeholder must now exist so the next claim picks a different index
+	if _, err := os.Stat(filepath.Join(dir, name+".yaml")); err != nil {
+		t.Fatalf("expected placeholder file to exist: %v", err)
+	}
+	name2, err := ts.claimName(dir, tc)
+	if err != nil {
+		t.Fatalf("claimName 2: %v", err)
+	}
+	if name2 != "get-users-2" {
+		t.Fatalf("got=%q want=get-users-2", name2)
+	}
+}
+
+func TestClaimName_ConcurrentCallersGetUniqueNames(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+	dir := filepath.Join(t.TempDir(), "tests")
+	tc := httpTC("GET", "http://api.test/users")
+
+	const workers = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seen := make(map[string]int, workers)
+	errs := make([]error, 0)
+
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			name, err := ts.claimName(dir, tc)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			seen[name]++
+		}()
+	}
+	wg.Wait()
+
+	if len(errs) != 0 {
+		t.Fatalf("claimName errors: %v", errs)
+	}
+	if len(seen) != workers {
+		t.Fatalf("expected %d unique names, got %d: %v", workers, len(seen), seen)
+	}
+	for name, count := range seen {
+		if count != 1 {
+			t.Errorf("name %q claimed %d times", name, count)
+		}
 	}
 }
 

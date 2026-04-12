@@ -108,7 +108,8 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	namingStrategy, namingErr := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
 	if namingErr != nil {
-		logger.Warn("record.testCaseNaming is invalid; falling back to descriptive",
+		logger.Warn("record.testCaseNaming is not recognised; falling back to descriptive — set it to \"descriptive\" or \"sequential\" in keploy.yml to silence this warning",
+			zap.String("provided", c.Record.TestCaseNaming),
 			zap.Error(namingErr))
 	}
 	testDB := testdb.NewWithNaming(logger, c.Path, namingStrategy)

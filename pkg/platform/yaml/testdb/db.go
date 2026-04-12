@@ -4,6 +4,7 @@ package testdb
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -244,11 +245,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
-		generated, err := ts.generateName(tcsPath, tc)
+		claimed, err := ts.claimName(tcsPath, tc)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
-		tcsName = generated
+		tcsName = claimed
 	} else {
 		tcsName = tc.Name
 	}
@@ -309,6 +310,44 @@ func (ts *TestYaml) generateName(tcsPath string, tc *models.TestCase) (string, e
 		return "", err
 	}
 	return fmt.Sprintf("%s-%d", slug, idx), nil
+}
+
+// maxNameClaimAttempts bounds the retry loop in claimName so a
+// persistent filesystem error can't spin forever. It must comfortably
+// exceed the number of recorders a user could realistically run
+// against the same testset directory in parallel.
+const maxNameClaimAttempts = 32
+
+// claimName atomically reserves a unique filename for an auto-named
+// test case. It calls generateName, then attempts to create the target
+// file with O_CREATE|O_EXCL so two concurrent recorders writing to the
+// same testset directory cannot end up writing to the same path. On a
+// collision (another process wrote that name between our directory
+// scan and the create), it rescans the directory for a new index and
+// retries. WriteFile later truncates the placeholder we created here
+// and replaces it with the encoded testcase body.
+func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
+	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+		return "", fmt.Errorf("create testcase directory: %w", err)
+	}
+	var lastName string
+	for attempt := 0; attempt < maxNameClaimAttempts; attempt++ {
+		name, err := ts.generateName(tcsPath, tc)
+		if err != nil {
+			return "", err
+		}
+		lastName = name
+		target := filepath.Join(tcsPath, name+".yaml")
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_ = f.Close()
+			return name, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("reserve testcase file %q: %w", name, err)
+		}
+	}
+	return "", fmt.Errorf("failed to allocate a unique testcase name after %d attempts (last candidate %q)", maxNameClaimAttempts, lastName)
 }
 
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
