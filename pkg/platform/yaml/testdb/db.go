@@ -351,14 +351,19 @@ const maxNameClaimAttempts = 32
 // retries. WriteFile later truncates the placeholder we created here
 // and replaces it with the encoded testcase body.
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
-	// Intentionally stricter than yaml.CreateYamlFile's legacy 0o777:
-	// directories 0o755, files 0o644 (same defaults Go's os.Create and
-	// os.MkdirAll pick when the caller doesn't care). A separate
-	// hardening pass can bring the explicit-name path through
-	// CreateYamlFile down to the same modes — doing that in this PR
-	// would bloat the diff and risk breaking unrelated flows that
-	// happen to rely on 0o777. Tracked inline so a future reviewer
-	// doesn't re-litigate the discrepancy.
+	// Intentionally stricter than yaml.CreateYamlFile's legacy
+	// 0o777: directories 0o755, files 0o644 — the conventional
+	// non-world-writable modes for files that should be readable
+	// but only owner-writable. The effective file mode is further
+	// masked by the process umask (same for every os.OpenFile
+	// caller), which is fine here: any umask that would tighten
+	// 0o644 further is already tighter than what we want.
+	//
+	// A separate hardening pass should migrate CreateYamlFile to
+	// the same modes. Doing that in this PR would bloat the diff
+	// and risk breaking unrelated flows (mocks, reports) that
+	// happen to rely on 0o777, so the discrepancy is intentional
+	// and tracked inline rather than relitigated each review.
 	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
