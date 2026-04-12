@@ -106,7 +106,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	testDB := testdb.New(logger, c.Path)
+	namingStrategy, err := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
+	if err != nil {
+		return nil, fmt.Errorf("invalid record.testCaseNaming in keploy.yml: %w (set it to %q or %q)",
+			err, testdb.NamingDescriptive, testdb.NamingSequential)
+	}
+	testDB := testdb.NewWithNaming(logger, c.Path, namingStrategy)
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))

@@ -79,6 +79,7 @@ record:
   filters: []
   sync: false
   maxBufferMemoryMB: 0
+  testCaseNaming: descriptive
 configPath: ""
 bypassRules: []
 disableMapping: true
