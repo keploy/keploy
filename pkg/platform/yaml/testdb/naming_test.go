@@ -1,9 +1,12 @@
 package testdb
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func httpTC(method, url string) *models.TestCase {
@@ -114,26 +117,91 @@ func TestSanitizeSlug(t *testing.T) {
 
 func TestParseNamingStrategy(t *testing.T) {
 	cases := []struct {
-		in   string
-		want NamingStrategy
+		in      string
+		want    NamingStrategy
+		wantErr bool
 	}{
-		{"", NamingDescriptive},
-		{"descriptive", NamingDescriptive},
-		{"DESCRIPTIVE", NamingDescriptive},
-		{"  Descriptive  ", NamingDescriptive},
-		{"sequential", NamingSequential},
-		{"SEQUENTIAL", NamingSequential},
-		{"  sequential\n", NamingSequential},
-		{"unknown", NamingDescriptive},
-		{"test-N", NamingDescriptive},
+		{"", NamingDescriptive, false},
+		{"descriptive", NamingDescriptive, false},
+		{"DESCRIPTIVE", NamingDescriptive, false},
+		{"  Descriptive  ", NamingDescriptive, false},
+		{"sequential", NamingSequential, false},
+		{"SEQUENTIAL", NamingSequential, false},
+		{"  sequential\n", NamingSequential, false},
+		{"unknown", NamingDescriptive, true},
+		{"test-N", NamingDescriptive, true},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
-			got := ParseNamingStrategy(c.in, nil)
+			got, err := ParseNamingStrategy(c.in)
 			if got != c.want {
 				t.Fatalf("ParseNamingStrategy(%q)=%q want %q", c.in, got, c.want)
 			}
+			if (err != nil) != c.wantErr {
+				t.Fatalf("ParseNamingStrategy(%q) err=%v wantErr=%v", c.in, err, c.wantErr)
+			}
 		})
+	}
+}
+
+func TestGenerateName_DescriptiveDisambiguation(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+	dir := t.TempDir()
+	// seed a previously recorded request on the same endpoint
+	if err := os.WriteFile(filepath.Join(dir, "get-users-1.yaml"), []byte("stub"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// and an unrelated file that must not affect numbering
+	if err := os.WriteFile(filepath.Join(dir, "post-auth-login-1.yaml"), []byte("stub"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	tc := httpTC("GET", "http://api.test/users")
+	got, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatalf("generateName: %v", err)
+	}
+	if got != "get-users-2" {
+		t.Fatalf("got=%q want=get-users-2", got)
+	}
+
+	// first occurrence on a different endpoint starts its own counter
+	tc2 := httpTC("GET", "http://api.test/orders/7")
+	got, err = ts.generateName(dir, tc2)
+	if err != nil {
+		t.Fatalf("generateName: %v", err)
+	}
+	if got != "get-orders-by-id-1" {
+		t.Fatalf("got=%q want=get-orders-by-id-1", got)
+	}
+}
+
+func TestGenerateName_SequentialMode(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingSequential)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "test-3.yaml"), []byte("stub"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tc := httpTC("GET", "http://api.test/users")
+	got, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatalf("generateName: %v", err)
+	}
+	if got != "test-4" {
+		t.Fatalf("got=%q want=test-4", got)
+	}
+}
+
+func TestGenerateName_NewTestsetDir(t *testing.T) {
+	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+	dir := filepath.Join(t.TempDir(), "fresh-testset", "tests")
+	tc := httpTC("POST", "http://api.test/auth/login")
+	got, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatalf("generateName: %v", err)
+	}
+	if got != "post-auth-login-1" {
+		t.Fatalf("got=%q want=post-auth-login-1", got)
 	}
 }
 

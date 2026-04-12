@@ -106,7 +106,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	testDB := testdb.NewWithNaming(logger, c.Path, testdb.ParseNamingStrategy(c.Record.TestCaseNaming, logger))
+	namingStrategy, namingErr := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
+	if namingErr != nil {
+		logger.Warn("record.testCaseNaming is invalid; falling back to descriptive",
+			zap.Error(namingErr))
+	}
+	testDB := testdb.NewWithNaming(logger, c.Path, namingStrategy)
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))

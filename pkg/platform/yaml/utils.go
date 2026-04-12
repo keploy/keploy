@@ -214,7 +214,7 @@ func NextIndexForPrefix(path, prefix string) (int, error) {
 	// emits these, but NextIndexForPrefix is exported so keep the
 	// guard in place for future callers.
 	if strings.ContainsAny(prefix, `/\`) || strings.Contains(prefix, "..") {
-		return 0, fmt.Errorf("invalid prefix %q: must not contain path separators", prefix)
+		return 0, fmt.Errorf("invalid prefix %q: must not contain path separators or parent references", prefix)
 	}
 	// The directory path itself is what we actually read from, so
 	// validate that here instead of validating the slug prefix.
