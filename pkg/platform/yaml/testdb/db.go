@@ -242,7 +242,20 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	// Validate the testcase directory once at the top so every
+	// subsequent reference — claimName, the deferred placeholder
+	// cleanup, saveAssets, WriteFile — sees the same (potentially
+	// normalised) value. Previously claimName re-validated
+	// internally and kept the normalised copy local to its own
+	// scope, leaving this function targeting the raw input for
+	// the cleanup Remove and for downstream writes; any future
+	// hardening of ValidatePath (e.g. calling filepath.Clean)
+	// would silently create a mismatch between the reservation
+	// and the writes.
+	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
+	if err != nil {
+		return tcsInfo{name: "", path: ""}, fmt.Errorf("validate testcase directory: %w", err)
+	}
 	var tcsName string
 	var reservedPlaceholder bool
 	if tc.Name == "" {
@@ -277,7 +290,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		}
 	}()
 
-	err := ts.saveAssets(testSetID, tc, tcsName)
+	err = ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
