@@ -3,7 +3,6 @@ package testdb
 import (
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -148,7 +147,7 @@ func splitAndLabelPathSegments(path string) []string {
 // identifier (numeric, UUID, or long hex). Short non-numeric slugs like
 // "me" or "login" are preserved.
 func isIDSegment(seg string) bool {
-	if _, err := strconv.Atoi(seg); err == nil {
+	if isAllDigits(seg) {
 		return true
 	}
 	if uuidPattern.MatchString(seg) {
@@ -158,6 +157,23 @@ func isIDSegment(seg string) bool {
 		return true
 	}
 	return false
+}
+
+// isAllDigits reports whether s is a non-empty string made up entirely
+// of ASCII digits. It replaces a previous strconv.Atoi call so that
+// integer IDs wider than the platform int (e.g. 64-bit row IDs on
+// 32-bit builds) still collapse to the by-id placeholder instead of
+// leaking into the slug.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizeSlug lowercases input, replaces disallowed characters with

@@ -153,6 +153,10 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	}
 
 	if _, err := os.Stat(yamlPath); err != nil {
+		if !os.IsNotExist(err) {
+			utils.LogError(Logger, err, "failed to stat the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			return false, err
+		}
 		if ctx.Err() == nil || ctx.Err() == context.Canceled {
 			// 0o755/0o644 rather than the historical 0o777 — nothing
 			// in the keploy tree needs world-writable perms and the

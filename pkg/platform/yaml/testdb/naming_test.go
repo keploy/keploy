@@ -375,6 +375,10 @@ func TestGenerateName_NewTestsetDir(t *testing.T) {
 func TestIsIDSegment(t *testing.T) {
 	ids := []string{
 		"1", "42", "0",
+		// 64-bit wide integer that overflows int32 — the old
+		// strconv.Atoi check would reject it on 32-bit builds and
+		// leak the raw ID into the slug.
+		"9223372036854775807",
 		"550e8400-e29b-41d4-a716-446655440000",
 		"507f1f77bcf86cd799439011",
 	}
