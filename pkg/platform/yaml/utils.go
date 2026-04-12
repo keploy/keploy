@@ -200,6 +200,11 @@ func ValidatePath(path string) (string, error) {
 // and returns the next sequential index (max+1, starting at 1). It is
 // used to disambiguate descriptive test case slugs when multiple
 // recordings share the same endpoint.
+//
+// A missing directory is treated as "no existing files" and returns 1
+// (first recording in a new test set). Any other IO error is returned
+// to the caller so we never silently overwrite an existing testcase
+// file because of a transient read failure.
 func NextIndexForPrefix(path, prefix string) (int, error) {
 	if prefix == "" {
 		return 1, nil
@@ -209,11 +214,15 @@ func NextIndexForPrefix(path, prefix string) (int, error) {
 	}
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		return 1, nil
+		if os.IsNotExist(err) {
+			return 1, nil
+		}
+		return 0, err
 	}
+	defer func() { _ = dir.Close() }()
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return 1, nil
+		return 0, err
 	}
 	lastIndex := 0
 	for _, v := range files {

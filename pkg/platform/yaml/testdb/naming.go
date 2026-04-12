@@ -85,16 +85,19 @@ func slugForGRPC(tc *models.TestCase) string {
 }
 
 // extractPath returns just the path component of a URL, tolerating
-// inputs that are already bare paths.
+// inputs that are already bare paths. When the input is a full URL
+// (scheme or host set) we always trust url.Parse — including an empty
+// Path, which correctly maps inputs like "http://api.test?x=1" to
+// root — and only fall back to manual query/fragment stripping for
+// genuinely bare paths or parse failures.
 func extractPath(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	if u, err := url.Parse(raw); err == nil && u.Path != "" {
+	if u, err := url.Parse(raw); err == nil && (u.Scheme != "" || u.Host != "") {
 		return u.Path
 	}
-	// Fallback: strip query/fragment manually.
 	if i := strings.IndexAny(raw, "?#"); i >= 0 {
 		raw = raw[:i]
 	}
