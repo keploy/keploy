@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -19,9 +20,17 @@ import (
 // tees a copy to a capture channel. If the channel is full or recording is
 // paused, capture is silently dropped — forwarding is never affected.
 type captureTeeWriter struct {
-	dest    io.Writer
-	ch      chan []byte
-	stopped bool
+	dest      io.Writer
+	ch        chan []byte
+	stopped   bool
+	closeOnce *sync.Once // shared with the forwarding goroutine's defer close
+}
+
+func (w *captureTeeWriter) stop() {
+	w.stopped = true
+	// Close the channel so the consumer goroutine can exit promptly
+	// instead of blocking until the connection ends.
+	w.closeOnce.Do(func() { close(w.ch) })
 }
 
 func (w *captureTeeWriter) Write(p []byte) (int, error) {
@@ -33,7 +42,7 @@ func (w *captureTeeWriter) Write(p []byte) (int, error) {
 	// Non-blocking tee to capture channel.
 	if !w.stopped {
 		if memoryguard.IsRecordingPaused() {
-			w.stopped = true
+			w.stop()
 			return n, nil
 		}
 		buf := make([]byte, len(p))
@@ -41,7 +50,7 @@ func (w *captureTeeWriter) Write(p []byte) (int, error) {
 		select {
 		case w.ch <- buf:
 		default:
-			w.stopped = true
+			w.stop()
 		}
 	}
 	return n, nil
@@ -75,16 +84,22 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	go createGenericMocksAsync(ctx, logger, clientCapChan, destCapChan)
 
 	// Forward bidirectionally at wire speed with non-blocking capture tee.
+	// Each tee writer shares a closeOnce with the deferred close so the
+	// channel is closed exactly once (by whichever fires first: capture
+	// stop or connection end).
+	clientCloseOnce := &sync.Once{}
+	destCloseOnce := &sync.Once{}
+
 	done := make(chan struct{}, 2)
 	go func() {
-		defer close(clientCapChan)
-		tee := &captureTeeWriter{dest: destConn, ch: clientCapChan}
+		defer clientCloseOnce.Do(func() { close(clientCapChan) })
+		tee := &captureTeeWriter{dest: destConn, ch: clientCapChan, closeOnce: clientCloseOnce}
 		_, _ = io.Copy(tee, clientConn)
 		done <- struct{}{}
 	}()
 	go func() {
-		defer close(destCapChan)
-		tee := &captureTeeWriter{dest: clientConn, ch: destCapChan}
+		defer destCloseOnce.Do(func() { close(destCapChan) })
+		tee := &captureTeeWriter{dest: clientConn, ch: destCapChan, closeOnce: destCloseOnce}
 		_, _ = io.Copy(tee, destConn)
 		done <- struct{}{}
 	}()

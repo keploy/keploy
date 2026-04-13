@@ -99,12 +99,13 @@ func (b *httpBodyCaptureBuffer) Reset() {
 // is exceeded, or the channel fills up, the feeder silently stops capturing.
 // The forwarding path is never affected.
 type asyncPipeFeeder struct {
-	ch      chan []byte
-	pw      *io.PipeWriter
-	closed  atomic.Bool
-	written atomic.Int64
-	maxSize int64
-	logger  *zap.Logger
+	ch        chan []byte
+	pw        *io.PipeWriter
+	closed    atomic.Bool
+	written   atomic.Int64
+	maxSize   int64
+	logger    *zap.Logger
+	closeOnce sync.Once
 }
 
 // newAsyncPipeFeeder creates a feeder and returns the pipe reader end for
@@ -153,12 +154,12 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	if isIngressRecordingPaused() {
-		f.closed.Store(true)
+		f.shutdown() // close channel so bridge+parser exit promptly
 		return len(p), nil
 	}
 	newTotal := f.written.Add(int64(len(p)))
 	if f.maxSize > 0 && newTotal > f.maxSize {
-		f.closed.Store(true)
+		f.shutdown()
 		return len(p), nil
 	}
 	// Copy data — the original slice belongs to io.Copy's reusable buffer.
@@ -167,9 +168,9 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 	select {
 	case f.ch <- buf:
 	default:
-		// Channel full — parser can't keep up. Stop capture for this
-		// connection. Remaining test cases on this connection will be lost.
-		f.closed.Store(true)
+		// Channel full — parser can't keep up. Stop capture entirely
+		// so bridge+parser goroutines can exit.
+		f.shutdown()
 		if f.logger != nil {
 			f.logger.Debug("Capture channel full — dropping remaining test cases on this connection. "+
 				"This may indicate responses too large for the channel buffer.",
@@ -182,18 +183,19 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Close signals the bridge goroutine to exit. Must be called after the
-// forwarding goroutine finishes (after io.Copy returns). Write() is
-// never called after Close() — they run on the same goroutine — so
-// there is no send-on-closed-channel race.
-//
-// Important: we do NOT close f.pw here. The bridge goroutine must first
-// drain all remaining channel items into the pipe so the parser sees
-// every byte. The bridge's deferred f.pw.Close() runs after the drain
-// completes, giving the parser a clean EOF only after all data is written.
-func (f *asyncPipeFeeder) Close() {
+// shutdown idempotently stops the feeder: sets the closed flag and closes
+// the channel. Safe to call from both Write() (capture disabled mid-stream)
+// and Close() (connection ended). The sync.Once ensures the channel is
+// closed exactly once regardless of which path fires first.
+func (f *asyncPipeFeeder) shutdown() {
 	f.closed.Store(true)
-	close(f.ch)
+	f.closeOnce.Do(func() { close(f.ch) })
+}
+
+// Close signals the bridge goroutine to exit. Must be called after the
+// forwarding goroutine finishes (after io.Copy returns).
+func (f *asyncPipeFeeder) Close() {
+	f.shutdown()
 }
 
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
