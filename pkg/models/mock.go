@@ -26,6 +26,7 @@ const (
 	GENERIC     Kind = "Generic"
 	REDIS       Kind = "Redis"
 	KAFKA       Kind = "Kafka"
+	HBASE       Kind = "Hbase"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
@@ -66,6 +67,8 @@ type MockSpec struct {
 	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	KafkaRequests       []Payload           `json:"kafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
 	KafkaResponses      []Payload           `json:"kafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
+	HbaseRequests       []Payload           `json:"hbaseRequests,omitempty" bson:"hbase_requests,omitempty"`
+	HbaseResponses      []Payload           `json:"hbaseResponses,omitempty" bson:"hbase_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
@@ -172,6 +175,12 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.RedisResponses = make([]Payload, len(m.Spec.RedisResponses))
 	copy(c.Spec.RedisResponses, m.Spec.RedisResponses)
+
+	c.Spec.HbaseRequests = make([]Payload, len(m.Spec.HbaseRequests))
+	copy(c.Spec.HbaseRequests, m.Spec.HbaseRequests)
+
+	c.Spec.HbaseResponses = make([]Payload, len(m.Spec.HbaseResponses))
+	copy(c.Spec.HbaseResponses, m.Spec.HbaseResponses)
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)

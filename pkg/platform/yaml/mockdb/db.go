@@ -375,6 +375,8 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 					isFilteredMock = false
 				case "Redis":
 					isFilteredMock = false
+				case "Hbase":
+					isFilteredMock = false
 				case "MySQL":
 					isFilteredMock = false
 				case "DNS":
@@ -460,6 +462,8 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 				case "Http2":
 					isUnFilteredMock = true
 				case "Redis":
+					isUnFilteredMock = true
+				case "Hbase":
 					isUnFilteredMock = true
 				case "MySQL", "PostgresV2":
 					isUnFilteredMock = true
