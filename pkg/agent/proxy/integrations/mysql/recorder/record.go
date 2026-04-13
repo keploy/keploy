@@ -20,7 +20,7 @@ import (
 )
 
 // Record records the MySQL traffic between the client and the server.
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, tlsUpgrader models.TLSUpgrader, memLimiter *pUtil.MemoryLimiter) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, tlsUpgrader models.TLSUpgrader) error {
 
 	var (
 		requests  []mysql.Request
@@ -114,7 +114,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts, memLimiter)
+		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")
