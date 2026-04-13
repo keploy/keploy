@@ -569,19 +569,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
 	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
-	// Used by the shutdown goroutine below to close the underlying connection.
 	initialSrcConn := srcConn
 
-	// Close the initial srcConn on context cancellation to unblock any
-	// goroutine stuck in a blocking read (ReadBytes → reader.Read).
-	// Uses parserCtx (per-connection) so the goroutine exits when the
-	// handler returns, not when the entire proxy shuts down.
-	// Uses initialSrcConn (captured before reassignment) to avoid a
-	// data race with TLS upgrade or conn wrapping.
-	go func() {
-		<-parserCtx.Done()
-		initialSrcConn.Close()
-	}()
+	// connCloser is started later (after dstConn is established) to close
+	// both connections on context cancellation, unblocking any goroutine
+	// stuck in a blocking read (ReadBytes → reader.Read).
+	var connCloserStarted bool
+	startConnCloser := func() {
+		if connCloserStarted {
+			return
+		}
+		connCloserStarted = true
+		// Capture dstConn NOW (after dial) so there's no data race.
+		closeDst := dstConn
+		go func() {
+			<-parserCtx.Done()
+			initialSrcConn.Close()
+			if closeDst != nil {
+				closeDst.Close()
+			}
+		}()
+	}
 
 	defer func() {
 		parserCtxCancel()
@@ -1020,6 +1028,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	outgoingOpts.DstCfg = dstCfg
+
+	// Start the shutdown goroutine now that dstConn is established.
+	startConnCloser()
+
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {

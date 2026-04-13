@@ -1433,7 +1433,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Agent.MemoryLimit = memoryLimit
 		}
 		if _, err := memoryguard.LimitBytes(c.cfg.Agent.MemoryLimit); err != nil {
-			utils.LogError(c.logger, err, "invalid memory limit for keploy agent")
+			utils.LogError(c.logger, err, "invalid memory limit for keploy agent; use a positive MB value within int64 range or set --memory-limit=0 to disable")
 			return err
 		}
 		if c.cfg.Agent.MemoryLimit > 0 && !c.cfg.Agent.IsDocker {

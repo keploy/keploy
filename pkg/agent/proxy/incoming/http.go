@@ -136,11 +136,11 @@ func (f *asyncPipeFeeder) bridge() {
 	for chunk := range f.ch {
 		if _, err := f.pw.Write(chunk); err != nil {
 			// Pipe reader closed (parser done). Mark closed so Write()
-			// stops enqueuing, then drain remaining channel items to
-			// prevent the forwarding goroutine from blocking on send.
+			// stops enqueuing new items via its non-blocking select.
+			// Return immediately — no need to drain the channel here.
+			// Write() won't block on send (select/default), and Close()
+			// will close the channel when the forwarding goroutine finishes.
 			f.closed.Store(true)
-			for range f.ch {
-			}
 			return
 		}
 	}
@@ -433,11 +433,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
-		if pressureCloseMode && !forceCloseMode {
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
-			captureEnabled = false
-		}
+		// Note: pressureCloseMode && !forceCloseMode branch removed —
+		// unreachable because forceCloseMode is always true here.
 
 		respTimestamp := time.Now()
 
@@ -528,14 +525,20 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// holding the semaphore starves other connections of capture slots
 		// and drives up p95 latency under load.
 		//
-		// Snapshot the capture buffer bytes — the goroutine will own them.
+		// Snapshot all values the goroutine needs — avoid closing over
+		// loop variables even though the loop exits after one iteration
+		// in sync/sampling mode (defensive against future changes).
 		reqBodyBytes := reqCapture.Bytes()
 		respBodyBytes := respCapture.Bytes()
 		reqBytesTotal := reqCapture.Total()
 		respBytesTotal := respCapture.Total()
+		capturedReq := req
+		capturedResp := resp
+		capturedReqTS := reqTimestamp
+		capturedRespTS := respTimestamp
 
 		go func() {
-			exchangeCaptureSize, err := capturedExchangeSize(req, resp, reqBodyBytes, respBodyBytes)
+			exchangeCaptureSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 			if err != nil {
 				logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
 					zap.Error(err),
@@ -550,16 +553,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.String("url", req.URL.String()),
-					zap.String("method", req.Method),
-					zap.Int("status_code", resp.StatusCode),
+					zap.String("url", capturedReq.URL.String()),
+					zap.String("method", capturedReq.Method),
+					zap.Int("status_code", capturedResp.StatusCode),
 				)
 				return
 			}
 
 			// Capture parsing is best-effort: the exchange has already been
 			// proxied successfully, so parse failures just skip the test case.
-			reqData, err := dumpCapturedRequest(req, reqBodyBytes)
+			reqData, err := dumpCapturedRequest(capturedReq, reqBodyBytes)
 			if err != nil {
 				logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
 					zap.Error(err),
@@ -579,11 +582,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 
-			respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respBodyBytes)
+			respData, err := dumpCapturedResponse(capturedResp, parsedHTTPReq, respBodyBytes)
 			if err != nil {
 				logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
 					zap.Error(err),
-					zap.Int("status_code", resp.StatusCode),
+					zap.Int("status_code", capturedResp.StatusCode),
 					zap.Int64("response_bytes_seen", respBytesTotal),
 					zap.Int("captured_response_bytes", len(respBodyBytes)),
 				)
@@ -595,14 +598,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Error(err),
 					zap.Int("captured_response_dump_bytes", len(respData)),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.Int("status_code", resp.StatusCode),
+					zap.Int("status_code", capturedResp.StatusCode),
 				)
 				return
 			}
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
