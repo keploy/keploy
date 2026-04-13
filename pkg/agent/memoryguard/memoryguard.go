@@ -23,7 +23,7 @@ const (
 	defaultCheckInterval = 500 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
 	pauseThresholdRatio  = 0.80
-	resumeThresholdRatio = 0.80
+	resumeThresholdRatio = 0.70 // Lower than pause to avoid rapid toggle (hysteresis)
 )
 
 var recordingPaused atomic.Bool
@@ -129,7 +129,7 @@ func (g *guard) run(ctx context.Context) {
 			if err != nil {
 				g.readFailCount++
 				if g.readFailCount == 1 {
-					g.logger.Warn("failed to read keploy-agent memory usage; "+
+					g.logger.Debug("failed to read keploy-agent memory usage; "+
 						"ensure /sys/fs/cgroup is mounted in the container or set --memory-limit=0 to disable",
 						zap.String("path", g.memoryCurrentPath),
 						zap.Error(err))

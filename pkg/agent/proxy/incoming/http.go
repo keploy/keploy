@@ -171,7 +171,7 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 		// connection. Remaining test cases on this connection will be lost.
 		f.closed.Store(true)
 		if f.logger != nil {
-			f.logger.Warn("Capture channel full — dropping remaining test cases on this connection. "+
+			f.logger.Debug("Capture channel full — dropping remaining test cases on this connection. "+
 				"This may indicate responses too large for the channel buffer.",
 				zap.Int64("total_bytes_written", f.written.Load()),
 				zap.Int("chunk_size", len(p)),
