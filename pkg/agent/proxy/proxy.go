@@ -403,6 +403,18 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
 		clientConnCancel()
+
+		// Close the listener synchronously BEFORE waiting for connection
+		// handlers. Defers are LIFO, so without this the listener-close
+		// defer (func1) runs AFTER this defer (func2). The accept
+		// goroutine blocks on listener.Accept() — if we wait for
+		// clientConnErrGrp before closing the listener, the accept
+		// goroutine never exits, and on 2-CPU CI runners the scheduler
+		// may not run other unblocking goroutines promptly, causing a hang.
+		if listener != nil {
+			listener.Close()
+		}
+
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
