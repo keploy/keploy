@@ -239,7 +239,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 				// modify the source code for refactoring.
 				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
-					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
+					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), models.FilePermReadWrite); err != nil {
 						return fmt.Errorf("failed to refactor source code:%w", err)
 					}
 					codeModified = true
@@ -396,7 +396,7 @@ func revertSourceCode(srcPath, originalSrcCode string, codeModified bool) error 
 		return nil
 	}
 
-	if err := os.WriteFile(srcPath, []byte(originalSrcCode), 0644); err != nil {
+	if err := os.WriteFile(srcPath, []byte(originalSrcCode), models.FilePermReadWrite); err != nil {
 		return fmt.Errorf("failed to revert source code to the original state:%w", err)
 	}
 	return nil
@@ -664,7 +664,7 @@ func (g *UnitTestGenerator) ValidateTest(
 	processedTestLines := append(originalContentLines[:InsertAfter], testCodeLines...)
 	processedTestLines = append(processedTestLines, originalContentLines[InsertAfter:]...)
 	processedTest := strings.Join(processedTestLines, "\n")
-	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
+	if err := os.WriteFile(g.testPath, []byte(processedTest), models.FilePermReadWrite); err != nil {
 		return false, fmt.Errorf("failed to write test file: %w", err)
 	}
 	importLen, err := g.injector.updateImports(g.testPath, generatedTest.NewImportsCode)
@@ -680,7 +680,7 @@ func (g *UnitTestGenerator) ValidateTest(
 	stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 	if exitCode != 0 {
 		g.logger.Info("Test Run Failed")
-		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
+		if err := os.WriteFile(g.testPath, []byte(originalContent), models.FilePermReadWrite); err != nil {
 			return false, fmt.Errorf("failed to revert test file: %w", err)
 		}
 		err = g.injector.uninstallLibraries(newInstalledPackages)
@@ -716,7 +716,7 @@ func (g *UnitTestGenerator) ValidateTest(
 	if !coverageIncreased {
 		g.logger.Info("No coverage increase detected after initial test run.")
 		// Revert test file to original content
-		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
+		if err := os.WriteFile(g.testPath, []byte(originalContent), models.FilePermReadWrite); err != nil {
 			return false, fmt.Errorf("failed to revert test file: %w", err)
 		}
 		// Uninstall any installed libraries
@@ -739,7 +739,7 @@ func (g *UnitTestGenerator) ValidateTest(
 			if exitCode != 0 {
 				g.logger.Info(fmt.Sprintf("Flaky test detected on iteration %d: %s", i+1, stderr))
 				// Revert test file to original content
-				if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
+				if err := os.WriteFile(g.testPath, []byte(originalContent), models.FilePermReadWrite); err != nil {
 					return false, fmt.Errorf("failed to revert test file: %w", err)
 				}
 				// Uninstall any installed libraries
@@ -775,7 +775,7 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 
 	newFilePath := filepath.Join(dir, discardedTestsFilename)
 
-	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, models.FilePermReadWrite)
 	if err != nil {
 		return fmt.Errorf("error opening discarded tests file: %w", err)
 	}

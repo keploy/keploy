@@ -17,6 +17,7 @@ import (
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -201,7 +202,7 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
 	}
 
-	if err := os.Chmod(aliasPath, 0777); err != nil {
+	if err := os.Chmod(aliasPath, models.DirPermDefault); err != nil {
 		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
 	}
 
@@ -251,7 +252,7 @@ func extractTarGz(gzipPath, destDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0777); err != nil {
+			if err := os.MkdirAll(target, models.DirPermDefault); err != nil {
 				return err
 			}
 		case tar.TypeReg:
@@ -319,7 +320,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return nil
 	}
 
-	err = os.Chmod(filePath, 0777) // Set permissions to 777
+	err = os.Chmod(filePath, models.FilePermReadWrite)
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to set the permission of config file")
 		return nil
