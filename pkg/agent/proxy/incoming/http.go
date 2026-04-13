@@ -433,9 +433,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
-		// Note: pressureCloseMode && !forceCloseMode branch removed —
-		// unreachable because forceCloseMode is always true here.
-
 		respTimestamp := time.Now()
 
 		// Re-evaluate capture eligibility after response headers (chunked may have changed).
