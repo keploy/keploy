@@ -58,6 +58,22 @@ send_request(){
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
+
+    # DEBUG: if keploy doesn't exit within 15 seconds, dump goroutine stacks
+    # SIGQUIT makes Go print all goroutine stack traces to stderr
+    (
+        sleep 30
+        if kill -0 "$REC_PID" 2>/dev/null; then
+            echo "===== KEPLOY HUNG — DUMPING GOROUTINE STACKS ====="
+            sudo kill -QUIT "$REC_PID" 2>/dev/null || true
+            sleep 3
+            # Force kill if still alive after stack dump
+            if kill -0 "$REC_PID" 2>/dev/null; then
+                echo "===== FORCE KILLING KEPLOY ====="
+                sudo kill -9 "$REC_PID" 2>/dev/null || true
+            fi
+        fi
+    ) &
 }
 
 # Record and Test cycles
