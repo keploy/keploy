@@ -309,7 +309,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	if !forceCloseMode {
 		// Sampling bypass: no lock, no capture — raw TCP passthrough.
 		if pm.sampling && !acquiredLock {
-			forwardRawTCP(clientConn, upConn)
+			forwardRawTCP(ctx, clientConn, upConn)
 			return
 		}
 		// Normal mode OR sampling-tracked: zero-copy TCP passthrough with
@@ -644,6 +644,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		go pm.parseStreamingHTTP(ctx, logger, reqPipeR, respPipeR, t, appPort)
 	}
 
+	// Close connections on context cancellation (shutdown) to unblock
+	// the io.Copy goroutines. Without this, the function hangs until
+	// the remote side (e.g., upstream app's keep-alive) closes naturally.
+	// Same pattern used by the gRPC handler.
+	go func() {
+		<-ctx.Done()
+		clientConn.Close()
+		upConn.Close()
+	}()
+
 	done := make(chan struct{}, 2)
 
 	// client → upstream (with optional non-blocking side-copy for capture)
@@ -759,7 +769,14 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 // where capture is not needed — bytes flow straight through via io.Copy.
 // Keep-alive is preserved (no Connection: close injected), so the client
 // can reuse the connection for multiple requests.
-func forwardRawTCP(clientConn, upConn net.Conn) {
+func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
+	// Close connections on context cancellation (shutdown).
+	go func() {
+		<-ctx.Done()
+		clientConn.Close()
+		upConn.Close()
+	}()
+
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upConn, clientConn)
