@@ -1,0 +1,56 @@
+[
+  {
+    "id": "slack",
+    "name": "Slack",
+    "emoji": "💬",
+    "description": "Live support, discussions, and quick answers.",
+    "url": "https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg",
+    "badge_flat": "https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "emoji": "🐙",
+    "description": "Contribute and collaborate on code.",
+    "url": "https://github.com/keploy",
+    "badge_flat": "https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white"
+  },
+  {
+    "id": "youtube",
+    "name": "YouTube",
+    "emoji": "📺",
+    "description": "Tutorials, demos, and community meetups.",
+    "url": "https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg",
+    "badge_flat": "https://img.shields.io/badge/YouTube-%23FF0000.svg?style=flat&logo=YouTube&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white"
+  },
+  {
+    "id": "substack",
+    "name": "Substack",
+    "emoji": "📰",
+    "description": "Technical deep dives and newsletters.",
+    "url": "https://testgpt.substack.com/",
+    "badge_flat": "https://img.shields.io/badge/Substack-FF6719?style=flat&logo=substack&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/Substack-FF6719?style=for-the-badge&logo=substack&logoColor=white"
+  },
+  {
+    "id": "twitter",
+    "name": "X (Twitter)",
+    "emoji": "🐦",
+    "description": "Product updates and announcements.",
+    "url": "https://x.com/Keployio",
+    "badge_flat": "https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/X-%231DA1F2.svg?style=for-the-badge&logo=X&logoColor=white"
+  },
+  {
+    "id": "blog",
+    "name": "Blog",
+    "emoji": "📢",
+    "description": "Read articles and updates.",
+    "url": "https://keploy.io/blog",
+    "badge_flat": "https://img.shields.io/badge/Blog-0A0A0A?style=flat&logo=rss&logoColor=white",
+    "badge_large": "https://img.shields.io/badge/Blog-0A0A0A?style=for-the-badge&logo=rss&logoColor=white"
+  }
+]
