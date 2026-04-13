@@ -278,6 +278,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
 		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
+	case "diff":
+		cmd.Flags().String("run1", "", "First test run ID to compare")
+		cmd.Flags().String("run2", "", "Second test run ID to compare")
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Test-sets to compare e.g. --test-sets \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -337,6 +342,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
@@ -411,6 +417,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
+		"ssePort":               "sse-port",
 		"proxyPort":             "proxy-port",
 		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
@@ -807,6 +814,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
 		}
 		c.cfg.Report.Format = format
+	case "diff":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTestSets(c.cfg, testSets)
 
 	case "sanitize":
 		path, err := cmd.Flags().GetString("path")
@@ -1093,13 +1116,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// get disable-mapping flag value
-			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
-			if err != nil {
-				errMsg := "failed to get the disable-mapping flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
 			}
-			c.cfg.DisableMapping = disableMapping
 
 			retryPassing, err := cmd.Flags().GetBool("retry-passing-test")
 			if err != nil {
@@ -1140,6 +1165,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.GRPCPort = grpcPort
+
+				ssePort, err := cmd.Flags().GetUint32("sse-port")
+				if err != nil {
+					errMsg := "failed to read --sse-port flag; ensure the value is a valid port number"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.SSEPort = ssePort
 
 				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
 				if err != nil {

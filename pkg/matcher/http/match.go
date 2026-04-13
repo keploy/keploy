@@ -380,11 +380,13 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// 3) Body mismatches
+		var bodyAssessment *models.FailureAssessment
 		if isBodyMismatch {
 			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
 				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 					currentRisk = matcherUtils.MaxRisk(currentRisk, assess.Risk)
 					currentCategories = append(currentCategories, assess.Category...)
+					bodyAssessment = assess
 				} else {
 					// couldn't classify → conservative
 					currentRisk = models.High
@@ -408,8 +410,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		res.FailureInfo = models.FailureInfo{
-			Risk:     currentRisk,
-			Category: uniqueCategories,
+			Risk:       currentRisk,
+			Category:   uniqueCategories,
+			Assessment: bodyAssessment,
 		}
 
 		isBodySizeMismatch := tc.HTTPResp.BodySkipped && !bodySizeResult.Normal
@@ -441,7 +444,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 	}
 
-	if !skipSuccessMsg {
+	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
+	// so we skip the success message as well
+	if !skipSuccessMsg && emitFailureLogs {
 		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +19,23 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// httpMethodPrefixes are pre-computed to avoid per-call []byte allocations.
+var (
+	httpResponsePrefix = []byte("HTTP/")
+	httpMethodGET      = []byte("GET ")
+	httpMethodPOST     = []byte("POST ")
+	httpMethodPUT      = []byte("PUT ")
+	httpMethodPATCH    = []byte("PATCH ")
+	httpMethodDELETE   = []byte("DELETE ")
+	httpMethodOPTIONS  = []byte("OPTIONS ")
+	httpMethodHEAD     = []byte("HEAD ")
+	httpMethodCONNECT  = []byte("CONNECT ")
+	httpVersionMarker  = []byte(" HTTP/")
+)
+
+// maxRequestLineScan caps how far into the first line we scan for " HTTP/".
+const maxRequestLineScan = 8192
 
 func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
@@ -45,19 +61,49 @@ type FinalHTTP struct {
 	ResTimestampMock time.Time
 }
 
-// MatchType function determines if the outgoing network call is HTTP by comparing the
-// message format with that of an HTTP text message.
+// MatchType determines if the outgoing network call is HTTP by checking for
+// a well-formed HTTP request line (METHOD path HTTP/version) or a response
+// status prefix (HTTP/version). For requests, it verifies " HTTP/" appears in
+// the first line to prevent false positives from binary protocols that start
+// with method-like ASCII bytes. Response detection only checks the prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
-	return isHTTP
+	isResponse := bytes.HasPrefix(buf, httpResponsePrefix)
+	isRequest := bytes.HasPrefix(buf, httpMethodGET) ||
+		bytes.HasPrefix(buf, httpMethodPOST) ||
+		bytes.HasPrefix(buf, httpMethodPUT) ||
+		bytes.HasPrefix(buf, httpMethodPATCH) ||
+		bytes.HasPrefix(buf, httpMethodDELETE) ||
+		bytes.HasPrefix(buf, httpMethodOPTIONS) ||
+		bytes.HasPrefix(buf, httpMethodHEAD) ||
+		bytes.HasPrefix(buf, httpMethodCONNECT)
+
+	if !isRequest && !isResponse {
+		h.Logger.Debug("determined the protocol is not HTTP", zap.Bool("isHTTP", false))
+		return false
+	}
+
+	// For requests, verify the first line contains " HTTP/" to confirm it's a
+	// valid HTTP request line and not a binary protocol that coincidentally
+	// starts with method-like ASCII bytes.
+	if isRequest {
+		// Cap the search range first to bound the scan cost on large non-HTTP payloads.
+		scanBuf := buf
+		maxScan := maxRequestLineScan + len(httpVersionMarker)
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
+			return false
+		}
+	}
+
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", true))
+	return true
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
@@ -212,9 +258,19 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.AddMock(newMock)
-		return nil
+	if opts.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			// In synchronous mode, always route HTTP mocks through the sync manager.
+			// The manager uses its internal first-request state to decide whether to
+			// buffer or forward mocks for correct time-window based association.
+			mgr.AddMock(newMock)
+			return nil
+		}
+	}
+	// In non-synchronous mode (k8s-proxy), or if no manager is available,
+	// send directly to the mocks channel so the mock is persisted.
+	if mocks != nil {
+		mocks <- newMock
 	}
 	return nil
 }

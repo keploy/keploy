@@ -42,6 +42,14 @@ test:
   host: "localhost"
   port: 0
   grpcPort: 0
+  ssePort: 0
+  protocol:
+    http:
+      port: 0
+    sse:
+      port: 0
+    grpc:
+      port: 0
   apiTimeout: 5
   skipCoverage: false
   coverageReportPath: ""
