@@ -403,24 +403,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
 		clientConnCancel()
-
-		// Wait for connection handlers with a timeout. The handlers
-		// should exit promptly (handleConnection defers close srcConn/
-		// dstConn which unblocks parser reads). But if something blocks
-		// (e.g., ReadBytes goroutine stuck in reader.Read despite
-		// connection close), don't hang the entire agent shutdown.
-		waitDone := make(chan struct{})
-		go func() {
-			clientConnErrGrp.Wait()
-			close(waitDone)
-		}()
-		select {
-		case <-waitDone:
-		case <-time.After(5 * time.Second):
-			p.logger.Warn("proxy connection handlers did not exit within 5s grace period; proceeding with shutdown")
-		}
-
-		var err error
+		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
@@ -572,6 +555,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+
+	// Close connections as soon as context is cancelled to unblock any
+	// goroutine stuck in a blocking read (ReadBytes → reader.Read).
+	// Without this, handleConnection's defer can't close connections until
+	// the parser returns, but the parser can't return because ReadBytes is
+	// blocked on the open connection — a circular dependency.
+	go func() {
+		<-ctx.Done()
+		if srcConn != nil {
+			srcConn.Close()
+		}
+		if dstConn != nil {
+			dstConn.Close()
+		}
+	}()
+
 	defer func() {
 		parserCtxCancel()
 
