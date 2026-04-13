@@ -119,12 +119,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
+	// Skip publishing the proxy port when it's zero. Docker rejects
+	// `-p 0:0` outright, so a caller that intentionally sets
+	// ProxyPort=0 (e.g. to run the agent without a listening proxy
+	// socket) would fail the whole docker-run alias build otherwise.
+	proxyPortStr := ""
+	if opts.ProxyPort != 0 {
+		proxyPortStr = " -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
+	}
 	switch osName {
 	case "linux":
 
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"

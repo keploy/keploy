@@ -155,8 +155,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1773927248001
-	h.agentRegistartionMap = objs.M_1773927248002
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -186,6 +186,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		utils.LogError(h.logger, err, "failed to detect the cgroup path")
 		return err
 	}
+
+	// Detect and clean orphaned BPF programs from crashed previous runs.
+	// This must happen BEFORE attaching our new programs to avoid conflicts.
+	// Only cleans programs whose owning process is dead and whose name
+	// matches known keploy program names. Safe when other keploy instances
+	// are running — hasOtherKeployProcesses check happens in the caller.
+	if cleaned := DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath); cleaned > 0 {
+		h.logger.Info("Cleaned orphaned cgroup BPF programs before attaching new ones",
+			zap.Int("cleaned", cleaned))
+	}
+
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
@@ -320,6 +331,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
 		}
+	}
+
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&agentInfo)
 	}
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)

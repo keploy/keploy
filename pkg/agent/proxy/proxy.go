@@ -99,6 +99,15 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
+
+	// skipListener disables the TCP accept loop. When true, the proxy
+	// does not bind a port. DNS, parser init, and session state still run.
+	skipListener bool
+}
+
+// SetSkipListener disables the TCP accept loop.
+func (p *Proxy) SetSkipListener(skip bool) {
+	p.skipListener = skip
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -116,6 +125,23 @@ func isNetworkClosedErr(err error) bool {
 		strings.Contains(errStr, "wsarecv") ||
 		strings.Contains(errStr, "wsasend") ||
 		strings.Contains(errStr, "forcibly closed by the remote host")
+}
+
+// isPostgresSSLRequest reports whether the first 8 bytes of a connection
+// are a Postgres SSLRequest packet:
+//
+//	int32 length = 8
+//	int32 code   = 80877103 (0x04D2162F)
+//
+// This is sent by libpq / pgx / pq when `sslmode` is prefer/require/
+// verify-ca/verify-full, BEFORE the TLS handshake begins. The server is
+// expected to reply with a single byte: 'S' (accept TLS) or 'N' (refuse).
+func isPostgresSSLRequest(b []byte) bool {
+	if len(b) < 8 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x00 && b[3] == 0x08 &&
+		b[4] == 0x04 && b[5] == 0xd2 && b[6] == 0x16 && b[7] == 0x2f
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -267,6 +293,11 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
+	// Skip the TCP listener if configured. DNS + parsers + session still run.
+	if agent.SkipProxyListener {
+		p.skipListener = true
+	}
+
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
@@ -387,8 +418,31 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	return nil
 }
 
-// start function starts the proxy server on the idle local port
+// start function starts the proxy server on the idle local port.
+// When skipListener is true, no TCP listener is created.
+// The function blocks on ctx.Done and handles cleanup on shutdown.
 func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
+
+	if p.skipListener {
+		p.logger.Info("Proxy TCP listener skipped. DNS and session services active.")
+		readyChan <- nil
+		// Block until context is cancelled, then run cleanup.
+		<-ctx.Done()
+		p.sessionMu.RLock()
+		if p.session != nil && p.session.MC != nil {
+			close(p.session.MC)
+		}
+		p.sessionMu.RUnlock()
+		p.nsSwitchMutex.Lock()
+		if string(p.nsswitchData) != "" {
+			if err := p.resetNsSwitchConfig(); err != nil {
+				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
+			}
+		}
+		p.nsSwitchMutex.Unlock()
+		p.logger.Debug("proxy (skipListener) stopped")
+		return nil
+	}
 
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
@@ -708,9 +762,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
+	// Peek 8 bytes: enough for both the TLS record header (first 5 bytes)
+	// and the Postgres SSLRequest (exactly 8 bytes). Any error — including
+	// io.EOF — is treated exactly as the old 5-byte path did: return up to
+	// the caller rather than trying to interpret a truncated first chunk.
+	testBuffer, err := reader.Peek(8)
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
@@ -723,6 +779,43 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
 		return err
+	}
+
+	// ── Postgres SSLRequest handshake ──
+	// If the first 8 bytes are an SSLRequest, reply 'S' to accept and then
+	// upgrade the connection to TLS using keploy's builtin CA. The client
+	// app will follow with a standard TLS ClientHello, which the existing
+	// isTLS path below will pick up.
+	if isPostgresSSLRequest(testBuffer) {
+		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
+			zap.Int("sourcePort", sourcePort),
+			zap.String("dstAddr", dstAddr),
+		)
+		// Consume the 8-byte SSLRequest from the buffered reader so the
+		// downstream parser never sees it.
+		if _, derr := reader.Discard(8); derr != nil {
+			utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes")
+			return derr
+		}
+		// Reply 'S' (TLS accepted). Write straight to the underlying TCP
+		// connection; writes bypass the buffered reader.
+		if _, werr := srcConn.Write([]byte{'S'}); werr != nil {
+			utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client")
+			return werr
+		}
+		// Re-peek for the TLS ClientHello. The client app sends it as soon
+		// as it gets 'S'. 5 bytes is enough for IsTLSHandshake().
+		testBuffer, err = reader.Peek(5)
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				p.logger.Debug("Postgres client closed conn after SSLRequest reply")
+				return nil
+			}
+			if err != io.EOF {
+				utils.LogError(p.logger, err, "failed to peek TLS ClientHello after Postgres SSLRequest accept")
+				return err
+			}
+		}
 	}
 
 	srcConn = &util.Conn{

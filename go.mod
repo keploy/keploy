@@ -6,7 +6,7 @@ toolchain go1.26.1
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/cilium/ebpf v0.19.0
+	github.com/cilium/ebpf v0.21.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
@@ -54,10 +54,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-require (
-	gopkg.in/yaml.v3 v3.0.1
-	gotest.tools/v3 v3.5.0 // indirect
-)
+require gopkg.in/yaml.v3 v3.0.1
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect

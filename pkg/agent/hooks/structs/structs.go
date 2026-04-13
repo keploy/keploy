@@ -31,4 +31,6 @@ type AgentInfo struct {
 	Proxy              ProxyInfo
 	_                  [4]byte
 	RecordingStartTime uint64 // boot-time NS when recording started; pre-existing processes are auto-excluded by eBPF
+	Flags              uint32 // extensible flag slot consumed by the BPF cgroup hooks; set via AgentInfoCustomizer
+	_                  [4]byte
 }

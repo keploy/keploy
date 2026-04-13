@@ -77,6 +77,16 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		upgrader := tlsUpgrader
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts, upgrader)
 		if err != nil {
+			// A capture layer that detects the MySQL CLIENT_SSL capability
+			// bit mid-handshake may close the SimulatedConn so a TLS-aware
+			// consumer (SSL/GoTLS/JSSE uprobe, upstream TLS proxy, etc.)
+			// can take over the plaintext continuation. The parser then
+			// sees EOF on the next read — expected, not an error.
+			if err == io.EOF {
+				logger.Debug("MySQL handshake short-circuited — client requested TLS; plaintext continuation handled by the TLS-aware consumer",
+					zap.String("connKey", opts.ConnKey))
+				return nil
+			}
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
 			return nil

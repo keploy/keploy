@@ -5,6 +5,7 @@ import (
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -93,4 +94,15 @@ func RegisterEbpfLoadedHook(h func(getMap func(string) coreAgent.Pinnable) error
 
 func SetEbpfProxyPortOverride(port uint32) {
 	coreAgent.EbpfProxyPortOverride = port
+}
+
+func SetSkipProxyListener(skip bool) {
+	coreAgent.SkipProxyListener = skip
+}
+
+// SetAgentInfoCustomizer registers a callback that mutates AgentInfo
+// before it is written to the BPF map. Use it to set the extensible
+// Flags slot from a downstream build.
+func SetAgentInfoCustomizer(fn func(info *structs.AgentInfo)) {
+	coreAgent.AgentInfoCustomizer = fn
 }
