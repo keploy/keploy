@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -16,6 +17,9 @@ func TestInferSchemaSingleGETEndpoint(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
+	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
 	}
 
 	pathItem := doc.Paths.Value("/users/1")
@@ -47,6 +51,9 @@ func TestInferSchemaPOSTEndpointWithJSONBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
 	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
+	}
 
 	pathItem := doc.Paths.Value("/users")
 	if pathItem == nil || pathItem.Post == nil {
@@ -75,6 +82,9 @@ func TestInferSchemaMultipleEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
 	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
+	}
 
 	users := doc.Paths.Value("/users")
 	if users == nil || users.Get == nil || users.Post == nil {
@@ -96,6 +106,9 @@ func TestInferSchemaTypeInferenceNestedObjects(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
+	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
 	}
 
 	response := doc.Paths.Value("/profile").Post.Responses.Value("200")
@@ -124,6 +137,9 @@ func TestInferSchemaResponseDescriptionPointerAliasing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
 	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
+	}
 
 	aResp := doc.Paths.Value("/a").Get.Responses.Value("200")
 	bResp := doc.Paths.Value("/b").Get.Responses.Value("404")
@@ -143,6 +159,9 @@ func TestInferSchemaObjectFieldsNotRequired(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("InferSchema returned error: %v", err)
+	}
+	if err := doc.Validate(context.Background()); err != nil {
+		t.Fatalf("InferSchema produced invalid OpenAPI doc: %v", err)
 	}
 
 	schema := doc.Paths.Value("/user").Get.Responses.Value("200").Value.Content["application/json"].Schema

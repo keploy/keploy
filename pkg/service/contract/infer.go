@@ -139,6 +139,9 @@ func inferSchemaRef(value any) *openapi3.SchemaRef {
 		arraySchema := openapi3.NewArraySchema()
 		if len(v) > 0 {
 			arraySchema.Items = inferSchemaRef(v[0])
+		} else {
+			// OpenAPI requires Items on array schemas; default to empty object.
+			arraySchema.Items = openapi3.NewSchemaRef("", openapi3.NewObjectSchema())
 		}
 		return openapi3.NewSchemaRef("", arraySchema)
 	case map[string]any:

@@ -24,6 +24,12 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 	cmd.AddCommand(Download(ctx, logger, serviceFactory, cmdConfigurator))
 	cmd.AddCommand(Validate(ctx, logger, serviceFactory, cmdConfigurator))
 	for _, subCmd := range cmd.Commands() {
+		// generate manages its own flags (--infer, --path via Validate);
+		// skip AddFlags to avoid registering --services/--tests which
+		// are unused by GenerateFromTests.
+		if subCmd.Name() == "generate" {
+			continue
+		}
 		err := cmdConfigurator.AddFlags(subCmd)
 		if err != nil {
 			utils.LogError(logger, err, "failed to add flags to command", zap.String("command", subCmd.Name()))
@@ -52,7 +58,13 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			err = contract.GenerateFromTests(ctx)
+
+			infer, _ := cmd.Flags().GetBool("infer")
+			if infer {
+				err = contract.GenerateFromTests(ctx)
+			} else {
+				err = contract.Generate(ctx, true)
+			}
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
@@ -63,8 +75,9 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		},
 	}
 
-	return cmd
+	cmd.Flags().Bool("infer", true, "Infer OpenAPI contract from recorded traffic (set to false for service-mapping based generation)")
 
+	return cmd
 }
 
 func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {

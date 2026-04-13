@@ -416,7 +416,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	testSetIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory")
+		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory", zap.String("path", keployPath), zap.String("hint", "verify that --path points to a directory containing keploy/<test-set>/tests/*.yaml files"))
 		return err
 	}
 	sort.Strings(testSetIDs)
@@ -425,12 +425,23 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 	for _, testSetID := range testSetIDs {
 		tcs, err := s.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
+			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID), zap.String("path", keployPath), zap.String("hint", "ensure the test set directory contains valid YAML test case files"))
 			return err
 		}
 		for _, tc := range tcs {
 			if tc == nil {
 				continue
+			}
+			// Hydrate request body from BodyRef when the body was offloaded to disk (>1MB).
+			if tc.HTTPReq.Body == "" && tc.HTTPReq.BodyRef.Path != "" {
+				refPath := filepath.Join(keployPath, tc.HTTPReq.BodyRef.Path)
+				data, err := os.ReadFile(refPath)
+				if err != nil {
+					s.logger.Warn("could not read offloaded request body, skipping body for schema inference", zap.String("path", refPath), zap.Error(err))
+				} else {
+					tc.HTTPReq.Body = string(data)
+					s.logger.Debug("hydrated request body from BodyRef", zap.String("path", refPath), zap.Int64("size", tc.HTTPReq.BodyRef.Size))
+				}
 			}
 			testCases = append(testCases, *tc)
 		}
