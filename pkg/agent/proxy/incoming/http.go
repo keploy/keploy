@@ -363,14 +363,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
-		// Memory pressure without forceClose: release lock and close connection
-		// to free resources quickly.
-		if pressureCloseMode && !forceCloseMode {
-			releaseLock()
-			req.Close = true
-			req.Header.Set("Connection", "close")
-			captureEnabled = false
-		}
+		// Note: the pressureCloseMode && !forceCloseMode branch was removed
+		// because forceCloseMode is always true here (the !forceCloseMode
+		// path returns early via handleHttp1ZeroCopy/forwardRawTCP).
 
 		// Determine whether capture is eligible for this exchange.
 		// Skip tee/buffering to avoid overhead when capture will be skipped anyway.
@@ -730,13 +725,27 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		// Set Host header to match pkg.ParseHTTPRequest behavior
 		req.Header.Set("Host", req.Host)
 
-		// Read the full request body to advance the reader past it
-		reqBody, err := io.ReadAll(req.Body)
+		// Read request body with a size cap to avoid unbounded allocations.
+		// We must consume the full body to advance the pipe reader past it
+		// (HTTP framing), but only keep up to MaxTestCaseSize in memory.
+		reqBody, err := io.ReadAll(io.LimitReader(req.Body, int64(hooksUtils.MaxTestCaseSize)+1))
+		// Drain any remainder to keep the stream aligned.
+		_, _ = io.Copy(io.Discard, req.Body)
 		req.Body.Close()
 		if err != nil {
 			return
 		}
-		// Re-wrap body so CaptureHook can read it
+		if len(reqBody) > hooksUtils.MaxTestCaseSize {
+			// Body exceeds capture budget — skip this exchange.
+			// Read and discard the response to keep the stream aligned.
+			resp, rerr := http.ReadResponse(respReader, req)
+			if rerr != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			continue
+		}
 		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 
 		resp, err := http.ReadResponse(respReader, req)
@@ -744,10 +753,15 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 			return
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		// Same bounded read for the response body.
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(hooksUtils.MaxTestCaseSize)+1))
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			return
+		}
+		if len(respBody) > hooksUtils.MaxTestCaseSize {
+			continue // Skip oversized response
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 

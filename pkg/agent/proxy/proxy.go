@@ -568,19 +568,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
-	// Close connections as soon as context is cancelled to unblock any
+	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
+	// Used by the shutdown goroutine below to close the underlying connection.
+	initialSrcConn := srcConn
+
+	// Close the initial srcConn on context cancellation to unblock any
 	// goroutine stuck in a blocking read (ReadBytes → reader.Read).
-	// Without this, handleConnection's defer can't close connections until
-	// the parser returns, but the parser can't return because ReadBytes is
-	// blocked on the open connection — a circular dependency.
+	// Uses parserCtx (per-connection) so the goroutine exits when the
+	// handler returns, not when the entire proxy shuts down.
+	// Uses initialSrcConn (captured before reassignment) to avoid a
+	// data race with TLS upgrade or conn wrapping.
 	go func() {
-		<-ctx.Done()
-		if srcConn != nil {
-			srcConn.Close()
-		}
-		if dstConn != nil {
-			dstConn.Close()
-		}
+		<-parserCtx.Done()
+		initialSrcConn.Close()
 	}()
 
 	defer func() {
