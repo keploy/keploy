@@ -403,7 +403,24 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
 		clientConnCancel()
-		err := clientConnErrGrp.Wait()
+
+		// Wait for connection handlers with a timeout. The handlers
+		// should exit promptly (handleConnection defers close srcConn/
+		// dstConn which unblocks parser reads). But if something blocks
+		// (e.g., ReadBytes goroutine stuck in reader.Read despite
+		// connection close), don't hang the entire agent shutdown.
+		waitDone := make(chan struct{})
+		go func() {
+			clientConnErrGrp.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			p.logger.Warn("proxy connection handlers did not exit within 5s grace period; proceeding with shutdown")
+		}
+
+		var err error
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
