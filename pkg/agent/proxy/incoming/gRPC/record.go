@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -113,8 +114,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 // HTTP/2 frame stream integrity (dropping bytes would corrupt parser alignment).
 // This is safe because the parser is faster than network I/O, and ctx cancellation
 // closes the connections which unblocks the reads.
+//
+// When memory pressure is detected, the tee stops permanently for this
+// connection (cannot resume without corrupting the parser's frame alignment).
+// Forwarding continues unimpacted.
 func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, direction string) {
 	buf := make([]byte, 32*1024)
+	teeActive := !memoryguard.IsRecordingPaused()
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
@@ -123,9 +129,15 @@ func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, dire
 					zap.String("direction", direction), zap.Error(wErr))
 				return
 			}
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			ch <- data // blocking send — preserves stream integrity
+			if teeActive {
+				if memoryguard.IsRecordingPaused() {
+					teeActive = false
+				} else {
+					data := make([]byte, n)
+					copy(data, buf[:n])
+					ch <- data // blocking send — preserves stream integrity
+				}
+			}
 		}
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed") {
@@ -202,7 +214,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []by
 // pairs and sends them as test cases. Only called from the single emitter
 // goroutine to prevent duplicate emissions.
 func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.DefaultStreamManager, t chan *models.TestCase, appPort uint16) {
-	if t == nil {
+	if t == nil || memoryguard.IsRecordingPaused() {
 		return
 	}
 

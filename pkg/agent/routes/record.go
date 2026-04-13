@@ -215,14 +215,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 	a.logger.Debug("Incoming stream connection established and headers flushed")
 
-	// Keep the connection alive and stream data
-	for t := range tc {
+	// Keep the connection alive and stream data.
+	// Use select (not for-range) so context cancellation is checked
+	// concurrently with channel receive — otherwise the handler blocks
+	// forever during shutdown when no test cases are arriving.
+	for {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
-			// Client closed the connection or context was cancelled
 			return
-		default:
+		case t, ok := <-tc:
+			if !ok {
+				return
+			}
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
