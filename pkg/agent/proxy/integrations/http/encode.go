@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -18,14 +19,7 @@ import (
 )
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml ...*pUtil.MemoryLimiter) error {
-
-	// Extract optional MemoryLimiter.
-	var memLimiter *pUtil.MemoryLimiter
-	if len(ml) > 0 {
-		memLimiter = ml[0]
-	}
-
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
@@ -57,8 +51,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
 		for {
-			if memLimiter != nil && memLimiter.IsExceeded() {
-				h.Logger.Debug("memory limit exceeded, stopping HTTP recording and falling back to passthrough")
+			if memoryguard.IsRecordingPaused() {
+				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
 				done := make(chan struct{}, 2)
 				cp := func(dst, src net.Conn) {
 					_, _ = io.Copy(dst, src)

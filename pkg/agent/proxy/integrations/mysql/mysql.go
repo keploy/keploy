@@ -39,7 +39,7 @@ func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
 func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
-	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader, session.MemLimiter)
+	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader)
 
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
