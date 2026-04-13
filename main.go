@@ -30,8 +30,16 @@ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
 	setVersion()
-	ctx := utils.NewCtx()
-	start(ctx)
+	// Initialize logger first so we can pass it to NewCtx for signal handling logging
+	logger, logFile, err := log.New()
+	if err != nil {
+		fmt.Println("Failed to start the logger for the CLI", err)
+		return
+	}
+	utils.LogFile = logFile
+
+	ctx := utils.NewCtx(logger)
+	start(ctx, logger)
 	os.Exit(utils.ErrCode)
 }
 
@@ -43,14 +51,8 @@ func setVersion() {
 	utils.VersionIdentifier = "version"
 }
 
-func start(ctx context.Context) {
-	logger, logFile, err := log.New()
-	if err != nil {
-		fmt.Println("Failed to start the logger for the CLI", err)
-		return
-	}
-	utils.LogFile = logFile
-
+func start(ctx context.Context, logger *zap.Logger) {
+	var err error
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
 	if utils.ShouldReexecWithSudo() {
