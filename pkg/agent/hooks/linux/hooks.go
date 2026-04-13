@@ -107,13 +107,35 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err == nil {
+		release := string(utsname.Release[:])
+		if idx := strings.IndexByte(release, 0); idx != -1 {
+			release = release[:idx]
+		}
+		h.logger.Info("Keploy agent container kernel version", zap.String("kernel", release))
+	}
+	// Check container distribution
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				distro := strings.TrimPrefix(line, "PRETTY_NAME=")
+				distro = strings.Trim(distro, "\"")
+				h.logger.Info("Container distribution", zap.String("distro", distro))
+				break
+			}
+		}
+	}
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
-		return err
+		// On some environments (e.g., Docker Desktop for Windows), the memcg accounting probe
+		// may fail with "function not implemented" even though the kernel supports memcg.
+		// Continue anyway - if eBPF truly can't load, spec.LoadAndAssign() will fail with a clear error.
+		h.logger.Warn("failed to remove memlock limit, continuing anyway", zap.Error(err))
 	}
 
-	// Load pre-compiled programs and maps into the kernel.
+	/// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	bpfopts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
@@ -126,6 +148,19 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to load BPF spec")
 		return err
+	}
+
+	// Strip ALL BTF to support WSL2 kernel limitations
+	// This prevents the "detect support for Map BTF" syscall that fails on WSL2
+	spec.Types = nil
+	for name, m := range spec.Maps {
+		m.Key = nil
+		m.Value = nil
+		// Fix .rodata map flags for WSL2 compatibility
+		if name == ".rodata" {
+			m.Flags = 0  // Remove BPF_F_RDONLY_PROG flag
+		}
+		spec.Maps[name] = m
 	}
 
 	programs := []struct {
