@@ -402,10 +402,26 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 		}
 
+		isSSERequest := tc.Kind == models.HTTP && pkg.IsSSERequest(tc)
+		// Fallback: if the request was recorded on the configured SSE port, treat it as SSE
+		// even without SSE headers (e.g., OPTIONS preflight). Matches replay hook logic.
+		if !isSSERequest && tc.Kind == models.HTTP && tc.AppPort > 0 && o.config.ReRecord.SSEPort != 0 && uint32(tc.AppPort) == uint32(o.config.ReRecord.SSEPort) {
+			isSSERequest = true
+		}
+
 		if o.config.ReRecord.Port != 0 && tc.Kind == models.HTTP {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace http port to provided port by the user")
+				break
+			}
+		}
+
+		if o.config.ReRecord.SSEPort != 0 && isSSERequest {
+			originalURL := tc.HTTPReq.URL
+			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.SSEPort)))
+			if err != nil {
+				utils.LogError(o.logger, err, fmt.Sprintf("failed to replace SSE port in URL. original_url=%q target_sse_port=%d. Next step: verify the URL is a valid absolute URL with a host and that --sse-port is a valid port number", originalURL, o.config.ReRecord.SSEPort))
 				break
 			}
 		}
@@ -454,9 +470,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		}
 
 		hostToUse := o.config.Test.Host
+		configPortToUse := o.config.ReRecord.Port
+		if isSSERequest && o.config.ReRecord.SSEPort > 0 {
+			configPortToUse = o.config.ReRecord.SSEPort
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, pkg.SimulationConfig{
 			APITimeout:      o.config.Test.APITimeout,
-			ConfigPort:      o.config.ReRecord.Port,
+			ConfigPort:      configPortToUse,
 			KeployPath:      o.config.Path,
 			ConfigHost:      hostToUse,
 			URLReplacements: nil,

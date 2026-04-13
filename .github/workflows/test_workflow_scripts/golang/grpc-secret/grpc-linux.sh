@@ -60,6 +60,36 @@ cleanup_keploy() {
     fi
 }
 
+wait_for_port_release() {
+    local port=$1
+    local timeout_seconds=${2:-15}
+
+    echo "Waiting for port ${port} to be released..."
+    for ((i=0; i<timeout_seconds; i++)); do
+        if ! lsof -tiTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "Port ${port} is free"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Port ${port} is still in use after ${timeout_seconds}s"
+    lsof -iTCP:"${port}" -sTCP:LISTEN -Pn || true
+    return 1
+}
+
+ensure_grpc_secret_stopped() {
+    local port=50051
+
+    if ! wait_for_port_release "${port}" 5; then
+        echo "Found a lingering grpc-secret listener on port ${port}, cleaning it up..."
+        pkill -f grpc-secret || true
+        sleep 2
+        pkill -9 -f grpc-secret || true
+        wait_for_port_release "${port}" 15
+    fi
+}
+
 # Checks a log file for critical errors or data races
 check_for_errors() {
     local logfile=$1
@@ -238,6 +268,7 @@ echo "🧪 Starting gRPC Secret Sanitize Testing"
 
 # Reset state before each run
 cleanup
+ensure_grpc_secret_stopped
 rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 sleep 3
@@ -253,18 +284,24 @@ echo "📝 Phase 1: Recording 2 test sets with all 4 endpoints..."
 for i in 1 2; do
     app_name="grpcSecret_${i}"
     echo "Recording iteration $i..."
-    
-    # Start keploy record in background
-    "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee ${app_name}.txt &
-    
-    # Send all 4 gRPC requests
+
+    ensure_grpc_secret_stopped
+
+    # Start keploy record in background and retain the actual record process PID.
+    "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false > >(tee "${app_name}.txt") 2>&1 &
+    record_pid=$!
+
+    # Send all 4 gRPC requests and wait for them to finish before stopping keploy.
     send_grpc_requests &
-    
-    # Wait for requests to complete
-    sleep 15
-    
+    request_pid=$!
+    wait "${request_pid}"
+
     # Kill keploy
     kill_keploy_process
+
+    # Wait for the record process to finish cleaning up the app and the proxy state.
+    wait "${record_pid}" || true
+    ensure_grpc_secret_stopped
     
     # Check for errors and race conditions
     check_for_errors "${app_name}.txt"
@@ -318,4 +355,3 @@ cleanup_keploy
 
 echo "🎉 gRPC Secret Sanitize Testing completed successfully!"
 exit 0
-
