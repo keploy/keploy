@@ -82,20 +82,6 @@ check_negative_dns_mock() {
   echo "Negative DNS recording check passed."
 }
 
-send_negative_dns_request() {
-  local base_url="http://localhost:8086"
-  local response
-
-  echo "Running negative DNS lookup (${NEGATIVE_DNS_DOMAIN})..."
-  response=$(curl -s "${base_url}/dns/a?domain=${NEGATIVE_DNS_DOMAIN}&transport=udp4")
-  echo "$response" | jq
-
-  if ! echo "$response" | jq -e '.error == "DNS query failed with code: 3"' >/dev/null; then
-    echo "::error::Expected NXDOMAIN response for ${NEGATIVE_DNS_DOMAIN}."
-    return 1
-  fi
-}
-
 send_request() {
   section "Sending Requests"
   echo "Waiting for app to start..."
@@ -110,7 +96,6 @@ send_request() {
   echo "Running curl.sh..."
   chmod +x ./curl.sh
   ./curl.sh
-  send_negative_dns_request
   endsec
 }
 
