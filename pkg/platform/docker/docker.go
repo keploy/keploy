@@ -1181,7 +1181,7 @@ func cloneYAMLNode(node *yaml.Node) *yaml.Node {
 	}
 
 	cloned := *node
-	if len(node.Content) > 0 {
+	if node.Content != nil {
 		cloned.Content = make([]*yaml.Node, len(node.Content))
 		for i, child := range node.Content {
 			cloned.Content[i] = cloneYAMLNode(child)
