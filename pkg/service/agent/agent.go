@@ -74,6 +74,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		IsDocker:      a.config.Agent.IsDocker,
 		EnableTesting: a.config.Agent.EnableTesting,
 		Rules:         rules,
+		CgroupPath:    a.config.Agent.CgroupPath,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -181,10 +182,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	hookCfg := coreAgent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:        0,
+		IsDocker:   opts.IsDocker,
+		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		CgroupPath: opts.CgroupPath,
 	}
 
 	if coreAgent.EbpfProxyPortOverride != 0 {

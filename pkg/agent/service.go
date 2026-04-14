@@ -17,11 +17,12 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	Pid      uint32
-	IsDocker bool
-	Mode     models.Mode
-	Rules    []models.BypassRule
-	Port     uint32
+	Pid        uint32
+	IsDocker   bool
+	Mode       models.Mode
+	Rules      []models.BypassRule
+	Port       uint32
+	CgroupPath string // optional: explicit cgroupv2 path override (used by DaemonSet agent)
 }
 
 type AuxiliaryProxyHook interface {
