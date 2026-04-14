@@ -18,6 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
+var dnsClientConfigFromFile = dns.ClientConfigFromFile
+
+var dnsExchange = func(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+	return c.Exchange(m, addr)
+}
+
 func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
@@ -420,7 +426,7 @@ func generateDNSDedupeKey(question dns.Question) string {
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
-	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	config, err := dnsClientConfigFromFile("/etc/resolv.conf")
 	var servers []string
 	port := "53"
 
@@ -448,7 +454,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		addr := net.JoinHostPort(server, port)
 
 		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
+		resp, _, err := dnsExchange(c, m, addr)
 		if err != nil {
 			resolveErr = err
 			continue
@@ -456,7 +462,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil && resp.Truncated {
 			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
+			resp, _, err = dnsExchange(c, m, addr)
 			if err != nil {
 				resolveErr = err
 				continue
@@ -487,17 +493,13 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		return resp, nil
 	}
 
-	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
-	// These are often noise from search domain expansion or external transient issues.
-	if in.Rcode != dns.RcodeSuccess {
-		p.logger.Debug("Skipping DNS mock recording due to non-zero rcode",
-			zap.String("query", question.Name),
-			zap.String("qtype", dns.TypeToString[question.Qtype]),
-			zap.Int("rcode", in.Rcode),
-		)
-		return resp, nil
-	}
+	// Preserve upstream negative replies as mocks too; dropping NXDOMAIN/REFUSED/SERVFAIL
+	// changes resolver search-domain behavior during replay.
+	p.recordResolvedDNSMock(question, reqTime, in, session)
+	return resp, nil
+}
 
+func (p *Proxy) recordResolvedDNSMock(question dns.Question, reqTime time.Time, in *dns.Msg, session *agent.Session) {
 	// ========== DNS MOCK DEDUPLICATION ==========
 	// Generate a unique key based on the DNS query (ignoring response IPs).
 	// If we've already recorded a mock for this query, skip recording.
@@ -507,7 +509,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			zap.String("query", question.Name),
 			zap.String("qtype", dns.TypeToString[question.Qtype]),
 		)
-		return resp, nil
+		return
 	}
 	// Mark as recorded
 	p.recordedDNSMocks.Add(dedupeKey, true)
@@ -553,11 +555,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.SetOutputChannel(session.MC)
 			mgr.AddMock(mock)
-			return resp, nil
+			return
 		}
 	}
 	session.MC <- mock
-	return resp, nil
 }
 
 func (p *Proxy) stopDNSServers(_ context.Context) error {
