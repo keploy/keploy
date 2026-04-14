@@ -138,7 +138,7 @@ send_requests() {
 
   echo "Triggering the fuzzer to generate traffic..."
 
-  curl --max-time 120 -X POST http://localhost:18082/run \
+  curl --max-time 300 -X POST http://localhost:18082/run \
   -H "Content-Type: application/json" \
   -d '{
     "mode": "record",

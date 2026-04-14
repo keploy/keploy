@@ -8,8 +8,6 @@ import (
 	"net"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -49,40 +47,47 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		return forwardHTTPBidirectional(clientConn, destConn)
 	}
 
-	// Buffered channels let ReadBuffConn read ahead without waiting
-	// for the main loop, preventing TCP flow-control throttling.
+	// Buffered channels for raw byte relay. Each Read() result is sent
+	// immediately — no accumulation, no "wait for short read" like ReadBytes.
 	clientBuffChan := make(chan []byte, 256)
 	destBuffChan := make(chan []byte, 256)
-	errChan := make(chan error, 1)
+	errChan := make(chan error, 2)
 
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get the error group from the context")
+	// readRelay reads from conn in a loop and sends each chunk to ch.
+	// Returns on error, EOF, or context cancellation.
+	readRelay := func(conn net.Conn, ch chan<- []byte) {
+		defer close(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			buf := make([]byte, 32*1024)
+			n, err := conn.Read(buf)
+			if n > 0 {
+				ch <- buf[:n]
+			}
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				if err != io.EOF {
+					utils.LogError(h.Logger, err, "failed to read from connection")
+				}
+				errChan <- err
+				return
+			}
+		}
 	}
-
-	// Read requests from client.
-	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		defer close(clientBuffChan)
-		pUtil.ReadBuffConn(ctx, h.Logger, clientConn, clientBuffChan, errChan, false)
-		return nil
-	})
-
-	// Read responses from destination.
-	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		defer close(destBuffChan)
-		pUtil.ReadBuffConn(ctx, h.Logger, destConn, destBuffChan, errChan, false)
-		return nil
-	})
 
 	go func() {
 		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		err := g.Wait()
-		if err != nil {
-			h.Logger.Debug("error group is returning an error", zap.Error(err))
-		}
-		close(errChan)
+		readRelay(clientConn, clientBuffChan)
+	}()
+	go func() {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+		readRelay(destConn, destBuffChan)
 	}()
 
 	// Async decode channel and background goroutine.
