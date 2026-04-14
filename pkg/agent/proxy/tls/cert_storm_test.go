@@ -85,15 +85,32 @@ func resetCertCacheForTest() {
 	certCache = nil
 }
 
-// TestCertCacheHit verifies that 42 concurrent connections to the same hostname
-// reuse a single cached certificate instead of generating 42 unique ones.
+// TestCertCacheHit verifies that once the cache is warmed for a hostname,
+// concurrent connections reuse the cached certificate.
 func TestCertCacheHit(t *testing.T) {
 	resetCertCacheForTest()
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	caKey, caCert := helperCA(t)
 
 	const hostname = "api.wise-sandbox.com"
 	const concurrency = 42
+
+	warmHello, warmCleanup, err := helperClientHello(hostname)
+	if err != nil {
+		t.Fatalf("helperClientHello(%q): %v", hostname, err)
+	}
+
+	warmCert, err := CertForClient(logger, warmHello, caKey, caCert, time.Time{})
+	warmCleanup()
+	if err != nil {
+		t.Fatalf("CertForClient warm-up(%q): %v", hostname, err)
+	}
+
+	warmLeaf, err := x509.ParseCertificate(warmCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate warm-up(%q): %v", hostname, err)
+	}
+	expectedSerial := warmLeaf.SerialNumber.String()
 
 	var (
 		wg        sync.WaitGroup
@@ -145,32 +162,12 @@ func TestCertCacheHit(t *testing.T) {
 		t.Fatal("no certificates were generated")
 	}
 
-	// The cache uses get-then-add without singleflight, so under high
-	// concurrency most goroutines can race past the cache miss check.
-	// The test verifies the cache provides *some* deduplication: fewer
-	// unique certs than total goroutines. A second sequential lookup
-	// confirms the cache is populated and working.
-	if uniqueSerials >= concurrency {
-		t.Errorf("expected fewer unique certs than concurrency (%d), got %d — cache not working at all", concurrency, uniqueSerials)
+	if uniqueSerials != 1 {
+		t.Errorf("expected exactly 1 unique cert from warmed cache reuse, got %d", uniqueSerials)
 	}
 
-	// Verify a sequential cache hit after the storm settles.
-	hello, cleanup, err := helperClientHello(hostname)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	cert, err := CertForClient(logger, hello, caKey, caCert, time.Time{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This serial must already exist in our set (cache hit from a previous goroutine).
-	if _, found := serials.Load(leaf.SerialNumber.String()); !found {
-		t.Error("sequential lookup after storm did not get a cache hit")
+	if _, ok := serials.Load(expectedSerial); !ok {
+		t.Errorf("expected warmed cache serial %s to be reused by concurrent calls", expectedSerial)
 	}
 
 	if elapsed > 10*time.Second {
