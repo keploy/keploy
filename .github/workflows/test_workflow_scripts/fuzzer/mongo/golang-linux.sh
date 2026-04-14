@@ -138,7 +138,7 @@ send_requests() {
 
   echo "Triggering the fuzzer to generate traffic..."
 
-  curl -X POST http://localhost:18082/run \
+  curl --max-time 120 -X POST http://localhost:18082/run \
   -H "Content-Type: application/json" \
   -d '{
     "mode": "record",
@@ -167,9 +167,17 @@ send_requests() {
     "connect_timeout_sec": 10,
     "max_conn_idle_time_sec": 30,
     "max_staleness_sec": 90,
-    
+
     "max_diffs": 20
-  }'
+  }' || true
+
+  # If the fuzzer didn't complete in 120s, dump goroutine stacks
+  REC_PID_EARLY="$(pgrep -n -f 'keploy record' || true)"
+  if [ -n "$REC_PID_EARLY" ] && kill -0 "$REC_PID_EARLY" 2>/dev/null; then
+    echo "::warning::Fuzzer timed out during send_requests — dumping goroutine stacks for diagnosis..."
+    sudo kill -QUIT "$REC_PID_EARLY" 2>/dev/null || true
+    sleep 3
+  fi
 }
 
 # --- Main Execution Logic ---
@@ -214,27 +222,81 @@ endsec
 # --- Recording Phase ---
 section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
-"$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
+GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
+# Helper: dump goroutine stacks for both keploy CLI and agent subprocess
+dump_goroutine_stacks() {
+  local reason="$1"
+  echo "===== $reason — DUMPING GOROUTINE STACKS ====="
+
+  # Find the keploy agent subprocess (child of the CLI process)
+  AGENT_PID="$(pgrep -f 'keploy' | grep -v "$$" | sort -n | tail -1 || true)"
+  CLI_PID="$(pgrep -n -f 'keploy record' || true)"
+
+  if [ -n "$AGENT_PID" ] && [ "$AGENT_PID" != "$CLI_PID" ]; then
+    echo "===== AGENT (PID=$AGENT_PID) ====="
+    sudo kill -QUIT "$AGENT_PID" 2>/dev/null || true
+    sleep 3
+  fi
+  if [ -n "$CLI_PID" ]; then
+    echo "===== CLI (PID=$CLI_PID) ====="
+    sudo kill -QUIT "$CLI_PID" 2>/dev/null || true
+    sleep 3
+  fi
+}
+
+# Watchdog: if recording hangs for 120s, dump stacks and force kill
+(
+  sleep 120
+  echo "::warning::Recording watchdog triggered after 120s"
+  dump_goroutine_stacks "RECORDING HUNG"
+  sleep 5
+  # Force kill everything to unblock the pipeline
+  pkill -9 -f 'keploy' 2>/dev/null || true
+) &
+WATCHDOG_PID=$!
+
 section "Generate Fuzzer Traffic"
-# Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
-# Increased sleep time to capture more of the complex, sharded operations
 sleep 7
 endsec
 
+# Kill the watchdog — recording traffic completed normally
+kill "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+
 section "Stop Recording"
-echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+echo "Stopping Keploy record process..."
 
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
-echo "Killing keploy"
+
+echo "Sending SIGINT to keploy..."
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-sleep 5
+# Wait up to 15 seconds for graceful shutdown
+SHUTDOWN_TIMEOUT=15
+for i in $(seq 1 $SHUTDOWN_TIMEOUT); do
+  if ! kill -0 "$REC_PID" 2>/dev/null; then
+    echo "Keploy exited after ${i}s"
+    break
+  fi
+  if [ "$i" -eq 10 ]; then
+    dump_goroutine_stacks "SHUTDOWN HUNG"
+  fi
+  sleep 1
+done
+
+# Force kill if still alive
+if kill -0 "$REC_PID" 2>/dev/null; then
+  echo "::error::Keploy did not exit within ${SHUTDOWN_TIMEOUT}s, force killing..."
+  sudo kill -9 "$REC_PID" 2>/dev/null || true
+  sleep 1
+fi
+
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
