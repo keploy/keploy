@@ -403,14 +403,14 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 							textResultSet.FinalResponse = finalResp
 							decodeCtx.LastOp.Store(clientConn, wire.RESET)
 							pendingRespBundle = &mysql.PacketBundle{
-								Header:  &mysql.PacketInfo{Type: respType, Header: origHeader},
+								Header:  &mysql.PacketInfo{Type: string(mysql.Text), Header: origHeader},
 								Message: textResultSet,
 							}
 						} else if binaryResultSet != nil {
 							binaryResultSet.FinalResponse = finalResp
 							decodeCtx.LastOp.Store(clientConn, wire.RESET)
 							pendingRespBundle = &mysql.PacketBundle{
-								Header:  &mysql.PacketInfo{Type: respType, Header: origHeader},
+								Header:  &mysql.PacketInfo{Type: string(mysql.Binary), Header: origHeader},
 								Message: binaryResultSet,
 							}
 						}
