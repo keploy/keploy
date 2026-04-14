@@ -18,12 +18,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var dnsClientConfigFromFile = dns.ClientConfigFromFile
-
-var dnsExchange = func(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
-	return c.Exchange(m, addr)
-}
-
 func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
@@ -426,7 +420,7 @@ func generateDNSDedupeKey(question dns.Question) string {
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
-	config, err := dnsClientConfigFromFile("/etc/resolv.conf")
+	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	var servers []string
 	port := "53"
 
@@ -454,7 +448,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		addr := net.JoinHostPort(server, port)
 
 		c.Net = "udp"
-		resp, _, err := dnsExchange(c, m, addr)
+		resp, _, err := c.Exchange(m, addr)
 		if err != nil {
 			resolveErr = err
 			continue
@@ -462,7 +456,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil && resp.Truncated {
 			c.Net = "tcp"
-			resp, _, err = dnsExchange(c, m, addr)
+			resp, _, err = c.Exchange(m, addr)
 			if err != nil {
 				resolveErr = err
 				continue
