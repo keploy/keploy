@@ -8,8 +8,6 @@ import (
 	"net"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -49,42 +47,41 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		return forwardHTTPBidirectional(clientConn, destConn)
 	}
 
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get the error group from the context")
-	}
-
 	// Buffered channels let ReadBuffConn read ahead without waiting
 	// for the main loop, preventing TCP flow-control throttling.
 	clientBuffChan := make(chan []byte, 256)
 	destBuffChan := make(chan []byte, 256)
-	errChan := make(chan error, 1)
+	// errChan capacity is 2 so both ReadBuffConn goroutines can send
+	// their errors without blocking, even if they error simultaneously.
+	errChan := make(chan error, 2)
 
-	// Read from client. stopOnRecordingPause is false: the main loop
-	// skips sending to decodeChan when paused, so recording stops while
-	// forwarding continues through the same goroutines.
-	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		defer close(clientBuffChan)
-		pUtil.ReadBuffConn(ctx, h.Logger, clientConn, clientBuffChan, errChan, false)
-		return nil
-	})
-
-	// Read from destination.
-	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		defer close(destBuffChan)
-		pUtil.ReadBuffConn(ctx, h.Logger, destConn, destBuffChan, errChan, false)
-		return nil
-	})
-
+	// ReadBuffConn goroutines are standalone (NOT added to the shared
+	// parserErrGrp) to avoid a deadlock: ReadBuffConn's blocking
+	// errChannel send has no ctx.Done() fallback, so if both goroutines
+	// error at the same time, one blocks forever in the shared errgroup.
+	readersDone := make(chan struct{})
 	go func() {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
-		err := g.Wait()
-		if err != nil {
-			h.Logger.Debug("error group is returning an error", zap.Error(err))
-		}
-		close(errChan)
+		defer close(readersDone)
+
+		clientDone := make(chan struct{})
+		destDone := make(chan struct{})
+
+		go func() {
+			defer pUtil.Recover(h.Logger, clientConn, destConn)
+			defer close(clientBuffChan)
+			defer close(clientDone)
+			pUtil.ReadBuffConn(ctx, h.Logger, clientConn, clientBuffChan, errChan, false)
+		}()
+
+		go func() {
+			defer pUtil.Recover(h.Logger, clientConn, destConn)
+			defer close(destBuffChan)
+			defer close(destDone)
+			pUtil.ReadBuffConn(ctx, h.Logger, destConn, destBuffChan, errChan, false)
+		}()
+
+		<-clientDone
+		<-destDone
 	}()
 
 	// Async decode channel and background goroutine.
@@ -101,12 +98,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	copy(initialBuf, reqBuf)
 	decodeChan <- httpDecodeItem{fromClient: true, data: initialBuf, ts: time.Now()}
 
+	// cleanup ensures all goroutines are stopped before we return.
+	cleanup := func() {
+		close(decodeChan)
+		<-decodeDone
+		<-readersDone
+	}
+
 	// Main loop: forward only, send copies for async decode.
 	for {
 		select {
 		case <-ctx.Done():
-			close(decodeChan)
-			<-decodeDone
+			cleanup()
 			return ctx.Err()
 
 		case buffer, ok := <-clientBuffChan:
@@ -122,8 +125,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			_, err := destConn.Write(buffer)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to write request to destination server")
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return err
 			}
 
@@ -150,8 +152,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			_, err := clientConn.Write(buffer)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to write response to client")
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return err
 			}
 
@@ -167,8 +168,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 
 		case err, ok := <-errChan:
 			if !ok || err == nil {
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return nil
 			}
 
@@ -199,8 +199,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				}
 			}
 
-			close(decodeChan)
-			<-decodeDone
+			cleanup()
 			if errors.Is(err, io.EOF) {
 				return nil
 			}

@@ -18,7 +18,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 // mysqlDecodeItem carries a forwarded chunk to the async decode goroutine.
@@ -48,42 +47,41 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		return nil
 	}
 
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get the error group from the context")
-	}
-
 	// Buffered channels let ReadBuffConn read ahead without waiting
 	// for the main loop, preventing TCP flow-control throttling.
 	clientBuffChan := make(chan []byte, 256)
 	destBuffChan := make(chan []byte, 256)
-	errChan := make(chan error, 1)
+	// errChan capacity is 2 so both ReadBuffConn goroutines can send
+	// their errors without blocking, even if they error simultaneously.
+	errChan := make(chan error, 2)
 
-	// Read commands from client. stopOnRecordingPause is false: the main
-	// loop skips sending to decodeChan when paused, so recording stops
-	// while forwarding continues through the same goroutines.
-	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, destConn)
-		defer close(clientBuffChan)
-		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan, false)
-		return nil
-	})
-
-	// Read responses from destination.
-	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, destConn)
-		defer close(destBuffChan)
-		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan, false)
-		return nil
-	})
-
+	// ReadBuffConn goroutines are standalone (NOT added to the shared
+	// parserErrGrp) to avoid a deadlock: ReadBuffConn's blocking
+	// errChannel send has no ctx.Done() fallback, so if both goroutines
+	// error at the same time, one blocks forever in the shared errgroup.
+	readersDone := make(chan struct{})
 	go func() {
-		defer pUtil.Recover(logger, clientConn, destConn)
-		err := g.Wait()
-		if err != nil {
-			logger.Debug("error group is returning an error", zap.Error(err))
-		}
-		close(errChan)
+		defer close(readersDone)
+
+		clientDone := make(chan struct{})
+		destDone := make(chan struct{})
+
+		go func() {
+			defer pUtil.Recover(logger, clientConn, destConn)
+			defer close(clientBuffChan)
+			defer close(clientDone)
+			pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan, false)
+		}()
+
+		go func() {
+			defer pUtil.Recover(logger, clientConn, destConn)
+			defer close(destBuffChan)
+			defer close(destDone)
+			pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan, false)
+		}()
+
+		<-clientDone
+		<-destDone
 	}()
 
 	// Async decode channel and background goroutine.
@@ -95,12 +93,18 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(ctx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
+	// cleanup ensures all goroutines are stopped before we return.
+	cleanup := func() {
+		close(decodeChan)
+		<-decodeDone
+		<-readersDone
+	}
+
 	// Main loop: forward only, send copies for async decode.
 	for {
 		select {
 		case <-ctx.Done():
-			close(decodeChan)
-			<-decodeDone
+			cleanup()
 			return ctx.Err()
 
 		case buffer, ok := <-clientBuffChan:
@@ -116,8 +120,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			_, err := destConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write command to the server")
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return err
 			}
 
@@ -144,8 +147,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			_, err := clientConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response to the client")
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return err
 			}
 
@@ -161,8 +163,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 		case err, ok := <-errChan:
 			if !ok || err == nil {
-				close(decodeChan)
-				<-decodeDone
+				cleanup()
 				return nil
 			}
 
@@ -193,8 +194,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				}
 			}
 
-			close(decodeChan)
-			<-decodeDone
+			cleanup()
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -207,15 +207,15 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 type mysqlDecodeState int
 
 const (
-	stateExpectCommand           mysqlDecodeState = iota // waiting for a client command
-	stateExpectResponse                                  // waiting for first response packet
-	stateExpectColumns                                   // reading column definition packets
-	stateExpectEOFAfterColumns                           // expecting EOF after column defs
-	stateExpectRows                                      // reading row data packets
-	stateExpectStmtParams                                // reading param defs for COM_STMT_PREPARE
-	stateExpectEOFAfterParams                            // expecting EOF after param defs
-	stateExpectStmtColumns                               // reading column defs for COM_STMT_PREPARE
-	stateExpectEOFAfterStmtCols                          // expecting EOF after stmt column defs
+	stateExpectCommand          mysqlDecodeState = iota // waiting for a client command
+	stateExpectResponse                                 // waiting for first response packet
+	stateExpectColumns                                  // reading column definition packets
+	stateExpectEOFAfterColumns                          // expecting EOF after column defs
+	stateExpectRows                                     // reading row data packets
+	stateExpectStmtParams                               // reading param defs for COM_STMT_PREPARE
+	stateExpectEOFAfterParams                           // expecting EOF after param defs
+	stateExpectStmtColumns                              // reading column defs for COM_STMT_PREPARE
+	stateExpectEOFAfterStmtCols                         // expecting EOF after stmt column defs
 )
 
 // asyncMySQLDecode runs in a background goroutine and processes forwarded
