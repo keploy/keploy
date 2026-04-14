@@ -129,7 +129,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Non-blocking send to async decode.
+			// Non-blocking send to async decode. Check channel capacity
+			// before copying to avoid allocation/GC churn when the decoder
+			// can't keep up (the copy would just be dropped).
 			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
@@ -172,7 +174,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return nil
 			}
 
-			// Drain buffered data before exiting.
+			// Drain buffered data before exiting — forward AND decode
+			// so the last response chunk isn't lost for mock creation.
 		drain:
 			for {
 				select {
@@ -185,6 +188,14 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						continue
 					}
 					_, _ = destConn.Write(buf)
+					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+						cp := make([]byte, len(buf))
+						copy(cp, buf)
+						select {
+						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: time.Now()}:
+						default:
+						}
+					}
 				case buf, ok := <-destBuffChan:
 					if !ok {
 						destBuffChan = nil
@@ -194,6 +205,14 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						continue
 					}
 					_, _ = clientConn.Write(buf)
+					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+						cp := make([]byte, len(buf))
+						copy(cp, buf)
+						select {
+						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: time.Now()}:
+						default:
+						}
+					}
 				default:
 					break drain
 				}
