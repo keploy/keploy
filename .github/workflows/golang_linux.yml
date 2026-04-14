@@ -155,7 +155,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: [udp-with-connect, udp-without-connect]
+        app:
+          - name: udp-with-connect
+            repository: officialasishkumar/dns-mock-test
+            ref: negative-dns-udp-with-connect
+          - name: udp-without-connect
+            repository: officialasishkumar/dns-mock-test
+            ref: negative-dns-udp-without-connect
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -166,7 +172,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: dns_mock (${{ matrix.branch }}) - ${{ matrix.config.job }}
+    name: dns_mock (${{ matrix.app.name }}) - ${{ matrix.config.job }}
     steps:
       - name: Checkout Keploy
         uses: actions/checkout@v4
@@ -191,8 +197,8 @@ jobs:
       - name: Checkout DNS Mock App
         uses: actions/checkout@v4
         with:
-          repository: akashkumar7902/dns-mock-test
-          ref: ${{ matrix.branch }}
+          repository: ${{ matrix.app.repository }}
+          ref: ${{ matrix.app.ref }}
           path: dns-mock-test
 
       - name: Run Test

@@ -7,6 +7,8 @@ if ! command -v jq &> /dev/null; then
     sudo apt-get update && sudo apt-get install -y jq
 fi
 
+NEGATIVE_DNS_DOMAIN="keploy-negative.invalid"
+
 # --- Helper Functions ---
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
@@ -63,6 +65,23 @@ check_test_report() {
     return 0
 }
 
+check_negative_dns_mock() {
+  local mocks_file="./keploy/test-set-0/mocks.yaml"
+  echo "Checking that negative DNS responses were recorded..."
+
+  if [ ! -f "$mocks_file" ]; then
+    echo "::error::No mocks.yaml found — cannot verify negative DNS recording."
+    return 1
+  fi
+
+  if ! grep -A20 -F "name: ${NEGATIVE_DNS_DOMAIN}." "$mocks_file" | grep -q 'rcode: 3'; then
+    echo "::error::Expected recorded NXDOMAIN DNS mock for ${NEGATIVE_DNS_DOMAIN}, but no matching rcode: 3 entry was found."
+    return 1
+  fi
+
+  echo "Negative DNS recording check passed."
+}
+
 send_request() {
   section "Sending Requests"
   echo "Waiting for app to start..."
@@ -76,7 +95,7 @@ send_request() {
 
   echo "Running curl.sh..."
   chmod +x ./curl.sh
-  ./curl.sh || true
+  ./curl.sh
   endsec
 }
 
@@ -114,6 +133,10 @@ sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors "record.txt"
 echo "Recording stopped."
+endsec
+
+section "Verify Negative DNS Recording"
+check_negative_dns_mock
 endsec
 
 # Replay
