@@ -317,6 +317,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().String("cgroup-path", "", "Explicit cgroupv2 path to attach eBPF hooks to (used by DaemonSet agent for targeting specific pods)")
+		cmd.Flags().Bool("skip-hooks", false, "Skip eBPF hook and proxy loading (used by DaemonSet orchestrator agent)")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
@@ -1404,6 +1405,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return fmt.Errorf("failed to get cgroup-path flag: %w", err)
 		}
 		c.cfg.Agent.CgroupPath = cgroupPath
+
+		skipHooks, err := cmd.Flags().GetBool("skip-hooks")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get skip-hooks flag")
+			return fmt.Errorf("failed to get skip-hooks flag: %w", err)
+		}
+		c.cfg.Agent.SkipHooks = skipHooks
 
 	}
 

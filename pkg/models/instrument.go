@@ -42,6 +42,7 @@ type HookOptions struct {
 	ProxyPort     uint32
 	ServerPort    uint32
 	CgroupPath    string // optional: explicit cgroupv2 path override (used by DaemonSet agent)
+	SkipHooks     bool   // skip eBPF hook and proxy loading (used by DaemonSet orchestrator)
 }
 
 type IngressEvent struct {
@@ -109,6 +110,7 @@ type SetupOptions struct {
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
 	CgroupPath      string // optional: explicit cgroupv2 path override (used by DaemonSet agent)
+	SkipHooks       bool   // skip eBPF hook and proxy loading (used by DaemonSet orchestrator)
 }
 
 type RunOptions struct {
