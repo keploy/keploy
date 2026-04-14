@@ -102,6 +102,7 @@ type SetupOptions struct {
 	NetworkAliases    map[string][]string
 	BuildDelay        uint64
 	PassThroughPorts  []uint
+	MemoryLimit       uint64
 	ConfigPath        string
 	ExtraArgs         []string
 	EnableSampling    int

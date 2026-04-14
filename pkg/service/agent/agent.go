@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -84,6 +85,13 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 			return err
 		}
 	}
+
+	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
+		a.logger.Info("Memory guard unavailable, continuing without memory-aware recording. "+
+			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
+			zap.Error(err))
+	}
+
 	select {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():

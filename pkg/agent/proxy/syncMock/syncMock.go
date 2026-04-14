@@ -9,6 +9,7 @@ import (
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const defaultMockBufferCapacity = 100
 
 func generateRandomString(n int) string {
 	sb := make([]byte, n)
@@ -24,11 +25,12 @@ type SyncMockManager struct {
 	outChan      chan<- *models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
+	memoryPause  bool
 }
 
 // Global instance is initialized at package load time
 var instance = &SyncMockManager{
-	buffer:       make([]*models.Mock, 0, 100),
+	buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
 	firstReqSeen: false,
 }
 
@@ -52,15 +54,23 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
+	if m.memoryPause {
+		m.mu.Unlock()
+		return
+	}
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
 		outChan := m.outChan
 		m.mu.Unlock()
-		// Send outside the lock to avoid deadlock: if the channel is
-		// full, holding mu would block AddMock callers and any
-		// ResolveRange call trying to flush the buffer.
-		outChan <- mock
+		// Non-blocking send: during shutdown the HandleOutgoing handler
+		// stops reading from the channel. A blocking send here would
+		// deadlock the entire shutdown sequence (parser → AddMock →
+		// blocked → handleCommandPhase can't return → proxy can't stop).
+		select {
+		case outChan <- mock:
+		default:
+		}
 		return
 	}
 	m.buffer = append(m.buffer, mock)
@@ -78,6 +88,26 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	defer m.mu.Unlock()
 	return m.firstReqSeen
 }
+
+func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.memoryPause = enabled
+	if !enabled {
+		return
+	}
+
+	for i := range m.buffer {
+		m.buffer[i] = nil
+	}
+	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
+}
+
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	// Collect mocks and mapping data under the lock, then send to channels
 	// AFTER releasing it. Sending while holding mu can deadlock: the channel
@@ -149,11 +179,18 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	m.mu.Unlock()
 
 	// Send mocks and mapping outside the lock to avoid deadlock.
+	// Non-blocking sends: during shutdown the consumers may have stopped.
 	for _, mock := range mocksToSend {
-		outChan <- mock
+		select {
+		case outChan <- mock:
+		default:
+		}
 	}
 	if mappingEntry != nil && mappingChan != nil {
-		mappingChan <- *mappingEntry
+		select {
+		case mappingChan <- *mappingEntry:
+		default:
+		}
 	}
 }
 
