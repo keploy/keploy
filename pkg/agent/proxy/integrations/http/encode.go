@@ -134,15 +134,14 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return err
 			}
 
-			// Non-blocking send to async decode. Check channel capacity
-			// before copying to avoid allocation/GC churn when the decoder
-			// can't keep up (the copy would just be dropped).
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// Send to async decode — blocking with ctx escape so HTTP
+			// mocks are never silently lost due to channel pressure.
+			if !memoryguard.IsRecordingPaused() {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- httpDecodeItem{fromClient: true, data: buf, ts: time.Now()}:
-				default:
+				case <-ctx.Done():
 				}
 			}
 
@@ -163,13 +162,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return err
 			}
 
-			// Non-blocking send to async decode.
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// Send to async decode — blocking with ctx escape.
+			if !memoryguard.IsRecordingPaused() {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- httpDecodeItem{fromClient: false, data: buf, ts: time.Now()}:
-				default:
+				case <-ctx.Done():
 				}
 			}
 
@@ -193,12 +192,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 						continue
 					}
 					_, _ = destConn.Write(buf)
-					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+					if !memoryguard.IsRecordingPaused() {
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
 						case decodeChan <- httpDecodeItem{fromClient: true, data: cp, ts: time.Now()}:
-						default:
+						case <-ctx.Done():
 						}
 					}
 				case buf, ok := <-destBuffChan:
@@ -210,12 +209,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 						continue
 					}
 					_, _ = clientConn.Write(buf)
-					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+					if !memoryguard.IsRecordingPaused() {
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
 						case decodeChan <- httpDecodeItem{fromClient: false, data: cp, ts: time.Now()}:
-						default:
+						case <-ctx.Done():
 						}
 					}
 				default:
