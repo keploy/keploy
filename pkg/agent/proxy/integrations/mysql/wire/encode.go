@@ -155,7 +155,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		payloadLen = int(packet.Header.Header.PayloadLength)
 	}
 	binary.LittleEndian.PutUint32(header, uint32(payloadLen))
-	header[3] = packet.Header.Header.SequenceID
+	if packet.Header != nil && packet.Header.Header != nil {
+		header[3] = packet.Header.Header.SequenceID
+	}
 	data = append(header, data...)
 
 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))

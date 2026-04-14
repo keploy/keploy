@@ -526,12 +526,16 @@ func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (stri
 		return "", err
 	}
 
-	// Root path ("/") means cgroup namespace isolation is absent; resolving it
-	// would give us the entire VM's memory rather than this container's usage.
-	// Fall through to a more specific resolution strategy.
-	if cgroupPath == "/" || cgroupPath == "" {
-		return "", fmt.Errorf("cgroup self-path is root (%q); skipping to container-specific resolution", cgroupPath)
+	// An empty cgroup path is invalid — fall through to identifier-based
+	// resolution.
+	if cgroupPath == "" {
+		return "", fmt.Errorf("cgroup self-path is empty; skipping to container-specific resolution")
 	}
+
+	// When cgroupPath is "/" (root), this is valid in containers with proper
+	// cgroup namespace isolation where the container sits at the root of its
+	// own cgroup namespace.  buildMountedCgroupPath handles the "/" case and
+	// fileExists validates the resolved path, so we do not reject "/" here.
 
 	candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
 	if !ok {
