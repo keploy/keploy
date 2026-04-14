@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -51,37 +53,36 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// for the main loop, preventing TCP flow-control throttling.
 	clientBuffChan := make(chan []byte, 256)
 	destBuffChan := make(chan []byte, 256)
-	// errChan capacity is 2 so both ReadBuffConn goroutines can send
-	// their errors without blocking, even if they error simultaneously.
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 1)
 
-	// ReadBuffConn goroutines are standalone (NOT added to the shared
-	// parserErrGrp) to avoid a deadlock: ReadBuffConn's blocking
-	// errChannel send has no ctx.Done() fallback, so if both goroutines
-	// error at the same time, one blocks forever in the shared errgroup.
-	readersDone := make(chan struct{})
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
+
+	// Read requests from client.
+	g.Go(func() error {
+		defer pUtil.Recover(logger, clientConn, destConn)
+		defer close(clientBuffChan)
+		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan, false)
+		return nil
+	})
+
+	// Read responses from destination.
+	g.Go(func() error {
+		defer pUtil.Recover(logger, clientConn, destConn)
+		defer close(destBuffChan)
+		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan, false)
+		return nil
+	})
+
 	go func() {
-		defer close(readersDone)
-
-		clientDone := make(chan struct{})
-		destDone := make(chan struct{})
-
-		go func() {
-			defer pUtil.Recover(logger, clientConn, destConn)
-			defer close(clientBuffChan)
-			defer close(clientDone)
-			pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan, false)
-		}()
-
-		go func() {
-			defer pUtil.Recover(logger, clientConn, destConn)
-			defer close(destBuffChan)
-			defer close(destDone)
-			pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan, false)
-		}()
-
-		<-clientDone
-		<-destDone
+		defer pUtil.Recover(logger, clientConn, destConn)
+		err := g.Wait()
+		if err != nil {
+			logger.Debug("error group is returning an error", zap.Error(err))
+		}
+		close(errChan)
 	}()
 
 	// Async decode channel and background goroutine.
@@ -93,11 +94,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(ctx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
-	// cleanup ensures all goroutines are stopped before we return.
+	// cleanup ensures the decode goroutine is stopped before we return.
 	cleanup := func() {
 		close(decodeChan)
 		<-decodeDone
-		<-readersDone
 	}
 
 	// Main loop: forward only, send copies for async decode.
@@ -291,13 +291,14 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				pendingCommand = commandPkt
 
-				// Handle no-response commands.
+				// Handle no-response commands — record mock with empty
+				// responses, matching the synchronous recorder behavior.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-					pendingRespBundle = &mysql.PacketBundle{
-						Header:  &mysql.PacketInfo{Type: "NO Response Packet"},
-						Message: nil,
-					}
-					flushMock()
+					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					pendingCommand = nil
+					pendingRespBundle = nil
+					state = stateExpectCommand
 					continue
 				}
 
@@ -305,11 +306,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				if strings.HasPrefix(commandPkt.Header.Type, "0x") {
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
-					pendingRespBundle = &mysql.PacketBundle{
-						Header:  &mysql.PacketInfo{Type: "NO Response Packet"},
-						Message: nil,
-					}
-					flushMock()
+					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					pendingCommand = nil
+					pendingRespBundle = nil
+					state = stateExpectCommand
 					continue
 				}
 
@@ -391,18 +392,25 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 							respType = mysql.StatusToString(mysql.OK)
 						}
 						finalResp := &mysql.GenericResponse{Data: pkt, Type: respType}
+						// Preserve the wire Header from the initial response
+						// packet (set by processFirstResponse via DecodePayload)
+						// so EncodeToBinary gets correct PayloadLength/SequenceID.
+						var origHeader *mysql.Header
+						if pendingRespBundle != nil && pendingRespBundle.Header != nil {
+							origHeader = pendingRespBundle.Header.Header
+						}
 						if textResultSet != nil {
 							textResultSet.FinalResponse = finalResp
 							decodeCtx.LastOp.Store(clientConn, wire.RESET)
 							pendingRespBundle = &mysql.PacketBundle{
-								Header:  &mysql.PacketInfo{Type: respType},
+								Header:  &mysql.PacketInfo{Type: respType, Header: origHeader},
 								Message: textResultSet,
 							}
 						} else if binaryResultSet != nil {
 							binaryResultSet.FinalResponse = finalResp
 							decodeCtx.LastOp.Store(clientConn, wire.RESET)
 							pendingRespBundle = &mysql.PacketBundle{
-								Header:  &mysql.PacketInfo{Type: respType},
+								Header:  &mysql.PacketInfo{Type: respType, Header: origHeader},
 								Message: binaryResultSet,
 							}
 						}

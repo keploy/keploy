@@ -8,6 +8,8 @@ import (
 	"net"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -51,37 +53,36 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	// for the main loop, preventing TCP flow-control throttling.
 	clientBuffChan := make(chan []byte, 256)
 	destBuffChan := make(chan []byte, 256)
-	// errChan capacity is 2 so both ReadBuffConn goroutines can send
-	// their errors without blocking, even if they error simultaneously.
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 1)
 
-	// ReadBuffConn goroutines are standalone (NOT added to the shared
-	// parserErrGrp) to avoid a deadlock: ReadBuffConn's blocking
-	// errChannel send has no ctx.Done() fallback, so if both goroutines
-	// error at the same time, one blocks forever in the shared errgroup.
-	readersDone := make(chan struct{})
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+	}
+
+	// Read requests from client.
+	g.Go(func() error {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+		defer close(clientBuffChan)
+		pUtil.ReadBuffConn(ctx, h.Logger, clientConn, clientBuffChan, errChan, false)
+		return nil
+	})
+
+	// Read responses from destination.
+	g.Go(func() error {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+		defer close(destBuffChan)
+		pUtil.ReadBuffConn(ctx, h.Logger, destConn, destBuffChan, errChan, false)
+		return nil
+	})
+
 	go func() {
-		defer close(readersDone)
-
-		clientDone := make(chan struct{})
-		destDone := make(chan struct{})
-
-		go func() {
-			defer pUtil.Recover(h.Logger, clientConn, destConn)
-			defer close(clientBuffChan)
-			defer close(clientDone)
-			pUtil.ReadBuffConn(ctx, h.Logger, clientConn, clientBuffChan, errChan, false)
-		}()
-
-		go func() {
-			defer pUtil.Recover(h.Logger, clientConn, destConn)
-			defer close(destBuffChan)
-			defer close(destDone)
-			pUtil.ReadBuffConn(ctx, h.Logger, destConn, destBuffChan, errChan, false)
-		}()
-
-		<-clientDone
-		<-destDone
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+		err := g.Wait()
+		if err != nil {
+			h.Logger.Debug("error group is returning an error", zap.Error(err))
+		}
+		close(errChan)
 	}()
 
 	// Async decode channel and background goroutine.
@@ -98,11 +99,10 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	copy(initialBuf, reqBuf)
 	decodeChan <- httpDecodeItem{fromClient: true, data: initialBuf, ts: time.Now()}
 
-	// cleanup ensures all goroutines are stopped before we return.
+	// cleanup ensures the decode goroutine is stopped before we return.
 	cleanup := func() {
 		close(decodeChan)
 		<-decodeDone
-		<-readersDone
 	}
 
 	// Main loop: forward only, send copies for async decode.
