@@ -72,7 +72,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 	err := a.Hook(ctx, models.HookOptions{
 		Mode:          a.config.Agent.Mode,
-		IsDocker:      a.config.Agent.IsDocker,
+		IsDocker:      a.config.Agent.IsDocker || a.config.InDocker,
 		EnableTesting: a.config.Agent.EnableTesting,
 		Rules:         rules,
 	})
@@ -81,7 +81,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		return err
 	}
 
-	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
+	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker || a.config.InDocker, a.config.Agent.MemoryLimit); err != nil {
 		a.logger.Info("Memory guard unavailable, continuing without memory-aware recording. "+
 			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
 			zap.Error(err))
