@@ -17,6 +17,26 @@ import (
 
 var teleURL = "https://telemetry.keploy.io/analytics"
 
+const (
+	// telemetryHTTPTimeout bounds each POST to the analytics endpoint. Used
+	// as the http.Client timeout and as the basis for the Shutdown drain
+	// deadline so the two can't drift out of sync.
+	telemetryHTTPTimeout = 2 * time.Second
+	// telemetryShutdownGrace is extra headroom beyond telemetryHTTPTimeout
+	// for Shutdown's inflight.Wait — guarantees an in-flight POST can
+	// complete or time out cleanly before Shutdown returns.
+	telemetryShutdownGrace = 500 * time.Millisecond
+	// flushInterval caps how long batched recording counters can sit in
+	// memory before being emitted. Shorter than the original 30s to shrink
+	// the crash-loss window under SIGKILL/OOM while still keeping network
+	// traffic constant (~6 req/min worst case).
+	flushInterval = 10 * time.Second
+	// flushThreshold bounds crash loss by volume: once pending recorded
+	// events reach this many, the flush loop is kicked even if the ticker
+	// hasn't fired yet.
+	flushThreshold = 500
+)
+
 type Telemetry struct {
 	Enabled        bool
 	OffMode        bool
@@ -30,14 +50,28 @@ type Telemetry struct {
 	inflightN      atomic.Int64
 	closed         atomic.Bool
 
-	// Batched counters for high-frequency recording events.
-	// Instead of spawning a goroutine per event, these are incremented atomically
-	// and flushed periodically by a single background goroutine.
+	// Batched recording state. recordingMu serializes hot-path increments
+	// with the flush goroutine's swap and with Shutdown's final drain, so
+	// the closed-gate + double-checked-locking pattern in the hot path
+	// cannot lose events during Shutdown.
+	recordingMu sync.Mutex
+	// recordedTests is the pending test count for the current flush epoch.
+	// Authoritative — reset to 0 on flush. Atomic so maybeKickFlush can
+	// read it without taking recordingMu.
 	recordedTests atomic.Int64
-	recordedMocks atomic.Int64
-	flushOnce     sync.Once
-	flushDone     chan struct{} // closed when flush loop exits; initialized in NewTelemetry
-	closeCh       chan struct{} // signals the flush loop to stop
+	// mocksByType preserves the per-protocol breakdown that the legacy
+	// per-event RecordedTestCaseMock payload carried in meta.mock.
+	// Authoritative source for the flush payload.
+	mocksByType map[string]int64
+	// mockKickCounter shadows len(mocksByType) as a lock-free hint for
+	// maybeKickFlush. Not authoritative — the flush payload reads from
+	// mocksByType. Kept loosely in sync under recordingMu.
+	mockKickCounter  atomic.Int64
+	flushOnce        sync.Once
+	flushLoopStarted atomic.Bool   // true once the flush goroutine has launched
+	flushDone        chan struct{} // closed when flush loop exits; initialized in NewTelemetry
+	flushKick        chan struct{} // buffered(1); non-blocking kick from hot path on threshold
+	closeCh          chan struct{} // signals the flush loop to stop
 }
 
 type Options struct {
@@ -58,8 +92,10 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 		KeployVersion:  opt.Version,
 		GlobalMap:      gm,
 		InstallationID: opt.InstallationID,
-		client:         &http.Client{Timeout: 2 * time.Second}, // matches Shutdown drain timeout
+		client:         &http.Client{Timeout: telemetryHTTPTimeout},
+		mocksByType:    make(map[string]int64),
 		flushDone:      make(chan struct{}),
+		flushKick:      make(chan struct{}, 1),
 		closeCh:        make(chan struct{}),
 	}
 }
@@ -141,11 +177,24 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 }
 
 func (tel *Telemetry) RecordedTestAndMocks() {
-	if !tel.Enabled {
+	if !tel.Enabled || tel.closed.Load() {
+		return
+	}
+	tel.recordingMu.Lock()
+	// Double-checked locking against Shutdown: if closed was flipped
+	// while we were waiting on the mutex, bail without mutating state so
+	// Shutdown's snapshot is authoritative.
+	if tel.closed.Load() {
+		tel.recordingMu.Unlock()
 		return
 	}
 	tel.recordedTests.Add(1)
+	// ensureFlushLoop must run under recordingMu so the goroutine cannot
+	// be spawned after Shutdown has already completed phase 3; otherwise
+	// the loop would leak with nothing left to signal it.
 	tel.ensureFlushLoop()
+	tel.recordingMu.Unlock()
+	tel.maybeKickFlush()
 }
 
 func (tel *Telemetry) GenerateUT() {
@@ -164,28 +213,62 @@ func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 }
 
 func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
-	if !tel.Enabled {
+	if !tel.Enabled || tel.closed.Load() {
 		return
 	}
-	tel.recordedMocks.Add(1)
+	tel.recordingMu.Lock()
+	// Double-checked locking against Shutdown; see RecordedTestAndMocks.
+	if tel.closed.Load() {
+		tel.recordingMu.Unlock()
+		return
+	}
+	tel.mocksByType[mockType]++
+	tel.mockKickCounter.Add(1)
+	// ensureFlushLoop must run under recordingMu; see RecordedTestAndMocks.
 	tel.ensureFlushLoop()
+	tel.recordingMu.Unlock()
+	tel.maybeKickFlush()
+}
+
+// maybeKickFlush fires a non-blocking signal to the flush loop when the
+// combined pending event count has reached flushThreshold. The kick
+// channel is buffered(1), so multiple rapid callers collapse into a single
+// pending wake-up and the hot path never blocks.
+func (tel *Telemetry) maybeKickFlush() {
+	if tel.recordedTests.Load()+tel.mockKickCounter.Load() < flushThreshold {
+		return
+	}
+	select {
+	case tel.flushKick <- struct{}{}:
+	default:
+	}
 }
 
 // ensureFlushLoop starts a single background goroutine that periodically
 // flushes batched recording counters. This replaces the per-event goroutine
 // pattern that previously spawned thousands of goroutines under load.
+//
+// MUST be called with recordingMu held. The mutex serializes the
+// flushLoopStarted store with Shutdown's closed flip so the goroutine
+// cannot be spawned after Shutdown has already skipped the close(closeCh)
+// path — otherwise the loop would leak with nothing left to signal it.
 func (tel *Telemetry) ensureFlushLoop() {
 	tel.flushOnce.Do(func() {
+		tel.flushLoopStarted.Store(true)
 		go func() {
 			defer close(tel.flushDone)
-			ticker := time.NewTicker(30 * time.Second)
+			ticker := time.NewTicker(flushInterval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
 					tel.flushRecordingCounters()
+				case <-tel.flushKick:
+					tel.flushRecordingCounters()
 				case <-tel.closeCh:
-					tel.flushRecordingCounters() // final flush
+					// Final drain is performed inline by Shutdown under
+					// recordingMu + closed=true so nothing can race it.
+					// The loop just exits here.
 					return
 				}
 			}
@@ -193,38 +276,76 @@ func (tel *Telemetry) ensureFlushLoop() {
 	})
 }
 
-// flushRecordingCounters sends a single batched telemetry event with
-// accumulated test and mock counts, then resets the counters.
-// Uses sendTracked so Shutdown() waits for the HTTP request to complete.
+// flushRecordingCounters snapshots and resets the batched counters under
+// recordingMu, then emits a RecordedBatch event. The mocks_by_type map
+// preserves the dimension the legacy per-event RecordedTestCaseMock
+// payload carried in meta.mock.
+//
+// The send always goes through sendFinal, which bypasses sendEvent's
+// closed gate. The closed gate exists to reject new user-initiated
+// events (TestRun, TestSetRun, MockTestRun, …) after Shutdown signals
+// shutdown. Flush sends are not new events — they are drains of state
+// the hot path already committed into mocksByType, and dropping a drain
+// is losing already-promised data. Using sendFinal also closes the
+// race where the flush loop releases recordingMu, Shutdown phase 1
+// flips closed, and the loop's subsequent send would otherwise bail at
+// the gate.
 func (tel *Telemetry) flushRecordingCounters() {
+	tel.recordingMu.Lock()
 	tests := tel.recordedTests.Swap(0)
-	mocks := tel.recordedMocks.Swap(0)
-	if tests == 0 && mocks == 0 {
+	pending := tel.mocksByType
+	tel.mocksByType = make(map[string]int64)
+	tel.mockKickCounter.Store(0)
+	tel.recordingMu.Unlock()
+
+	var totalMocks int64
+	for _, v := range pending {
+		totalMocks += v
+	}
+
+	if tests == 0 && totalMocks == 0 {
 		return
 	}
+
 	dataMap := map[string]interface{}{
 		"recorded_tests": tests,
-		"recorded_mocks": mocks,
+		"recorded_mocks": totalMocks,
 	}
-	tel.sendTracked("RecordedBatch", dataMap)
+	if len(pending) > 0 {
+		byType := make(map[string]interface{}, len(pending))
+		for k, v := range pending {
+			byType[k] = v
+		}
+		dataMap["mocks_by_type"] = byType
+	}
+	tel.sendFinal("RecordedBatch", dataMap)
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
-	tel.sendEvent(eventType, false, output...)
+	tel.sendEvent(eventType, false, false, output...)
 }
 
 func (tel *Telemetry) sendTracked(eventType string, output ...map[string]interface{}) {
-	tel.sendEvent(eventType, true, output...)
+	tel.sendEvent(eventType, true, false, output...)
 }
 
-func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[string]interface{}) {
+// sendFinal is the post-closed counterpart to sendTracked. It bypasses
+// the closed gate in sendEvent so Shutdown's final drain actually reaches
+// the server, while still registering the POST with inflight so the
+// drain wait covers it. Must only be called from Shutdown after closed
+// has been set.
+func (tel *Telemetry) sendFinal(eventType string, output ...map[string]interface{}) {
+	tel.sendEvent(eventType, true, true, output...)
+}
+
+func (tel *Telemetry) sendEvent(eventType string, tracked bool, force bool, output ...map[string]interface{}) {
 	if !tel.Enabled {
 		return
 	}
 
 	if tracked {
 		tel.mu.Lock()
-		if tel.closed.Load() {
+		if !force && tel.closed.Load() {
 			tel.mu.Unlock()
 			return
 		}
@@ -296,27 +417,39 @@ func (tel *Telemetry) Shutdown() {
 		return
 	}
 
-	// Flush remaining recording counters BEFORE setting closed,
-	// since sendTracked rejects events when closed is true.
-	tel.flushRecordingCounters()
-
+	// Phase 1: flip closed under recordingMu + mu so every hot-path
+	// caller either completes its write before we acquired the lock or
+	// observes closed=true via the double-checked load and bails. This
+	// is the fence that makes the final drain below race-free.
+	tel.recordingMu.Lock()
 	tel.mu.Lock()
 	if !tel.closed.CompareAndSwap(false, true) {
 		tel.mu.Unlock()
+		tel.recordingMu.Unlock()
 		return
 	}
 	tel.mu.Unlock()
+	tel.recordingMu.Unlock()
 
-	// Signal the flush loop goroutine to exit.
-	close(tel.closeCh)
+	// Phase 2: inline final drain. flushRecordingCounters re-acquires
+	// recordingMu — safe because every hot-path thread past its outer
+	// closed check will DCL-fail under the lock after phase 1. The
+	// send bypasses the closed gate via sendFinal unconditionally.
+	tel.flushRecordingCounters()
 
-	// Wait for the flush loop goroutine to finish so it doesn't leak.
-	// Uses a short timeout to avoid blocking shutdown if the loop never started.
-	select {
-	case <-tel.flushDone:
-	case <-time.After(500 * time.Millisecond):
+	// Phase 3: stop the flush loop if it was ever started. Skipping this
+	// when the loop never launched avoids a pointless grace-period wait
+	// on flushDone (which would never close).
+	if tel.flushLoopStarted.Load() {
+		close(tel.closeCh)
+		select {
+		case <-tel.flushDone:
+		case <-time.After(telemetryShutdownGrace):
+		}
 	}
 
+	// Phase 4: wait for any in-flight HTTP POSTs (including the one we
+	// just kicked off in phase 2).
 	if tel.inflightN.Load() == 0 {
 		return
 	}
@@ -328,8 +461,11 @@ func (tel *Telemetry) Shutdown() {
 		tel.inflight.Wait()
 		close(done)
 	}()
+	// Wait long enough for an in-flight POST to either complete or hit
+	// its own HTTP-client timeout. telemetryShutdownGrace provides
+	// headroom so the two deadlines can't race.
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(telemetryHTTPTimeout + telemetryShutdownGrace):
 	}
 }
