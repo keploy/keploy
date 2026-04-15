@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/storage"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
@@ -106,12 +107,13 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	testDB := testdb.New(logger, c.Path)
-	mockDB := mockdb.New(logger, c.Path, "")
-	mapDB := mapdb.New(logger, c.Path, "")
+	format := yaml.ParseFormat(c.StorageFormat)
+	testDB := testdb.NewWithFormat(logger, c.Path, format)
+	mockDB := mockdb.NewWithFormat(logger, c.Path, "", format)
+	mapDB := mapdb.NewWithFormat(logger, c.Path, "", format)
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
-	reportDB := reportdb.New(logger, c.Path+"/reports")
-	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	reportDB := reportdb.NewWithFormat(logger, c.Path+"/reports", format)
+	testSetDb := testset.NewWithFormat[*models.TestSet](logger, c.Path, format)
 	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{

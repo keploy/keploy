@@ -25,12 +25,18 @@ import (
 type TestYaml struct {
 	TcsPath string
 	logger  *zap.Logger
+	Format  yaml.Format
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
+	return NewWithFormat(logger, tcsPath, yaml.FormatYAML)
+}
+
+func NewWithFormat(logger *zap.Logger, tcsPath string, format yaml.Format) *TestYaml {
 	return &TestYaml{
 		TcsPath: tcsPath,
 		logger:  logger,
+		Format:  format,
 	}
 }
 
@@ -67,7 +73,7 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	}
 
 	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
-	reportNames, err := yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
+	reportNames, err := yaml.ReadSessionIndicesF(ctx, runReportPath, ts.logger, yaml.ModeFile, ts.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -95,15 +101,15 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	if err != nil {
 		return nil, err
 	}
-	data, err := yaml.ReadFile(ctx, ts.logger, testPath, testCaseName)
+	data, err := yaml.ReadFileF(ctx, ts.logger, testPath, testCaseName, ts.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("test case %q is empty", testCaseName)
 	}
-	var doc *yaml.NetworkTrafficDoc
-	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+	doc, err := yaml.UnmarshalDoc(ts.Format, data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
 	}
 	if doc == nil {
@@ -135,15 +141,16 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
+	ext := "." + ts.Format.FileExtension()
 	for _, j := range files {
-		if filepath.Ext(j.Name()) != ".yaml" || strings.Contains(j.Name(), "mocks") {
+		if filepath.Ext(j.Name()) != ext || strings.Contains(j.Name(), "mocks") {
 			continue
 		}
 
 		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(ctx, ts.logger, TestPath, name)
+		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, ts.Format)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+			utils.LogError(ts.logger, err, "failed to read the testcase")
 			return nil, err
 		}
 
@@ -152,15 +159,14 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			continue
 		}
 
-		var testCase *yaml.NetworkTrafficDoc
-		err = yamlLib.Unmarshal(data, &testCase)
+		testCase, err := yaml.UnmarshalDoc(ts.Format, data)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
 			return nil, err
 		}
 
 		if testCase == nil {
-			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			ts.logger.Warn("skipping invalid testCase", zap.String("testcase name", name))
 			continue
 		}
 
@@ -231,7 +237,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
-		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+		lastIndx, err := yaml.FindLastIndexF(tcsPath, ts.logger, ts.Format)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
@@ -251,26 +257,34 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 	yamlTc.Name = tcsName
 
-	var buf bytes.Buffer
-	encoder := yamlLib.NewEncoder(&buf)
-	encoder.SetIndent(2) // Set indent to 2 spaces to match the original style
-	err = encoder.Encode(&yamlTc)
+	var data []byte
+	if ts.Format == yaml.FormatJSON {
+		data, err = yaml.MarshalDocIndent(yaml.FormatJSON, yamlTc)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		data = append(data, '\n')
+	} else {
+		var buf bytes.Buffer
+		encoder := yamlLib.NewEncoder(&buf)
+		encoder.SetIndent(2)
+		err = encoder.Encode(&yamlTc)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		data = buf.Bytes()
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
+	_, err = yaml.FileExistsF(ctx, ts.logger, tcsPath, tcsName, ts.Format)
 	if err != nil {
+		utils.LogError(ts.logger, err, "failed to find file", zap.String("path directory", tcsPath), zap.String("file", tcsName))
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
-	data := buf.Bytes()
 
-	_, err = yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
+	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, tcsName, data, false, ts.Format)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
-		return tcsInfo{name: tcsName, path: tcsPath}, err
-	}
-
-	data = append([]byte(utils.GetVersionAsComment()), data...)
-
-	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
@@ -280,7 +294,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	for _, testCaseID := range testCaseIDs {
-		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
+		err := yaml.DeleteFileF(ctx, ts.logger, path, testCaseID, ts.Format)
 		if err != nil {
 			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err
@@ -304,27 +318,25 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
-	// get the test case and fill the assertion and update the test case
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
-	data, err := yaml.ReadFile(ctx, ts.logger, tcsPath, testCaseID)
+	data, err := yaml.ReadFileF(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+		utils.LogError(ts.logger, err, "failed to read the testcase")
 		return err
 	}
 	if len(data) == 0 {
 		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
 		return nil
 	}
-	var testCase *yaml.NetworkTrafficDoc
 
-	err = yamlLib.Unmarshal(data, &testCase)
+	testCase, err := yaml.UnmarshalDoc(ts.Format, data)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+		utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
 		return err
 	}
 
 	if testCase == nil {
-		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		ts.logger.Warn("skipping invalid testCase", zap.String("testcase name", testCaseID))
 		return nil
 	}
 
@@ -340,14 +352,14 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return err
 	}
 	yamlTc.Name = testCaseID
-	data, err = yamlLib.Marshal(&yamlTc)
+	data, err = yaml.MarshalDoc(ts.Format, yamlTc)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to marshall the testcase")
+		utils.LogError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
-	err = yaml.WriteFile(ctx, ts.logger, tcsPath, testCaseID, data, false)
+	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, ts.Format)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return err
 	}
 	return nil

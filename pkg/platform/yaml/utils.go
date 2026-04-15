@@ -197,7 +197,11 @@ func ValidatePath(path string) (string, error) {
 }
 
 // FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
-func FindLastIndex(path string, _ *zap.Logger) (int, error) {
+func FindLastIndex(path string, logger *zap.Logger) (int, error) {
+	return FindLastIndexF(path, logger, FormatYAML)
+}
+
+func FindLastIndexF(path string, _ *zap.Logger, format Format) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
@@ -207,12 +211,14 @@ func FindLastIndex(path string, _ *zap.Logger) (int, error) {
 		return 1, nil
 	}
 
+	ext := "." + format.FileExtension()
 	lastIndex := 0
 	for _, v := range files {
-		if v.Name() == "mocks.yaml" || v.Name() == "config.yaml" {
+		name := v.Name()
+		if name == "mocks"+ext || name == "config"+ext || name == "mocks.yaml" || name == "config.yaml" {
 			continue
 		}
-		fileName := filepath.Base(v.Name())
+		fileName := filepath.Base(name)
 		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
 		fileNameParts := strings.Split(fileNameWithoutExt, "-")
 		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
@@ -386,16 +392,20 @@ func generateSchemaName(src string) string {
 }
 
 func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	return FileExistsF(nil, logger, path, fileName, FormatYAML)
+}
+
+func FileExistsF(_ context.Context, logger *zap.Logger, path string, fileName string, format Format) (bool, error) {
+	filePath, err := ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
 	if err != nil {
-		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to validate the file path", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
-	if _, err := os.Stat(yamlPath); err != nil {
+	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		utils.LogError(logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to check if the file exists", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
 

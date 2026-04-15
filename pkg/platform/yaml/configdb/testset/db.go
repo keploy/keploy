@@ -17,12 +17,18 @@ import (
 type Db[T any] struct {
 	logger *zap.Logger
 	path   string
+	Format yaml.Format
 }
 
 func New[T any](logger *zap.Logger, path string) *Db[T] {
+	return NewWithFormat[T](logger, path, yaml.FormatYAML)
+}
+
+func NewWithFormat[T any](logger *zap.Logger, path string, format yaml.Format) *Db[T] {
 	return &Db[T]{
 		logger: logger,
 		path:   path,
+		Format: format,
 	}
 }
 
@@ -31,10 +37,8 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 	var config T
 
-	// Try to read config.yaml, but continue if it doesn't exist
-	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
+	data, err := yaml.ReadFileF(ctx, db.logger, filePath, "config", db.Format)
 	if err != nil {
-		// Config file missing, create default config and continue with secret loading
 		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
 
 		// Since T is *models.TestSet, initialize a new TestSet instance
@@ -49,8 +53,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 			db.logger.Warn("Generic type T is not *models.TestSet, using zero value", zap.String("testSet", testSetID))
 		}
 	} else {
-		// Config file exists, unmarshal it
-		err := yamlLib.Unmarshal(data, &config)
+		err := yaml.UnmarshalGeneric(db.Format, data, &config)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
 			// Don't return early - continue with secret loading even if config is malformed
@@ -87,34 +90,30 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	filePath := filepath.Join(db.path, testSetID)
 
-	// Clear secrets before writing to config.yaml to avoid leaking them in config.yaml
 	if testSetPtr, ok := any(config).(*models.TestSet); ok {
-		// Create a shallow copy of the TestSet to avoid modifying the original
 		testSetCopy := *testSetPtr
-		// Clear the secrets in the copy
 		testSetCopy.Secret = nil
-		// Marshal the copy instead of the original
-		data, err := yamlLib.Marshal(&testSetCopy)
+		data, err := yaml.MarshalGeneric(db.Format, &testSetCopy)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 			return err
 		}
-		err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
+		err = yaml.WriteFileF(ctx, db.logger, filePath, "config", data, false, db.Format)
 		if err != nil {
-			utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
+			utils.LogError(db.logger, err, "failed to write test-set configuration file", zap.String("testSet", testSetID))
 			return err
 		}
 		return nil
 	}
 
-	data, err := yamlLib.Marshal(config)
+	data, err := yaml.MarshalGeneric(db.Format, config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 		return err
 	}
-	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
+	err = yaml.WriteFileF(ctx, db.logger, filePath, "config", data, false, db.Format)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
+		utils.LogError(db.logger, err, "failed to write test-set configuration file", zap.String("testSet", testSetID))
 		return err
 	}
 

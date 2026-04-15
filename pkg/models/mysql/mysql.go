@@ -12,8 +12,8 @@ type Spec struct {
 	Requests         []RequestYaml     `json:"requests" yaml:"requests"`
 	Response         []ResponseYaml    `json:"responses" yaml:"responses"`
 	CreatedAt        int64             `json:"created" yaml:"created,omitempty"`
-	ReqTimestampMock time.Time         `json:"ReqTimestampMock,omitempty"`
-	ResTimestampMock time.Time         `json:"ResTimestampMock,omitempty"`
+	ReqTimestampMock time.Time         `json:"ReqTimestampMock,omitempty" yaml:"ReqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"ResTimestampMock,omitempty" yaml:"ResTimestampMock,omitempty"`
 }
 
 type RequestYaml struct {

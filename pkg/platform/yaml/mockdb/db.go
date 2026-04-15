@@ -27,6 +27,7 @@ type MockYaml struct {
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
+	Format    yaml.Format
 }
 
 const mockFileLockStripeCount = 256
@@ -34,16 +35,21 @@ const mockFileLockStripeCount = 256
 var mockFileLockStripes [mockFileLockStripeCount]sync.RWMutex
 
 func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
+	return NewWithFormat(Logger, mockPath, mockName, yaml.FormatYAML)
+}
+
+func NewWithFormat(Logger *zap.Logger, mockPath string, mockName string, format yaml.Format) *MockYaml {
 	return &MockYaml{
 		MockPath:  mockPath,
 		MockName:  mockName,
 		Logger:    Logger,
 		idCounter: -1,
+		Format:    format,
 	}
 }
 
-func mockFileLockKey(path, fileName string) string {
-	fullPath := filepath.Join(path, fileName+".yaml")
+func mockFileLockKey(path, fileName string, format yaml.Format) string {
+	fullPath := filepath.Join(path, fileName+"."+format.FileExtension())
 	if absPath, err := filepath.Abs(fullPath); err == nil {
 		return absPath
 	}
@@ -57,7 +63,7 @@ func getMockFileLock(lockKey string) *sync.RWMutex {
 }
 
 func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.Mock) error {
-	targetPath := filepath.Join(path, fileName+".yaml")
+	targetPath := filepath.Join(path, fileName+"."+ys.Format.FileExtension())
 	if len(mocks) == 0 {
 		if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
 			return err
@@ -82,33 +88,58 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 	}()
 
 	writer := bufio.NewWriter(tmpFile)
-	if version := utils.GetVersionAsComment(); version != "" {
-		if _, err := writer.WriteString(version); err != nil {
-			_ = tmpFile.Close()
-			return err
-		}
-	}
 
-	for i, mock := range mocks {
-		if i > 0 {
-			if _, err := writer.WriteString("---\n"); err != nil {
+	if ys.Format == yaml.FormatJSON {
+		// NDJSON: one JSON object per line
+		for _, mock := range mocks {
+			mockDoc, err := EncodeMock(mock, ys.Logger)
+			if err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+			data, err := yaml.MarshalDoc(yaml.FormatJSON, mockDoc)
+			if err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+			if _, err := writer.Write(data); err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+			if _, err := writer.WriteString("\n"); err != nil {
 				_ = tmpFile.Close()
 				return err
 			}
 		}
-		mockYaml, err := EncodeMock(mock, ys.Logger)
-		if err != nil {
-			_ = tmpFile.Close()
-			return err
+	} else {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
 		}
-		data, err := yamlLib.Marshal(&mockYaml)
-		if err != nil {
-			_ = tmpFile.Close()
-			return err
-		}
-		if _, err := writer.Write(data); err != nil {
-			_ = tmpFile.Close()
-			return err
+
+		for i, mock := range mocks {
+			if i > 0 {
+				if _, err := writer.WriteString("---\n"); err != nil {
+					_ = tmpFile.Close()
+					return err
+				}
+			}
+			mockYaml, err := EncodeMock(mock, ys.Logger)
+			if err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+			data, err := yamlLib.Marshal(&mockYaml)
+			if err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+			if _, err := writer.Write(data); err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
 		}
 	}
 
@@ -184,32 +215,32 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName))
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
 	lock.Lock()
 	defer lock.Unlock()
 
+	ext := "." + ys.Format.FileExtension()
 	ys.Logger.Debug("pruning unused mocks",
 		zap.Any("consumedMocks", mockNames),
 		zap.String("testSetID", testSetID),
-		zap.String("path", filepath.Join(path, mockFileName+".yaml")),
+		zap.String("path", filepath.Join(path, mockFileName+ext)),
 		zap.Time("pruneBefore", pruneBefore))
 
-	// Read the mocks from the yaml file
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
+	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+ext))
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return err
 	}
 	if _, err := os.Stat(mockPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		utils.LogError(ys.Logger, err, "failed to find the mocks yaml file")
+		utils.LogError(ys.Logger, err, "failed to find the mocks file")
 		return err
 	}
-	reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockFileName)
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return err
 	}
 	defer reader.Close()
@@ -221,8 +252,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			break
 		}
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the yaml file documents", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
-			return fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+			utils.LogError(ys.Logger, err, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+			return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
 		}
 		mockYamls = append(mockYamls, doc)
 	}
@@ -276,7 +307,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockYaml, err := EncodeMock(mock, ys.Logger)
+	mockDoc, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
@@ -285,26 +316,26 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName))
+	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, ys.Format))
 	lock.Lock()
 	defer lock.Unlock()
 
-	data, err := yamlLib.Marshal(&mockYaml)
+	data, err := yaml.MarshalDoc(ys.Format, mockDoc)
 	if err != nil {
 		return err
 	}
 
-	exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName)
+	exists, err := yaml.FileExistsF(ctx, ys.Logger, mockPath, mockFileName, ys.Format)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
+		utils.LogError(ys.Logger, err, "failed to find file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
-	if !exists {
+	if !exists && ys.Format == yaml.FormatYAML {
 		data = append([]byte(utils.GetVersionAsComment()), data...)
 	}
 
-	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
+	err = yaml.WriteFileF(ctx, ys.Logger, mockPath, mockFileName, data, true, ys.Format)
 	if err != nil {
 		return err
 	}
@@ -320,20 +351,20 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName))
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
 	lock.RLock()
 	defer lock.RUnlock()
 
-	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
+	ext := "." + ys.Format.FileExtension()
+	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ext)
 	if err != nil {
 		return nil, err
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		// Use buffered reader for memory-efficient reading of large mock files
-		reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockFileName)
+		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, ys.Format)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+			utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
 			return nil, err
 		}
 		defer reader.Close()
@@ -345,14 +376,13 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 				break
 			}
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
 			}
 			hasContent = true
 
-			// Decode each YAML document into models.Mock as it is read.
 			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
 				return nil, err
 			}
 
@@ -387,7 +417,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 
 		if !hasContent {
-			utils.LogError(ys.Logger, nil, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+			utils.LogError(ys.Logger, nil, "failed to read the mocks from file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
 			return nil, fmt.Errorf("failed to get mocks, empty file")
 		}
 	}
@@ -408,20 +438,20 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockName))
+	lock := getMockFileLock(mockFileLockKey(path, mockName, ys.Format))
 	lock.RLock()
 	defer lock.RUnlock()
 
-	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ".yaml")
+	ext := "." + ys.Format.FileExtension()
+	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ext)
 	if err != nil {
 		return nil, err
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		// Use buffered reader for memory-efficient reading of large mock files
-		reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockName)
+		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockName, ys.Format)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to read the mocks from config file", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
 		defer reader.Close()
@@ -432,13 +462,12 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 				break
 			}
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
 			}
 
-			// Decode each YAML document into models.Mock as it is read.
 			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
 				return nil, err
 			}
 
@@ -519,14 +548,13 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
-	// Read the mocks from the yaml file
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
+	ext := "." + ys.Format.FileExtension()
+	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+ext))
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return err
 	}
 
-	// Delete all contents of the mocks directory
 	err = os.RemoveAll(mockPath)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
