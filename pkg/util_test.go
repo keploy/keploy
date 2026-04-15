@@ -856,16 +856,19 @@ func TestIsTime_VariousFormats_808(t *testing.T) {
 	}
 }
 
-// TestToHTTPHeader_WithTimeValue_909 verifies that the ToHTTPHeader function correctly
-// converts a map of strings to an http.Header object. It specifically checks that
-// header values recognized as timestamps are not split by commas, while other
-// comma-separated values are correctly split into slices.
+// TestToHTTPHeader_WithTimeValue_909 verifies that the ToHTTPHeader function
+// converts a map of strings to an http.Header object, preserving each recorded
+// value as a single header value. Splitting on "," would corrupt values whose
+// content legitimately contains commas (e.g. `compatible_components: CC1,CC2,CC3`),
+// so both timestamp values and comma-separated list values must round-trip
+// untouched.
 func TestToHTTPHeader_WithTimeValue_909(t *testing.T) {
 	// Arrange
 	mockHeader := map[string]string{
-		"Date":            "Tue, 17 Jan 2023 16:34:58 IST",
-		"X-Custom-Header": "value1,value2",
-		"Content-Type":    "application/json",
+		"Date":                  "Tue, 17 Jan 2023 16:34:58 IST",
+		"X-Custom-Header":       "value1,value2",
+		"Content-Type":          "application/json",
+		"Compatible-Components": "CC1,CC2,CC3",
 	}
 
 	// Act
@@ -874,8 +877,9 @@ func TestToHTTPHeader_WithTimeValue_909(t *testing.T) {
 	// Assert
 	require.NotNil(t, httpHeader)
 	assert.Equal(t, []string{"Tue, 17 Jan 2023 16:34:58 IST"}, httpHeader["Date"])
-	assert.Equal(t, []string{"value1", "value2"}, httpHeader["X-Custom-Header"])
+	assert.Equal(t, []string{"value1,value2"}, httpHeader["X-Custom-Header"])
 	assert.Equal(t, []string{"application/json"}, httpHeader["Content-Type"])
+	assert.Equal(t, []string{"CC1,CC2,CC3"}, httpHeader["Compatible-Components"])
 }
 
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and

@@ -206,13 +206,13 @@ func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string)
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
-		match := IsTime(j)
-		if match {
-			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
-			header[i] = []string{j}
-			continue
-		}
-		header[i] = strings.Split(j, ",")
+		// Preserve the recorded value as a single header value. Splitting on ","
+		// here corrupts headers whose value legitimately contains commas
+		// (e.g. `compatible_components: CC1,CC2,CC3`) by turning one header
+		// into multiple header lines, which many servers read as just the
+		// first value. Emitting a single line with commas is semantically
+		// equivalent to multiple lines for standard list-valued headers.
+		header[i] = []string{j}
 	}
 	return header
 }
