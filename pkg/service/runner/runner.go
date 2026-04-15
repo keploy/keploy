@@ -277,6 +277,7 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 	mocksWeNeed = make(map[string]bool)
 
 	if r.mappingDB == nil {
+		err = fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
 		return
 	}
 	testMockMappings, hasMeaningful, getErr := r.mappingDB.Get(ctx, testSetID)
