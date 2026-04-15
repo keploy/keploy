@@ -72,8 +72,23 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	oldInfo, okOld := oldKey.(models.TestModeInfo)
 	newInfo, okNew := newKey.(models.TestModeInfo)
 
-	// First try exact match
-	_, found := db.rbt.Get(oldKey)
+	// Extract expected name from new object for identity validation.
+	// This prevents accidentally removing a different mock when keys have
+	// shifted after SetUnFilteredMocks re-populates the tree.
+	var expectedName string
+	if newMock, ok := newObj.(*models.Mock); ok && newMock != nil {
+		expectedName = newMock.Name
+	}
+
+	// First try exact key match
+	existingVal, found := db.rbt.Get(oldKey)
+	if found && expectedName != "" {
+		if existingMock, ok := existingVal.(*models.Mock); ok && existingMock != nil {
+			if existingMock.Name != expectedName {
+				found = false // Different mock at this key, skip
+			}
+		}
+	}
 	if found {
 		db.rbt.Remove(oldKey)
 		db.rbt.Put(newKey, newObj)
@@ -88,23 +103,64 @@ func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interfac
 	}
 
 	// If exact match fails, use ID index for O(1) lookup
-	if !okOld {
-		return false
+	if okOld {
+		currentKey, exists := db.idIndex[oldInfo.ID]
+		if exists {
+			// Verify identity before removing
+			if expectedName != "" {
+				idVal, idFound := db.rbt.Get(currentKey)
+				if idFound {
+					if existingMock, ok := idVal.(*models.Mock); ok && existingMock != nil {
+						if existingMock.Name != expectedName {
+							exists = false // Different mock at this ID, skip
+						}
+					}
+				}
+			}
+			if exists {
+				db.rbt.Remove(currentKey)
+				db.rbt.Put(newKey, newObj)
+				delete(db.idIndex, oldInfo.ID)
+				if okNew {
+					db.idIndex[newInfo.ID] = newInfo
+				}
+				return true
+			}
+		}
 	}
 
-	currentKey, exists := db.idIndex[oldInfo.ID]
-	if !exists {
-		return false
+	// Fallback: linear scan by name to find the correct mock.
+	// This handles the case where SetUnFilteredMocks re-populated the tree
+	// with new ID/SortOrder assignments, making key/ID-based lookups stale.
+	if expectedName != "" {
+		var foundKey interface{}
+		it := db.rbt.Iterator()
+		for it.Next() {
+			if existingMock, ok := it.Value().(*models.Mock); ok && existingMock != nil {
+				if existingMock.Name == expectedName {
+					foundKey = it.Key()
+					break
+				}
+			}
+		}
+		if foundKey != nil {
+			foundInfo, foundInfoOk := foundKey.(models.TestModeInfo)
+			db.rbt.Remove(foundKey)
+			// Use the found mock's ID in the new key to keep idIndex consistent
+			adjustedNewKey := newInfo
+			if foundInfoOk {
+				adjustedNewKey.ID = foundInfo.ID
+				delete(db.idIndex, foundInfo.ID)
+			}
+			db.rbt.Put(adjustedNewKey, newObj)
+			if okNew {
+				db.idIndex[adjustedNewKey.ID] = adjustedNewKey
+			}
+			return true
+		}
 	}
 
-	// Found by ID, update it
-	db.rbt.Remove(currentKey)
-	db.rbt.Put(newKey, newObj)
-	delete(db.idIndex, oldInfo.ID)
-	if okNew {
-		db.idIndex[newInfo.ID] = newInfo
-	}
-	return true
+	return false
 }
 
 func (db *TreeDb) deleteAll() {
