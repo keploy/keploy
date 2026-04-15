@@ -49,6 +49,19 @@ func New(
 }
 
 func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
+
+	if opts.TestSetID == "" {
+		return &TestResult{Passed: false, Error: "TestSetID is required"}
+	}
+
+	if opts.TestStepID == "" {
+		return &TestResult{Passed: false, Error: "TestStepID is required"}
+	}
+
+	if opts.ServiceURL == "" {
+		return &TestResult{Passed: false, Error: "ServiceURL is required"}
+	}
+
 	// 1. Fetch the recorded test case.
 	tc, err := r.loadTestCase(ctx, opts.TestSetID, opts.TestStepID)
 	if err != nil {
@@ -277,18 +290,11 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 			mocksThatHaveMappings[m.Name] = true
 		}
 	}
-	if testCaseName != "" {
-		if mocks, ok := testMockMappings[testCaseName]; ok {
-			for _, m := range mocks {
-				mocksWeNeed[m.Name] = true
-				expected = append(expected, m.Name)
 
-			}
-		}
-	} else {
-		mocksWeNeed = mocksThatHaveMappings
-		for m := range mocksWeNeed {
-			expected = append(expected, m)
+	if mocks, ok := testMockMappings[testCaseName]; ok {
+		for _, m := range mocks {
+			mocksWeNeed[m.Name] = true
+			expected = append(expected, m.Name)
 		}
 	}
 	return
