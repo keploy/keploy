@@ -640,7 +640,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	if destInfo.Port == 3306 || destInfo.Port == 4000{
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
