@@ -479,7 +479,8 @@ func TestFileExistsF(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exists, err := FileExistsF(nil, logger, tempDir, "test", FormatJSON)
+	ctx := context.Background()
+	exists, err := FileExistsF(ctx, logger, tempDir, "test", FormatJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +488,7 @@ func TestFileExistsF(t *testing.T) {
 		t.Error("expected test.json to exist")
 	}
 
-	exists, err = FileExistsF(nil, logger, tempDir, "test", FormatYAML)
+	exists, err = FileExistsF(ctx, logger, tempDir, "test", FormatYAML)
 	if err != nil {
 		t.Fatal(err)
 	}

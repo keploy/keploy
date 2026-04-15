@@ -55,7 +55,7 @@ type NetworkTrafficDocJSON struct {
 // encoded document (e.g. json.NewEncoder(w).Encode(jsonDoc)) can do so without
 // re-allocating a []byte.
 func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
-	var specData interface{}
+	var specData any
 	if err := doc.Spec.Decode(&specData); err != nil {
 		return nil, fmt.Errorf("failed to decode yaml.Node spec for JSON conversion: %w", err)
 	}
@@ -140,7 +140,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node
 	if len(jsonDoc.Spec) > 0 {
-		var specData interface{}
+		var specData any
 		if err := json.Unmarshal(jsonDoc.Spec, &specData); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal JSON spec: %w", err)
 		}
@@ -177,7 +177,7 @@ func EncodeDocTo(w io.Writer, format Format, doc *NetworkTrafficDoc) error {
 }
 
 // MarshalGeneric serializes any value to bytes in the specified format.
-func MarshalGeneric(format Format, v interface{}) ([]byte, error) {
+func MarshalGeneric(format Format, v any) ([]byte, error) {
 	switch format {
 	case FormatJSON:
 		return json.MarshalIndent(v, "", "  ")
@@ -187,7 +187,7 @@ func MarshalGeneric(format Format, v interface{}) ([]byte, error) {
 }
 
 // UnmarshalGeneric deserializes bytes into v using the specified format.
-func UnmarshalGeneric(format Format, data []byte, v interface{}) error {
+func UnmarshalGeneric(format Format, data []byte, v any) error {
 	switch format {
 	case FormatJSON:
 		return json.Unmarshal(data, v)
