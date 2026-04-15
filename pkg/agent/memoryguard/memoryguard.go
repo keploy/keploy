@@ -149,7 +149,6 @@ func (g *guard) run(ctx context.Context) {
 			}
 			g.readFailCount = 0
 
-
 			pauseThreshold := thresholdBytes(g.limitBytes, pauseThresholdRatio)
 			resumeThreshold := thresholdBytes(g.limitBytes, resumeThresholdRatio)
 

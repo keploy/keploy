@@ -259,11 +259,22 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 
 	if mgr := syncMock.Get(); mgr != nil {
-		// In synchronous mode, always route HTTP mocks through the sync manager.
-		// The manager uses its internal first-request state to decide whether to
-		// buffer or forward mocks for correct time-window based association.
+		// Route HTTP mocks through the sync manager. The manager uses its
+		// internal first-request state to decide whether to buffer or forward
+		// mocks for correct time-window based association.
 		mgr.AddMock(newMock)
 		return nil
+	}
+
+	// Fallback: syncMock manager unavailable, send to mocks channel directly.
+	// Use select with ctx so we don't block forever during shutdown.
+	select {
+	case <-ctx.Done():
+		select {
+		case mocks <- newMock:
+		default:
+		}
+	case mocks <- newMock:
 	}
 	return nil
 }

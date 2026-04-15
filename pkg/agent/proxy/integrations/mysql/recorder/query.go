@@ -57,17 +57,19 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Returns on error, EOF, or context cancellation.
 	readRelay := func(conn net.Conn, ch chan<- []byte) {
 		defer close(ch)
+		buf := make([]byte, 32*1024) // reused across reads
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			buf := make([]byte, 32*1024)
 			n, err := conn.Read(buf)
 			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
 				select {
-				case ch <- buf[:n]:
+				case ch <- data:
 				case <-ctx.Done():
 					return
 				}
@@ -98,16 +100,23 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	}()
 
 	// Async decode channel and background goroutine.
+	// Use a decoder-specific context so cleanup() can unblock recordMock's
+	// channel send (which selects on ctx.Done) without waiting for the
+	// parent context to be canceled.
 	decodeChan := make(chan mysqlDecodeItem, 512)
 	decodeDone := make(chan struct{})
+	decoderCtx, cancelDecoder := context.WithCancel(ctx)
 	go func() {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(decodeDone)
-		asyncMySQLDecode(ctx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
+		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
 	// cleanup ensures the decode goroutine is stopped before we return.
+	// Canceling the decoder context first unblocks any pending channel
+	// sends in recordMock, preventing a deadlock.
 	cleanup := func() {
+		cancelDecoder()
 		close(decodeChan)
 		<-decodeDone
 	}
