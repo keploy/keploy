@@ -234,7 +234,10 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	}
 
 	// Resolve which mocks are needed.
-	mocksThatHaveMappings, mocksWeNeed, expected := r.resolveMockSets(ctx, testSetID, testCaseName)
+	mocksThatHaveMappings, mocksWeNeed, expected, err := r.resolveMockSets(ctx, testSetID, testCaseName)
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("failed to resolve mock sets: %w", err)
+	}
 
 	// Fetch mocks.
 	afterTime := models.BaseTime
@@ -273,16 +276,20 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	return expected, cleanup, nil
 }
 
-func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool, expected []string) {
+func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool, expected []string, err error) {
 	mocksThatHaveMappings = make(map[string]bool)
 	mocksWeNeed = make(map[string]bool)
-	expected = make([]string, 0)
 
 	if r.mappingDB == nil {
 		return
 	}
-	testMockMappings, hasMeaningful, err := r.mappingDB.Get(ctx, testSetID)
-	if err != nil || !hasMeaningful {
+	testMockMappings, hasMeaningful, getErr := r.mappingDB.Get(ctx, testSetID)
+	if getErr != nil {
+		err = fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, getErr)
+		return
+	}
+	if !hasMeaningful {
+		err = fmt.Errorf("no mock mappings found for test set %q", testSetID)
 		return
 	}
 	for _, mocks := range testMockMappings {
@@ -291,11 +298,14 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 		}
 	}
 
-	if mocks, ok := testMockMappings[testCaseName]; ok {
-		for _, m := range mocks {
-			mocksWeNeed[m.Name] = true
-			expected = append(expected, m.Name)
-		}
+	mocks, ok := testMockMappings[testCaseName]
+	if !ok {
+		err = fmt.Errorf("no mock mapping found for test case %q in test set %q", testCaseName, testSetID)
+		return
+	}
+	for _, m := range mocks {
+		mocksWeNeed[m.Name] = true
+		expected = append(expected, m.Name)
 	}
 	return
 }
