@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +98,73 @@ func generateCacheKey(name string, qtype uint16) string {
 	return fmt.Sprintf("%s-%s", dns.Fqdn(name), dns.TypeToString[qtype])
 }
 
+func dnsTypeString(qtype uint16) string {
+	if typeName, ok := dns.TypeToString[qtype]; ok {
+		return typeName
+	}
+	return strconv.Itoa(int(qtype))
+}
+
+func dnsRcodeString(rcode int) string {
+	if rcodeName, ok := dns.RcodeToString[rcode]; ok {
+		return rcodeName
+	}
+	return strconv.Itoa(rcode)
+}
+
+func dnsQuestionFields(question dns.Question) []zap.Field {
+	return []zap.Field{
+		zap.String("query", question.Name),
+		zap.String("qtype", dnsTypeString(question.Qtype)),
+		zap.Uint16("qclass", question.Qclass),
+	}
+}
+
+func dnsMessageFields(prefix string, msg *dns.Msg) []zap.Field {
+	if msg == nil {
+		return []zap.Field{zap.Bool(prefix+"_nil", true)}
+	}
+
+	fields := []zap.Field{
+		zap.Int(prefix+"_rcode", msg.Rcode),
+		zap.String(prefix+"_rcode_name", dnsRcodeString(msg.Rcode)),
+		zap.Bool(prefix+"_authoritative", msg.Authoritative),
+		zap.Bool(prefix+"_recursion_available", msg.RecursionAvailable),
+		zap.Bool(prefix+"_truncated", msg.Truncated),
+		zap.Int(prefix+"_answer_count", len(msg.Answer)),
+		zap.Int(prefix+"_ns_count", len(msg.Ns)),
+		zap.Int(prefix+"_extra_count", len(msg.Extra)),
+	}
+
+	if len(msg.Answer) > 0 {
+		fields = append(fields, zap.Strings(prefix+"_answers", encodeDNSRRs(msg.Answer)))
+	}
+	if len(msg.Ns) > 0 {
+		fields = append(fields, zap.Strings(prefix+"_ns", encodeDNSRRs(msg.Ns)))
+	}
+	if len(msg.Extra) > 0 {
+		fields = append(fields, zap.Strings(prefix+"_extra", encodeDNSRRs(msg.Extra)))
+	}
+
+	return fields
+}
+
+func resolverConfigFields(config *dns.ClientConfig, question dns.Question) []zap.Field {
+	if config == nil {
+		return nil
+	}
+
+	return []zap.Field{
+		zap.Strings("resolver_servers", config.Servers),
+		zap.String("resolver_port", config.Port),
+		zap.Strings("resolver_search", config.Search),
+		zap.Int("resolver_ndots", config.Ndots),
+		zap.Int("resolver_timeout_seconds", config.Timeout),
+		zap.Int("resolver_attempts", config.Attempts),
+		zap.Strings("resolver_name_list", config.NameList(question.Name)),
+	}
+}
+
 func mergeRcode(cur, next int) int {
 	// keep success unless we see a failure
 	if next == dns.RcodeSuccess {
@@ -120,8 +188,6 @@ func mergeRcode(cur, next int) int {
 }
 
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	p.logger.Debug("", zap.String("Source socket info", w.RemoteAddr().String()))
-
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 
@@ -133,18 +199,27 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		mockingEnabled = session.Mocking
 	}
 
-	p.logger.Debug("Got some Dns queries")
+	p.logger.Debug("received dns request",
+		zap.String("source", w.RemoteAddr().String()),
+		zap.String("mode", string(mode)),
+		zap.Bool("mocking_enabled", mockingEnabled),
+		zap.Int("question_count", len(r.Question)),
+	)
 
 	flagsSet := false
 
 	for _, question := range r.Question {
-		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
-
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 
 		resp, found := p.dnsCache.Get(key)
+		logFields := append([]zap.Field{
+			zap.String("mode", string(mode)),
+			zap.Bool("cache_hit", found),
+			zap.String("cache_key", key),
+		}, dnsQuestionFields(question)...)
 		if !found {
+			p.logger.Debug("dns cache miss", logFields...)
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
 			// Only cache real mock responses in test mode.
@@ -153,6 +228,8 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
+		} else {
+			p.logger.Debug("dns cache hit", logFields...)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)
@@ -169,10 +246,15 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Answer = append(msg.Answer, resp.Answer...)
 		msg.Ns = append(msg.Ns, resp.Ns...)
 		msg.Extra = append(msg.Extra, resp.Extra...)
+
+		responseFields := append([]zap.Field{
+			zap.Bool("from_upstream", resp.FromUpstream),
+		}, dnsQuestionFields(question)...)
+		responseFields = append(responseFields, dnsMessageFields("resolved", resp.Msg)...)
+		p.logger.Debug("resolved dns question", responseFields...)
 	}
 
-	p.logger.Debug(fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
-	p.logger.Debug("Writing dns info back to the client...")
+	p.logger.Debug("sending dns response to client", dnsMessageFields("outgoing", msg)...)
 
 	err := w.WriteMsg(msg)
 	if err != nil {
@@ -209,11 +291,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		return p.defaultDNSResponse(question)
 
 	case models.MODE_RECORD:
+		p.logger.Debug("resolving dns question in record mode", dnsQuestionFields(question)...)
 		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
 			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
-				zap.String("query", question.Name),
-				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				dnsQuestionFields(question)...,
 			)
 			return dnsCacheEntry{
 				Msg: &dns.Msg{
@@ -244,7 +326,9 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 
 	switch question.Qtype {
 	case dns.TypeA:
-		p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
+		p.logger.Debug("using synthesized A fallback for DNS query",
+			append(dnsQuestionFields(question), zap.String("proxy_ip4", p.IP4))...,
+		)
 		resp.Answer = []dns.RR{&dns.A{
 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 			A:   net.ParseIP(p.IP4),
@@ -254,7 +338,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 	case dns.TypeAAAA:
 		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
 		// clients prefer an unreachable ::1 destination in IPv4-only environments.
-		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		p.logger.Debug("no synthesized AAAA fallback; returning empty AAAA response", dnsQuestionFields(question)...)
 		return resp
 
 	case dns.TypeSRV:
@@ -427,9 +511,23 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	if err == nil {
 		servers = config.Servers
 		port = config.Port
+		fields := append(dnsQuestionFields(question), resolverConfigFields(config, question)...)
+		if resolvConfBytes, readErr := os.ReadFile("/etc/resolv.conf"); readErr == nil {
+			fields = append(fields, zap.String("resolv_conf", strings.TrimSpace(string(resolvConfBytes))))
+		} else {
+			fields = append(fields, zap.NamedError("resolv_conf_read_error", readErr))
+		}
+		p.logger.Debug("loaded resolver configuration for record-mode DNS", fields...)
 	} else {
 		// Fallback to public DNS if resolv.conf fails
 		servers = []string{"8.8.8.8", "1.1.1.1"}
+		p.logger.Debug("failed to parse /etc/resolv.conf for record-mode DNS; using fallback resolvers",
+			append(dnsQuestionFields(question),
+				zap.Error(err),
+				zap.Strings("resolver_servers", servers),
+				zap.String("resolver_port", port),
+			)...,
+		)
 	}
 
 	c := new(dns.Client)
@@ -448,19 +546,56 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		addr := net.JoinHostPort(server, port)
 
 		c.Net = "udp"
+		p.logger.Debug("sending DNS query upstream",
+			append(dnsQuestionFields(question),
+				zap.String("upstream_addr", addr),
+				zap.String("transport", c.Net),
+			)...,
+		)
 		resp, _, err := c.Exchange(m, addr)
 		if err != nil {
 			resolveErr = err
+			p.logger.Debug("upstream DNS exchange failed",
+				append(dnsQuestionFields(question),
+					zap.String("upstream_addr", addr),
+					zap.String("transport", c.Net),
+					zap.Error(err),
+				)...,
+			)
 			continue
 		}
 
+		p.logger.Debug("received upstream DNS response",
+			append(append(dnsQuestionFields(question),
+				zap.String("upstream_addr", addr),
+				zap.String("transport", c.Net),
+			), dnsMessageFields("upstream", resp)...)...,
+		)
+
 		if resp != nil && resp.Truncated {
+			p.logger.Debug("upstream DNS response truncated; retrying over TCP",
+				append(dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
+			)
 			c.Net = "tcp"
 			resp, _, err = c.Exchange(m, addr)
 			if err != nil {
 				resolveErr = err
+				p.logger.Debug("upstream DNS TCP retry failed",
+					append(dnsQuestionFields(question),
+						zap.String("upstream_addr", addr),
+						zap.String("transport", c.Net),
+						zap.Error(err),
+					)...,
+				)
 				continue
 			}
+
+			p.logger.Debug("received upstream DNS response after TCP retry",
+				append(append(dnsQuestionFields(question),
+					zap.String("upstream_addr", addr),
+					zap.String("transport", c.Net),
+				), dnsMessageFields("upstream", resp)...)...,
+			)
 		}
 
 		if resp != nil {
@@ -490,11 +625,8 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
 	// These are often noise from search domain expansion or external transient issues.
 	if in.Rcode != dns.RcodeSuccess {
-		p.logger.Debug("Skipping DNS mock recording due to non-zero rcode",
-			zap.String("query", question.Name),
-			zap.String("qtype", dns.TypeToString[question.Qtype]),
-			zap.Int("rcode", in.Rcode),
-		)
+		fields := append(dnsQuestionFields(question), dnsMessageFields("upstream", in)...)
+		p.logger.Debug("skipping DNS mock recording due to non-zero rcode", fields...)
 		return resp, nil
 	}
 
@@ -504,8 +636,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	dedupeKey := generateDNSDedupeKey(question)
 	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
 		p.logger.Debug("Skipping duplicate DNS mock",
-			zap.String("query", question.Name),
-			zap.String("qtype", dns.TypeToString[question.Qtype]),
+			append(dnsQuestionFields(question), zap.String("dedupe_key", dedupeKey))...,
 		)
 		return resp, nil
 	}
@@ -544,9 +675,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	}
 
 	p.logger.Debug("Recording new DNS mock",
-		zap.String("query", question.Name),
-		zap.String("qtype", dns.TypeToString[question.Qtype]),
-		zap.Int("rcode", in.Rcode),
+		append(append(dnsQuestionFields(question), zap.String("dedupe_key", dedupeKey)), dnsMessageFields("upstream", in)...)...,
 	)
 
 	if session.Synchronous {
