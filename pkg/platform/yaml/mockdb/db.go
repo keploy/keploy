@@ -4,6 +4,7 @@ package mockdb
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -94,26 +95,27 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 	writer := bufio.NewWriter(tmpFile)
 
 	if format == yaml.FormatJSON {
-		// NDJSON: one JSON object per line
+		// NDJSON: one JSON object per line. The JSON write path is now
+		// fully yaml-free — EncodeMockJSON covers every kind that keploy
+		// records (HTTP, DNS, Generic, Redis, Kafka, HTTP/2, gRPC,
+		// PostgresV2, MySQL, Mongo). An unexpected kind is treated as an
+		// error rather than silently falling back through yaml.Node.
+		jsonEnc := json.NewEncoder(writer)
 		for _, mock := range mocks {
-			mockDoc, err := EncodeMock(mock, ys.Logger)
+			jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
 			if err != nil {
 				_ = tmpFile.Close()
 				return err
 			}
-			data, err := yaml.MarshalDoc(yaml.FormatJSON, mockDoc)
-			if err != nil {
+			if !handled {
+				_ = tmpFile.Close()
+				return fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", mock.Kind)
+			}
+			if err := jsonEnc.Encode(jsonDoc); err != nil {
 				_ = tmpFile.Close()
 				return err
 			}
-			if _, err := writer.Write(data); err != nil {
-				_ = tmpFile.Close()
-				return err
-			}
-			if _, err := writer.WriteString("\n"); err != nil {
-				_ = tmpFile.Close()
-				return err
-			}
+			// json.Encoder already appends a trailing newline.
 		}
 	} else {
 		if version := utils.GetVersionAsComment(); version != "" {
@@ -250,21 +252,45 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	}
 	defer reader.Close()
 
-	var mockYamls []*yaml.NetworkTrafficDoc
-	for {
-		doc, err := reader.ReadNextDoc()
-		if errors.Is(err, io.EOF) {
-			break
+	// On a JSON mocks file, decode through the json.RawMessage path so
+	// pruning doesn't allocate yaml.Node trees for every mock it reads.
+	var mocks []*models.Mock
+	if reader.Format() == yaml.FormatJSON {
+		var jsonDocs []*yaml.NetworkTrafficDocJSON
+		for {
+			jd, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+				return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			jsonDocs = append(jsonDocs, jd)
 		}
+		m, err := DecodeMocksJSON(jsonDocs, ys.Logger)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-			return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			return err
 		}
-		mockYamls = append(mockYamls, doc)
-	}
-	mocks, err := DecodeMocks(mockYamls, ys.Logger)
-	if err != nil {
-		return err
+		mocks = m
+	} else {
+		var mockYamls []*yaml.NetworkTrafficDoc
+		for {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+				return fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			mockYamls = append(mockYamls, doc)
+		}
+		m, err := DecodeMocks(mockYamls, ys.Logger)
+		if err != nil {
+			return err
+		}
+		mocks = m
 	}
 
 	newMocks := make([]*models.Mock, 0, len(mocks))
@@ -313,10 +339,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockDoc, err := EncodeMock(mock, ys.Logger)
-	if err != nil {
-		return err
-	}
+
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
@@ -335,7 +358,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Stream directly to the file instead of marshaling to []byte first.
 	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
@@ -351,9 +373,29 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 
 	writer := bufio.NewWriter(file)
 
-	// Write version comment / document separator (YAML only — JSON has no
-	// comment syntax and NDJSON separates docs with '\n' written by Encode).
-	if effFormat == yaml.FormatYAML {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// Encode + stream. Each branch takes a different in-memory representation:
+	// JSON builds NetworkTrafficDocJSON directly (no yaml.Node anywhere),
+	// YAML keeps using EncodeMock -> yamlLib.Encoder for wire compatibility
+	// with pre-existing mocks.yaml files.
+	switch effFormat {
+	case yaml.FormatJSON:
+		jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
+		if err != nil {
+			return fmt.Errorf("failed to encode mock (json): %w", err)
+		}
+		if !handled {
+			return fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", mock.Kind)
+		}
+		if err := json.NewEncoder(writer).Encode(jsonDoc); err != nil {
+			return fmt.Errorf("failed to encode mock json: %w", err)
+		}
+		// json.Encoder appends the trailing '\n' — NDJSON-ready.
+	default:
+		// YAML path.
 		if isFileEmpty {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := writer.WriteString(version); err != nil {
@@ -365,15 +407,18 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-	}
-
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// Stream the encoded mock (one YAML doc or one NDJSON line) directly to writer.
-	if err := yaml.EncodeDocTo(writer, effFormat, mockDoc); err != nil {
-		return fmt.Errorf("failed to encode mock: %w", err)
+		mockDoc, err := EncodeMock(mock, ys.Logger)
+		if err != nil {
+			return fmt.Errorf("failed to encode mock (yaml): %w", err)
+		}
+		enc := yamlLib.NewEncoder(writer)
+		if err := enc.Encode(mockDoc); err != nil {
+			_ = enc.Close()
+			return fmt.Errorf("failed to encode mock yaml: %w", err)
+		}
+		if err := enc.Close(); err != nil {
+			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -414,21 +459,43 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 	defer reader.Close()
 
+	// When the mocks file is JSON we go through ReadNextDocJSON +
+	// DecodeMocksJSON, skipping the yaml.Node bridge entirely. YAML files
+	// keep the original path for full backwards compatibility with
+	// existing recordings.
+	readerIsJSON := reader.Format() == yaml.FormatJSON
+
 	hasContent := false
 	for {
-		doc, err := reader.ReadNextDoc()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-		}
-		hasContent = true
-
-		mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-			return nil, err
+		var mocks []*models.Mock
+		if readerIsJSON {
+			jsonDoc, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			hasContent = true
+			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
+				return nil, err
+			}
+		} else {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			hasContent = true
+			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
+				return nil, err
+			}
 		}
 
 		for _, mock := range mocks {
@@ -499,19 +566,36 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	}
 	defer reader.Close()
 
-	for {
-		doc, err := reader.ReadNextDoc()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-		}
+	readerIsJSON := reader.Format() == yaml.FormatJSON
 
-		mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-			return nil, err
+	for {
+		var mocks []*models.Mock
+		if readerIsJSON {
+			jsonDoc, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
+				return nil, err
+			}
+		} else {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			}
+			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
+				return nil, err
+			}
 		}
 
 		for _, mock := range mocks {

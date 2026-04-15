@@ -113,6 +113,15 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	if len(data) == 0 {
 		return nil, fmt.Errorf("test case %q is empty", testCaseName)
 	}
+	// JSON file → decode directly from json.RawMessage spec; no yaml.Node
+	// bridge on the hot path.
+	if detected == yaml.FormatJSON {
+		var jd yaml.NetworkTrafficDocJSON
+		if err := json.Unmarshal(data, &jd); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal json test case %q: %w", testCaseName, err)
+		}
+		return DecodeJSON(&jd, ts.logger)
+	}
 	doc, err := yaml.UnmarshalDoc(detected, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
@@ -191,6 +200,23 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 
 		if len(data) == 0 {
 			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			continue
+		}
+
+		// JSON files decode directly into TestCase via DecodeJSON — no
+		// yaml.Node allocation on the per-testcase hot path.
+		if fileFormat == yaml.FormatJSON {
+			var jd yaml.NetworkTrafficDocJSON
+			if err := json.Unmarshal(data, &jd); err != nil {
+				utils.LogError(ts.logger, err, "failed to unmarshal json testcase data", zap.String("testcase name", name))
+				return nil, err
+			}
+			tc, err := DecodeJSON(&jd, ts.logger)
+			if err != nil {
+				utils.LogError(ts.logger, err, "failed to decode json testcase", zap.String("testcase name", name))
+				return nil, err
+			}
+			tcs = append(tcs, tc)
 			continue
 		}
 
@@ -286,11 +312,25 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
-	yamlTc, err := EncodeTestcase(*tc, ts.logger)
-	if err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	// For YAML we build a NetworkTrafficDoc (whose Spec is a yaml.Node);
+	// for JSON we build a NetworkTrafficDocJSON directly (Spec is
+	// json.RawMessage). The JSON path skips the yaml.Node intermediate
+	// entirely — this is where the big win comes from.
+	var yamlTc *yaml.NetworkTrafficDoc
+	var jsonTc *yaml.NetworkTrafficDocJSON
+	if ts.Format == yaml.FormatJSON {
+		jsonTc, err = EncodeTestcaseJSON(*tc, ts.logger)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		jsonTc.Name = tcsName
+	} else {
+		yamlTc, err = EncodeTestcase(*tc, ts.logger)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		yamlTc.Name = tcsName
 	}
-	yamlTc.Name = tcsName
 
 	// Stream the encoded testcase directly to disk via a temp file + rename
 	// instead of buffering the full document in memory. This avoids allocating
@@ -336,14 +376,12 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	switch ts.Format {
 	case yaml.FormatJSON:
 		// Pretty-print testcases so they're human-editable; json.Encoder
-		// streams directly to writer with no intermediate []byte.
+		// streams directly to writer with no intermediate []byte. jsonTc
+		// was built via EncodeTestcaseJSON which skips the yaml.Node
+		// intermediate (no yaml_emitter_emit, no yaml parse-back).
 		enc := json.NewEncoder(writer)
 		enc.SetIndent("", "  ")
-		jsonDoc, err := yaml.DocToJSON(yamlTc)
-		if err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to convert testcase to JSON: %w", err)
-		}
-		if err := enc.Encode(jsonDoc); err != nil {
+		if err := enc.Encode(jsonTc); err != nil {
 			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase json: %w", err)
 		}
 	default:
@@ -426,32 +464,68 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return nil
 	}
 
-	testCase, err := yaml.UnmarshalDoc(detected, data)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
-		return err
+	// Decode via the path that matches the file on disk — yaml.Node for
+	// YAML files, json.RawMessage for JSON files. Write back in the SAME
+	// format we read: don't silently convert an existing .yaml testcase
+	// into .json just because StorageFormat flipped between record and
+	// replay.
+	var tc *models.TestCase
+	if detected == yaml.FormatJSON {
+		var jd yaml.NetworkTrafficDocJSON
+		if err := json.Unmarshal(data, &jd); err != nil {
+			utils.LogError(ts.logger, err, "failed to unmarshal json testcase data")
+			return err
+		}
+		tc, err = DecodeJSON(&jd, ts.logger)
+	} else {
+		testCase, err := yaml.UnmarshalDoc(detected, data)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
+			return err
+		}
+		if testCase == nil {
+			ts.logger.Warn("skipping invalid testCase", zap.String("testcase name", testCaseID))
+			return nil
+		}
+		tc, err = Decode(testCase, ts.logger)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to decode the testcase")
+			return err
+		}
 	}
-
-	if testCase == nil {
-		ts.logger.Warn("skipping invalid testCase", zap.String("testcase name", testCaseID))
-		return nil
-	}
-
-	tc, err := Decode(testCase, ts.logger)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to decode the testcase")
 		return err
 	}
 	tc.Assertions = assertions
+
+	// Re-encode in the same format we read.
+	if detected == yaml.FormatJSON {
+		jsonDoc, err := EncodeTestcaseJSON(*tc, ts.logger)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to encode the testcase (json)")
+			return err
+		}
+		jsonDoc.Name = testCaseID
+		out, err := json.MarshalIndent(jsonDoc, "", "  ")
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to marshal the json testcase")
+			return err
+		}
+		out = append(out, '\n')
+		if err := yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, out, false, detected); err != nil {
+			utils.LogError(ts.logger, err, "failed to write testcase file")
+			return err
+		}
+		return nil
+	}
+
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to encode the testcase")
 		return err
 	}
 	yamlTc.Name = testCaseID
-	// Write back in the SAME format we read — do not silently convert
-	// an existing .yaml testcase into .json just because StorageFormat
-	// flipped between record and replay.
 	data, err = yaml.MarshalDoc(detected, yamlTc)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to marshal the testcase")

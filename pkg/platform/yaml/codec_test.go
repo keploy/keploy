@@ -700,6 +700,90 @@ func TestReadSessionIndicesAny(t *testing.T) {
 	}
 }
 
+// TestReadNextDocJSONReturnsRawMessageSpec verifies that on a JSON mocks
+// file, ReadNextDocJSON returns a NetworkTrafficDocJSON whose Spec is still
+// json.RawMessage — i.e. we've bypassed the yaml.Node bridge entirely on
+// the JSON read hot path.
+func TestReadNextDocJSONReturnsRawMessageSpec(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "mockreader_json_native_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Build two docs and write as NDJSON via the JSON write-side helper.
+	doc := buildHTTPDoc()
+	doc.Name = "mock-json-native"
+	line, err := MarshalDoc(FormatJSON, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := append(line, '\n')
+	if err := os.WriteFile(filepath.Join(tempDir, "mocks.json"), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := NewMockReaderF(ctx, logger, tempDir, "mocks", FormatJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	jd, err := reader.ReadNextDocJSON()
+	if err != nil {
+		t.Fatalf("ReadNextDocJSON: %v", err)
+	}
+	if jd.Name != "mock-json-native" {
+		t.Errorf("name = %q", jd.Name)
+	}
+	if len(jd.Spec) == 0 {
+		t.Fatalf("expected Spec to carry a json.RawMessage body, got empty")
+	}
+	if !json.Valid(jd.Spec) {
+		t.Errorf("Spec is not valid JSON: %s", jd.Spec)
+	}
+	if _, err := reader.ReadNextDocJSON(); err != io.EOF {
+		t.Errorf("expected EOF, got %v", err)
+	}
+}
+
+// TestReadNextDocJSONRejectsYAMLFormat verifies that ReadNextDocJSON is a
+// programming-error guard — it must error when called on a YAML reader so
+// callers can't accidentally skip the yaml path.
+func TestReadNextDocJSONRejectsYAMLFormat(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "mockreader_yaml_reject")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Write a valid YAML mocks file.
+	doc := buildHTTPDoc()
+	yamlBytes, err := yamlLib.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mocks.yaml"), yamlBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := NewMockReaderF(ctx, logger, tempDir, "mocks", FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	if _, err := reader.ReadNextDocJSON(); err == nil {
+		t.Fatal("expected error when ReadNextDocJSON is called on a YAML reader")
+	}
+}
+
 // TestReadSessionIndicesF tests format-aware file listing.
 func TestReadSessionIndicesF(t *testing.T) {
 	ctx := context.Background()

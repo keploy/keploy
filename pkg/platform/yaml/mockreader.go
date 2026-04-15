@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -163,7 +164,20 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 	}
 }
 
+// Format returns the format the reader is decoding. Callers can use this to
+// pick between ReadNextDoc (NetworkTrafficDoc with yaml.Node spec) and
+// ReadNextDocJSON (NetworkTrafficDocJSON with json.RawMessage spec) and thus
+// skip the yaml.Node bridge on the JSON read path.
+func (r *MockReader) Format() Format {
+	return r.format
+}
+
 // ReadNextDoc reads and decodes the next document.
+//
+// For JSON files this still goes through the yaml.Node bridge (via
+// UnmarshalDoc -> jsonDocToYamlDoc) so callers that rely on
+// NetworkTrafficDoc.Spec.Decode(&concreteSpec) keep working. Hot paths that
+// want to stay yaml-free on JSON files should use ReadNextDocJSON instead.
 func (r *MockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
 	data, err := r.ReadNextDocument()
 	if err != nil {
@@ -187,6 +201,31 @@ func (r *MockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
 		return nil, fmt.Errorf("failed to decode YAML at line %d: %w", r.lineNum, err)
 	}
 
+	return &doc, nil
+}
+
+// ReadNextDocJSON reads the next NDJSON line and returns it as a
+// NetworkTrafficDocJSON with the spec kept as a json.RawMessage. Only valid
+// when the reader's format is JSON; panics (via error) otherwise.
+//
+// This is the read-side companion to EncodeMockJSON: the entire round-trip
+// for a JSON mocks file can now stay on encoding/json with no yaml.Node
+// allocation or gopkg.in/yaml.v3 emit/parse.
+func (r *MockReader) ReadNextDocJSON() (*NetworkTrafficDocJSON, error) {
+	if r.format != FormatJSON {
+		return nil, fmt.Errorf("mockreader: ReadNextDocJSON called on %s reader", r.format)
+	}
+	data, err := r.ReadNextDocument()
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return r.ReadNextDocJSON()
+	}
+	var doc NetworkTrafficDocJSON
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("failed to decode JSON at line %d: %w", r.lineNum, err)
+	}
 	return &doc, nil
 }
 
