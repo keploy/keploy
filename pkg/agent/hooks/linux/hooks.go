@@ -66,9 +66,11 @@ type Hooks struct {
 	socket      link.Link
 	connect4    link.Link
 	udp4Sendmsg link.Link
+	udp4Recvmsg link.Link
 	gp4         link.Link
 	connect6    link.Link
 	udp6Sendmsg link.Link
+	udp6Recvmsg link.Link
 	gp6         link.Link
 	objects     bpfObjects
 	cgBind4     link.Link
@@ -155,8 +157,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1773927248001
-	h.agentRegistartionMap = objs.M_1773927248002
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -248,6 +250,23 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.udp4Sendmsg = udp4
 	}
 
+	// Partner to udp4_sendmsg: rewrites the source of the DNS reply back to
+	// the original nameserver address. Without it, strict DNS clients (RFC
+	// 5452 source validation — dnspython, raw recvfrom-based clients, glibc
+	// res_send on the unconnected path) see the reply coming from keploy's
+	// DNS port, reject it as spoofed, and retransmit until they time out
+	// with EAI_AGAIN / "Temporary failure in name resolution".
+	udp4Recv, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP4Recvmsg,
+		Program: objs.K_udp4Recvmsg,
+	})
+	if err != nil {
+		h.logger.Error("failed to attach the udp4 recvmsg cgroup hook (strict DNS clients may fail with EAI_AGAIN)", zap.Error(err))
+	} else {
+		h.udp4Recvmsg = udp4Recv
+	}
+
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet4GetPeername,
@@ -281,6 +300,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.logger.Error("failed to attach the udp6 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
 	} else {
 		h.udp6Sendmsg = udp6
+	}
+
+	udp6Recv, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP6Recvmsg,
+		Program: objs.K_udp6Recvmsg,
+	})
+	if err != nil {
+		h.logger.Error("failed to attach the udp6 recvmsg cgroup hook (strict DNS clients may fail with EAI_AGAIN)", zap.Error(err))
+	} else {
+		h.udp6Recvmsg = udp6Recv
 	}
 
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
@@ -378,6 +408,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 
+	if h.udp4Recvmsg != nil {
+		if err := h.udp4Recvmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp4 recvmsg hook")
+		}
+	}
+
 	if h.gp4 != nil {
 		if err := h.gp4.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the gp4")
@@ -393,6 +429,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.udp6Sendmsg != nil {
 		if err := h.udp6Sendmsg.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the udp6 sendmsg hook")
+		}
+	}
+	if h.udp6Recvmsg != nil {
+		if err := h.udp6Recvmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp6 recvmsg hook")
 		}
 	}
 	if h.gp6 != nil {
