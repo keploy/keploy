@@ -171,13 +171,6 @@ send_requests() {
     "max_diffs": 20
   }' || true
 
-  # If the fuzzer didn't complete in 120s, dump goroutine stacks
-  REC_PID_EARLY="$(pgrep -n -f 'keploy record' || true)"
-  if [ -n "$REC_PID_EARLY" ] && kill -0 "$REC_PID_EARLY" 2>/dev/null; then
-    echo "::warning::Fuzzer timed out during send_requests — dumping goroutine stacks for diagnosis..."
-    sudo kill -QUIT "$REC_PID_EARLY" 2>/dev/null || true
-    sleep 3
-  fi
 }
 
 # --- Main Execution Logic ---
@@ -227,46 +220,10 @@ KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
-# Helper: dump goroutine stacks for both keploy CLI and agent subprocess
-dump_goroutine_stacks() {
-  local reason="$1"
-  echo "===== $reason — DUMPING GOROUTINE STACKS ====="
-
-  # Find the keploy agent subprocess (child of the CLI process)
-  AGENT_PID="$(pgrep -f 'keploy' | grep -v "$$" | sort -n | tail -1 || true)"
-  CLI_PID="$(pgrep -n -f 'keploy record' || true)"
-
-  if [ -n "$AGENT_PID" ] && [ "$AGENT_PID" != "$CLI_PID" ]; then
-    echo "===== AGENT (PID=$AGENT_PID) ====="
-    sudo kill -QUIT "$AGENT_PID" 2>/dev/null || true
-    sleep 3
-  fi
-  if [ -n "$CLI_PID" ]; then
-    echo "===== CLI (PID=$CLI_PID) ====="
-    sudo kill -QUIT "$CLI_PID" 2>/dev/null || true
-    sleep 3
-  fi
-}
-
-# Watchdog: if recording hangs for 120s, dump stacks and force kill
-(
-  sleep 120
-  echo "::warning::Recording watchdog triggered after 120s"
-  dump_goroutine_stacks "RECORDING HUNG"
-  sleep 5
-  # Force kill everything to unblock the pipeline
-  pkill -9 -f 'keploy' 2>/dev/null || true
-) &
-WATCHDOG_PID=$!
-
 section "Generate Fuzzer Traffic"
 send_requests "$KEPLOY_PID"
 sleep 7
 endsec
-
-# Kill the watchdog — recording traffic completed normally
-kill "$WATCHDOG_PID" 2>/dev/null || true
-wait "$WATCHDOG_PID" 2>/dev/null || true
 
 section "Stop Recording"
 echo "Stopping Keploy record process..."
@@ -283,9 +240,6 @@ for i in $(seq 1 $SHUTDOWN_TIMEOUT); do
   if ! kill -0 "$REC_PID" 2>/dev/null; then
     echo "Keploy exited after ${i}s"
     break
-  fi
-  if [ "$i" -eq 10 ]; then
-    dump_goroutine_stacks "SHUTDOWN HUNG"
   fi
   sleep 1
 done
