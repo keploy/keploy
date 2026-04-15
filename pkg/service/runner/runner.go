@@ -281,9 +281,8 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 		if mocks, ok := testMockMappings[testCaseName]; ok {
 			for _, m := range mocks {
 				mocksWeNeed[m.Name] = true
-			}
-			for m := range mocksWeNeed {
-				expected = append(expected, m)
+				expected = append(expected, m.Name)
+
 			}
 		}
 	} else {
