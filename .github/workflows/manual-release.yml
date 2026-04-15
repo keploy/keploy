@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       oss_branch:
-        description: 'OSS branch to build from (keploy/keploy). Defaults to flipkart.'
-        required: false
-        default: 'flipkart'
+        description: 'OSS branch to build from (keploy/keploy)'
+        required: true
+        default: 'main'
         type: string
 
 permissions:
@@ -25,7 +25,7 @@ jobs:
       - name: Resolve commit
         id: commit
         env:
-          OSS_BRANCH: ${{ inputs.oss_branch || 'flipkart' }}
+          OSS_BRANCH: ${{ inputs.oss_branch }}
         run: |
           set -e
           source_repo="https://github.com/keploy/keploy.git"
