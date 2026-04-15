@@ -221,13 +221,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	}
 
 	// Resolve which mocks are needed.
-	mocksThatHaveMappings, mocksWeNeed := r.resolveMockSets(ctx, testSetID, testCaseName)
-
-	// Build the expected mock names list from the mapping.
-	var expected []string
-	for name := range mocksWeNeed {
-		expected = append(expected, name)
-	}
+	mocksThatHaveMappings, mocksWeNeed, expected := r.resolveMockSets(ctx, testSetID, testCaseName)
 
 	// Fetch mocks.
 	afterTime := models.BaseTime
@@ -266,9 +260,10 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	return expected, cleanup, nil
 }
 
-func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool) {
+func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool, expected []string) {
 	mocksThatHaveMappings = make(map[string]bool)
 	mocksWeNeed = make(map[string]bool)
+	expected = make([]string, 0)
 
 	if r.mappingDB == nil {
 		return
@@ -287,9 +282,15 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 			for _, m := range mocks {
 				mocksWeNeed[m.Name] = true
 			}
+			for m := range mocksWeNeed {
+				expected = append(expected, m)
+			}
 		}
 	} else {
 		mocksWeNeed = mocksThatHaveMappings
+		for m := range mocksWeNeed {
+			expected = append(expected, m)
+		}
 	}
 	return
 }
