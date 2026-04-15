@@ -553,7 +553,9 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
-	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
+	if actual.Header != nil && actual.Header.Header != nil &&
+		expected.Header != nil && expected.Header.Header != nil &&
+		actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
 		if expectedQuery == actualQuery {
 			matchCount++
