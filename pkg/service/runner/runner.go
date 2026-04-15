@@ -49,6 +49,19 @@ func New(
 }
 
 func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
+
+	if opts.TestSetID == "" {
+		return &TestResult{Passed: false, Error: "TestSetID is required"}
+	}
+
+	if opts.TestStepID == "" {
+		return &TestResult{Passed: false, Error: "TestStepID is required"}
+	}
+
+	if opts.ServiceURL == "" {
+		return &TestResult{Passed: false, Error: "ServiceURL is required"}
+	}
+
 	// 1. Fetch the recorded test case.
 	tc, err := r.loadTestCase(ctx, opts.TestSetID, opts.TestStepID)
 	if err != nil {
@@ -70,10 +83,8 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	}
 
 	// 3. Wait for app.
-	if opts.ServiceURL != "" {
-		if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
-			return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
-		}
+	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
 	// 4. Global noise.
@@ -122,21 +133,19 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, serviceURL string, noise models.GlobalNoise) (bool, models.RespCompare, error) {
 	tcCopy := *tc
 
-	if serviceURL != "" {
-		orig, err := url.Parse(tc.HTTPReq.URL)
-		if err != nil {
-			return false, models.RespCompare{}, fmt.Errorf("invalid original URL: %w", err)
-		}
-		svc, err := url.Parse(serviceURL)
-		if err != nil {
-			return false, models.RespCompare{}, fmt.Errorf("invalid service URL: %w", err)
-		}
-		orig.Scheme = svc.Scheme
-		orig.Host = svc.Host
-		httpReq := tc.HTTPReq
-		httpReq.URL = orig.String()
-		tcCopy.HTTPReq = httpReq
+	orig, err := url.Parse(tc.HTTPReq.URL)
+	if err != nil {
+		return false, models.RespCompare{}, fmt.Errorf("invalid original URL: %w", err)
 	}
+	svc, err := url.Parse(serviceURL)
+	if err != nil {
+		return false, models.RespCompare{}, fmt.Errorf("invalid service URL: %w", err)
+	}
+	orig.Scheme = svc.Scheme
+	orig.Host = svc.Host
+	httpReq := tc.HTTPReq
+	httpReq.URL = orig.String()
+	tcCopy.HTTPReq = httpReq
 
 	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
 	if err != nil {
@@ -221,12 +230,9 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	}
 
 	// Resolve which mocks are needed.
-	mocksThatHaveMappings, mocksWeNeed := r.resolveMockSets(ctx, testSetID, testCaseName)
-
-	// Build the expected mock names list from the mapping.
-	var expected []string
-	for name := range mocksWeNeed {
-		expected = append(expected, name)
+	mocksThatHaveMappings, mocksWeNeed, expected, err := r.resolveMockSets(ctx, testSetID, testCaseName)
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("failed to resolve mock sets: %w", err)
 	}
 
 	// Fetch mocks.
@@ -266,15 +272,21 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	return expected, cleanup, nil
 }
 
-func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool) {
+func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool, expected []string, err error) {
 	mocksThatHaveMappings = make(map[string]bool)
 	mocksWeNeed = make(map[string]bool)
 
 	if r.mappingDB == nil {
+		err = fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
 		return
 	}
-	testMockMappings, hasMeaningful, err := r.mappingDB.Get(ctx, testSetID)
-	if err != nil || !hasMeaningful {
+	testMockMappings, hasMeaningful, getErr := r.mappingDB.Get(ctx, testSetID)
+	if getErr != nil {
+		err = fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, getErr)
+		return
+	}
+	if !hasMeaningful {
+		err = fmt.Errorf("no mock mappings found for test set %q", testSetID)
 		return
 	}
 	for _, mocks := range testMockMappings {
@@ -282,14 +294,15 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 			mocksThatHaveMappings[m.Name] = true
 		}
 	}
-	if testCaseName != "" {
-		if mocks, ok := testMockMappings[testCaseName]; ok {
-			for _, m := range mocks {
-				mocksWeNeed[m.Name] = true
-			}
-		}
-	} else {
-		mocksWeNeed = mocksThatHaveMappings
+
+	mocks, ok := testMockMappings[testCaseName]
+	if !ok {
+		err = fmt.Errorf("no mock mapping found for test case %q in test set %q", testCaseName, testSetID)
+		return
+	}
+	for _, m := range mocks {
+		mocksWeNeed[m.Name] = true
+		expected = append(expected, m.Name)
 	}
 	return
 }
