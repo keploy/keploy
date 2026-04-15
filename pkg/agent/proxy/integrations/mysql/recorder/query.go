@@ -66,7 +66,11 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			buf := make([]byte, 32*1024)
 			n, err := conn.Read(buf)
 			if n > 0 {
-				ch <- buf[:n]
+				select {
+				case ch <- buf[:n]:
+				case <-ctx.Done():
+					return
+				}
 			}
 			if err != nil {
 				if ctx.Err() != nil {
@@ -75,7 +79,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read from connection")
 				}
-				errChan <- err
+				select {
+				case errChan <- err:
+				case <-ctx.Done():
+				}
 				return
 			}
 		}
@@ -369,9 +376,9 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				switch state {
 				case stateExpectResponse:
-					state = processFirstResponse(logger, pkt, decodeCtx, clientConn, lastOp,
+					state = processFirstResponse(ctx, logger, pkt, decodeCtx, clientConn, lastOp,
 						&pendingRespBundle, &textResultSet, &binaryResultSet, &stmtPrepareOk,
-						&remainingCols, &remainingParams, &state)
+						&remainingCols, &remainingParams)
 					if state == stateExpectCommand {
 						resTimestamp = item.ts
 						flushMock()
@@ -538,6 +545,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 // processFirstResponse handles the first response packet of a MySQL
 // command-response exchange. It returns the new decoder state.
 func processFirstResponse(
+	ctx context.Context,
 	logger *zap.Logger,
 	pkt []byte,
 	decodeCtx *wire.DecodeContext,
@@ -549,10 +557,9 @@ func processFirstResponse(
 	stmtPrepareOk **mysql.StmtPrepareOkPacket,
 	remainingCols *uint64,
 	remainingParams *uint16,
-	_ *mysqlDecodeState,
 ) mysqlDecodeState {
 	// Try to decode the response packet.
-	commandRespPkt, err := wire.DecodePayload(context.Background(), logger, pkt, clientConn, decodeCtx)
+	commandRespPkt, err := wire.DecodePayload(ctx, logger, pkt, clientConn, decodeCtx)
 	if err != nil {
 		logger.Debug("failed to decode MySQL response in async decoder", zap.Error(err))
 		return stateExpectCommand

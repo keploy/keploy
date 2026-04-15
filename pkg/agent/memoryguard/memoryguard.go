@@ -3,6 +3,7 @@ package memoryguard
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -148,9 +149,6 @@ func (g *guard) run(ctx context.Context) {
 			}
 			g.readFailCount = 0
 
-			g.logger.Info("Checked keploy-agent memory usage",
-				zap.Int64("memory_usage_bytes", currentBytes),
-				zap.Int64("memory_limit_bytes", g.limitBytes))
 
 			pauseThreshold := thresholdBytes(g.limitBytes, pauseThresholdRatio)
 			resumeThreshold := thresholdBytes(g.limitBytes, resumeThresholdRatio)
@@ -517,9 +515,13 @@ func extractHexIdentifiers(value string) []string {
 //
 // On macOS with Docker Desktop + kind the cgroup namespace is not propagated,
 // so /proc/self/cgroup reports "/" (the root of the entire VM's cgroup tree).
-// Resolving "/" would yield the VM-wide memory.current (~5–8 GiB) instead of
-// this container's actual usage.  We detect that case and return an error so
-// the caller falls through to the identifier-based or PID-based resolution.
+// When cgroupPath is "/" (root), this is valid in containers with proper
+// cgroup namespace isolation where the container sits at the root of its
+// own cgroup namespace. buildMountedCgroupPath handles the "/" case and
+// fileExists validates the resolved path, so we do not reject "/" here.
+// If the resolved path doesn't exist (e.g. macOS Docker Desktop + kind
+// where "/" maps to VM-wide memory), fileExists will fail and the caller
+// falls through to identifier-based or PID-based resolution.
 func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (string, error) {
 	cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
 	if err != nil {
@@ -531,11 +533,6 @@ func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (stri
 	if cgroupPath == "" {
 		return "", fmt.Errorf("cgroup self-path is empty; skipping to container-specific resolution")
 	}
-
-	// When cgroupPath is "/" (root), this is valid in containers with proper
-	// cgroup namespace isolation where the container sits at the root of its
-	// own cgroup namespace.  buildMountedCgroupPath handles the "/" case and
-	// fileExists validates the resolved path, so we do not reject "/" here.
 
 	candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
 	if !ok {
@@ -675,7 +672,7 @@ func findCgroupByOwnPID(layout cgroupLayout) (string, error) {
 
 	var foundPath string
 	// sentinelErr signals a successful early-exit from WalkDir.
-	sentinelErr := fmt.Errorf("found")
+	sentinelErr := errors.New("found")
 
 	walkErr := filepath.WalkDir(layout.mountPoint, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -707,7 +704,7 @@ func findCgroupByOwnPID(layout cgroupLayout) (string, error) {
 	})
 
 	// WalkDir returns sentinelErr when we found the path — that is success.
-	if walkErr != nil && walkErr.Error() != sentinelErr.Error() {
+	if walkErr != nil && !errors.Is(walkErr, sentinelErr) {
 		return "", walkErr
 	}
 	if foundPath == "" {
