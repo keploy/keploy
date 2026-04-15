@@ -148,8 +148,11 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
 	results := make([]*models.Mock, 0, 64)
-	m.filtered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -159,8 +162,11 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.unfiltered
+	m.treesMu.RUnlock()
 	results := make([]*models.Mock, 0, 128)
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -300,8 +306,12 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	// Snapshot the legacy tree pointer safely
+	m.treesMu.RLock()
+	globalTree := m.unfiltered
+	m.treesMu.RUnlock()
 	// Update legacy/global tree first
-	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
+	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new)
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
@@ -382,7 +392,10 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	deletedGlobal := m.filtered.delete(mock.TestModeInfo)
+	m.treesMu.RLock()
+	globalTree := m.filtered
+	m.treesMu.RUnlock()
+	deletedGlobal := globalTree.delete(mock.TestModeInfo)
 
 	// per-kind
 	k := mock.Kind
@@ -417,7 +430,10 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	deletedGlobal := m.unfiltered.delete(mock.TestModeInfo)
+	m.treesMu.RLock()
+	globalTree := m.unfiltered
+	m.treesMu.RUnlock()
+	deletedGlobal := globalTree.delete(mock.TestModeInfo)
 
 	// per-kind
 	k := mock.Kind
@@ -537,7 +553,10 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 	}
 
 	// Fallback: legacy scan of the combined tree
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	m.treesMu.RLock()
+	legacyTree := m.unfiltered
+	m.treesMu.RUnlock()
+	legacyTree.rangeValues(func(v interface{}) bool {
 		mock, ok := v.(*models.Mock)
 		if !ok || mock == nil || mock.Kind != models.MySQL {
 			return true

@@ -3,6 +3,7 @@ package yaml
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"go.keploy.io/server/v3/pkg/models"
 	yamlLib "gopkg.in/yaml.v3"
@@ -49,8 +50,11 @@ type NetworkTrafficDocJSON struct {
 	ConnectionID string              `json:"connectionId,omitempty"`
 }
 
-// docToJSON converts a NetworkTrafficDoc to its JSON-friendly representation.
-func docToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
+// DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
+// with a json.RawMessage spec. Exported so callers that want to stream the
+// encoded document (e.g. json.NewEncoder(w).Encode(jsonDoc)) can do so without
+// re-allocating a []byte.
+func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 	var specData interface{}
 	if err := doc.Spec.Decode(&specData); err != nil {
 		return nil, fmt.Errorf("failed to decode yaml.Node spec for JSON conversion: %w", err)
@@ -77,7 +81,7 @@ func docToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 func MarshalDoc(format Format, doc *NetworkTrafficDoc) ([]byte, error) {
 	switch format {
 	case FormatJSON:
-		jsonDoc, err := docToJSON(doc)
+		jsonDoc, err := DocToJSON(doc)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +95,7 @@ func MarshalDoc(format Format, doc *NetworkTrafficDoc) ([]byte, error) {
 func MarshalDocIndent(format Format, doc *NetworkTrafficDoc) ([]byte, error) {
 	switch format {
 	case FormatJSON:
-		jsonDoc, err := docToJSON(doc)
+		jsonDoc, err := DocToJSON(doc)
 		if err != nil {
 			return nil, err
 		}
@@ -146,6 +150,30 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 	}
 
 	return doc, nil
+}
+
+// EncodeDocTo streams a NetworkTrafficDoc to w in the specified format.
+// - For JSON: writes a single compact JSON object followed by '\n' (NDJSON).
+// - For YAML: writes a single YAML document (no trailing document separator);
+//   caller is responsible for writing the `---\n` separator between documents.
+// Streaming avoids a full []byte allocation for each document.
+func EncodeDocTo(w io.Writer, format Format, doc *NetworkTrafficDoc) error {
+	switch format {
+	case FormatJSON:
+		jsonDoc, err := DocToJSON(doc)
+		if err != nil {
+			return err
+		}
+		// json.Encoder.Encode appends a trailing '\n', which is NDJSON-compatible.
+		return json.NewEncoder(w).Encode(jsonDoc)
+	default:
+		enc := yamlLib.NewEncoder(w)
+		if err := enc.Encode(doc); err != nil {
+			_ = enc.Close()
+			return err
+		}
+		return enc.Close()
+	}
 }
 
 // MarshalGeneric serializes any value to bytes in the specified format.

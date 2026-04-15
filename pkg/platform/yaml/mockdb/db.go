@@ -320,25 +320,54 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	lock.Lock()
 	defer lock.Unlock()
 
-	data, err := yaml.MarshalDoc(ys.Format, mockDoc)
+	// Stream directly to the file instead of marshaling to []byte first.
+	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, ys.Format)
 	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
-	exists, err := yaml.FileExistsF(ctx, ys.Logger, mockPath, mockFileName, ys.Format)
+	filePath := filepath.Join(mockPath, mockFileName+"."+ys.Format.FileExtension())
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to find file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
-		return err
+		return fmt.Errorf("failed to open mock file for append: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+
+	// Write version comment / document separator (YAML only — JSON has no
+	// comment syntax and NDJSON separates docs with '\n' written by Encode).
+	if ys.Format == yaml.FormatYAML {
+		if isFileEmpty {
+			if version := utils.GetVersionAsComment(); version != "" {
+				if _, err := writer.WriteString(version); err != nil {
+					return fmt.Errorf("failed to write version comment: %w", err)
+				}
+			}
+		} else {
+			if _, err := writer.WriteString("---\n"); err != nil {
+				return fmt.Errorf("failed to write document separator: %w", err)
+			}
+		}
 	}
 
-	if !exists && ys.Format == yaml.FormatYAML {
-		data = append([]byte(utils.GetVersionAsComment()), data...)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
-	err = yaml.WriteFileF(ctx, ys.Logger, mockPath, mockFileName, data, true, ys.Format)
-	if err != nil {
-		return err
+	// Stream the encoded mock (one YAML doc or one NDJSON line) directly to writer.
+	if err := yaml.EncodeDocTo(writer, ys.Format, mockDoc); err != nil {
+		return fmt.Errorf("failed to encode mock: %w", err)
 	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush mock writer: %w", err)
+	}
+
 	return nil
 }
 

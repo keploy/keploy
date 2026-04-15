@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -232,6 +233,57 @@ func TestMarshalGenericYAML(t *testing.T) {
 	}
 	if decoded.TestSetID != "test-set-0" {
 		t.Errorf("testSetID = %q, want test-set-0", decoded.TestSetID)
+	}
+}
+
+// TestEncodeDocToJSONStreaming verifies EncodeDocTo writes NDJSON-compatible
+// output: one compact JSON object followed by '\n', round-trippable via
+// UnmarshalDoc(FormatJSON).
+func TestEncodeDocToJSONStreaming(t *testing.T) {
+	doc := buildHTTPDoc()
+
+	var buf bytes.Buffer
+	if err := EncodeDocTo(&buf, FormatJSON, doc); err != nil {
+		t.Fatalf("EncodeDocTo(JSON): %v", err)
+	}
+
+	out := buf.Bytes()
+	if len(out) == 0 || out[len(out)-1] != '\n' {
+		t.Fatalf("JSON stream should end with '\\n' for NDJSON; got %q", out)
+	}
+	// A single-document NDJSON stream has exactly one newline at the end.
+	if nl := bytes.Count(out, []byte{'\n'}); nl != 1 {
+		t.Errorf("expected 1 newline in single-doc NDJSON, got %d", nl)
+	}
+	if !json.Valid(bytes.TrimRight(out, "\n")) {
+		t.Fatalf("payload is not valid JSON: %s", out)
+	}
+
+	decoded, err := UnmarshalDoc(FormatJSON, bytes.TrimRight(out, "\n"))
+	if err != nil {
+		t.Fatalf("UnmarshalDoc: %v", err)
+	}
+	if decoded.Name != "test-1" || decoded.Kind != models.HTTP {
+		t.Errorf("decoded doc = %+v", decoded)
+	}
+}
+
+// TestEncodeDocToYAMLStreaming verifies EncodeDocTo writes a single YAML
+// document that re-parses cleanly.
+func TestEncodeDocToYAMLStreaming(t *testing.T) {
+	doc := buildHTTPDoc()
+
+	var buf bytes.Buffer
+	if err := EncodeDocTo(&buf, FormatYAML, doc); err != nil {
+		t.Fatalf("EncodeDocTo(YAML): %v", err)
+	}
+
+	var roundTrip NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(buf.Bytes(), &roundTrip); err != nil {
+		t.Fatalf("yaml.Unmarshal of streamed output: %v", err)
+	}
+	if roundTrip.Name != "test-1" {
+		t.Errorf("name = %q", roundTrip.Name)
 	}
 }
 

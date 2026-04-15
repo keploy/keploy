@@ -2,8 +2,9 @@
 package testdb
 
 import (
-	"bytes"
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -257,35 +258,96 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 	yamlTc.Name = tcsName
 
-	var data []byte
-	if ts.Format == yaml.FormatJSON {
-		data, err = yaml.MarshalDocIndent(yaml.FormatJSON, yamlTc)
-		if err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, err
+	// Stream the encoded testcase directly to disk via a temp file + rename
+	// instead of buffering the full document in memory. This avoids allocating
+	// a large bytes.Buffer per testcase. The final file's extension and
+	// encoding are both driven by ts.Format (yaml or json).
+
+	ext := "." + ts.Format.FileExtension()
+
+	// Validate the output path to prevent directory traversal.
+	outPath, err := yaml.ValidatePath(filepath.Join(tcsPath, tcsName+ext))
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
+	}
+
+	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*"+ext+".tmp")
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmpFile.Close()
+			os.Remove(tmpPath)
 		}
-		data = append(data, '\n')
-	} else {
-		var buf bytes.Buffer
-		encoder := yamlLib.NewEncoder(&buf)
+	}()
+
+	writer := bufio.NewWriter(tmpFile)
+
+	// Version comment is a YAML-only concept (JSON has no comment syntax).
+	if ts.Format == yaml.FormatYAML {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
+			}
+		}
+	}
+
+	switch ts.Format {
+	case yaml.FormatJSON:
+		// Pretty-print testcases so they're human-editable; json.Encoder
+		// streams directly to writer with no intermediate []byte.
+		enc := json.NewEncoder(writer)
+		enc.SetIndent("", "  ")
+		jsonDoc, err := yaml.DocToJSON(yamlTc)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to convert testcase to JSON: %w", err)
+		}
+		if err := enc.Encode(jsonDoc); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase json: %w", err)
+		}
+	default:
+		encoder := yamlLib.NewEncoder(writer)
 		encoder.SetIndent(2)
-		err = encoder.Encode(&yamlTc)
-		if err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, err
+		if err := encoder.Encode(&yamlTc); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
 		}
-		data = buf.Bytes()
-		data = append([]byte(utils.GetVersionAsComment()), data...)
+		if err := encoder.Close(); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
+		}
 	}
 
-	_, err = yaml.FileExistsF(ctx, ts.logger, tcsPath, tcsName, ts.Format)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to find file", zap.String("path directory", tcsPath), zap.String("file", tcsName))
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	if err := writer.Flush(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
 	}
+	// Set file permissions to 0777 to match the original CreateYamlFile behavior
+	if err := tmpFile.Chmod(0o777); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close temp file: %w", err)
+	}
+	cleanup = false
 
-	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, tcsName, data, false, ts.Format)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase file")
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	// Use remove-then-rename for cross-platform compatibility (Windows)
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		if err := os.Remove(outPath); err != nil {
+			os.Remove(tmpPath)
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase: %w", err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		os.Remove(tmpPath)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase: %w", statErr)
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		os.Remove(tmpPath)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
