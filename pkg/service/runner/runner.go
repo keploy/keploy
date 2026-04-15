@@ -83,10 +83,8 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	}
 
 	// 3. Wait for app.
-	if opts.ServiceURL != "" {
-		if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
-			return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
-		}
+	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
 	// 4. Global noise.
@@ -135,21 +133,19 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, serviceURL string, noise models.GlobalNoise) (bool, models.RespCompare, error) {
 	tcCopy := *tc
 
-	if serviceURL != "" {
-		orig, err := url.Parse(tc.HTTPReq.URL)
-		if err != nil {
-			return false, models.RespCompare{}, fmt.Errorf("invalid original URL: %w", err)
-		}
-		svc, err := url.Parse(serviceURL)
-		if err != nil {
-			return false, models.RespCompare{}, fmt.Errorf("invalid service URL: %w", err)
-		}
-		orig.Scheme = svc.Scheme
-		orig.Host = svc.Host
-		httpReq := tc.HTTPReq
-		httpReq.URL = orig.String()
-		tcCopy.HTTPReq = httpReq
+	orig, err := url.Parse(tc.HTTPReq.URL)
+	if err != nil {
+		return false, models.RespCompare{}, fmt.Errorf("invalid original URL: %w", err)
 	}
+	svc, err := url.Parse(serviceURL)
+	if err != nil {
+		return false, models.RespCompare{}, fmt.Errorf("invalid service URL: %w", err)
+	}
+	orig.Scheme = svc.Scheme
+	orig.Host = svc.Host
+	httpReq := tc.HTTPReq
+	httpReq.URL = orig.String()
+	tcCopy.HTTPReq = httpReq
 
 	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
 	if err != nil {
