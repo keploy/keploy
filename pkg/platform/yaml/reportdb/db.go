@@ -83,18 +83,16 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
-	_, err := yaml.ValidatePath(filepath.Join(path, reportName+"."+fe.Format.FileExtension()))
-	if err != nil {
-		return nil, err
-	}
-	data, err := yaml.ReadFileF(ctx, fe.Logger, path, reportName, fe.Format)
+	// Auto-detect the report format — `keploy report` keeps working for
+	// reports written by a differently-configured prior run.
+	data, detected, err := yaml.ReadFileAny(ctx, fe.Logger, path, reportName, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
 
 	var doc models.TestReport
-	if fe.Format == yaml.FormatJSON {
+	if detected == yaml.FormatJSON {
 		err = yaml.UnmarshalGeneric(yaml.FormatJSON, data, &doc)
 	} else {
 		decoder := yamlLib.NewDecoder(bytes.NewReader(data))

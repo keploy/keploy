@@ -201,7 +201,19 @@ func FindLastIndex(path string, logger *zap.Logger) (int, error) {
 	return FindLastIndexF(path, logger, FormatYAML)
 }
 
-func FindLastIndexF(path string, _ *zap.Logger, format Format) (int, error) {
+func FindLastIndexF(path string, logger *zap.Logger, format Format) (int, error) {
+	// Delegate to the format-agnostic scanner: when allocating the next
+	// test-N index we must see BOTH .yaml and .json files so we don't
+	// hand out a number that collides with an existing file of the other
+	// format after a StorageFormat switch.
+	_ = format
+	return FindLastIndexAny(path, logger)
+}
+
+// FindLastIndexAny scans `path` for both test-N.yaml and test-N.json (and
+// report-N.*) and returns the next index, ensuring newly-created files never
+// collide with pre-existing files of the other format.
+func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
@@ -211,22 +223,24 @@ func FindLastIndexF(path string, _ *zap.Logger, format Format) (int, error) {
 		return 1, nil
 	}
 
-	ext := "." + format.FileExtension()
 	lastIndex := 0
 	for _, v := range files {
 		name := v.Name()
-		if name == "mocks"+ext || name == "config"+ext || name == "mocks.yaml" || name == "config.yaml" {
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".json" {
 			continue
 		}
-		fileName := filepath.Base(name)
-		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
-		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		// Skip well-known non-test files in either format.
+		base := name[:len(name)-len(ext)]
+		if base == "mocks" || base == "config" {
+			continue
+		}
+		fileNameParts := strings.Split(base, "-")
 		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
 			continue
 		}
-		indxStr := fileNameParts[1]
-		indx, err := strconv.Atoi(indxStr)
-		if err != nil {
+		indx, convErr := strconv.Atoi(fileNameParts[1])
+		if convErr != nil {
 			continue
 		}
 		if indx > lastIndex {
@@ -410,4 +424,22 @@ func FileExistsF(_ context.Context, logger *zap.Logger, path string, fileName st
 	}
 
 	return true, nil
+}
+
+// FileExistsAny checks whether <path>/<fileName>.<ext> exists for either
+// supported format, preferring `preferred`. Returns true + the format that
+// was found. Use this on read paths where the stored file may be in a
+// different format than the current StorageFormat.
+func FileExistsAny(ctx context.Context, logger *zap.Logger, path string, fileName string, preferred Format) (bool, Format, error) {
+	other := otherFormat(preferred)
+	for _, f := range [2]Format{preferred, other} {
+		exists, err := FileExistsF(ctx, logger, path, fileName, f)
+		if err != nil {
+			return false, "", err
+		}
+		if exists {
+			return true, f, nil
+		}
+	}
+	return false, preferred, nil
 }

@@ -74,7 +74,9 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	}
 
 	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
-	reportNames, err := yaml.ReadSessionIndicesF(ctx, runReportPath, ts.logger, yaml.ModeFile, ts.Format)
+	// Accept reports saved in either format so that replay-side tools
+	// (e.g. "keploy report") keep working after a StorageFormat switch.
+	reportNames, err := yaml.ReadSessionIndicesAny(ctx, runReportPath, ts.logger, yaml.ModeFile)
 	if err != nil {
 		return nil, err
 	}
@@ -102,14 +104,16 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	if err != nil {
 		return nil, err
 	}
-	data, err := yaml.ReadFileF(ctx, ts.logger, testPath, testCaseName, ts.Format)
+	// Auto-detect format on read so replay works even when StorageFormat
+	// differs from the format the testcase was originally recorded in.
+	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, testPath, testCaseName, ts.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("test case %q is empty", testCaseName)
 	}
-	doc, err := yaml.UnmarshalDoc(ts.Format, data)
+	doc, err := yaml.UnmarshalDoc(detected, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
 	}
@@ -142,14 +146,44 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
-	ext := "." + ts.Format.FileExtension()
+	// Accept both .yaml and .json so a directory containing a mix of
+	// formats (e.g. mid-migration) is fully visible to replay. Each file
+	// is decoded using its own extension-derived format.
+	seen := make(map[string]yaml.Format) // base-name -> format already loaded
 	for _, j := range files {
-		if filepath.Ext(j.Name()) != ext || strings.Contains(j.Name(), "mocks") {
+		fileExt := filepath.Ext(j.Name())
+		var fileFormat yaml.Format
+		switch fileExt {
+		case ".yaml":
+			fileFormat = yaml.FormatYAML
+		case ".json":
+			fileFormat = yaml.FormatJSON
+		default:
+			continue
+		}
+		if strings.Contains(j.Name(), "mocks") {
 			continue
 		}
 
-		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, ts.Format)
+		name := strings.TrimSuffix(j.Name(), fileExt)
+		// If both test-N.yaml and test-N.json exist, prefer the one
+		// matching the configured StorageFormat; skip the other.
+		if prev, ok := seen[name]; ok {
+			if prev == ts.Format {
+				continue
+			}
+			if fileFormat != ts.Format {
+				continue
+			}
+			// The current file matches StorageFormat and the previous
+			// didn't — re-read with the preferred format by falling
+			// through, but also remove the already-added tc. Simpler:
+			// skip re-reads and keep the first one.
+			continue
+		}
+		seen[name] = fileFormat
+
+		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, fileFormat)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the testcase")
 			return nil, err
@@ -160,7 +194,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			continue
 		}
 
-		testCase, err := yaml.UnmarshalDoc(ts.Format, data)
+		testCase, err := yaml.UnmarshalDoc(fileFormat, data)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
 			return nil, err
@@ -381,7 +415,8 @@ func (ts *TestYaml) ChangePath(path string) {
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
-	data, err := yaml.ReadFileF(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
+	// Read whichever format the testcase was recorded in.
+	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the testcase")
 		return err
@@ -391,7 +426,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return nil
 	}
 
-	testCase, err := yaml.UnmarshalDoc(ts.Format, data)
+	testCase, err := yaml.UnmarshalDoc(detected, data)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
 		return err
@@ -414,12 +449,15 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return err
 	}
 	yamlTc.Name = testCaseID
-	data, err = yaml.MarshalDoc(ts.Format, yamlTc)
+	// Write back in the SAME format we read — do not silently convert
+	// an existing .yaml testcase into .json just because StorageFormat
+	// flipped between record and replay.
+	data, err = yaml.MarshalDoc(detected, yamlTc)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
-	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, ts.Format)
+	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, detected)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return err

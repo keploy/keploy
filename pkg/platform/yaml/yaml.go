@@ -157,6 +157,33 @@ func ReadFileF(ctx context.Context, logger *zap.Logger, path, name string, forma
 	return data, nil
 }
 
+// ReadFileAny reads a persisted artifact file, preferring `preferred`'s
+// extension but transparently falling back to the other format if a file of
+// that extension exists instead. Returns the bytes and the format that was
+// actually read — so the caller can decode with the matching unmarshaller.
+//
+// This is the read-side mechanism that makes replay backward-compatible when
+// users switch StorageFormat (or when old YAML recordings are replayed by a
+// JSON-defaulted binary).
+func ReadFileAny(ctx context.Context, logger *zap.Logger, path, name string, preferred Format) ([]byte, Format, error) {
+	other := otherFormat(preferred)
+	for _, f := range [2]Format{preferred, other} {
+		filePath := filepath.Join(path, name+"."+f.FileExtension())
+		if _, statErr := os.Stat(filePath); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, "", statErr
+		}
+		data, err := ReadFileF(ctx, logger, path, name, f)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, f, nil
+	}
+	return nil, "", fs.ErrNotExist
+}
+
 func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	return CreateFileF(ctx, Logger, path, fileName, FormatYAML)
 }
@@ -231,6 +258,57 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 			}
 			name = name[:len(name)-len(fileExt)]
 			indices = append(indices, name)
+		}
+	}
+
+	return indices, nil
+}
+
+// ReadSessionIndicesAny is the format-agnostic variant of
+// ReadSessionIndicesF. In ModeFile it accepts both .yaml and .json files
+// (deduplicating by stripped base name) so callers discover test/report
+// files regardless of the format they were recorded in.
+func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
+	var indices []string
+
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	seen := make(map[string]struct{})
+	for _, v := range files {
+		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema {
+			continue
+		}
+
+		name := v.Name()
+
+		switch mode {
+		case ModeDir:
+			if v.IsDir() {
+				if _, ok := seen[name]; !ok {
+					seen[name] = struct{}{}
+					indices = append(indices, name)
+				}
+			}
+		case ModeFile:
+			fileExt := filepath.Ext(name)
+			if fileExt != ".yaml" && fileExt != ".json" {
+				continue
+			}
+			base := name[:len(name)-len(fileExt)]
+			if _, ok := seen[base]; ok {
+				continue
+			}
+			seen[base] = struct{}{}
+			indices = append(indices, base)
 		}
 	}
 

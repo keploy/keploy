@@ -37,27 +37,24 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 	var config T
 
-	data, err := yaml.ReadFileF(ctx, db.logger, filePath, "config", db.Format)
+	// Auto-detect format so a testset config recorded in the other format
+	// remains readable after a StorageFormat switch.
+	data, detected, err := yaml.ReadFileAny(ctx, db.logger, filePath, "config", db.Format)
 	if err != nil {
 		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
 
-		// Since T is *models.TestSet, initialize a new TestSet instance
-		// Use type assertion to ensure we're working with the right type
 		emptyTestSet := &models.TestSet{}
 		testSetPtr, ok := any(emptyTestSet).(T)
 		if ok {
 			config = testSetPtr
 			db.logger.Debug("Initialized empty TestSet for missing config", zap.String("testSet", testSetID))
 		} else {
-			// If T is not *models.TestSet, log warning but continue with zero value
 			db.logger.Warn("Generic type T is not *models.TestSet, using zero value", zap.String("testSet", testSetID))
 		}
 	} else {
-		err := yaml.UnmarshalGeneric(db.Format, data, &config)
+		err := yaml.UnmarshalGeneric(detected, data, &config)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
-			// Don't return early - continue with secret loading even if config is malformed
-			// Use default config instead
 			emptyTestSet := &models.TestSet{}
 			testSetPtr, ok := any(emptyTestSet).(T)
 			if ok {

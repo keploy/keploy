@@ -37,6 +37,17 @@ func (f Format) FileExtension() string {
 	}
 }
 
+// otherFormat returns the other supported format. Used by the *Any helpers
+// to implement "prefer configured format, fall back to the other" so replay
+// keeps working when StorageFormat differs from the format existing files
+// were recorded in.
+func otherFormat(f Format) Format {
+	if f == FormatJSON {
+		return FormatYAML
+	}
+	return FormatJSON
+}
+
 // NetworkTrafficDocJSON is the JSON-friendly version of NetworkTrafficDoc.
 // It uses json.RawMessage instead of yaml.Node for the polymorphic Spec field.
 type NetworkTrafficDocJSON struct {

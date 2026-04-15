@@ -62,8 +62,12 @@ func getMockFileLock(lockKey string) *sync.RWMutex {
 	return &mockFileLockStripes[hasher.Sum32()%mockFileLockStripeCount]
 }
 
-func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.Mock) error {
-	targetPath := filepath.Join(path, fileName+"."+ys.Format.FileExtension())
+// writeMocksAtomically writes the given mocks to <path>/<fileName>.<ext> in
+// the specified `format`. Callers pass the format actually observed on disk
+// (via resolveEffectiveFormat) so a prune/rewrite never silently migrates
+// an existing mocks.yaml into mocks.json or vice versa.
+func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.Mock, format yaml.Format) error {
+	targetPath := filepath.Join(path, fileName+"."+format.FileExtension())
 	if len(mocks) == 0 {
 		if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
 			return err
@@ -89,7 +93,7 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 
 	writer := bufio.NewWriter(tmpFile)
 
-	if ys.Format == yaml.FormatJSON {
+	if format == yaml.FormatJSON {
 		// NDJSON: one JSON object per line
 		for _, mock := range mocks {
 			mockDoc, err := EncodeMock(mock, ys.Logger)
@@ -219,26 +223,27 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	lock.Lock()
 	defer lock.Unlock()
 
-	ext := "." + ys.Format.FileExtension()
+	// Detect the format the mocks file is actually stored in (may differ
+	// from ys.Format after a StorageFormat switch). If no mocks file exists
+	// at all, nothing to prune.
+	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to stat mocks file", zap.String("path", path))
+		return err
+	}
+	if !existsAny {
+		return nil
+	}
+
+	ext := "." + detectedFormat.FileExtension()
 	ys.Logger.Debug("pruning unused mocks",
 		zap.Any("consumedMocks", mockNames),
 		zap.String("testSetID", testSetID),
 		zap.String("path", filepath.Join(path, mockFileName+ext)),
+		zap.String("detectedFormat", string(detectedFormat)),
 		zap.Time("pruneBefore", pruneBefore))
 
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+ext))
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-		return err
-	}
-	if _, err := os.Stat(mockPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		utils.LogError(ys.Logger, err, "failed to find the mocks file")
-		return err
-	}
-	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, ys.Format)
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return err
@@ -291,7 +296,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		prunedCount++
 	}
 
-	if err := ys.writeMocksAtomically(path, mockFileName, newMocks); err != nil {
+	// Write back in the same format we read — preserve existing file's format.
+	if err := ys.writeMocksAtomically(path, mockFileName, newMocks, detectedFormat); err != nil {
 		return err
 	}
 
@@ -316,18 +322,27 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, ys.Format))
+	// Resolve the effective mock-file format: if a mocks file in either
+	// format already exists, append to THAT file in ITS format (don't create
+	// a parallel file in the other format). Only when no mocks file exists
+	// yet do we use the configured StorageFormat for a fresh file.
+	effFormat := ys.Format
+	if existsAny, detected, statErr := yaml.FileExistsAny(ctx, ys.Logger, mockPath, mockFileName, ys.Format); statErr == nil && existsAny {
+		effFormat = detected
+	}
+
+	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
 	lock.Lock()
 	defer lock.Unlock()
 
 	// Stream directly to the file instead of marshaling to []byte first.
-	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, ys.Format)
+	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
-	filePath := filepath.Join(mockPath, mockFileName+"."+ys.Format.FileExtension())
+	filePath := filepath.Join(mockPath, mockFileName+"."+effFormat.FileExtension())
 	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("failed to open mock file for append: %w", err)
@@ -338,7 +353,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 
 	// Write version comment / document separator (YAML only — JSON has no
 	// comment syntax and NDJSON separates docs with '\n' written by Encode).
-	if ys.Format == yaml.FormatYAML {
+	if effFormat == yaml.FormatYAML {
 		if isFileEmpty {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := writer.WriteString(version); err != nil {
@@ -357,7 +372,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 
 	// Stream the encoded mock (one YAML doc or one NDJSON line) directly to writer.
-	if err := yaml.EncodeDocTo(writer, ys.Format, mockDoc); err != nil {
+	if err := yaml.EncodeDocTo(writer, effFormat, mockDoc); err != nil {
 		return fmt.Errorf("failed to encode mock: %w", err)
 	}
 
@@ -384,71 +399,71 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	lock.RLock()
 	defer lock.RUnlock()
 
-	ext := "." + ys.Format.FileExtension()
-	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ext)
+	// Auto-detect the mocks file's format (may be yaml or json regardless
+	// of the currently-configured StorageFormat) so replay keeps working
+	// across format switches.
+	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			// No mocks file in either format — nothing to replay.
+			filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
+			return filtered, nil
+		}
+		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
+	defer reader.Close()
 
-	if _, err := os.Stat(mockPath); err == nil {
-		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, ys.Format)
+	hasContent := false
+	for {
+		doc, err := reader.ReadNextDoc()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+			return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+		}
+		hasContent = true
+
+		mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
-		defer reader.Close()
 
-		hasContent := false
-		for {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
+		for _, mock := range mocks {
+			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+
+			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+			if isMappedToSpecificTest && !isNeededForCurrentRun {
+				continue
 			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			isFilteredMock := true
+			switch mock.Kind {
+			case "Generic":
+				isFilteredMock = false
+			case "Postgres":
+				isFilteredMock = false
+			case "Http":
+				isFilteredMock = false
+			case "Http2":
+				isFilteredMock = false
+			case "Redis":
+				isFilteredMock = false
+			case "MySQL":
+				isFilteredMock = false
+			case "DNS":
+				isFilteredMock = false
 			}
-			hasContent = true
-
-			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
-
-			for _, mock := range mocks {
-				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-
-				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-				if isMappedToSpecificTest && !isNeededForCurrentRun {
-					continue
-				}
-				isFilteredMock := true
-				switch mock.Kind {
-				case "Generic":
-					isFilteredMock = false
-				case "Postgres":
-					isFilteredMock = false
-				case "Http":
-					isFilteredMock = false
-				case "Http2":
-					isFilteredMock = false
-				case "Redis":
-					isFilteredMock = false
-				case "MySQL":
-					isFilteredMock = false
-				case "DNS":
-					isFilteredMock = false
-				}
-				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
-					tcsMocks = append(tcsMocks, mock)
-				}
+			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
+				tcsMocks = append(tcsMocks, mock)
 			}
 		}
+	}
 
-		if !hasContent {
-			utils.LogError(ys.Logger, nil, "failed to read the mocks from file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
-			return nil, fmt.Errorf("failed to get mocks, empty file")
-		}
+	if !hasContent {
+		utils.LogError(ys.Logger, nil, "failed to read the mocks from file (empty)", zap.String("session", filepath.Base(path)))
+		return nil, fmt.Errorf("failed to get mocks, empty file")
 	}
 
 	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
@@ -471,62 +486,60 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	lock.RLock()
 	defer lock.RUnlock()
 
-	ext := "." + ys.Format.FileExtension()
-	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ext)
+	// Auto-detect format so config mocks recorded in the other format
+	// remain visible to replay.
+	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockName, ys.Format)
 	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime)
+			return unfiltered, nil
+		}
+		utils.LogError(ys.Logger, err, "failed to read the mocks from config file", zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
+	defer reader.Close()
 
-	if _, err := os.Stat(mockPath); err == nil {
-		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockName, ys.Format)
+	for {
+		doc, err := reader.ReadNextDoc()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from config file", zap.String("session", filepath.Base(path)))
+			return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+		}
+
+		mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
-		defer reader.Close()
 
-		for {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
+		for _, mock := range mocks {
+			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+
+			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+			if isMappedToSpecificTest && !isNeededForCurrentRun {
+				continue
 			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+			isUnFilteredMock := false
+			switch mock.Kind {
+			case "Generic":
+				isUnFilteredMock = true
+			case "Postgres":
+				isUnFilteredMock = true
+			case "Http":
+				isUnFilteredMock = true
+			case "Http2":
+				isUnFilteredMock = true
+			case "Redis":
+				isUnFilteredMock = true
+			case "MySQL", "PostgresV2":
+				isUnFilteredMock = true
+			case "DNS":
+				isUnFilteredMock = true
 			}
-
-			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
-
-			for _, mock := range mocks {
-				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-
-				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-				if isMappedToSpecificTest && !isNeededForCurrentRun {
-					continue
-				}
-				isUnFilteredMock := false
-				switch mock.Kind {
-				case "Generic":
-					isUnFilteredMock = true
-				case "Postgres":
-					isUnFilteredMock = true
-				case "Http":
-					isUnFilteredMock = true
-				case "Http2":
-					isUnFilteredMock = true
-				case "Redis":
-					isUnFilteredMock = true
-				case "MySQL", "PostgresV2":
-					isUnFilteredMock = true
-				case "DNS":
-					isUnFilteredMock = true
-				}
-				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
-					configMocks = append(configMocks, mock)
-				}
+			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
+				configMocks = append(configMocks, mock)
 			}
 		}
 	}
@@ -571,23 +584,25 @@ func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath
 }
 
 func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) error {
+	_ = ctx
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
-	ext := "." + ys.Format.FileExtension()
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+ext))
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-		return err
-	}
-
-	err = os.RemoveAll(mockPath)
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
-		return err
+	// Delete both format variants so a stale mocks.yaml never shadows a
+	// fresh rerecord that writes mocks.json (and vice versa).
+	for _, f := range [2]yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		candidate, err := yaml.ValidatePath(filepath.Join(path, mockFileName+"."+f.FileExtension()))
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to validate mock path for delete", zap.String("at_path", candidate))
+			return err
+		}
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", candidate))
+			return err
+		}
 	}
 
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))

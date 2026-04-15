@@ -52,6 +52,31 @@ func NewMockReaderF(ctx context.Context, logger *zap.Logger, path, name string, 
 	}, nil
 }
 
+// NewMockReaderAny opens a mock file, preferring `preferred`'s extension but
+// falling back to the other format if only that variant exists on disk. The
+// returned reader is configured to decode the actual file's format, so
+// callers that have mocks still recorded as YAML keep working even when
+// StorageFormat is set to json (and vice versa).
+func NewMockReaderAny(ctx context.Context, logger *zap.Logger, path, name string, preferred Format) (*MockReader, error) {
+	other := preferred
+	if preferred == FormatJSON {
+		other = FormatYAML
+	} else {
+		other = FormatJSON
+	}
+	for _, f := range [2]Format{preferred, other} {
+		filePath := filepath.Join(path, name+"."+f.FileExtension())
+		if _, statErr := os.Stat(filePath); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, statErr
+		}
+		return NewMockReaderF(ctx, logger, path, name, f)
+	}
+	return nil, fmt.Errorf("failed to open mock file: %w", os.ErrNotExist)
+}
+
 // ReadNextDocument reads lines until it encounters "---" or EOF (YAML),
 // or reads one line for NDJSON (JSON format).
 func (r *MockReader) ReadNextDocument() ([]byte, error) {

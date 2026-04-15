@@ -497,6 +497,209 @@ func TestFileExistsF(t *testing.T) {
 	}
 }
 
+// TestReadFileAnyPrefersPreferred verifies ReadFileAny picks the preferred
+// format when both files exist.
+func TestReadFileAnyPrefersPreferred(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "readfile_any_prefer_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	if err := os.WriteFile(filepath.Join(tempDir, "f.yaml"), []byte("y: 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "f.json"), []byte(`{"j":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prefer JSON -> should return .json contents
+	data, detected, err := ReadFileAny(ctx, logger, tempDir, "f", FormatJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detected != FormatJSON {
+		t.Errorf("detected = %v, want FormatJSON", detected)
+	}
+	if string(data) != `{"j":1}` {
+		t.Errorf("data = %q", data)
+	}
+
+	// Prefer YAML -> should return .yaml contents
+	data, detected, err = ReadFileAny(ctx, logger, tempDir, "f", FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detected != FormatYAML {
+		t.Errorf("detected = %v, want FormatYAML", detected)
+	}
+	if string(data) != "y: 1" {
+		t.Errorf("data = %q", data)
+	}
+}
+
+// TestReadFileAnyFallsBack verifies ReadFileAny falls back to the other
+// format when the preferred one is missing — this is the backward-compat
+// path for replay after a StorageFormat switch.
+func TestReadFileAnyFallsBack(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "readfile_any_fallback_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Only a .yaml file exists — caller prefers JSON but must get YAML back.
+	if err := os.WriteFile(filepath.Join(tempDir, "legacy.yaml"), []byte("hello: world"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, detected, err := ReadFileAny(ctx, logger, tempDir, "legacy", FormatJSON)
+	if err != nil {
+		t.Fatalf("expected fallback, got err: %v", err)
+	}
+	if detected != FormatYAML {
+		t.Errorf("detected = %v, want FormatYAML (fallback)", detected)
+	}
+	if string(data) != "hello: world" {
+		t.Errorf("data = %q", data)
+	}
+}
+
+// TestReadFileAnyMissingBoth verifies ReadFileAny returns fs.ErrNotExist
+// when neither format's file is present.
+func TestReadFileAnyMissingBoth(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "readfile_any_missing_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	_, _, err = ReadFileAny(ctx, logger, tempDir, "nope", FormatJSON)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("expected os.IsNotExist, got %v", err)
+	}
+}
+
+// TestFileExistsAnyDetection verifies FileExistsAny reports the correct
+// detected format regardless of what the caller prefers.
+func TestFileExistsAnyDetection(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "fileexists_any_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	if err := os.WriteFile(filepath.Join(tempDir, "m.yaml"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Caller prefers JSON; only YAML exists. Must still report exists=true
+	// and detected=FormatYAML so writer can preserve the file's format.
+	exists, detected, err := FileExistsAny(ctx, logger, tempDir, "m", FormatJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("expected exists=true")
+	}
+	if detected != FormatYAML {
+		t.Errorf("detected = %v, want FormatYAML", detected)
+	}
+}
+
+// TestNewMockReaderAnyFallsBack verifies NewMockReaderAny opens a YAML
+// mocks file even when the caller prefers JSON (and vice versa).
+func TestNewMockReaderAnyFallsBack(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "mockreader_any_fallback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Write mocks.yaml (legacy format).
+	doc := buildHTTPDoc()
+	doc.Name = "mock-legacy"
+	yamlBytes, err := yamlLib.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mocks.yaml"), yamlBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Caller prefers JSON but mocks.yaml is the only file present.
+	// NewMockReaderAny must fall back to YAML and return a reader that
+	// decodes YAML documents correctly.
+	reader, err := NewMockReaderAny(ctx, logger, tempDir, "mocks", FormatJSON)
+	if err != nil {
+		t.Fatalf("NewMockReaderAny fallback: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.ReadNextDoc()
+	if err != nil {
+		t.Fatalf("ReadNextDoc: %v", err)
+	}
+	if got.Name != "mock-legacy" {
+		t.Errorf("name = %q, want mock-legacy", got.Name)
+	}
+	if _, err := reader.ReadNextDoc(); err != io.EOF {
+		t.Errorf("expected EOF, got %v", err)
+	}
+}
+
+// TestReadSessionIndicesAny verifies the format-agnostic scan accepts
+// both .yaml and .json files and deduplicates by basename.
+func TestReadSessionIndicesAny(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	tempDir, err := os.MkdirTemp("", "sessionindices_any_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Mix of formats + one collision (test-2 exists in both formats).
+	for _, name := range []string{
+		"test-1.yaml",
+		"test-2.yaml",
+		"test-2.json",
+		"test-3.json",
+		"unrelated.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(tempDir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ReadSessionIndicesAny(ctx, tempDir, logger, ModeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Errorf("expected 3 distinct basenames (test-1, test-2, test-3), got %d: %v", len(got), got)
+	}
+}
+
 // TestReadSessionIndicesF tests format-aware file listing.
 func TestReadSessionIndicesF(t *testing.T) {
 	ctx := context.Background()
