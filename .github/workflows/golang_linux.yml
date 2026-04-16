@@ -188,19 +188,19 @@ jobs:
         with:
           src: ${{ matrix.config.replay_src }}
 
-      - name: Checkout DNS Mock App
+      - name: Checkout samples-go
         uses: actions/checkout@v4
         with:
-          repository: akashkumar7902/dns-mock-test
-          ref: ${{ matrix.branch }}
-          path: dns-mock-test
+          repository: keploy/samples-go
+          ref: main
+          path: samples-go
 
       - name: Run Test
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd dns-mock-test
+          cd samples-go/dns-mock-test
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_mock/golang-linux.sh
 
   dns_dedup_test:
