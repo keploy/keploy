@@ -1,6 +1,6 @@
 ---
 name: keploy-pr-workflow
-description: INVOKE AUTOMATICALLY before creating or updating a PR or issue on any keploy repository, before any `git push` to a shared branch, and before composing any commit that will leave the local machine. Carries required PR format, commit-message conventions, Signed-off-by enforcement, and customer-data hygiene checks. Also invoke when the user asks to open, update, or review a PR/issue. Do not draft a PR body, push to a remote branch, or commit-and-push without first consulting this skill.
+description: Guide for creating PRs and issues on keploy repositories — PR format, customer-data hygiene, commit conventions, sign-off. Invoke when the user asks to open, update, or review a pull request or issue, when preparing a commit that will land in main, or whenever a change is about to leave the local machine.
 ---
 
 # keploy-pr-workflow
