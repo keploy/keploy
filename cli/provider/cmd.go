@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
@@ -316,6 +317,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
@@ -334,6 +336,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 	case "test", "rerecord":
@@ -426,6 +429,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"containerName":         "container-name",
 		"networkName":           "network-name",
 		"passThroughPorts":      "pass-through-ports",
+		"memoryLimit":           "memory-limit",
 		"appId":                 "app-id",
 		"appName":               "app-name",
 		"generateGithubActions": "generate-github-actions",
@@ -967,6 +971,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
+		// memory-limit non-Docker gate is applied after flag parsing below
 
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
@@ -1062,6 +1067,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			if cmd.Flags().Changed("memory-limit") {
+				memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get the memory-limit flag")
+					return fmt.Errorf("failed to get memory-limit flag: %w", err)
+				}
+				c.cfg.Record.MemoryLimit = memoryLimit
+			}
+			if _, err := memoryguard.LimitBytes(c.cfg.Record.MemoryLimit); err != nil {
+				utils.LogError(c.logger, err, "invalid memory limit for keploy agent")
+				return err
+			}
+			if c.cfg.Record.MemoryLimit > 0 {
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType != utils.DockerRun && cmdType != utils.DockerCompose {
+					c.logger.Info("memory-limit is only supported for docker run and docker compose recording; ignoring it for this command type",
+						zap.String("cmd-type", c.cfg.CommandType))
+					c.cfg.Record.MemoryLimit = 0
+				}
+			}
 
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 			if err != nil {
@@ -1362,8 +1388,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get dnsPort flag")
-			return nil
+			utils.LogError(c.logger, err, "failed to get dns-port flag; verify the --dns-port value and try again")
+			return fmt.Errorf("failed to get dns-port flag: %w", err)
 		}
 		c.cfg.Agent.DnsPort = dnsPort
 
@@ -1385,17 +1411,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get build-delay flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get build-delay flag; verify the --build-delay value and try again")
+			return fmt.Errorf("failed to get build-delay flag: %w", err)
 		}
 		c.cfg.Agent.BuildDelay = buildDelay
 
 		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag; verify the --pass-through-ports value and try again")
+			return fmt.Errorf("failed to get pass-through-ports flag: %w", err)
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		if cmd.Flags().Changed("memory-limit") {
+			memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+			if err != nil {
+				errMsg := "failed to get memory-limit flag; verify the --memory-limit value and try again"
+				utils.LogError(c.logger, err, errMsg)
+				return fmt.Errorf("failed to get memory-limit flag: %w", err)
+			}
+			c.cfg.Agent.MemoryLimit = memoryLimit
+		}
+		if _, err := memoryguard.LimitBytes(c.cfg.Agent.MemoryLimit); err != nil {
+			utils.LogError(c.logger, err, "invalid memory limit for keploy agent; use a positive MB value within int64 range or set --memory-limit=0 to disable")
+			return err
+		}
+		if c.cfg.Agent.MemoryLimit > 0 && !c.cfg.Agent.IsDocker {
+			c.logger.Info("--memory-limit is only effective in Docker mode; ignoring",
+				zap.Uint64("memory_limit_mb", c.cfg.Agent.MemoryLimit))
+			c.cfg.Agent.MemoryLimit = 0
+		}
 
 	}
 
