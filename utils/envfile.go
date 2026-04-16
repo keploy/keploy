@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
+
+var validEnvKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // ParseEnvFile reads a .env file and returns its contents as a map.
 // It supports:
@@ -26,9 +29,7 @@ func ParseEnvFile(path string) (map[string]string, error) {
 	// Increase the buffer to support large single-line values (e.g., base64 blobs, certificates).
 	// The default limit (~64KB) causes bufio.ErrTooLong for such values.
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-	lineNum := 0
 	for scanner.Scan() {
-		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 
 		// skip empty lines and comments
@@ -79,12 +80,18 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 			return nil, err
 		}
 		for k, v := range fileVars {
+			if !validEnvKeyRe.MatchString(k) {
+				return nil, fmt.Errorf("invalid environment variable name %q in env file %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k, envFilePath)
+			}
 			merged[k] = v
 		}
 	}
 
 	// inline values override file values
 	for k, v := range envMap {
+		if !validEnvKeyRe.MatchString(k) {
+			return nil, fmt.Errorf("invalid environment variable name %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k)
+		}
 		merged[k] = v
 	}
 
