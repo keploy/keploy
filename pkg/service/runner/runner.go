@@ -297,7 +297,6 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 
 	mocks, ok := testMockMappings[testCaseName]
 	if !ok {
-		mocksWeNeed = mocksThatHaveMappings
 		return
 	}
 	for _, m := range mocks {
