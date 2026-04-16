@@ -76,7 +76,8 @@ func TestParseEnvFile(t *testing.T) {
 }
 
 func TestParseEnvFile_MissingFile(t *testing.T) {
-	_, err := ParseEnvFile("/nonexistent/.env")
+	path := filepath.Join(t.TempDir(), "does-not-exist.env")
+	_, err := ParseEnvFile(path)
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
@@ -130,6 +131,39 @@ func TestResolveEnvVars(t *testing.T) {
 		}
 		if len(result) != 0 {
 			t.Errorf("expected empty map, got %v", result)
+		}
+	})
+
+	t.Run("rejects invalid inline key with space", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"BAD KEY": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for invalid key, got nil")
+		}
+	})
+
+	t.Run("rejects invalid inline key starting with digit", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"1NVALID": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for key starting with digit, got nil")
+		}
+	})
+
+	t.Run("rejects invalid key with metacharacters", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"WITH;META": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for key with metacharacters, got nil")
+		}
+	})
+
+	t.Run("rejects invalid key from env file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("BAD KEY=value\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolveEnvVars(nil, path)
+		if err == nil {
+			t.Fatal("expected error for invalid key in env file, got nil")
 		}
 	})
 }
