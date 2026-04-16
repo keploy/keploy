@@ -99,6 +99,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
+	agentMemoryLimitFlag := ""
+	if opts.MemoryLimit > 0 {
+		agentMemoryLimitFlag = " --memory-limit " + strconv.FormatUint(opts.MemoryLimit, 10)
+	}
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
@@ -136,6 +140,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -202,6 +207,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			alias += agentMemoryLimitFlag
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -253,6 +259,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -319,6 +326,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			alias += agentMemoryLimitFlag
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -369,6 +377,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}

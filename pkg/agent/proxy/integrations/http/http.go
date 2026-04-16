@@ -116,7 +116,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MemLimiter)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -258,19 +258,23 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if opts.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			// In synchronous mode, always route HTTP mocks through the sync manager.
-			// The manager uses its internal first-request state to decide whether to
-			// buffer or forward mocks for correct time-window based association.
-			mgr.AddMock(newMock)
-			return nil
-		}
+	if mgr := syncMock.Get(); mgr != nil {
+		// Route HTTP mocks through the sync manager. The manager uses its
+		// internal first-request state to decide whether to buffer or forward
+		// mocks for correct time-window based association.
+		mgr.AddMock(newMock)
+		return nil
 	}
-	// In non-synchronous mode (k8s-proxy), or if no manager is available,
-	// send directly to the mocks channel so the mock is persisted.
-	if mocks != nil {
-		mocks <- newMock
+
+	// Fallback: syncMock manager unavailable, send to mocks channel directly.
+	// Use select with ctx so we don't block forever during shutdown.
+	select {
+	case <-ctx.Done():
+		select {
+		case mocks <- newMock:
+		default:
+		}
+	case mocks <- newMock:
 	}
 	return nil
 }

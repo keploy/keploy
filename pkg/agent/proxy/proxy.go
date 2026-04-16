@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -87,8 +86,6 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
-	memLimiter *util.MemoryLimiter
-
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
@@ -122,11 +119,6 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	var memLimit int64
-	if opts.Record.MaxBufferMemoryMB > 0 && opts.Record.MaxBufferMemoryMB <= uint64(math.MaxInt64/(1024*1024)) {
-		memLimit = int64(opts.Record.MaxBufferMemoryMB) * 1024 * 1024
-	}
-
 	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
@@ -144,7 +136,6 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
-		memLimiter:        util.NewMemoryLimiter(memLimit, logger),
 	}
 
 	return proxy
@@ -168,7 +159,6 @@ func (p *Proxy) buildRecordSession(
 		Egress:       util.NewSafeConn(dstConn, logger),
 		Mocks:        mocks,
 		ErrGroup:     errGrp,
-		MemLimiter:   p.memLimiter,
 		TLSUpgrader:  tlsUpgrader,
 		Logger:       logger,
 		ClientConnID: fmt.Sprint(clientConnID),
@@ -414,6 +404,18 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
 		clientConnCancel()
+
+		// Close the listener synchronously BEFORE waiting for connection
+		// handlers. Defers are LIFO, so without this the listener-close
+		// defer (func1) runs AFTER this defer (func2). The accept
+		// goroutine blocks on listener.Accept() — if we wait for
+		// clientConnErrGrp before closing the listener, the accept
+		// goroutine never exits, and on 2-CPU CI runners the scheduler
+		// may not run other unblocking goroutines promptly, causing a hang.
+		if listener != nil {
+			listener.Close()
+		}
+
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
@@ -566,6 +568,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+
+	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
+	initialSrcConn := srcConn
+
+	// connCloser is started later (after dstConn is established) to close
+	// both connections on context cancellation, unblocking any goroutine
+	// stuck in a blocking read (ReadBytes → reader.Read).
+	var connCloserStarted bool
+	startConnCloser := func() {
+		if connCloserStarted {
+			return
+		}
+		connCloserStarted = true
+		// Capture dstConn NOW (after dial) so there's no data race.
+		closeDst := dstConn
+		go func() {
+			<-parserCtx.Done()
+			initialSrcConn.Close()
+			if closeDst != nil {
+				closeDst.Close()
+			}
+		}()
+	}
+
 	defer func() {
 		parserCtxCancel()
 
@@ -638,7 +664,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
 				Mocks:        rule.MC,
 				ErrGroup:     parserErrGrp,
-				MemLimiter:   p.memLimiter,
 				TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
 				Logger:       mysqlLogger,
 				ClientConnID: fmt.Sprint(clientConnID),
@@ -689,10 +714,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	multiReader := io.MultiReader(reader, srcConn)
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: multiReader,
+		Reader: reader,
 		Logger: p.logger,
 	}
 
@@ -880,7 +904,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Reader: util.NewPrefixReader(initialBuf, srcConn),
 		Logger: p.logger,
 	}
 
@@ -1005,6 +1029,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	outgoingOpts.DstCfg = dstCfg
+
+	// Start the shutdown goroutine now that dstConn is established.
+	startConnCloser()
+
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {
