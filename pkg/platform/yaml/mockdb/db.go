@@ -4,6 +4,7 @@ package mockdb
 import (
 	"bufio"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -22,11 +23,42 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// mockFormatGob is the on-disk extension for the binary gob mock
+// format, enabled via KEPLOY_MOCK_FORMAT=gob. The format is a stream
+// of gob-encoded *models.Mock (appendable without rewrite). Readers
+// auto-detect by checking mocks.gob first, falling back to mocks.yaml.
+const mockFormatGob = "gob"
+
+func useGobMockFormat() bool {
+	return os.Getenv("KEPLOY_MOCK_FORMAT") == mockFormatGob
+}
+
 type MockYaml struct {
 	MockPath  string
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
+
+	// Async gob writer: background goroutine drains gobQueue and
+	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
+	// goroutines never block on disk or gob encoding. Sync fallback
+	// activates when the queue is full so no mock is dropped.
+	gobOnce      sync.Once
+	gobQueue     chan gobWriteJob
+	gobStop      chan struct{}
+	gobDone      chan struct{}
+	gobMu        sync.Mutex
+	gobFilePath  string
+	gobFile      *os.File
+	gobBufw      *bufio.Writer
+	gobEnc       *gob.Encoder
+	gobOverflows atomic.Uint64
+}
+
+type gobWriteJob struct {
+	mock     *models.Mock
+	testSet  string
+	filename string
 }
 
 const mockFileLockStripeCount = 256
@@ -276,14 +308,24 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockYaml, err := EncodeMock(mock, ys.Logger)
-	if err != nil {
-		return err
-	}
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
+	}
+
+	// Binary gob format: async path — InsertMock enqueues, a single
+	// background goroutine owns the open file + encoder. pprof showed
+	// yaml.v3 encoding at 28-30% of record client CPU; gob round-trips
+	// all interface{} Message fields via the gob.Register calls in
+	// pkg/models/*. Sync fallback on queue-full so mocks never drop.
+	if useGobMockFormat() {
+		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
+	}
+
+	mockYaml, err := EncodeMock(mock, ys.Logger)
+	if err != nil {
+		return err
 	}
 	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName))
 	lock.Lock()
@@ -339,6 +381,203 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	return nil
 }
 
+// insertMockGob enqueues the mock for async encoding. One background
+// goroutine owns the open file + encoder; parsers never block on
+// disk. Queue-full falls back to synchronous write so mocks are never
+// dropped — tracked via gobOverflows for observability.
+func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
+	ys.ensureGobWriter(ctx)
+	job := gobWriteJob{mock: mock, testSet: mockPath, filename: mockFileName}
+	select {
+	case ys.gobQueue <- job:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		ys.gobOverflows.Add(1)
+		return ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
+	}
+}
+
+func (ys *MockYaml) ensureGobWriter(ctx context.Context) {
+	ys.gobOnce.Do(func() {
+		ys.gobQueue = make(chan gobWriteJob, 4096)
+		ys.gobStop = make(chan struct{})
+		ys.gobDone = make(chan struct{})
+		go ys.gobWriterLoop(ctx)
+	})
+}
+
+func (ys *MockYaml) gobWriterLoop(ctx context.Context) {
+	defer close(ys.gobDone)
+	for {
+		select {
+		case job, ok := <-ys.gobQueue:
+			if !ok {
+				ys.gobFlushAndClose()
+				return
+			}
+			if err := ys.gobWriteOne(job); err != nil {
+				utils.LogError(ys.Logger, err, "async gob mock writer failed — continuing",
+					zap.String("testSet", job.testSet), zap.String("mockName", job.mock.Name))
+			}
+		case <-ctx.Done():
+			ys.drainAndClose()
+			return
+		case <-ys.gobStop:
+			ys.drainAndClose()
+			return
+		}
+	}
+}
+
+func (ys *MockYaml) drainAndClose() {
+	for {
+		select {
+		case job := <-ys.gobQueue:
+			_ = ys.gobWriteOne(job)
+		default:
+			ys.gobFlushAndClose()
+			return
+		}
+	}
+}
+
+func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
+	want := filepath.Join(job.testSet, job.filename+".gob")
+	if ys.gobFilePath != want || ys.gobFile == nil {
+		if err := ys.gobReopenLocked(job.testSet, job.filename); err != nil {
+			return err
+		}
+	}
+	return ys.gobEnc.Encode(job.mock)
+}
+
+func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
+	if ys.gobFile != nil {
+		_ = ys.gobBufw.Flush()
+		_ = ys.gobFile.Close()
+		ys.gobFile = nil
+		ys.gobBufw = nil
+		ys.gobEnc = nil
+	}
+	if err := os.MkdirAll(mockPath, 0o777); err != nil {
+		return fmt.Errorf("mkdir mock dir: %w", err)
+	}
+	filePath := filepath.Join(mockPath, mockFileName+".gob")
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o666)
+	if err != nil {
+		return fmt.Errorf("open gob mock file: %w", err)
+	}
+	ys.gobFile = f
+	// 256 KB buffer holds dozens of mocks before a syscall; bufio
+	// autoflushes at fill. Shutdown drains explicitly.
+	ys.gobBufw = bufio.NewWriterSize(f, 256*1024)
+	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
+	ys.gobFilePath = filePath
+	return nil
+}
+
+func (ys *MockYaml) gobFlushAndClose() {
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
+	if ys.gobBufw != nil {
+		_ = ys.gobBufw.Flush()
+	}
+	if ys.gobFile != nil {
+		_ = ys.gobFile.Close()
+	}
+	ys.gobFile = nil
+	ys.gobBufw = nil
+	ys.gobEnc = nil
+}
+
+// gobWriteSync is the sync fallback when the async queue is full.
+// Holds the async writer mutex so our write doesn't interleave with
+// the background goroutine's output mid-encoding.
+func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
+	if err := os.MkdirAll(mockPath, 0o777); err != nil {
+		return fmt.Errorf("failed to create mock directory: %w", err)
+	}
+	gobFilePath := filepath.Join(mockPath, mockFileName+".gob")
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
+	if ys.gobBufw != nil {
+		_ = ys.gobBufw.Flush()
+	}
+	f, err := os.OpenFile(gobFilePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o666)
+	if err != nil {
+		return fmt.Errorf("failed to open gob mock file: %w", err)
+	}
+	defer f.Close()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	w := bufio.NewWriter(f)
+	enc := gob.NewEncoder(w)
+	if err := enc.Encode(mock); err != nil {
+		return fmt.Errorf("failed to encode mock gob: %w", err)
+	}
+	return w.Flush()
+}
+
+// Close drains the async gob writer and flushes the file. Safe to
+// call multiple times. Call at record shutdown so all queued mocks
+// are on disk before the process exits.
+func (ys *MockYaml) Close() error {
+	if ys.gobStop == nil {
+		return nil
+	}
+	select {
+	case <-ys.gobStop:
+	default:
+		close(ys.gobStop)
+	}
+	select {
+	case <-ys.gobDone:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out waiting for gob writer to flush")
+	}
+	return nil
+}
+
+// readGobMocks decodes every mock in a mocks.gob file. The async
+// writer holds one *gob.Encoder alive for the whole session, so the
+// on-disk file is a single continuous gob stream — we mirror that on
+// the read side with one *gob.Decoder that keeps the type table live
+// across Decode calls. Mid-stream ErrUnexpectedEOF is treated as
+// end-of-data (partial write from a crashed writer — we lose the tail
+// mock, not the batch).
+//
+// Constraint: because the encoder session owns the type table, you
+// cannot usefully append to an existing mocks.gob from a fresh
+// encoder — the new encoder's type table will conflict. Readers that
+// need to merge multiple sessions must read each file independently.
+func readGobMocks(path string) ([]*models.Mock, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	dec := gob.NewDecoder(bufio.NewReader(f))
+	var out []*models.Mock
+	for {
+		var m models.Mock
+		if err := dec.Decode(&m); err != nil {
+			if err == io.EOF {
+				return out, nil
+			}
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				return out, nil
+			}
+			return out, fmt.Errorf("decode gob mock: %w", err)
+		}
+		out = append(out, &m)
+	}
+}
+
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
@@ -351,6 +590,30 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName))
 	lock.RLock()
 	defer lock.RUnlock()
+
+	// Prefer gob binary format when present (low-latency record output).
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		mocks, err := readGobMocks(gobPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, mock := range mocks {
+			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+			if isMappedToSpecificTest && !isNeededForCurrentRun {
+				continue
+			}
+			if mock.Spec.Metadata["type"] == "config" {
+				continue
+			}
+			switch mock.Kind {
+			case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
+		return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime), nil
+	}
 
 	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
 	if err != nil {
@@ -443,6 +706,32 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	lock := getMockFileLock(mockFileLockKey(path, mockName))
 	lock.RLock()
 	defer lock.RUnlock()
+
+	// Prefer gob binary format when present.
+	gobPath := filepath.Join(path, mockName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		mocks, err := readGobMocks(gobPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, mock := range mocks {
+			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+			if isMappedToSpecificTest && !isNeededForCurrentRun {
+				continue
+			}
+			isConfig := mock.Spec.Metadata["type"] == "config"
+			isUnfilteredKind := false
+			switch mock.Kind {
+			case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+				isUnfilteredKind = true
+			}
+			if isConfig || !isUnfilteredKind {
+				configMocks = append(configMocks, mock)
+			}
+		}
+		return pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime), nil
+	}
 
 	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ".yaml")
 	if err != nil {
