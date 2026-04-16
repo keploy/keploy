@@ -297,7 +297,7 @@ func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName st
 
 	mocks, ok := testMockMappings[testCaseName]
 	if !ok {
-		err = fmt.Errorf("no mock mapping found for test case %q in test set %q", testCaseName, testSetID)
+		mocksWeNeed = mocksThatHaveMappings
 		return
 	}
 	for _, m := range mocks {
