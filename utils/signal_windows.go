@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -38,7 +39,7 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
@@ -56,6 +57,11 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// effect of Setpgid on Linux.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+
+	// When in-memory compose content is provided, pipe it via stdin.
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
 	// Set the output of the command

@@ -16,6 +16,10 @@ import (
 
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
+	if packet == nil {
+		return nil, fmt.Errorf("packet is nil")
+	}
+
 	var data []byte
 	var err error
 
@@ -141,6 +145,12 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
 		}
+	default:
+		return nil, fmt.Errorf("unhandled mysql message type %T for encoding", packet.Message)
+	}
+
+	if packet.Header == nil {
+		return nil, fmt.Errorf("packet header is nil for message type %T", packet.Message)
 	}
 
 	// Encode the header for the packet
@@ -151,11 +161,13 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	// PayloadLength corresponds to that first payload only (e.g., column-count = 1).
 	// For single-packet messages, we can safely use len(data).
 	payloadLen := len(data)
-	if isCompositeMessage(packet.Message) && packet.Header != nil && packet.Header.Header != nil {
+	if isCompositeMessage(packet.Message) && packet.Header.Header != nil {
 		payloadLen = int(packet.Header.Header.PayloadLength)
 	}
 	binary.LittleEndian.PutUint32(header, uint32(payloadLen))
-	header[3] = packet.Header.Header.SequenceID
+	if packet.Header.Header != nil {
+		header[3] = packet.Header.Header.SequenceID
+	}
 	data = append(header, data...)
 
 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))

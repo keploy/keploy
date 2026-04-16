@@ -361,7 +361,8 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 
 		// Since auth switch response data can be different, we should just check the sequence number
-		if authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
+		if authSwitchRespMock.Header != nil && authSwitchRespMock.Header.Header != nil &&
+			authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
 			utils.LogError(logger, nil, "sequence number mismatch for auth switch response", zap.Any("expected", authSwitchRespMock.Header.Header.SequenceID), zap.Any("actual", authSwitchRespPkt.Header.SequenceID))
 			return res, fmt.Errorf("sequence number mismatch for auth switch response")
 		}
@@ -681,7 +682,8 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Since encrypted password can be different, we should just check the sequence number
-	if encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
+	if encryptedPassMock.Header != nil && encryptedPassMock.Header.Header != nil &&
+		encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
 		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
 		return fmt.Errorf("sequence number mismatch for encrypted password")
 	}

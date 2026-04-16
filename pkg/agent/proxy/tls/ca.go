@@ -21,6 +21,7 @@ import (
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
@@ -367,6 +368,27 @@ var SrcPortToDstURL = sync.Map{}
 
 var setLogLevelOnce sync.Once
 
+// certCache caches generated TLS certificates by hostname to avoid regenerating
+// a certificate for every connection to the same host. Without this cache,
+// N concurrent CONNECT tunnels to the same host cause N parallel cert generations,
+// saturating CPU in resource-constrained environments (e.g., K8s pods).
+var (
+	certCache     *expirable.LRU[string, *tls.Certificate]
+	certCacheOnce sync.Once
+)
+
+const (
+	certCacheMaxSize = 1024
+	certCacheTTL     = 24 * time.Hour
+)
+
+func getCertCache() *expirable.LRU[string, *tls.Certificate] {
+	certCacheOnce.Do(func() {
+		certCache = expirable.NewLRU[string, *tls.Certificate](certCacheMaxSize, nil, certCacheTTL)
+	})
+	return certCache
+}
+
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
@@ -386,18 +408,36 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		cfsslLog.Level = cfsslLog.LevelError
 	})
 
-	// Generate a new server certificate and private key for the given hostname
+	// Generate a new server certificate and private key for the given hostname.
+	// When the client omits SNI (common after CONNECT tunnel setup where the
+	// client already knows the target from the CONNECT request), fall back to
+	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
 	dstURL := clientHello.ServerName
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	if dstURL == "" {
+		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
+			if s, ok := stored.(string); ok && s != "" {
+				dstURL = s
+			}
+		}
+	}
+
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
+	// Check the cert cache before generating a new certificate.
+	if dstURL != "" {
+		if cached, ok := getCertCache().Get(dstURL); ok {
+			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			return cached, nil
+		}
+	}
+
 	serverReq := &csr.CertificateRequest{
-		//Make the name accordng to the ip of the request
-		CN: clientHello.ServerName,
+		CN: dstURL,
 		Hosts: []string{
-			clientHello.ServerName,
+			dstURL,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -447,6 +487,28 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
+	}
+
+	// Pre-populate Leaf to avoid a data race: crypto/tls lazily parses
+	// Certificate.Leaf on first use, which is not goroutine-safe. Parsing
+	// it here, before caching, ensures all concurrent consumers see a
+	// fully-initialized certificate.
+	if serverTLSCert.Leaf == nil {
+		leaf, parseErr := x509.ParseCertificate(serverTLSCert.Certificate[0])
+		if parseErr != nil {
+			logger.Debug("failed to pre-parse certificate leaf, skipping cache", zap.Error(parseErr))
+			return &serverTLSCert, nil
+		}
+		serverTLSCert.Leaf = leaf
+	}
+
+	// Cache the generated certificate for reuse by subsequent connections
+	// to the same hostname, avoiding redundant key generation and signing.
+	// NOTE: The cache key only uses hostname. In practice, caPrivKey and
+	// caCertParsed are constant for the lifetime of a Proxy instance, and
+	// backdate is constant per test run, so hostname is sufficient.
+	if dstURL != "" {
+		getCertCache().Add(dstURL, &serverTLSCert)
 	}
 
 	return &serverTLSCert, nil

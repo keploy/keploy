@@ -173,10 +173,12 @@ func replaceFile(src, dst string) error {
 	return nil
 }
 
-// UpdateMocks deletes the mocks from the mock file with given names
+// UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
-// mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
-func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time) error {
+// mockNames is a keep-set keyed by mock name (values carry models.MockState details).
+// Mocks present in mockNames are retained; other mocks may still be retained by
+// timestamp-based exemptions (for replay writes and startup/init traffic).
+func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -245,6 +247,16 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			newMocks = append(newMocks, mock)
 			continue
 		}
+		// Keep startup/init mocks: mocks recorded before the first test case
+		// are connection-level or app-init traffic (DNS, TLS, DB handshake,
+		// config fetch, etc.) that only fires once at app startup. In multi-
+		// test-set replays without app restart, these won't be consumed in
+		// later test-sets but are still needed for future replays.
+		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+			newMocks = append(newMocks, mock)
+			continue
+		}
 		prunedCount++
 	}
 
@@ -277,25 +289,53 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	lock.Lock()
 	defer lock.Unlock()
 
-	data, err := yamlLib.Marshal(&mockYaml)
+	// Stream YAML directly to the file instead of marshaling to []byte first.
+	isFileEmpty, err := yaml.CreateYamlFile(ctx, ys.Logger, mockPath, mockFileName)
 	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to create yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
 		return err
 	}
 
-	exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName)
+	yamlFilePath := filepath.Join(mockPath, mockFileName+".yaml")
+	file, err := os.OpenFile(yamlFilePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
-		return err
+		return fmt.Errorf("failed to open mock file for append: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+
+	if isFileEmpty {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				return fmt.Errorf("failed to write version comment: %w", err)
+			}
+		}
+	} else {
+		if _, err := writer.WriteString("---\n"); err != nil {
+			return fmt.Errorf("failed to write document separator: %w", err)
+		}
 	}
 
-	if !exists {
-		data = append([]byte(utils.GetVersionAsComment()), data...)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
-	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
-	if err != nil {
-		return err
+	encoder := yamlLib.NewEncoder(writer)
+	if err := encoder.Encode(&mockYaml); err != nil {
+		return fmt.Errorf("failed to encode mock yaml: %w", err)
 	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush mock writer: %w", err)
+	}
+
 	return nil
 }
 

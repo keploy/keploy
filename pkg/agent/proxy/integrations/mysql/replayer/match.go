@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -317,7 +318,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 				logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 
-				if ok, c := matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, mock.Name); ok {
+				if ok, c := matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, mock.Name, util.NewNoiseChecker(mock.Noise)); ok {
 					// Query-aware definitive match (exact or structural): pick and stop searching
 					matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
@@ -552,7 +553,9 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
-	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
+	if actual.Header != nil && actual.Header.Header != nil &&
+		expected.Header != nil && expected.Header.Header != nil &&
+		actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
 		if expectedQuery == actualQuery {
 			matchCount++
@@ -636,7 +639,7 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 //   - If both expectedQuery and actualQuery are present, require them to match (exact).
 //     If they don't match, return (false, 0) immediately.
 //   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
-func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string) (bool, int) {
+func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string, nc *util.NoiseChecker) (bool, int) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -689,7 +692,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 			unsignedEqual := ep.Unsigned == ap.Unsigned
 			valueEqual := false
 			if unsignedEqual { // initial check to avoid comparing signed vs unsigned values
-				valueEqual = paramValueEqual(ep.Value, ap.Value)
+				valueEqual = paramValueEqual(ep.Value, ap.Value, nc)
 			}
 			if typeEqual && nameEqual && unsignedEqual && valueEqual {
 				matchCount++
@@ -733,7 +736,10 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 	return (queryMatched && allParamsMatched), matchCount
 }
 
-func paramValueEqual(a, b interface{}) bool {
+func paramValueEqual(a, b interface{}, nc *util.NoiseChecker) bool {
+	if nc.IsNoisyValue(a) {
+		return true
+	}
 	switch av := a.(type) {
 	case []byte:
 		bv, ok := b.([]byte)
