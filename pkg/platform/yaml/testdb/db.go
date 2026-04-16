@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -25,6 +27,13 @@ import (
 type TestYaml struct {
 	TcsPath string
 	logger  *zap.Logger
+
+	// lastIndex caches the max test-index per test-set path so upsert
+	// can mint "test-N" names without re-reading tests/ on every
+	// insert. pprof measured 16% of the record client's CPU in
+	// FindLastIndex at ~3000 accumulated tests; at steady state every
+	// new test caused a getdents64 of the full directory.
+	lastIndex sync.Map // map[string]*atomic.Int64
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
@@ -32,6 +41,27 @@ func New(logger *zap.Logger, tcsPath string) *TestYaml {
 		TcsPath: tcsPath,
 		logger:  logger,
 	}
+}
+
+// nextTestIndex returns the next available test-N index for tcsPath.
+// First call seeds the counter from yaml.FindLastIndex; subsequent
+// calls are a single atomic increment. Safe for concurrent upserts
+// on the same test-set.
+func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
+	if v, ok := ts.lastIndex.Load(tcsPath); ok {
+		return int(v.(*atomic.Int64).Add(1)), nil
+	}
+	seed, err := yaml.FindLastIndex(tcsPath, ts.logger)
+	if err != nil {
+		return 0, err
+	}
+	var counter atomic.Int64
+	counter.Store(int64(seed))
+	actual, loaded := ts.lastIndex.LoadOrStore(tcsPath, &counter)
+	if loaded {
+		return int(actual.(*atomic.Int64).Add(1)), nil
+	}
+	return seed, nil
 }
 
 type tcsInfo struct {
@@ -231,7 +261,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
-		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+		lastIndx, err := ts.nextTestIndex(tcsPath)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
