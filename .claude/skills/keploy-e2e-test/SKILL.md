@@ -309,3 +309,5 @@ End with a short, factual summary:
   to the user so they can decide.
 - Don't claim "tests pass" from compilation alone. `go build` succeeding
   isn't a substitute for a real replay run. If you couldn't run, say so.
+
+For anything in samples repo side changes, you must have created a branch. Use that branch has ref in keploy/keploy to test it. 
