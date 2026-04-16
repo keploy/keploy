@@ -72,14 +72,20 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	if !m.firstReqSeen && m.outChan != nil {
 		outChan := m.outChan
 		m.mu.Unlock()
-		// Non-blocking send: during shutdown the HandleOutgoing handler
-		// stops reading from the channel. A blocking send here would
-		// deadlock the entire shutdown sequence (parser → AddMock →
-		// blocked → handleCommandPhase can't return → proxy can't stop).
-		select {
-		case outChan <- mock:
-		default:
-		}
+		// Non-blocking send with closed-channel recovery: during
+		// shutdown HandleOutgoing stops reading AND may close the
+		// channel. A bare `outChan <- mock` panics with "send on
+		// closed channel" even through a default case — the select
+		// does not catch closed-channel sends. recover() + silent
+		// drop is the right behavior because shutdown is racing the
+		// parser.
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case outChan <- mock:
+			default:
+			}
+		}()
 		return
 	}
 	m.buffer = append(m.buffer, mock)
