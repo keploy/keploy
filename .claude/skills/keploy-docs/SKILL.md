@@ -1,6 +1,6 @@
 ---
 name: keploy-docs
-description: Guide for contributing to the Keploy documentation site at github.com/keploy/docs. Invoke when a change in keploy/keploy introduces, removes, or alters user-visible behavior (new CLI flag, changed default, new command, new configuration field, new on-disk format) and the docs need to catch up — or when the user asks to document a feature, write a quickstart, or fix a docs bug. Covers where to put the edit, every CI check that must pass, and how to reproduce each check locally before the PR.
+description: INVOKE AUTOMATICALLY whenever a code change in keploy/keploy introduces, removes, or alters user-visible behavior — new CLI flag, changed default, new command, new configuration field, new on-disk format. Docs in github.com/keploy/docs must catch up in lockstep, not later. Also invoke when the user asks to document a feature, write a quickstart, or fix a docs bug. Covers where to put the edit in the docs repo, every CI check that must pass, and how to reproduce each check locally before the PR.
 ---
 
 # keploy-docs

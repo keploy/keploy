@@ -1,6 +1,6 @@
 ---
 name: keploy-e2e-test
-description: End-to-end verification of a change to keploy/keploy using keploy's own record/replay against a real sample application. Use whenever the user asks to test a change, verify a fix, prove that a modification works in practice, add e2e coverage for a PR, reproduce a bug against a sample app, or wire a behavior into CI. Covers deciding whether e2e is the right signal, finding or extending an existing sample script, or (only when necessary) adding a new sample and matrix entry following the repo's conventions.
+description: INVOKE AUTOMATICALLY after implementing any non-trivial change to keploy/keploy — new/changed CLI flag or command, record/replay pipeline, proxy, agent hook, protocol handler, YAML format, matcher, coverage, or config. Unit tests and `go build` are NOT sufficient; this skill runs keploy's own record/replay against a real sample app, the same way CI does. Also invoke when the user asks to test, verify, prove, reproduce, or wire behavior into CI. Skip only with one of the reasons in the skill's skip list (pure refactor, enterprise-only, CLI-output-only, docs-only, missing infra, unclear scope) — state which one. Covers deciding whether e2e is the right signal, finding or extending an existing sample script, or (only when necessary) adding a new sample and matrix entry.
 ---
 
 # keploy-e2e-test
