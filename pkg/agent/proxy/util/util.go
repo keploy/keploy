@@ -181,12 +181,82 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	return buf[:n], nil
 }
 
+// DirectChunkReader is implemented by capture-layer net.Conns whose
+// wire bytes already arrive pre-framed on an internal channel (e.g. an
+// eBPF ringbuf feeder). When a conn passed to ReadBuffConn satisfies
+// this interface, the ReadBytes+goroutine hop is bypassed — chunks
+// forward directly from DirectChunks() into bufferChannel.
+//
+// HasPending reports whether Read() carry-over bytes exist (typically
+// a Prepend'd handshake peek). The fast path drains those via a single
+// Read before switching to the chunk channel so the parser sees bytes
+// in original order.
+//
+// Real net.Conns (TCP/TLS/sockmap-ingress) do not implement this
+// interface and continue through the ReadBytes loop unchanged.
+type DirectChunkReader interface {
+	DirectChunks() <-chan []byte
+	HasPending() bool
+}
+
 // ReadBuffConn is used to read the buffer from the connection.
 // When stopOnRecordingPause is true, it exits as soon as the shared
 // self-aware memory guard pauses recording, allowing record-mode parsers to
 // fall back to passthrough without reading more data for decoding.
 // errChannel should be buffered to hold one terminal error per reader goroutine.
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
+	if dcr, ok := conn.(DirectChunkReader); ok {
+		if dcr.HasPending() {
+			drain := make([]byte, 64*1024)
+			n, err := conn.Read(drain)
+			if n > 0 {
+				out := make([]byte, n)
+				copy(out, drain[:n])
+				select {
+				case bufferChannel <- out:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "direct-chunk carry-over drain failed")
+				}
+				select {
+				case errChannel <- err:
+				default:
+				}
+				return
+			}
+		}
+		src := dcr.DirectChunks()
+		for {
+			if stopOnRecordingPause && isRecordingPaused() {
+				select {
+				case errChannel <- ErrRecordingPausedDueToMemoryPressure:
+				default:
+				}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-src:
+				if !ok {
+					select {
+					case errChannel <- io.EOF:
+					default:
+					}
+					return
+				}
+				select {
+				case bufferChannel <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
 	//TODO: where to close the errChannel
 	for {
 		select {
