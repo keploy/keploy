@@ -77,7 +77,11 @@ type bpfMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	KeployProxylessMeta         *ebpf.MapSpec `ebpf:"keploy_proxyless_meta"`
+	KeployProxylessSkStorage    *ebpf.MapSpec `ebpf:"keploy_proxyless_sk_storage"`
+	KeployProxylessSockhash     *ebpf.MapSpec `ebpf:"keploy_proxyless_sockhash"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
+	PidFilterCache              *ebpf.MapSpec `ebpf:"pid_filter_cache"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
@@ -115,7 +119,11 @@ type bpfMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	KeployProxylessMeta         *ebpf.Map `ebpf:"keploy_proxyless_meta"`
+	KeployProxylessSkStorage    *ebpf.Map `ebpf:"keploy_proxyless_sk_storage"`
+	KeployProxylessSockhash     *ebpf.Map `ebpf:"keploy_proxyless_sockhash"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
+	PidFilterCache              *ebpf.Map `ebpf:"pid_filter_cache"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
@@ -129,7 +137,11 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.KeployProxylessMeta,
+		m.KeployProxylessSkStorage,
+		m.KeployProxylessSockhash,
 		m.OrigDstByCookie,
+		m.PidFilterCache,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)
