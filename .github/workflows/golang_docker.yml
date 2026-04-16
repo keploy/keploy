@@ -20,6 +20,9 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: go-memory-load
+            path: go-memory-load
+            script_dir: go_memory_load
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
@@ -57,6 +60,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
+          ref: main
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:

@@ -58,6 +58,35 @@ send_request(){
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
+
+    # DEBUG: if keploy doesn't exit within 15 seconds, dump goroutine stacks
+    # for BOTH the CLI process AND the keploy agent subprocess
+    (
+        sleep 15
+        if kill -0 "$REC_PID" 2>/dev/null; then
+            # Find the keploy agent subprocess (child of the CLI)
+            AGENT_PID="$(pgrep -P "$REC_PID" -f 'keploy' 2>/dev/null || true)"
+
+            if [ -n "$AGENT_PID" ]; then
+                echo "===== KEPLOY AGENT SUBPROCESS HUNG (PID=$AGENT_PID) — DUMPING GOROUTINE STACKS ====="
+                sudo kill -QUIT "$AGENT_PID" 2>/dev/null || true
+                sleep 3
+            fi
+
+            echo "===== KEPLOY CLI HUNG (PID=$REC_PID) — DUMPING GOROUTINE STACKS ====="
+            sudo kill -QUIT "$REC_PID" 2>/dev/null || true
+            sleep 3
+
+            # Force kill both if still alive
+            if [ -n "$AGENT_PID" ] && kill -0 "$AGENT_PID" 2>/dev/null; then
+                sudo kill -9 "$AGENT_PID" 2>/dev/null || true
+            fi
+            if kill -0 "$REC_PID" 2>/dev/null; then
+                echo "===== FORCE KILLING KEPLOY ====="
+                sudo kill -9 "$REC_PID" 2>/dev/null || true
+            fi
+        fi
+    ) &
 }
 
 # Record and Test cycles
