@@ -522,25 +522,24 @@ func extractHexIdentifiers(value string) []string {
 // where "/" maps to VM-wide memory), fileExists will fail and the caller
 // falls through to identifier-based or PID-based resolution.
 func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (string, error) {
-	cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
-	if err != nil {
-		return "", err
-	}
+    cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
+    if err != nil {
+        return "", err
+    }
 
-	// An empty cgroup path is invalid — fall through to identifier-based
-	// resolution.
-	if cgroupPath == "" {
-		return "", fmt.Errorf("cgroup self-path is empty; skipping to container-specific resolution")
-	}
+    // Reject the root path ("/") so it is forced to use your PID-based fallback on macOS
+    if cgroupPath == "/" || cgroupPath == "" {
+        return "", fmt.Errorf("cgroup self-path is root (%q); skipping to container-specific resolution", cgroupPath)
+    }
 
-	candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
-	if !ok {
-		return "", fmt.Errorf("unable to map cgroup path %q to mount %q", cgroupPath, layout.mountPoint)
-	}
-	if !fileExists(candidate) {
-		return "", fmt.Errorf("cgroup memory file %q not found", candidate)
-	}
-	return candidate, nil
+    candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
+    if !ok {
+        return "", fmt.Errorf("unable to map cgroup path %q to mount %q", cgroupPath, layout.mountPoint)
+    }
+    if !fileExists(candidate) {
+        return "", fmt.Errorf("cgroup memory file %q not found", candidate)
+    }
+    return candidate, nil
 }
 
 func buildMountedCgroupPath(mountPoint, mountRoot, cgroupPath, usageFile string) (string, bool) {
