@@ -90,8 +90,10 @@ func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string
 	defer cgroupFD.Close()
 
 	// Query all programs attached to this cgroup for this attach type.
-	// cilium/ebpf v0.21.0 uses link.QueryPrograms or raw BPF syscall.
-	// We use bpf.ProgQuery via the raw syscall wrapper.
+	// queryAttachedPrograms calls link.QueryPrograms (cilium/ebpf's
+	// typed wrapper around the BPF_PROG_QUERY syscall), so unsupported
+	// attach types or insufficient privileges are reported as errors
+	// from that helper.
 	progIDs, err := queryAttachedPrograms(cgroupFD.Fd(), attachType)
 	if err != nil {
 		// Not all attach types support querying; skip silently.
