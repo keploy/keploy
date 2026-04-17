@@ -8,8 +8,10 @@ package mockdb
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,5 +227,37 @@ func TestMockYamlIsIOCloser(t *testing.T) {
 	// Second Close must be safe (recorder may call it twice in edge paths).
 	if err := ys.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestGobMagicHeaderRejectsMismatch verifies the magic-header guard
+// catches files written by a different version. A pre-v1 file (no
+// header) or a future version with a different magic must fail fast
+// with a clear error rather than decoding into a corrupt *models.Mock.
+func TestGobMagicHeaderRejectsMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mocks.gob")
+
+	// Case 1: empty file → ReadFull returns an unexpected-EOF style
+	// error, which we surface as "read gob mock magic".
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readGobMocks(path); err == nil {
+		t.Fatalf("expected error on empty mocks.gob, got nil")
+	}
+
+	// Case 2: file with wrong magic bytes — truncate "keploy" to
+	// "XXXXXX" and check the readable error.
+	bad := append([]byte("XXXXXX-gob-v1\n"), []byte("body")...)
+	if err := os.WriteFile(path, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readGobMocks(path)
+	if err == nil {
+		t.Fatalf("expected error on bad magic, got nil")
+	}
+	if !strings.Contains(err.Error(), "unrecognized magic") {
+		t.Fatalf("expected 'unrecognized magic' in error, got: %v", err)
 	}
 }

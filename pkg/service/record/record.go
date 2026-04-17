@@ -34,6 +34,25 @@ type Recorder struct {
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
+
+	// cleanups is run in LIFO order from Start's defer. Downstream
+	// builds and internal subsystems register shutdown work here
+	// rather than each one type-asserting its own io.Closer into the
+	// store interfaces. Register with RegisterCleanup.
+	cleanupMu sync.Mutex
+	cleanups  []func() error
+}
+
+// RegisterCleanup appends a shutdown callback that Recorder.Start's
+// defer will drain in LIFO order. Thread-safe. Callbacks should be
+// idempotent — Recorder may be restarted in some flows (re-record).
+func (r *Recorder) RegisterCleanup(fn func() error) {
+	if fn == nil {
+		return
+	}
+	r.cleanupMu.Lock()
+	r.cleanups = append(r.cleanups, fn)
+	r.cleanupMu.Unlock()
 }
 
 // SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
@@ -75,21 +94,29 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
 
-	// Flush any async mockDB writer (e.g. the gob binary writer when
-	// KEPLOY_MOCK_FORMAT=gob) before this goroutine returns. A MockDB
-	// that doesn't need flushing simply won't implement io.Closer and
-	// the assertion is a no-op. The default yaml MockDB falls in that
-	// bucket; the gob variant drains its 4096-entry chan and closes
-	// the file. Without this, mocks in-flight at the moment of Ctrl-C
-	// are lost.
+	// Auto-register mockDB.Close if it implements io.Closer. The
+	// default yaml MockDB does not; the gob variant does. Registered
+	// via RegisterCleanup so it drains in LIFO order alongside any
+	// other subsystems the caller has registered (telemetry flush,
+	// mapping-DB sync, etc.).
 	if closer, ok := r.mockDB.(io.Closer); ok {
-		defer func() {
-			if err := closer.Close(); err != nil {
-				r.logger.Warn("mockDB Close returned an error; some queued mocks may not have been flushed to disk",
-					zap.Error(err))
-			}
-		}()
+		r.RegisterCleanup(closer.Close)
 	}
+
+	// Drain all registered cleanups in LIFO order on return. Errors
+	// are logged but do not abort subsequent cleanups — each subsystem
+	// gets its flush regardless of what came before.
+	defer func() {
+		r.cleanupMu.Lock()
+		cleanups := r.cleanups
+		r.cleanups = nil
+		r.cleanupMu.Unlock()
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if err := cleanups[i](); err != nil {
+				r.logger.Warn("record cleanup returned an error", zap.Error(err))
+			}
+		}
+	}()
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)

@@ -24,13 +24,40 @@ import (
 )
 
 // mockFormatGob is the on-disk extension for the binary gob mock
-// format, enabled via KEPLOY_MOCK_FORMAT=gob. The format is a stream
-// of gob-encoded *models.Mock (appendable without rewrite). Readers
-// auto-detect by checking mocks.gob first, falling back to mocks.yaml.
+// format, enabled via KEPLOY_MOCK_FORMAT=gob. The format is a magic
+// header followed by a single continuous gob stream of *models.Mock.
+// Readers auto-detect by checking mocks.gob first, falling back to
+// mocks.yaml.
 const mockFormatGob = "gob"
 
+// gobMockMagic is the version-tagged header written at the start of
+// every mocks.gob file. Readers reject files whose first bytes don't
+// match this constant. Bump the version suffix when a breaking change
+// to the encoded Mock struct forces a format break — old files then
+// fail fast at replay time with a clear error instead of silently
+// decoding to a corrupt struct.
+const gobMockMagic = "keploy-gob-v1\n"
+
+// configuredMockFormat holds the mock format selected via config file
+// (record.mockFormat). The env var KEPLOY_MOCK_FORMAT takes precedence
+// so ad-hoc runs can override the file without editing it.
+//
+// Written once at startup from the OSS CLI provider; read by useGobMockFormat.
+// No mutex — Go's package-var initialization barrier is sufficient.
+var configuredMockFormat string
+
+// SetConfiguredMockFormat is called by the OSS CLI after parsing the
+// config file so mockdb knows the file-selected format. Pass "" to
+// leave default (yaml).
+func SetConfiguredMockFormat(format string) {
+	configuredMockFormat = format
+}
+
 func useGobMockFormat() bool {
-	return os.Getenv("KEPLOY_MOCK_FORMAT") == mockFormatGob
+	if v := os.Getenv("KEPLOY_MOCK_FORMAT"); v != "" {
+		return v == mockFormatGob
+	}
+	return configuredMockFormat == mockFormatGob
 }
 
 type MockYaml struct {
@@ -471,10 +498,28 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	if err != nil {
 		return fmt.Errorf("open gob mock file: %w", err)
 	}
+	// Detect a fresh file vs an existing one. We only write the magic
+	// header on fresh files — re-opening an existing file (e.g., a
+	// previous session aborted mid-write) must not duplicate the
+	// header because the reader's single gob.Decoder would then see
+	// garbage after the first-session type table.
+	stat, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("stat gob mock file: %w", err)
+	}
 	ys.gobFile = f
 	// 256 KB buffer holds dozens of mocks before a syscall; bufio
 	// autoflushes at fill. Shutdown drains explicitly.
 	ys.gobBufw = bufio.NewWriterSize(f, 256*1024)
+	if stat.Size() == 0 {
+		if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
+			_ = f.Close()
+			ys.gobFile = nil
+			ys.gobBufw = nil
+			return fmt.Errorf("write gob magic: %w", werr)
+		}
+	}
 	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
 	ys.gobFilePath = filePath
 	return nil
@@ -495,32 +540,29 @@ func (ys *MockYaml) gobFlushAndClose() {
 }
 
 // gobWriteSync is the sync fallback when the async queue is full.
-// Holds the async writer mutex so our write doesn't interleave with
-// the background goroutine's output mid-encoding.
+// Reuses the async writer's open file + encoder under the mutex so
+// the type-table in the running gob stream stays consistent — the
+// reader uses a single gob.Decoder for the whole file, and creating
+// a fresh encoder here would emit a second type-table that the
+/// reader cannot resume across.
 func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	if err := os.MkdirAll(mockPath, 0o777); err != nil {
-		return fmt.Errorf("failed to create mock directory: %w", err)
-	}
-	gobFilePath := filepath.Join(mockPath, mockFileName+".gob")
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
-	if ys.gobBufw != nil {
-		_ = ys.gobBufw.Flush()
-	}
-	f, err := os.OpenFile(gobFilePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o666)
-	if err != nil {
-		return fmt.Errorf("failed to open gob mock file: %w", err)
-	}
-	defer f.Close()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	w := bufio.NewWriter(f)
-	enc := gob.NewEncoder(w)
-	if err := enc.Encode(mock); err != nil {
+	want := filepath.Join(mockPath, mockFileName+".gob")
+	if ys.gobFilePath != want || ys.gobFile == nil {
+		if err := ys.gobReopenLocked(mockPath, mockFileName); err != nil {
+			return err
+		}
+	}
+	if err := ys.gobEnc.Encode(mock); err != nil {
 		return fmt.Errorf("failed to encode mock gob: %w", err)
 	}
-	return w.Flush()
+	// Flush immediately so the "sync" semantics hold — by the time
+	// this returns, bytes are in the OS buffer, not just the bufio.
+	return ys.gobBufw.Flush()
 }
 
 // Close drains the async gob writer and flushes the file. Safe to
@@ -539,6 +581,17 @@ func (ys *MockYaml) Close() error {
 	case <-ys.gobDone:
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("timed out waiting for gob writer to flush")
+	}
+	// Operator visibility: if the async queue filled up during the
+	// session and the sync fallback fired, report the count so disk
+	// stalls / undersized queues are caught at post-run review
+	// instead of requiring the user to notice slower rps.
+	if overflows := ys.gobOverflows.Load(); overflows > 0 {
+		if ys.Logger != nil {
+			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
+				zap.Uint64("overflowedMocks", overflows),
+				zap.String("hint", "consider raising KEPLOY_MOCK_QUEUE if disk or encoding became a bottleneck"))
+		}
 	}
 	return nil
 }
@@ -561,7 +614,19 @@ func readGobMocks(path string) ([]*models.Mock, error) {
 		return nil, err
 	}
 	defer f.Close()
-	dec := gob.NewDecoder(bufio.NewReader(f))
+	br := bufio.NewReader(f)
+	// Verify the magic header. Files recorded before v1 did not emit
+	// a header; we reject them with a clear error rather than decoding
+	// a garbled Mock struct. Bump gobMockMagic to v2 when the on-disk
+	// format changes in a breaking way.
+	magic := make([]byte, len(gobMockMagic))
+	if _, err := io.ReadFull(br, magic); err != nil {
+		return nil, fmt.Errorf("read gob mock magic: %w (file may be truncated or not a keploy gob mock)", err)
+	}
+	if string(magic) != gobMockMagic {
+		return nil, fmt.Errorf("gob mock file %s: unrecognized magic %q (want %q) — the file was written by a different keploy version", path, magic, gobMockMagic)
+	}
+	dec := gob.NewDecoder(br)
 	var out []*models.Mock
 	for {
 		var m models.Mock
