@@ -337,12 +337,16 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// Create a channel to signal readiness of each server
 	readyChan := make(chan error, 1)
 
-	// start the proxy server
+	// start the proxy server. p.start is the sole writer of readyChan:
+	// it sends the startup error (or nil on success) exactly once on
+	// every code path — skipListener, listen failure, and successful
+	// listen. Do not send again here; readyChan is buffered size 1
+	// and a second send would block forever because the caller at
+	// line below only reads it once. Before this was fixed, the
+	// skipListener path leaked this goroutine at shutdown.
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		err := p.start(ctx, readyChan)
-
-		readyChan <- err
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
 			return err

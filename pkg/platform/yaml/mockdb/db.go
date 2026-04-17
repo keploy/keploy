@@ -720,7 +720,10 @@ func (ys *MockYaml) Close() error {
 	// session and the sync fallback fired, report the count so disk
 	// stalls / undersized queues are caught at post-run review
 	// instead of requiring the user to notice slower rps.
-	if overflows := ys.gobOverflows.Load(); overflows > 0 {
+	// Swap the overflow counter to zero atomically so re-record cycles
+	// (next Start on the same MockYaml) don't count this session's
+	// overflows again on their own Close.
+	if overflows := ys.gobOverflows.Swap(0); overflows > 0 {
 		if ys.Logger != nil {
 			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
 				zap.Uint64("overflowedMocks", overflows),
