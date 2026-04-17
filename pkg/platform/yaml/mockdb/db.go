@@ -80,6 +80,12 @@ type MockYaml struct {
 	gobBufw      *bufio.Writer
 	gobEnc       *gob.Encoder
 	gobOverflows atomic.Uint64
+	// gobClosed latches to true after Close() drains the writer. Further
+	// InsertMock calls return an error rather than enqueueing into a
+	// channel whose consumer has exited, which would otherwise cause the
+	// first 4096 mocks to buffer silently and then block/panic on flush.
+	// Re-recording flows should construct a fresh MockYaml.
+	gobClosed atomic.Bool
 }
 
 type gobWriteJob struct {
@@ -413,6 +419,9 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 // disk. Queue-full falls back to synchronous write so mocks are never
 // dropped — tracked via gobOverflows for observability.
 func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
+	if ys.gobClosed.Load() {
+		return fmt.Errorf("gob mock writer is closed; construct a new MockYaml for the next recording session")
+	}
 	ys.ensureGobWriter(ctx)
 	job := gobWriteJob{mock: mock, testSet: mockPath, filename: mockFileName}
 	select {
@@ -567,8 +576,14 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 
 // Close drains the async gob writer and flushes the file. Safe to
 // call multiple times. Call at record shutdown so all queued mocks
-// are on disk before the process exits.
+// are on disk before the process exits. Once Close has run, further
+// InsertMock calls return an error — re-recording sessions must
+// construct a fresh MockYaml instance.
 func (ys *MockYaml) Close() error {
+	// Latch the closed flag first so any concurrent InsertMock fails
+	// fast rather than enqueueing into a channel whose consumer is
+	// about to exit.
+	ys.gobClosed.Store(true)
 	if ys.gobStop == nil {
 		return nil
 	}

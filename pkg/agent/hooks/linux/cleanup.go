@@ -73,8 +73,12 @@ func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string)
 }
 
 // detachOrphanedByName iterates all BPF programs of the given attach type on
-// the cgroup, finds ones matching the expected name, and detaches any whose
-// owning process is no longer alive.
+// the cgroup, finds ones matching the expected name, and detaches them.
+// It does not (and cannot, via BPF_PROG_GET_INFO_BY_FD) verify per-program
+// creator PID or liveness; the safety guarantee comes from the caller
+// invoking it only after DetectAndCleanOrphanedCgroupPrograms has confirmed
+// no other keploy process is alive — a name match at that point is
+// definitionally an orphan from a crashed prior run.
 func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string, attachType ebpf.AttachType) int {
 	// Open the cgroup directory to get an FD for querying.
 	cgroupFD, err := os.Open(cgroupPath)
@@ -114,18 +118,13 @@ func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string
 			continue
 		}
 
-		// This program matches our expected name. Check if the owning
-		// process is still alive. If the program was created by a process
-		// that has since exited, it's an orphan.
-		//
-		// BPF programs don't directly store the creator PID in a queryable
-		// field. Instead, we check if ANY keploy process is running.
-		// If no keploy process owns this program (i.e., we're the only
-		// keploy process starting up), it's safe to detach.
-		//
-		// The caller (CleanupStaleAgents) already kills stale agent
-		// processes before we reach here. So if we find a matching program,
-		// it's from a process that's already dead.
+		// Name-match is the only check we can do — the BPF program info
+		// exposed via BPF_PROG_GET_INFO_BY_FD does not include a creator
+		// PID. The global no-other-keploy-process gate enforced by the
+		// caller (DetectAndCleanOrphanedCgroupPrograms) is what makes
+		// this safe: if we are the only live keploy and we find a
+		// program with a keploy-reserved name attached to the cgroup,
+		// it is by definition an orphan from a crashed prior run.
 
 		logger.Info("Detaching orphaned BPF program from cgroup",
 			zap.String("program", name),
@@ -133,9 +132,11 @@ func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string
 			zap.String("attachType", attachType.String()))
 
 		if err := detachProgramFromCgroup(cgroupFD.Fd(), progID, attachType); err != nil {
-			logger.Warn("Failed to detach orphaned BPF program",
+			logger.Debug("Failed to detach orphaned BPF program; re-run with elevated privileges or check cgroup permissions and retry, otherwise remove the stale attachment manually with bpftool",
 				zap.String("program", name),
 				zap.Uint32("progID", progID),
+				zap.String("cgroupPath", cgroupPath),
+				zap.String("attachType", attachType.String()),
 				zap.Error(err))
 			continue
 		}

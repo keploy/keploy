@@ -115,7 +115,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		r.cleanupMu.Unlock()
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			if err := cleanups[i](); err != nil {
-				r.logger.Warn("record cleanup returned an error", zap.Error(err))
+				// A cleanup error usually means a mock-file flush or
+				// telemetry-drain returned non-nil — the session data
+				// is still on disk (the writer buffers drain before
+				// Close returns err on inner failures), but the tail
+				// batch may be incomplete. Log at Error so the
+				// operator sees it on exit summary; include cleanup
+				// index so `record cleanup N failed` is actionable
+				// against the known RegisterCleanup call sites.
+				r.logger.Error("record cleanup returned an error; inspect the mock file for a truncated tail and check disk space/permissions at the recording output directory",
+					zap.Int("cleanupIndex", i),
+					zap.Error(err))
 			}
 		}
 	}()
