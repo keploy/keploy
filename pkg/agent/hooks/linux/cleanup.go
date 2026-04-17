@@ -181,9 +181,16 @@ func detachProgramFromCgroup(cgroupFD uintptr, progID uint32, attachType ebpf.At
 }
 
 // CleanOrphanedBPFPins removes stale pinned BPF objects from /sys/fs/bpf/.
-// Only removes keploy-specific pins. Safe to call even when other keploy
-// instances are running (the caller checks hasOtherKeployProcesses first).
+// Only removes keploy-specific pins. Gated internally on
+// HasOtherKeployProcesses so a live keploy sibling cannot have its pins
+// yanked out from under it — earlier revisions delegated this check to
+// the caller, which was fragile because every new call site had to
+// remember to re-enforce it.
 func CleanOrphanedBPFPins(logger *zap.Logger) {
+	if HasOtherKeployProcesses(os.Getpid()) {
+		logger.Debug("Skipping BPF pin cleanup because another keploy process is still running")
+		return
+	}
 	patterns := []string{
 		"/sys/fs/bpf/keploy_sock*",
 		"/sys/fs/bpf/keploy_capture_rb",

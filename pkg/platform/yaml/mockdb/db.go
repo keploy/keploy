@@ -627,26 +627,27 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // re-record cycles (multiple Recorder.Start on the same mockDB
 // instance) work without dropping mocks.
 func (ys *MockYaml) Close() error {
+	// Hold the lifecycle lock for the entire teardown. While we wait
+	// for the writer goroutine to drain, no concurrent ensureGobWriter
+	// can run — ys.gobRunning stays true and ys.gobQueue / ys.gobStop
+	// / ys.gobDone cannot be reassigned out from under the draining
+	// goroutine. A second concurrent Close() blocks on this same lock
+	// and observes gobRunning=false after the first Close completes,
+	// so close(gobStop) is never called twice.
 	ys.gobLifecycleMu.Lock()
+	defer ys.gobLifecycleMu.Unlock()
 	if !ys.gobRunning {
-		ys.gobLifecycleMu.Unlock()
 		return nil
 	}
-	stop := ys.gobStop
-	done := ys.gobDone
-	ys.gobRunning = false
-	ys.gobLifecycleMu.Unlock()
-
+	close(ys.gobStop)
 	select {
-	case <-stop:
-	default:
-		close(stop)
-	}
-	select {
-	case <-done:
+	case <-ys.gobDone:
 	case <-time.After(5 * time.Second):
+		// Leave gobRunning=true so a retry of Close can still complete
+		// the shutdown rather than racing with a half-drained writer.
 		return fmt.Errorf("timed out waiting for gob writer to flush")
 	}
+	ys.gobRunning = false
 	// Operator visibility: if the async queue filled up during the
 	// session and the sync fallback fired, report the count so disk
 	// stalls / undersized queues are caught at post-run review
