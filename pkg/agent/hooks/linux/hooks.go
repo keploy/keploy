@@ -187,15 +187,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// Detect and clean orphaned BPF programs from crashed previous runs.
-	// This must happen BEFORE attaching our new programs to avoid conflicts.
-	// Only cleans programs whose owning process is dead and whose name
-	// matches known keploy program names. Safe when other keploy instances
-	// are running — hasOtherKeployProcesses check happens in the caller.
-	if cleaned := DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath); cleaned > 0 {
-		h.logger.Info("Cleaned orphaned cgroup BPF programs before attaching new ones",
-			zap.Int("cleaned", cleaned))
-	}
+	// Detect and clean orphaned BPF programs from crashed previous
+	// runs. This must happen BEFORE attaching our new programs to
+	// avoid "program already attached" failures. Safety is enforced
+	// inside the helper: it name-matches keployBPFProgNames and
+	// gates on HasOtherKeployProcesses(os.Getpid()) so it cannot
+	// detach programs belonging to a live keploy sibling. The helper
+	// also emits its own Info log when it cleans anything, so no
+	// log is needed here.
+	DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath)
 
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{

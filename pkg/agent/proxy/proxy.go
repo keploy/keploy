@@ -144,6 +144,21 @@ func isPostgresSSLRequest(b []byte) bool {
 		b[4] == 0x04 && b[5] == 0xd2 && b[6] == 0x16 && b[7] == 0x2f
 }
 
+// isPostgresSSLRequestPrefix reports whether the first 5 bytes of a
+// connection match the Postgres SSLRequest packet's prefix (length=8
+// + first byte of the 80877103 code). This is the widest prefix we
+// can detect after a 5-byte Peek — used to decide whether it's worth
+// blocking on a second Peek(8) to verify the full signature. The
+// prefix 00 00 00 08 04 does not collide with TLS (0x16 ...), any
+// printable-ASCII protocol greeting, or any PG protocol message
+// other than SSLRequest, so this check is effectively exact.
+func isPostgresSSLRequestPrefix(b []byte) bool {
+	if len(b) < 5 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x00 && b[3] == 0x08 && b[4] == 0x04
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
@@ -770,11 +785,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	reader := bufio.NewReader(srcConn)
-	// Peek 8 bytes: enough for both the TLS record header (first 5 bytes)
-	// and the Postgres SSLRequest (exactly 8 bytes). Any error — including
-	// io.EOF — is treated exactly as the old 5-byte path did: return up to
-	// the caller rather than trying to interpret a truncated first chunk.
-	testBuffer, err := reader.Peek(8)
+	// Peek 5 bytes first — exactly what the TLS record header needs,
+	// and the widest Peek we can do without risking a deadlock on
+	// short plaintext greetings (e.g. Redis 'PING\r\n' is 6 bytes and
+	// some protocols send <8 bytes then wait for a server reply).
+	testBuffer, err := reader.Peek(5)
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
@@ -805,6 +820,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// not re-originate the upstream connection, or upstreams accepting
 	// direct TLS). End-to-end MITM against a vanilla Postgres still
 	// goes through the parser-driven TLSUpgrader path.
+	//
+	// We only extend the Peek to 8 bytes when the first 5 bytes match
+	// the SSLRequest prefix (`00 00 00 08 04`). That prefix is unique
+	// enough to rule out TLS (0x16 ...), CONNECT ("CONN"), and other
+	// common greetings, so the extra 3-byte wait is deterministic for
+	// exactly the one client that's actually speaking SSLRequest.
+	// This keeps the short-greeting deadlock (Redis PING, memcached
+	// 'quit', etc.) off the default code path.
+	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequestPrefix(testBuffer) {
+		sslBuf, perr := reader.Peek(8)
+		if perr != nil {
+			utils.LogError(p.logger, perr, "client started with a Postgres SSLRequest prefix (00 00 00 08 04) but did not deliver the full 8-byte packet; the connection likely dropped mid-handshake — verify the client is a standard libpq/pgx/pq and check for a mismatched sslmode or an intermediary terminating the TCP stream",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
+			return perr
+		}
+		testBuffer = sslBuf
+	}
 	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
 		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
 			zap.Int("sourcePort", sourcePort),
