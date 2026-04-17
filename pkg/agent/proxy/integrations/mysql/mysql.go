@@ -84,7 +84,7 @@ func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	caps := uint32(body[0]) | uint32(body[1])<<8 |
 		uint32(body[2])<<16 | uint32(body[3])<<24
 	const (
-		clientProto41   = 0x00000200
+		clientProto41    = 0x00000200
 		clientPluginAuth = 0x00080000
 	)
 	const requiredBits = clientProto41 | clientPluginAuth

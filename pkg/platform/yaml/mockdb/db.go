@@ -544,7 +544,7 @@ func (ys *MockYaml) gobFlushAndClose() {
 // the type-table in the running gob stream stays consistent — the
 // reader uses a single gob.Decoder for the whole file, and creating
 // a fresh encoder here would emit a second type-table that the
-/// reader cannot resume across.
+// / reader cannot resume across.
 func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()

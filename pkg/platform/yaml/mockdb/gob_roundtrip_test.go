@@ -159,11 +159,11 @@ func TestRoundTrip_Mongo(t *testing.T) {
 		Kind:    models.Mongo,
 		Spec: models.MockSpec{
 			MongoRequests: []models.MongoRequest{{
-				Header: &models.MongoHeader{Length: 50, RequestID: 1, ResponseTo: 0, Opcode: wiremessage.OpMsg},
+				Header:  &models.MongoHeader{Length: 50, RequestID: 1, ResponseTo: 0, Opcode: wiremessage.OpMsg},
 				Message: &models.MongoOpMessage{FlagBits: 0, Sections: []string{`{"find":"c"}`}, Checksum: 0},
 			}},
 			MongoResponses: []models.MongoResponse{{
-				Header: &models.MongoHeader{Length: 60, RequestID: 2, ResponseTo: 1, Opcode: wiremessage.OpMsg},
+				Header:  &models.MongoHeader{Length: 60, RequestID: 2, ResponseTo: 1, Opcode: wiremessage.OpMsg},
 				Message: &models.MongoOpMessage{FlagBits: 0, Sections: []string{`{"ok":1}`}, Checksum: 0},
 			}},
 		},
