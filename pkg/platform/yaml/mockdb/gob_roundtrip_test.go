@@ -211,12 +211,14 @@ func TestRoundTrip_MultipleMocksAppend(t *testing.T) {
 	}
 }
 
-// TestMockYamlIsIOCloser guards the type-assertion dance in
-// pkg/service/record/record.go's Start(): the recorder's defer does
-// `if c, ok := r.mockDB.(io.Closer); ok { defer c.Close() }`. If
-// MockYaml stops implementing io.Closer by accident, the async gob
-// writer's queued mocks would be lost on Ctrl-C without any build
-// or runtime error — only this test catches it.
+// TestMockYamlIsIOCloser guards the recorder shutdown contract in
+// pkg/service/record/record.go's Start(): the recorder type-asserts
+// mockDB against io.Closer and registers closer.Close via
+// RegisterCleanup, and a dedicated deferred block drains those
+// cleanups during shutdown (including on Ctrl-C). If MockYaml stops
+// implementing io.Closer by accident, the async gob writer's queued
+// mocks would be lost without any build or runtime error — only this
+// test catches it.
 func TestMockYamlIsIOCloser(t *testing.T) {
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "mocks")

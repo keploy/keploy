@@ -123,7 +123,7 @@ type MockYaml struct {
 }
 
 type gobWriteJob struct {
-	mock     *models.Mock
+	mock *models.Mock
 	// testSetPath is the full directory path — "<MockPath>/<testSetID>"
 	// — not just the test-set identifier. Kept as a full path because
 	// gobReopenLocked mkdir's it and reuses it in filepath.Join.
@@ -1033,16 +1033,23 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 		mockFileName = ys.MockName
 	}
 
-	// Refuse any testSetID that would escape the configured mocks
-	// directory via ".." or by starting with a path separator. A
-	// re-record request with testSetID="../../etc" could otherwise
-	// turn os.Remove into an arbitrary-file delete; guard before we
-	// touch the filesystem.
-	cleanedID := filepath.Clean(testSetID)
-	if cleanedID != testSetID || strings.Contains(cleanedID, "..") || filepath.IsAbs(cleanedID) {
-		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a single-segment relative name under the mocks output directory", testSetID)
+	// Refuse any testSetID that could escape the configured mocks
+	// directory. The test-set layout is "<MockPath>/<testSetID>/mocks.*",
+	// so the ID must be a single non-empty path segment with no
+	// separators and no "." / ".." components. A re-record request
+	// with testSetID="../../etc" or "a/b" could otherwise turn
+	// os.Remove into an arbitrary-file delete or pick up a different
+	// test-set's directory; guard before we touch the filesystem.
+	if testSetID == "" ||
+		testSetID == "." ||
+		testSetID == ".." ||
+		strings.ContainsAny(testSetID, "/\\") ||
+		strings.Contains(testSetID, "..") ||
+		filepath.IsAbs(testSetID) ||
+		filepath.Clean(testSetID) != testSetID {
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no '.' or '..') under the mocks output directory", testSetID)
 	}
-	path := filepath.Join(ys.MockPath, cleanedID)
+	path := filepath.Join(ys.MockPath, testSetID)
 
 	// Delete both the yaml and the gob mock files for this test set so a
 	// mocks-only refresh on a previously-gob-recorded session cannot
