@@ -70,22 +70,25 @@ type MockYaml struct {
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
 	// goroutines never block on disk or gob encoding. Sync fallback
 	// activates when the queue is full so no mock is dropped.
-	gobOnce      sync.Once
-	gobQueue     chan gobWriteJob
-	gobStop      chan struct{}
-	gobDone      chan struct{}
-	gobMu        sync.Mutex
-	gobFilePath  string
-	gobFile      *os.File
-	gobBufw      *bufio.Writer
-	gobEnc       *gob.Encoder
-	gobOverflows atomic.Uint64
-	// gobClosed latches to true after Close() drains the writer. Further
-	// InsertMock calls return an error rather than enqueueing into a
-	// channel whose consumer has exited, which would otherwise cause the
-	// first 4096 mocks to buffer silently and then block/panic on flush.
-	// Re-recording flows should construct a fresh MockYaml.
-	gobClosed atomic.Bool
+	//
+	// The writer lifecycle is restartable across Close/InsertMock
+	// cycles so that re-record flows (same Recorder / same mockDB,
+	// multiple Start calls) flush+close between sessions but still
+	// accept mocks for the next session. gobLifecycleMu guards the
+	// transition between "running" and "quiesced"; gobRunning tracks
+	// which state we are in. Do not use sync.Once here — it cannot be
+	// reset, which was the original re-record bug.
+	gobLifecycleMu sync.Mutex
+	gobRunning     bool
+	gobQueue       chan gobWriteJob
+	gobStop        chan struct{}
+	gobDone        chan struct{}
+	gobMu          sync.Mutex
+	gobFilePath    string
+	gobFile        *os.File
+	gobBufw        *bufio.Writer
+	gobEnc         *gob.Encoder
+	gobOverflows   atomic.Uint64
 }
 
 type gobWriteJob struct {
@@ -419,9 +422,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 // disk. Queue-full falls back to synchronous write so mocks are never
 // dropped — tracked via gobOverflows for observability.
 func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	if ys.gobClosed.Load() {
-		return fmt.Errorf("gob mock writer is closed; construct a new MockYaml for the next recording session")
-	}
 	ys.ensureGobWriter(ctx)
 	job := gobWriteJob{mock: mock, testSet: mockPath, filename: mockFileName}
 	select {
@@ -435,13 +435,22 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	}
 }
 
+// ensureGobWriter starts the async writer goroutine if it is not
+// already running. Safe to call repeatedly — both within one session
+// (as an idempotent init) and across sessions (after a Close, the
+// next InsertMock re-starts a fresh goroutine with fresh channels,
+// so the same MockYaml instance survives re-record cycles).
 func (ys *MockYaml) ensureGobWriter(ctx context.Context) {
-	ys.gobOnce.Do(func() {
-		ys.gobQueue = make(chan gobWriteJob, 4096)
-		ys.gobStop = make(chan struct{})
-		ys.gobDone = make(chan struct{})
-		go ys.gobWriterLoop(ctx)
-	})
+	ys.gobLifecycleMu.Lock()
+	defer ys.gobLifecycleMu.Unlock()
+	if ys.gobRunning {
+		return
+	}
+	ys.gobQueue = make(chan gobWriteJob, 4096)
+	ys.gobStop = make(chan struct{})
+	ys.gobDone = make(chan struct{})
+	ys.gobRunning = true
+	go ys.gobWriterLoop(ctx)
 }
 
 func (ys *MockYaml) gobWriterLoop(ctx context.Context) {
@@ -454,8 +463,10 @@ func (ys *MockYaml) gobWriterLoop(ctx context.Context) {
 				return
 			}
 			if err := ys.gobWriteOne(job); err != nil {
-				utils.LogError(ys.Logger, err, "async gob mock writer failed — continuing",
-					zap.String("testSet", job.testSet), zap.String("mockName", job.mock.Name))
+				utils.LogError(ys.Logger, err, "async gob mock writer failed for one mock — continuing with the rest; check disk space on the mocks output directory, verify write permissions on the test-set path, and re-run with --debug to see the exact failing file path. To bypass gob while triaging, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
+					zap.String("testSet", job.testSet),
+					zap.String("mockName", job.mock.Name),
+					zap.String("mockOutputDir", ys.MockPath))
 			}
 		case <-ctx.Done():
 			ys.drainAndClose()
@@ -575,25 +586,29 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 }
 
 // Close drains the async gob writer and flushes the file. Safe to
-// call multiple times. Call at record shutdown so all queued mocks
-// are on disk before the process exits. Once Close has run, further
-// InsertMock calls return an error — re-recording sessions must
-// construct a fresh MockYaml instance.
+// call multiple times, and safe to call between record sessions —
+// the writer goroutine exits after flushing, and the next InsertMock
+// starts a fresh goroutine via ensureGobWriter. This is what makes
+// re-record cycles (multiple Recorder.Start on the same mockDB
+// instance) work without dropping mocks.
 func (ys *MockYaml) Close() error {
-	// Latch the closed flag first so any concurrent InsertMock fails
-	// fast rather than enqueueing into a channel whose consumer is
-	// about to exit.
-	ys.gobClosed.Store(true)
-	if ys.gobStop == nil {
+	ys.gobLifecycleMu.Lock()
+	if !ys.gobRunning {
+		ys.gobLifecycleMu.Unlock()
 		return nil
 	}
+	stop := ys.gobStop
+	done := ys.gobDone
+	ys.gobRunning = false
+	ys.gobLifecycleMu.Unlock()
+
 	select {
-	case <-ys.gobStop:
+	case <-stop:
 	default:
-		close(ys.gobStop)
+		close(stop)
 	}
 	select {
-	case <-ys.gobDone:
+	case <-done:
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("timed out waiting for gob writer to flush")
 	}
@@ -927,18 +942,19 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
-	// Read the mocks from the yaml file
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
-		return err
+	// Delete both the yaml and the gob mock files for this test set so a
+	// mocks-only refresh on a previously-gob-recorded session cannot
+	// leave a stale mocks.gob on disk (GetFilteredMocks prefers the gob
+	// variant when present). Missing files are not an error.
+	candidates := []string{
+		filepath.Join(path, mockFileName+".yaml"),
+		filepath.Join(path, mockFileName+".gob"),
 	}
-
-	// Delete all contents of the mocks directory
-	err = os.RemoveAll(mockPath)
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
-		return err
+	for _, candidate := range candidates {
+		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+			utils.LogError(ys.Logger, err, "failed to delete stale mock file during refresh", zap.String("path", candidate))
+			return err
+		}
 	}
 
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
