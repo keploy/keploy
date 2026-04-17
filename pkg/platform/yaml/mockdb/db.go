@@ -688,8 +688,16 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			if mock.Spec.Metadata["type"] == "config" {
 				continue
 			}
+			// Mirror the YAML GetFilteredMocks semantics: the listed
+			// kinds are "unfiltered config" mocks (returned by
+			// GetUnFilteredMocks) — everything else (Mongo, PostgresV2
+			// when used per-test, gRPC, etc.) is a per-testcase "tcs"
+			// mock. Default to include; exclude only the unfiltered
+			// kinds so we do not silently drop Mongo in gob mode.
 			switch mock.Kind {
-			case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+			case "Generic", "Postgres", "Http", "Http2", "Redis", "MySQL", "DNS":
+				// unfiltered — belongs to GetUnFilteredMocks
+			default:
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -801,13 +809,18 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
+			// Mirror the YAML GetUnFilteredMocks semantics: a mock
+			// belongs here only if it is explicitly tagged "config" or
+			// if its kind is one of the listed unfiltered kinds. Other
+			// kinds (Mongo, gRPC) stay out — they are per-testcase
+			// mocks returned by GetFilteredMocks.
 			isConfig := mock.Spec.Metadata["type"] == "config"
 			isUnfilteredKind := false
 			switch mock.Kind {
 			case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
 				isUnfilteredKind = true
 			}
-			if isConfig || !isUnfilteredKind {
+			if isConfig || isUnfilteredKind {
 				configMocks = append(configMocks, mock)
 			}
 		}
