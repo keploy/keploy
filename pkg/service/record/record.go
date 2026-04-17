@@ -94,8 +94,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
 
-	// Auto-register mockDB.Close if it implements io.Closer. The
-	// default yaml MockDB does not; the gob variant does. Registered
+	// Auto-register mockDB.Close if it implements io.Closer. MockYaml
+	// implements Close unconditionally: in gob mode it drains the
+	// async writer and flushes the file; in yaml mode it is a no-op
+	// (gobStop is nil, so Close returns nil immediately). Registered
 	// via RegisterCleanup so it drains in LIFO order alongside any
 	// other subsystems the caller has registered (telemetry flush,
 	// mapping-DB sync, etc.).

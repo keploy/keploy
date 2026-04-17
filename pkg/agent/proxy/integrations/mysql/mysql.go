@@ -75,10 +75,18 @@ func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	if 4+pktLen > len(buf) {
 		return false
 	}
-	body := buf[4:]
+	// Slice to exactly the first MySQL packet's body — buf may carry
+	// subsequent packets that would otherwise make the reserved-bytes
+	// check pass spuriously when pktLen < 32.
+	body := buf[4 : 4+pktLen]
 	// Server greeting: starts with protocol version 0x0a (10).
 	if body[0] == 0x0a {
 		return true
+	}
+	// Client HandshakeResponse41 must fit the 4 caps bytes within this
+	// packet's own body.
+	if pktLen < 4 {
+		return false
 	}
 	// Client HandshakeResponse41: first 4 body bytes = capability flags.
 	caps := uint32(body[0]) | uint32(body[1])<<8 |
@@ -92,7 +100,9 @@ func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 		return false
 	}
 	// Sanity: the 23 reserved bytes at body[9:32] must all be zero.
-	if len(body) < 32 {
+	// Length check uses pktLen (== len(body)) so multi-packet buffers
+	// can't satisfy this with bytes from the next packet.
+	if pktLen < 32 {
 		return false
 	}
 	for _, b := range body[9:32] {

@@ -797,13 +797,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Consume the 8-byte SSLRequest from the buffered reader so the
 		// downstream parser never sees it.
 		if _, derr := reader.Discard(8); derr != nil {
-			utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes")
+			utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes; the 8-byte SSLRequest was peeked but the bufio reader could not be advanced. This usually means the underlying TCP connection was reset between peek and discard — retry the client connection, and if it persists capture a packet trace between the client and the proxy listener",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
 			return derr
 		}
 		// Reply 'S' (TLS accepted). Write straight to the underlying TCP
 		// connection; writes bypass the buffered reader.
 		if _, werr := srcConn.Write([]byte{'S'}); werr != nil {
-			utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client")
+			utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client; the proxy accepted the SSLRequest but could not send the one-byte acknowledgment. Verify the client is still connected (not a half-closed stream), check for client-side read timeouts shorter than the proxy's accept latency, and confirm no firewall is dropping 1-byte segments",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
 			return werr
 		}
 		// Re-peek for the TLS ClientHello. The client app sends it as soon
@@ -815,7 +819,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return nil
 			}
 			if err != io.EOF {
-				utils.LogError(p.logger, err, "failed to peek TLS ClientHello after Postgres SSLRequest accept")
+				utils.LogError(p.logger, err, "failed to peek TLS ClientHello after replying 'S' to the Postgres SSLRequest; the client did not deliver a TLS record. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the post-'S' bytes to confirm they look like a TLS ClientHello (first byte 0x16)",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr))
 				return err
 			}
 		}

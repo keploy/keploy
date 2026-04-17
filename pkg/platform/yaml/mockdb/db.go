@@ -590,7 +590,8 @@ func (ys *MockYaml) Close() error {
 		if ys.Logger != nil {
 			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
 				zap.Uint64("overflowedMocks", overflows),
-				zap.String("hint", "consider raising KEPLOY_MOCK_QUEUE if disk or encoding became a bottleneck"))
+				zap.Int("queueCapacity", cap(ys.gobQueue)),
+				zap.String("hint", "queue capacity is the hard-coded channel size in ensureGobWriter; raise it in code if disk/encoding is the bottleneck"))
 		}
 	}
 	return nil
