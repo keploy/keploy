@@ -526,6 +526,14 @@ func (ys *MockYaml) gobWriterLoop() {
 				return
 			}
 			if err := ys.gobWriteOne(job); err != nil {
+				// Accumulate into gobFlushErr so Close() surfaces any
+				// steady-state encode failures to the recorder's
+				// deferred cleanup log — previously these errors were
+				// only logged and Close() could still return nil even
+				// when one or more mocks had been dropped mid-session.
+				ys.gobMu.Lock()
+				ys.gobFlushErr = errors.Join(ys.gobFlushErr, err)
+				ys.gobMu.Unlock()
 				utils.LogError(ys.Logger, err, "async gob mock writer failed for one mock — continuing with the rest; check disk space on the mocks output directory, verify write permissions on the test-set path, and re-run with --debug to see the exact failing file path. To bypass gob while triaging, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
 					zap.String("testSetPath", job.testSetPath),
 					zap.String("mockName", job.mock.Name),
@@ -636,8 +644,13 @@ func (ys *MockYaml) gobFlushAndClose() error {
 	ys.gobBufw = nil
 	ys.gobEnc = nil
 	combined := errors.Join(flushErr, closeErr)
-	ys.gobFlushErr = combined
-	return combined
+	// Join with any encode/write errors that gobWriterLoop or
+	// drainAndClose already accumulated, rather than overwriting
+	// them. Otherwise a successful final flush after earlier drops
+	// would mask the real mid-session failures and Close() would
+	// return nil on a partially-lost session.
+	ys.gobFlushErr = errors.Join(ys.gobFlushErr, combined)
+	return ys.gobFlushErr
 }
 
 // gobWriteSync is the sync fallback when the async queue is full.

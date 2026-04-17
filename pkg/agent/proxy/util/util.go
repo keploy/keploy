@@ -185,12 +185,20 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 // wire bytes already arrive pre-framed on an internal channel (e.g. an
 // eBPF ringbuf feeder). When a conn passed to ReadBuffConn satisfies
 // this interface, the ReadBytes+goroutine hop is bypassed — chunks
-// forward directly from DirectChunks() into bufferChannel.
+// forward from DirectChunks() into bufferChannel (with a defensive
+// copy so reusable backing arrays in the producer are safe).
 //
 // HasPending reports whether Read() carry-over bytes exist (typically
-// a Prepend'd handshake peek). The fast path drains those via a single
-// Read before switching to the chunk channel so the parser sees bytes
-// in original order.
+// a Prepend'd handshake peek). The fast path drains those via a loop
+// of Read calls before switching to the chunk channel so the parser
+// sees bytes in original order.
+//
+// Slice-ownership contract: implementations MAY recycle the backing
+// array of a []byte they push onto DirectChunks() as soon as the
+// next chunk is produced. ReadBuffConn therefore copies each chunk
+// before handing it to the parser side. New implementations do not
+// need to pre-allocate fresh slices per chunk; they can reuse a
+// scratch buffer.
 //
 // Real net.Conns (TCP/TLS/sockmap-ingress) do not implement this
 // interface and continue through the ReadBytes loop unchanged.
@@ -260,8 +268,19 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 					}
 					return
 				}
+				// Defensive copy. The DirectChunkReader interface
+				// does not mandate chunk-slice ownership semantics,
+				// and some implementations (ring-buffer backed
+				// carry-over readers, reusable scratch buffers) may
+				// recycle the backing array as soon as the next
+				// chunk is produced. The normal ReadBytes path above
+				// allocates a fresh buffer per read; mirror that so
+				// downstream parsers cannot observe bytes mutating
+				// under them.
+				out := make([]byte, len(chunk))
+				copy(out, chunk)
 				select {
-				case bufferChannel <- chunk:
+				case bufferChannel <- out:
 				case <-ctx.Done():
 					return
 				}
