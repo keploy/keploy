@@ -107,6 +107,12 @@ type MockYaml struct {
 	gobBufw        *bufio.Writer
 	gobEnc         *gob.Encoder
 	gobOverflows   atomic.Uint64
+	// gobStopClosed is true after Close() has invoked close(gobStop).
+	// A subsequent Close() that arrives after the first one timed out
+	// waiting for gobDone must not close the channel a second time
+	// (that would panic). Cleared when the writer finally exits and
+	// we transition back to gobRunning=false.
+	gobStopClosed bool
 	// gobFlushErr holds the terminal flush/close error from
 	// gobFlushAndClose so that Close() can surface it to its caller
 	// (and therefore to the Recorder.Start deferred-cleanup logger)
@@ -639,15 +645,24 @@ func (ys *MockYaml) Close() error {
 	if !ys.gobRunning {
 		return nil
 	}
-	close(ys.gobStop)
+	// Signal the writer to exit. Guarded by gobStopClosed so a retry
+	// after a timeout cannot double-close the channel (which would
+	// panic). The writer's stopClosed+running combination is the
+	// "teardown in progress" state.
+	if !ys.gobStopClosed {
+		close(ys.gobStop)
+		ys.gobStopClosed = true
+	}
 	select {
 	case <-ys.gobDone:
 	case <-time.After(5 * time.Second):
-		// Leave gobRunning=true so a retry of Close can still complete
-		// the shutdown rather than racing with a half-drained writer.
+		// Leave gobRunning=true + gobStopClosed=true so a retry of
+		// Close enters this function, skips the already-closed stop,
+		// and just waits on gobDone again.
 		return fmt.Errorf("timed out waiting for gob writer to flush")
 	}
 	ys.gobRunning = false
+	ys.gobStopClosed = false
 	// Operator visibility: if the async queue filled up during the
 	// session and the sync fallback fired, report the count so disk
 	// stalls / undersized queues are caught at post-run review
@@ -759,7 +774,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
-		return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime), nil
+		return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false), nil
 	}
 
 	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
@@ -874,7 +889,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 				configMocks = append(configMocks, mock)
 			}
 		}
-		return pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime), nil
+		return pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime, false), nil
 	}
 
 	mockPath, err := yaml.ValidatePath(path + "/" + mockName + ".yaml")
@@ -909,7 +924,6 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 
 			for _, mock := range mocks {
 				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-
 				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
@@ -987,7 +1001,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	}
 	for _, candidate := range candidates {
 		if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
-			utils.LogError(ys.Logger, err, "failed to delete stale mock file during refresh", zap.String("path", candidate))
+			utils.LogError(ys.Logger, err, "failed to delete stale mock file during refresh; check that the file is not read-only and that the current user owns the mocks output directory, ensure no other keploy process or editor has an open handle on it, then retry — missing files are tolerated, only permission/ownership errors surface here", zap.String("path", candidate))
 			return err
 		}
 	}

@@ -414,7 +414,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
-	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
+	if p.skipListener {
+		p.logger.Info("Proxy TCP listener intentionally not bound (SkipProxyListener is set); DNS and session services are live but no port is accepting connections")
+	} else {
+		p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
+	}
 	return nil
 }
 
