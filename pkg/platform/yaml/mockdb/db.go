@@ -768,9 +768,12 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			// Shared classifier with GetUnFilteredMocks and with the
 			// YAML read path. Kinds that belong to the unfiltered
 			// bucket (HTTP, Postgres, Redis, ...) are excluded here;
-			// per-testcase kinds (Mongo, gRPC, PostgresV2-as-tcs) fall
-			// through to the append.
-			if !isUnfilteredMockKind(mock.Kind) {
+			// per-testcase kinds (Mongo, gRPC, ...) fall through to
+			// the append. PostgresV2 is a special case: YAML's
+			// GetFilteredMocks keeps it in the tcs bucket while
+			// GetUnFilteredMocks also picks it up as unfiltered, so
+			// the YAML reader yields it from both. Mirror that here.
+			if !isUnfilteredMockKind(mock.Kind) || mock.Kind == models.PostgresV2 {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}

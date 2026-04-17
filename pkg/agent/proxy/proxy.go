@@ -822,12 +822,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				p.logger.Debug("Postgres client closed conn after SSLRequest reply")
 				return nil
 			}
-			if err != io.EOF {
-				utils.LogError(p.logger, err, "failed to peek TLS ClientHello after replying 'S' to the Postgres SSLRequest; the client did not deliver a TLS record. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the post-'S' bytes to confirm they look like a TLS ClientHello (first byte 0x16)",
-					zap.Uint32("sourcePort", uint32(sourcePort)),
-					zap.String("dstAddr", dstAddr))
-				return err
-			}
+			// Any non-nil error here means we could not read a complete
+			// 5-byte TLS record header — either the client sent fewer
+			// than 5 bytes before closing (EOF with partial buffer) or
+			// the network errored out. Falling through would leave the
+			// downstream TLS detection running against a truncated
+			// prefix and misclassify the stream as plaintext, so bail.
+			utils.LogError(p.logger, err, "failed to read a complete 5-byte TLS record header after replying 'S' to the Postgres SSLRequest; the client did not deliver enough bytes to identify a TLS ClientHello. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the bytes sent immediately after 'S' to verify a full TLS record header arrives (starting with 0x16)",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr),
+				zap.Int("bytesRead", len(testBuffer)))
+			return err
 		}
 	}
 
