@@ -455,15 +455,20 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		readyChan <- nil
 		// Block until context is cancelled, then run cleanup.
 		<-ctx.Done()
-		p.sessionMu.RLock()
-		if p.session != nil && p.session.MC != nil {
-			close(p.session.MC)
-		}
-		p.sessionMu.RUnlock()
+		// Intentionally do NOT close p.session.MC in the skipListener
+		// path. The non-skip path above closes MC only after
+		// clientConnErrGrp.Wait() guarantees every per-conn producer
+		// has exited, so no send-to-closed-channel panic can fire.
+		// In skipListener mode there is no clientConnErrGrp — DNS
+		// mock producers and any external capture-layer senders are
+		// still running up to ctx cancellation and may race a close.
+		// Shutdown of downstream consumers is driven by ctx.Done()
+		// instead; the Go runtime garbage-collects MC once all
+		// references drop.
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
 			if err := p.resetNsSwitchConfig(); err != nil {
-				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
+				utils.LogError(p.logger, err, "failed to reset the nsswitch config, please retry shutdown or restore the resolver configuration manually from /etc/nsswitch.conf")
 			}
 		}
 		p.nsSwitchMutex.Unlock()
