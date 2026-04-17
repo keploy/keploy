@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,8 +124,11 @@ type MockYaml struct {
 
 type gobWriteJob struct {
 	mock     *models.Mock
-	testSet  string
-	filename string
+	// testSetPath is the full directory path — "<MockPath>/<testSetID>"
+	// — not just the test-set identifier. Kept as a full path because
+	// gobReopenLocked mkdir's it and reuses it in filepath.Join.
+	testSetPath string
+	filename    string
 }
 
 const mockFileLockStripeCount = 256
@@ -451,16 +455,39 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 // goroutine owns the open file + encoder; parsers never block on
 // disk. Queue-full falls back to synchronous write so mocks are never
 // dropped — tracked via gobOverflows for observability.
+//
+// The writer-alive check and the channel send run under the same
+// lifecycle lock Close uses. This makes the "is the writer still
+// accepting jobs?" invariant atomic across the send: Close cannot
+// transition from running=true to stopClosed in between our check
+// and our send, so any job we enqueue is guaranteed to be drained
+// by the current writer (or by its drainAndClose on the way out).
 func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	ys.ensureGobWriter(ctx)
-	job := gobWriteJob{mock: mock, testSet: mockPath, filename: mockFileName}
+	ys.gobLifecycleMu.Lock()
+	if ys.gobStopClosed {
+		ys.gobLifecycleMu.Unlock()
+		return fmt.Errorf("gob mock writer is closing; the recording session must complete its shutdown before new mocks can be accepted")
+	}
+	if !ys.gobRunning {
+		ys.gobQueue = make(chan gobWriteJob, 4096)
+		ys.gobStop = make(chan struct{})
+		ys.gobDone = make(chan struct{})
+		ys.gobRunning = true
+		go ys.gobWriterLoop()
+	}
+	job := gobWriteJob{mock: mock, testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
+		ys.gobLifecycleMu.Unlock()
 		return nil
 	case <-ctx.Done():
+		ys.gobLifecycleMu.Unlock()
 		return ctx.Err()
 	default:
 		ys.gobOverflows.Add(1)
+		ys.gobLifecycleMu.Unlock()
+		// Sync fallback holds only gobMu; lifecycle lock released so
+		// other parsers can continue enqueueing while we write.
 		return ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
 	}
 }
@@ -500,7 +527,7 @@ func (ys *MockYaml) gobWriterLoop() {
 			}
 			if err := ys.gobWriteOne(job); err != nil {
 				utils.LogError(ys.Logger, err, "async gob mock writer failed for one mock — continuing with the rest; check disk space on the mocks output directory, verify write permissions on the test-set path, and re-run with --debug to see the exact failing file path. To bypass gob while triaging, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
-					zap.String("testSet", job.testSet),
+					zap.String("testSetPath", job.testSetPath),
 					zap.String("mockName", job.mock.Name),
 					zap.String("mockOutputDir", ys.MockPath))
 			}
@@ -511,11 +538,24 @@ func (ys *MockYaml) gobWriterLoop() {
 	}
 }
 
+// drainAndClose is the shutdown path for the writer goroutine. It
+// consumes every job still buffered in gobQueue and records any
+// encoding failures into gobFlushErr so Close() can surface them to
+// the caller — previously these errors were dropped on the floor and
+// Close would return nil even when the shutdown lost mocks.
 func (ys *MockYaml) drainAndClose() {
 	for {
 		select {
 		case job := <-ys.gobQueue:
-			_ = ys.gobWriteOne(job)
+			if err := ys.gobWriteOne(job); err != nil {
+				ys.gobMu.Lock()
+				ys.gobFlushErr = errors.Join(ys.gobFlushErr, err)
+				ys.gobMu.Unlock()
+				utils.LogError(ys.Logger, err, "failed to persist a queued gob mock while shutting down; check disk space on the mocks output directory, verify write permissions on the test-set path, and retry. To keep recording while investigating, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
+					zap.String("testSetPath", job.testSetPath),
+					zap.String("mockName", job.mock.Name),
+					zap.String("mockOutputDir", ys.MockPath))
+			}
 		default:
 			ys.gobFlushAndClose()
 			return
@@ -526,9 +566,9 @@ func (ys *MockYaml) drainAndClose() {
 func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
-	want := filepath.Join(job.testSet, job.filename+".gob")
+	want := filepath.Join(job.testSetPath, job.filename+".gob")
 	if ys.gobFilePath != want || ys.gobFile == nil {
-		if err := ys.gobReopenLocked(job.testSet, job.filename); err != nil {
+		if err := ys.gobReopenLocked(job.testSetPath, job.filename); err != nil {
 			return err
 		}
 	}
@@ -992,7 +1032,17 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
 	}
-	path := filepath.Join(ys.MockPath, testSetID)
+
+	// Refuse any testSetID that would escape the configured mocks
+	// directory via ".." or by starting with a path separator. A
+	// re-record request with testSetID="../../etc" could otherwise
+	// turn os.Remove into an arbitrary-file delete; guard before we
+	// touch the filesystem.
+	cleanedID := filepath.Clean(testSetID)
+	if cleanedID != testSetID || strings.Contains(cleanedID, "..") || filepath.IsAbs(cleanedID) {
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a single-segment relative name under the mocks output directory", testSetID)
+	}
+	path := filepath.Join(ys.MockPath, cleanedID)
 
 	// Delete both the yaml and the gob mock files for this test set so a
 	// mocks-only refresh on a previously-gob-recorded session cannot

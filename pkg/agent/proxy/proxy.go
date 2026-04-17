@@ -428,7 +428,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	if p.skipListener {
-		p.logger.Info("Proxy TCP listener skipped. DNS and session services active.")
+		// Info-level notice is emitted once in StartProxy (near the
+		// DNS-control log, which is the conventional "startup banner"
+		// spot). Here we only want a debug trace for the start()
+		// internal entry point so logs aren't duplicated.
+		p.logger.Debug("Proxy TCP listener skipped; DNS and session services active")
 		readyChan <- nil
 		// Block until context is cancelled, then run cleanup.
 		<-ctx.Done()
