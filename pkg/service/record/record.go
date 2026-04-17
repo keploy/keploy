@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -73,6 +74,22 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+
+	// Flush any async mockDB writer (e.g. the gob binary writer when
+	// KEPLOY_MOCK_FORMAT=gob) before this goroutine returns. A MockDB
+	// that doesn't need flushing simply won't implement io.Closer and
+	// the assertion is a no-op. The default yaml MockDB falls in that
+	// bucket; the gob variant drains its 4096-entry chan and closes
+	// the file. Without this, mocks in-flight at the moment of Ctrl-C
+	// are lost.
+	if closer, ok := r.mockDB.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				r.logger.Warn("mockDB Close returned an error; some queued mocks may not have been flushed to disk",
+					zap.Error(err))
+			}
+		}()
+	}
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)

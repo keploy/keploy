@@ -208,3 +208,22 @@ func TestRoundTrip_MultipleMocksAppend(t *testing.T) {
 		t.Fatalf("unexpected order/content: %s %s", got[0].Spec.HTTPReq.URL, got[1].Spec.HTTPReq.URL)
 	}
 }
+
+// TestMockYamlIsIOCloser guards the type-assertion dance in
+// pkg/service/record/record.go's Start(): the recorder's defer does
+// `if c, ok := r.mockDB.(io.Closer); ok { defer c.Close() }`. If
+// MockYaml stops implementing io.Closer by accident, the async gob
+// writer's queued mocks would be lost on Ctrl-C without any build
+// or runtime error — only this test catches it.
+func TestMockYamlIsIOCloser(t *testing.T) {
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	var _ interface{ Close() error } = ys // compile-time guard
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close on fresh MockYaml: %v", err)
+	}
+	// Second Close must be safe (recorder may call it twice in edge paths).
+	if err := ys.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
