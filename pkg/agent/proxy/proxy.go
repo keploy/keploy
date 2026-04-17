@@ -797,6 +797,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// double-handling breaks the parser-driven flow. Downstream builds
 	// that ship without a Postgres parser (pure proxy-mode) flip the
 	// flag on via agent.SetInterceptPostgresSSLRequest.
+	//
+	// Client-side only: this block terminates TLS with the client but
+	// does NOT forward an SSLRequest to the upstream Postgres server.
+	// See the runtime_hooks.go docstring on InterceptPostgresSSLRequest
+	// for the supported deployment shapes (downstream builds that do
+	// not re-originate the upstream connection, or upstreams accepting
+	// direct TLS). End-to-end MITM against a vanilla Postgres still
+	// goes through the parser-driven TLSUpgrader path.
 	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
 		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
 			zap.Int("sourcePort", sourcePort),

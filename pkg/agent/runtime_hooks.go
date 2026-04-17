@@ -31,9 +31,24 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 // upgrading to TLS). Disabled by default: the default keploy build
 // injects a Postgres parser (via extraparsers.go) that handles the
 // SSLRequest through the TLSUpgrader interface, and double-handling
-// breaks the parser-driven flow. Downstream builds that do not
-// register a Postgres parser (pure proxy-mode deployments) can opt
-// in by setting this to true before proxy start.
+// breaks the parser-driven flow.
+//
+// Scope when enabled: this flag only covers the client-facing half
+// of the handshake (read SSLRequest, reply 'S', MITM TLS with the
+// client). The proxy does NOT currently forward an SSLRequest to
+// the upstream Postgres server — tls.Dial goes straight into a TLS
+// ClientHello. A real Postgres server on port 5432 expects the
+// 8-byte SSLRequest preamble before TLS and will typically reject a
+// direct TLS handshake.
+//
+// Usable today in: (a) downstream builds that decrypt the client
+// side and forward plaintext elsewhere rather than to a live
+// Postgres server, or (b) upstreams that explicitly accept direct
+// TLS on the destination port (e.g. a Postgres-compatible gateway,
+// or a test fixture that skips SSLRequest). For end-to-end MITM
+// against a vanilla Postgres, use the parser-driven TLSUpgrader
+// path in keploy/integrations instead, or wait for symmetric
+// upstream SSLRequest forwarding to land as a follow-up.
 var InterceptPostgresSSLRequest bool
 
 // ProxyHook allows an optional auxiliary proxy hook to run after proxy startup.
