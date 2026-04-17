@@ -781,12 +781,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	// ── Postgres SSLRequest handshake ──
-	// If the first 8 bytes are an SSLRequest, reply 'S' to accept and then
-	// upgrade the connection to TLS using keploy's builtin CA. The client
-	// app will follow with a standard TLS ClientHello, which the existing
-	// isTLS path below will pick up.
-	if isPostgresSSLRequest(testBuffer) {
+	// ── Postgres SSLRequest handshake (opt-in) ──
+	// When agent.InterceptPostgresSSLRequest is enabled, the proxy itself
+	// replies 'S' and upgrades to TLS. Disabled by default because the
+	// default build registers a Postgres parser (via extraparsers.go)
+	// that already handles SSLRequest through the TLSUpgrader interface;
+	// double-handling breaks the parser-driven flow. Downstream builds
+	// that ship without a Postgres parser (pure proxy-mode) flip the
+	// flag on via agent.SetInterceptPostgresSSLRequest.
+	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
 		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),

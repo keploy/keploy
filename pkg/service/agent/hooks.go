@@ -106,3 +106,11 @@ func SetSkipProxyListener(skip bool) {
 func SetAgentInfoCustomizer(fn func(info *structs.AgentInfo)) {
 	coreAgent.AgentInfoCustomizer = fn
 }
+
+// SetInterceptPostgresSSLRequest enables proxy-level handling of the
+// Postgres SSLRequest preamble. Leave disabled (default) when a
+// Postgres parser is registered — the parser handles the handshake
+// through the TLSUpgrader interface and double-handling breaks it.
+func SetInterceptPostgresSSLRequest(enabled bool) {
+	coreAgent.InterceptPostgresSSLRequest = enabled
+}

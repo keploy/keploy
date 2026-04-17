@@ -26,6 +26,16 @@ var SkipProxyListener bool
 // which the BPF cgroup hooks consume to branch their behavior.
 var AgentInfoCustomizer func(info *structs.AgentInfo)
 
+// InterceptPostgresSSLRequest controls whether the proxy itself
+// responds to the Postgres SSLRequest preamble (by replying 'S' and
+// upgrading to TLS). Disabled by default: the default keploy build
+// injects a Postgres parser (via extraparsers.go) that handles the
+// SSLRequest through the TLSUpgrader interface, and double-handling
+// breaks the parser-driven flow. Downstream builds that do not
+// register a Postgres parser (pure proxy-mode deployments) can opt
+// in by setting this to true before proxy start.
+var InterceptPostgresSSLRequest bool
+
 // ProxyHook allows an optional auxiliary proxy hook to run after proxy startup.
 var ProxyHook AuxiliaryProxyHook
 
