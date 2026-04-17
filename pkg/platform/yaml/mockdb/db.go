@@ -485,10 +485,19 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 		return ctx.Err()
 	default:
 		ys.gobOverflows.Add(1)
+		// Keep the lifecycle lock held across the sync fallback. If we
+		// released it here, a concurrent Close() could flush+close the
+		// writer (setting gobFile=nil), and then gobWriteSync's
+		// gobWriteOne would call gobReopenLocked — which TRUNCATES
+		// the gob file with O_TRUNC — destroying everything written
+		// earlier in the session. Serializing the sync fallback
+		// against Close() is the cost of the "no dropped mocks"
+		// guarantee on the overflow path; it only kicks in when the
+		// 4096-slot queue is already full, which is already a
+		// degraded-throughput mode.
+		err := ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
 		ys.gobLifecycleMu.Unlock()
-		// Sync fallback holds only gobMu; lifecycle lock released so
-		// other parsers can continue enqueueing while we write.
-		return ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
+		return err
 	}
 }
 
