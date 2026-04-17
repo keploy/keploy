@@ -206,8 +206,13 @@ type DirectChunkReader interface {
 // errChannel should be buffered to hold one terminal error per reader goroutine.
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
 	if dcr, ok := conn.(DirectChunkReader); ok {
-		if dcr.HasPending() {
-			drain := make([]byte, 64*1024)
+		// Drain ALL pending carry-over in a loop before switching to
+		// the chunk channel. A single 64 KiB Read would lose in-order
+		// delivery if the parser has prepended more than one buffer
+		// (e.g., peek + rewind + a protocol upgrade's extra prefix).
+		// Exit when HasPending is false or Read returns (0, err).
+		drain := make([]byte, 64*1024)
+		for dcr.HasPending() {
 			n, err := conn.Read(drain)
 			if n > 0 {
 				out := make([]byte, n)
@@ -220,13 +225,19 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			}
 			if err != nil {
 				if err != io.EOF {
-					utils.LogError(logger, err, "direct-chunk carry-over drain failed")
+					utils.LogError(logger, err, "direct-chunk carry-over drain failed; the Prepend/peek buffer on the SimulatedConn could not be read. Restart the agent and re-run the session; if it recurs, enable --debug and capture the parser that last called Prepend to see which carry-over was lost")
 				}
 				select {
 				case errChannel <- err:
 				default:
 				}
 				return
+			}
+			if n == 0 {
+				// Should not happen while HasPending is true, but
+				// break defensively to avoid a busy loop on drivers
+				// that mis-report readiness.
+				break
 			}
 		}
 		src := dcr.DirectChunks()

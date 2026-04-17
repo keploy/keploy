@@ -38,6 +38,24 @@ const mockFormatGob = "gob"
 // decoding to a corrupt struct.
 const gobMockMagic = "keploy-gob-v1\n"
 
+// isUnfilteredMockKind classifies which mock kinds belong to the
+// "unfiltered config" bucket returned by GetUnFilteredMocks, versus
+// the per-testcase bucket returned by GetFilteredMocks. The YAML and
+// gob read paths must share this classification verbatim so replay
+// behavior does not diverge based on on-disk format.
+//
+// PostgresV2 is intentionally listed here even though it also passes
+// the GetFilteredMocks path (matches YAML's current behavior — both
+// paths include it; a mock shows up in both buckets). Changing that
+// semantics is out of scope for this PR.
+func isUnfilteredMockKind(kind models.Kind) bool {
+	switch kind {
+	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+		return true
+	}
+	return false
+}
+
 // configuredMockFormat holds the mock format selected via config file
 // (record.mockFormat). The env var KEPLOY_MOCK_FORMAT takes precedence
 // so ad-hoc runs can override the file without editing it.
@@ -89,6 +107,12 @@ type MockYaml struct {
 	gobBufw        *bufio.Writer
 	gobEnc         *gob.Encoder
 	gobOverflows   atomic.Uint64
+	// gobFlushErr holds the terminal flush/close error from
+	// gobFlushAndClose so that Close() can surface it to its caller
+	// (and therefore to the Recorder.Start deferred-cleanup logger)
+	// instead of silently losing the tail of mocks.gob on a disk-full
+	// or permission-change shutdown.
+	gobFlushErr error
 }
 
 type gobWriteJob struct {
@@ -440,7 +464,13 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 // (as an idempotent init) and across sessions (after a Close, the
 // next InsertMock re-starts a fresh goroutine with fresh channels,
 // so the same MockYaml instance survives re-record cycles).
-func (ys *MockYaml) ensureGobWriter(ctx context.Context) {
+//
+// The writer goroutine does not take the caller's ctx: InsertMock's
+// ctx can be request-scoped and cancel partway through a recording
+// session, but the writer must survive until Close() is called so it
+// can drain the queue and flush the tail batch to disk. InsertMock
+// still honors its own ctx for the enqueue step.
+func (ys *MockYaml) ensureGobWriter(_ context.Context) {
 	ys.gobLifecycleMu.Lock()
 	defer ys.gobLifecycleMu.Unlock()
 	if ys.gobRunning {
@@ -450,10 +480,10 @@ func (ys *MockYaml) ensureGobWriter(ctx context.Context) {
 	ys.gobStop = make(chan struct{})
 	ys.gobDone = make(chan struct{})
 	ys.gobRunning = true
-	go ys.gobWriterLoop(ctx)
+	go ys.gobWriterLoop()
 }
 
-func (ys *MockYaml) gobWriterLoop(ctx context.Context) {
+func (ys *MockYaml) gobWriterLoop() {
 	defer close(ys.gobDone)
 	for {
 		select {
@@ -468,9 +498,6 @@ func (ys *MockYaml) gobWriterLoop(ctx context.Context) {
 					zap.String("mockName", job.mock.Name),
 					zap.String("mockOutputDir", ys.MockPath))
 			}
-		case <-ctx.Done():
-			ys.drainAndClose()
-			return
 		case <-ys.gobStop:
 			ys.drainAndClose()
 			return
@@ -514,49 +541,57 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
 	filePath := filepath.Join(mockPath, mockFileName+".gob")
-	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o666)
+	// Truncate on every open. A gob stream's type table lives in the
+	// encoder; reusing a file across multiple encoder sessions (e.g.
+	// re-record cycles, or a switch-back to an earlier test-set's
+	// file) would embed a second type table mid-file and the reader's
+	// single gob.Decoder would fail with "duplicate type" / garbage.
+	// Each gob session therefore owns its file exclusively: the first
+	// write truncates any prior content and the file carries exactly
+	// one continuous gob stream until Close. Callers that need
+	// append-like semantics must use yaml (the default format).
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
-		return fmt.Errorf("open gob mock file: %w", err)
-	}
-	// Detect a fresh file vs an existing one. We only write the magic
-	// header on fresh files — re-opening an existing file (e.g., a
-	// previous session aborted mid-write) must not duplicate the
-	// header because the reader's single gob.Decoder would then see
-	// garbage after the first-session type table.
-	stat, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("stat gob mock file: %w", err)
+		return fmt.Errorf("open gob mock file for overwrite: %w", err)
 	}
 	ys.gobFile = f
 	// 256 KB buffer holds dozens of mocks before a syscall; bufio
 	// autoflushes at fill. Shutdown drains explicitly.
 	ys.gobBufw = bufio.NewWriterSize(f, 256*1024)
-	if stat.Size() == 0 {
-		if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
-			_ = f.Close()
-			ys.gobFile = nil
-			ys.gobBufw = nil
-			return fmt.Errorf("write gob magic: %w", werr)
-		}
+	if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
+		_ = f.Close()
+		ys.gobFile = nil
+		ys.gobBufw = nil
+		return fmt.Errorf("write gob magic: %w", werr)
 	}
 	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
 	ys.gobFilePath = filePath
 	return nil
 }
 
-func (ys *MockYaml) gobFlushAndClose() {
+// gobFlushAndClose finalizes the on-disk gob stream. Flush and Close
+// errors are both collected — the tail of the file (the bufio buffer)
+// and the file descriptor itself each can fail independently (e.g.
+// disk full between the last Encode and shutdown, or a permission
+// change on the output directory). gobFlushErr records the combined
+// result so Close() can surface it. Always returns state to nil so
+// the next reopen starts fresh.
+func (ys *MockYaml) gobFlushAndClose() error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
+	var flushErr, closeErr error
 	if ys.gobBufw != nil {
-		_ = ys.gobBufw.Flush()
+		flushErr = ys.gobBufw.Flush()
 	}
 	if ys.gobFile != nil {
-		_ = ys.gobFile.Close()
+		closeErr = ys.gobFile.Close()
 	}
 	ys.gobFile = nil
 	ys.gobBufw = nil
 	ys.gobEnc = nil
+	combined := errors.Join(flushErr, closeErr)
+	ys.gobFlushErr = combined
+	return combined
 }
 
 // gobWriteSync is the sync fallback when the async queue is full.
@@ -623,6 +658,17 @@ func (ys *MockYaml) Close() error {
 				zap.Int("queueCapacity", cap(ys.gobQueue)),
 				zap.String("hint", "queue capacity is the hard-coded channel size in ensureGobWriter; raise it in code if disk/encoding is the bottleneck"))
 		}
+	}
+	// Surface the final flush/close error from the writer goroutine so
+	// the Recorder.Start deferred-cleanup log makes a disk-full / perm
+	// change at shutdown visible to the operator instead of silently
+	// dropping the tail of mocks.gob.
+	ys.gobMu.Lock()
+	flushErr := ys.gobFlushErr
+	ys.gobFlushErr = nil
+	ys.gobMu.Unlock()
+	if flushErr != nil {
+		return fmt.Errorf("gob writer flush/close during shutdown: %w", flushErr)
 	}
 	return nil
 }
@@ -703,16 +749,12 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			if mock.Spec.Metadata["type"] == "config" {
 				continue
 			}
-			// Mirror the YAML GetFilteredMocks semantics: the listed
-			// kinds are "unfiltered config" mocks (returned by
-			// GetUnFilteredMocks) — everything else (Mongo, PostgresV2
-			// when used per-test, gRPC, etc.) is a per-testcase "tcs"
-			// mock. Default to include; exclude only the unfiltered
-			// kinds so we do not silently drop Mongo in gob mode.
-			switch mock.Kind {
-			case "Generic", "Postgres", "Http", "Http2", "Redis", "MySQL", "DNS":
-				// unfiltered — belongs to GetUnFilteredMocks
-			default:
+			// Shared classifier with GetUnFilteredMocks and with the
+			// YAML read path. Kinds that belong to the unfiltered
+			// bucket (HTTP, Postgres, Redis, ...) are excluded here;
+			// per-testcase kinds (Mongo, gRPC, PostgresV2-as-tcs) fall
+			// through to the append.
+			if !isUnfilteredMockKind(mock.Kind) {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -824,18 +866,10 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
-			// Mirror the YAML GetUnFilteredMocks semantics: a mock
-			// belongs here only if it is explicitly tagged "config" or
-			// if its kind is one of the listed unfiltered kinds. Other
-			// kinds (Mongo, gRPC) stay out — they are per-testcase
-			// mocks returned by GetFilteredMocks.
-			isConfig := mock.Spec.Metadata["type"] == "config"
-			isUnfilteredKind := false
-			switch mock.Kind {
-			case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
-				isUnfilteredKind = true
-			}
-			if isConfig || isUnfilteredKind {
+			// Shared classifier with GetFilteredMocks and the YAML
+			// path. Include config-tagged mocks plus the unfiltered
+			// kinds; everything else goes to GetFilteredMocks.
+			if mock.Spec.Metadata["type"] == "config" || isUnfilteredMockKind(mock.Kind) {
 				configMocks = append(configMocks, mock)
 			}
 		}

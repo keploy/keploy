@@ -183,9 +183,9 @@ func TestRoundTrip_DNS(t *testing.T) {
 
 func TestRoundTrip_MultipleMocksAppend(t *testing.T) {
 	// Ensure appending a second mock via the async writer doesn't
-	// corrupt the first. Persistent encoder writes one continuous
-	// stream; readGobMocks handles both one-per-call and one-per-file
-	// layouts by re-creating the decoder on every iteration.
+	// corrupt the first. The persistent encoder writes one continuous
+	// gob stream, and readGobMocks reads that stream with a single
+	// decoder across repeated Decode calls.
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "mocks")

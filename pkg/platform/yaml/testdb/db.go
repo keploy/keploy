@@ -44,9 +44,10 @@ func New(logger *zap.Logger, tcsPath string) *TestYaml {
 }
 
 // nextTestIndex returns the next available test-N index for tcsPath.
-// First call seeds the counter from yaml.FindLastIndex; subsequent
-// calls are a single atomic increment. Safe for concurrent upserts
-// on the same test-set.
+// First call seeds the counter from yaml.FindLastIndex (which returns
+// the largest existing index on disk) and returns seed+1; subsequent
+// calls are a single atomic increment. Safe for concurrent upserts on
+// the same test-set.
 func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 	if v, ok := ts.lastIndex.Load(tcsPath); ok {
 		return int(v.(*atomic.Int64).Add(1)), nil
@@ -55,13 +56,17 @@ func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Store the returned index in the counter so the next Add(1) lands
+	// at seed+2 — matches the "first call returns seed+1" contract.
 	var counter atomic.Int64
-	counter.Store(int64(seed))
+	counter.Store(int64(seed + 1))
 	actual, loaded := ts.lastIndex.LoadOrStore(tcsPath, &counter)
 	if loaded {
+		// Another goroutine raced us and won the LoadOrStore; advance
+		// on the winning counter instead of overwriting it.
 		return int(actual.(*atomic.Int64).Add(1)), nil
 	}
-	return seed, nil
+	return seed + 1, nil
 }
 
 type tcsInfo struct {
