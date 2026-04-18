@@ -208,7 +208,7 @@ jobs:
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $ErrorActionPreference = 'Stop'
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
           # Seed per-run gitconfig from the global one (if it exists)
@@ -428,7 +428,7 @@ jobs:
       - name: Pre-checkout git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
           $gitConfig = Join-Path $isoDir 'gitconfig'
           New-Item -Path $gitConfig -ItemType File -Force | Out-Null
@@ -505,7 +505,7 @@ jobs:
       - name: Pre-checkout git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
           $gitConfig = Join-Path $isoDir 'gitconfig'
           New-Item -Path $gitConfig -ItemType File -Force | Out-Null
