@@ -423,9 +423,26 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
+	// Bail early if the caller has already cancelled before we touch
+	// the tmp file. Big test-sets have ~10^5 mocks and the filter+
+	// encode loops below can run for seconds; a cancelled recorder
+	// should not sit here rewriting a file whose result nobody is
+	// waiting for.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	newMocks := make([]*models.Mock, 0, len(mocks))
 	prunedCount := 0
-	for _, mock := range mocks {
+	for i, mock := range mocks {
+		// Check ctx every 1024 entries so a very large filter loop
+		// still responds to cancellation without paying the syscall
+		// cost on every iteration.
+		if i&0x3ff == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if mock.Spec.Metadata["type"] == "config" {
 			newMocks = append(newMocks, mock)
 			continue
@@ -491,7 +508,16 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return fmt.Errorf("write gob magic to prune tmp: %w", err)
 	}
 	enc := gob.NewEncoder(bw)
-	for _, mock := range newMocks {
+	for i, mock := range newMocks {
+		// Same cancellation cadence as the filter loop above — the
+		// encode pass is the expensive one (reflect-heavy) so an
+		// op at cancellation is worth the early exit cost.
+		if i&0x3ff == 0 {
+			if err := ctx.Err(); err != nil {
+				_ = tmp.Close()
+				return err
+			}
+		}
 		if err := enc.Encode(mock); err != nil {
 			_ = tmp.Close()
 			return fmt.Errorf("encode mock during gob prune: %w", err)
@@ -519,7 +545,6 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.Int("kept", len(newMocks)),
 		zap.Int("pruned", prunedCount),
 		zap.Time("pruneBefore", pruneBefore))
-	_ = ctx
 	return nil
 }
 

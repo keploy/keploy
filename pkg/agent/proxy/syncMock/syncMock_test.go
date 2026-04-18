@@ -330,6 +330,48 @@ func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
 	}
 }
 
+// TestResolveRangeDropsStaleMocksAfterClose locks in the
+// cross-session isolation: once CloseOutChan has fired, any
+// buffered mock that ResolveRange would have retained must be
+// dropped instead. Otherwise a re-record session that binds a
+// fresh channel via SetOutputChannel could inherit stale mocks
+// from the previous session's buffer. Copilot review round 25.
+func TestResolveRangeDropsStaleMocksAfterClose(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	now := time.Now()
+	// In-window mock that ResolveRange would normally emit
+	// ("matching" branch).
+	match := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: now}}
+	// Out-of-window but recent — ResolveRange's RETENTION branch
+	// would normally keep it for future matching.
+	retain := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: now.Add(2 * time.Second)}}
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, match, retain)
+	mgr.mu.Unlock()
+
+	// Close the outgoing channel first; ResolveRange should
+	// observe outChanClosed and drop both entries rather than
+	// retaining them.
+	mgr.CloseOutChan()
+
+	mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "t", true, false)
+
+	mgr.mu.Lock()
+	remaining := len(mgr.buffer)
+	mgr.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected buffer drained after ResolveRange-post-close; got %d mocks left", remaining)
+	}
+}
+
 // drainChan empties ch up to max elements; fails if more arrive than
 // the sender configuration could have possibly produced.
 func drainChan(t *testing.T, ch chan *models.Mock, max int) {

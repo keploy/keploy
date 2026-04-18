@@ -214,10 +214,14 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 
 	m.mu.Lock()
 	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
-	// so we don't race SetOutputChannel / CloseOutChan. Only the
-	// bound boolean is needed — the actual send later goes through
-	// sendToOutChan which reacquires the RLock.
-	outChanBound, _ := m.outChanStatus()
+	// so we don't race SetOutputChannel / CloseOutChan. Thread both
+	// bits through: `bound` (is the channel wired and open?) picks
+	// the send-vs-retain fork; `closed` distinguishes the
+	// shutdown-in-progress case from the not-yet-wired case and is
+	// consulted below to DROP rather than retain stale mocks — a
+	// re-record session could otherwise bleed pre-shutdown mocks
+	// into the next session's output (Copilot review, round 25).
+	outChanBound, outChanClosed := m.outChanStatus()
 	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
@@ -238,24 +242,40 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
-				// If output channel is not wired yet, keep matching mocks buffered
-				// so they can be emitted later instead of blocking on a nil channel.
-				if !outChanBound {
+				switch {
+				case outChanClosed:
+					// Shutdown is in progress. Dropping the mock is
+					// correct — the record writer won't consume
+					// anything more, and retaining would leak the
+					// mock into a re-record session that rebinds a
+					// fresh channel on this same manager.
+				case !outChanBound:
+					// Not wired yet (startup race, rare). Keep in
+					// buffer so a later ResolveRange can emit once
+					// SetOutputChannel fires.
 					m.buffer[keepIdx] = mock
 					keepIdx++
-					continue
+				default:
+					mock.Name = "mock-" + generateRandomString(8)
+					associatedMockIDs = append(associatedMockIDs, mock.Name)
+					mocksToSend = append(mocksToSend, mock)
 				}
-				mock.Name = "mock-" + generateRandomString(8)
-				associatedMockIDs = append(associatedMockIDs, mock.Name)
-				mocksToSend = append(mocksToSend, mock)
+				continue
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
 			continue
 		}
 
-		// RETENTION: Keep the mock if it's recent (within 7s) but didn't match this specific window.
-		// It might be matched by a future out-of-order request.
+		// RETENTION: Keep the mock if it's recent (within 7s) but
+		// didn't match this specific window. It might be matched
+		// by a future out-of-order request — UNLESS shutdown is in
+		// progress, in which case no future ResolveRange will emit
+		// it anyway, and retaining would leak into the next
+		// session's buffer.
+		if outChanClosed {
+			continue
+		}
 		m.buffer[keepIdx] = mock
 		keepIdx++
 	}
