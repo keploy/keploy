@@ -36,17 +36,17 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 // double-handling breaks the parser-driven flow.
 //
 // Scope when enabled: the flag covers both sides of the handshake.
-// - Client side: read SSLRequest, reply 'S', MITM TLS with the client.
-// - Upstream side: when the destination port is 5432, the proxy
-//   dials plain TCP, writes the SSLRequest preamble, reads the
-//   'S'/'N' response from the upstream Postgres server, and only
-//   then upgrades the existing socket to TLS via tls.Client. This
-//   is what a real Postgres server expects; tls.Dial directly on
-//   5432 would be rejected by the server. Non-5432 destinations
-//   still go through the plain tls.Dial path — if a downstream
-//   deployment runs Postgres on a non-standard port, it needs to
-//   either (a) accept direct TLS, or (b) register a Postgres parser
-//   via the integrations TLSUpgrader path.
+//   - Client side: read SSLRequest, reply 'S', MITM TLS with the client.
+//   - Upstream side: when the destination port is 5432, the proxy
+//     dials plain TCP, writes the SSLRequest preamble, reads the
+//     'S'/'N' response from the upstream Postgres server, and only
+//     then upgrades the existing socket to TLS via tls.Client. This
+//     is what a real Postgres server expects; tls.Dial directly on
+//     5432 would be rejected by the server. Non-5432 destinations
+//     still go through the plain tls.Dial path — if a downstream
+//     deployment runs Postgres on a non-standard port, it needs to
+//     either (a) accept direct TLS, or (b) register a Postgres parser
+//     via the integrations TLSUpgrader path.
 //
 // End-to-end MITM against a vanilla Postgres now works under this
 // flag. The parser-driven TLSUpgrader path from keploy/integrations
