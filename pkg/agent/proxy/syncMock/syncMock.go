@@ -20,31 +20,19 @@ func generateRandomString(n int) string {
 }
 
 type SyncMockManager struct {
+	// mu guards buffer, firstReqSeen, memoryPause, mappingChan.
 	mu           sync.Mutex
 	buffer       []*models.Mock
-	outChan      chan<- *models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
 
-	// outChanMu serializes outChan sends with CloseOutChan so the
-	// race detector doesn't flag concurrent close(outChan) against
-	// an in-flight send(outChan). Senders hold RLock, the closer
-	// holds Lock. Without this, proxy shutdown racing the tail of
-	// a record session produced the data race seen in #4045 CI:
-	//
-	//   Write at ... by goroutine 46:
-	//     runtime.closechan()     ← proxy.go:576 close(p.session.MC)
-	//   Previous read at ... by goroutine 69:
-	//     runtime.chansend()      ← AddMock(outChan <- mock)
-	//
-	// The prior recover() caught the resulting panic but did not
-	// prevent the race; under -race the runtime reports unsynchronized
-	// access, and on CI it co-occurred with a 28-minute hang in the
-	// petclinic record_build_replay_latest job. We still keep the
-	// recover as defence-in-depth for the tiny window between
-	// reading outChanClosed and the actual send.
+	// outChanMu guards outChan and outChanClosed together. Senders
+	// RLock across the whole read+send; the closer Locks across the
+	// close. This is the only lock protecting outChan — see commit
+	// history of #4045 for the data race this serializes against.
 	outChanMu     sync.RWMutex
+	outChan       chan<- *models.Mock
 	outChanClosed bool
 }
 
@@ -59,14 +47,15 @@ func Get() *SyncMockManager {
 	return instance
 }
 
-// SetOutputChannel allows the Outgoing Proxy to "plug in" the channel later.
-// Also clears the "closed" flag so a second Start (re-record) can hand in a
-// fresh channel after the previous CloseOutChan.
+// SetOutputChannel plugs a fresh outgoing mock channel into the
+// manager and reopens it for sends. Re-record flows call this each
+// time a new session starts. The reset of outChanClosed has to
+// happen under the same lock as the outChan assignment so a
+// concurrent sender always sees a consistent (outChan, closed)
+// tuple.
 func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
-	m.mu.Lock()
-	m.outChan = out
-	m.mu.Unlock()
 	m.outChanMu.Lock()
+	m.outChan = out
 	m.outChanClosed = false
 	m.outChanMu.Unlock()
 }
@@ -75,6 +64,25 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mappingChan = ch
+}
+
+// sendToOutChan is the single send path to outChan. Holds outChanMu
+// read-lock across the whole observation + send so CloseOutChan (the
+// writer-lock holder) cannot interleave a close between our
+// not-closed check and the chansend. Non-blocking via default — if
+// the reader has fallen behind, the mock is dropped rather than
+// stalling the caller while holding the read lock (which would also
+// stall every concurrent sender and block the closer).
+func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
+	m.outChanMu.RLock()
+	defer m.outChanMu.RUnlock()
+	if m.outChanClosed || m.outChan == nil {
+		return
+	}
+	select {
+	case m.outChan <- mock:
+	default:
+	}
 }
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
@@ -93,80 +101,68 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		return
 	}
 
-	// storing startup mocks until first request is seen
-	if !m.firstReqSeen && m.outChan != nil {
-		outChan := m.outChan
+	// Decide forward vs buffer vs drop under a single snapshot of
+	// (outChan, outChanClosed). The trio has three legal outcomes:
+	//
+	//   closed          → drop (shutdown in progress, buffer would leak)
+	//   unbound (nil)   → buffer (SetOutputChannel hasn't fired yet;
+	//                     ResolveRange will emit once bound)
+	//   bound + open    → forward via sendToOutChan, unless we're
+	//                     past firstReqSeen in which case the mock
+	//                     belongs in the dedup buffer for windowing
+	bound, closed := m.outChanStatus()
+	switch {
+	case closed:
 		m.mu.Unlock()
-		// Take outChanMu as a reader so concurrent AddMock calls can
-		// still proceed in parallel; CloseOutChan takes the write
-		// side to serialize the close(outChan) call against every
-		// in-flight send. Check outChanClosed under the same lock
-		// to skip sending on an already-closed channel without
-		// relying on a panic. The recover() inside the inner func
-		// stays as defence-in-depth: if a future caller invokes
-		// Close() directly without going through CloseOutChan, the
-		// closed-channel panic is still swallowed rather than
-		// propagating to the parser goroutine.
-		m.outChanMu.RLock()
-		if m.outChanClosed {
-			m.outChanMu.RUnlock()
-			return
-		}
-		func() {
-			defer m.outChanMu.RUnlock()
-			defer func() {
-				r := recover()
-				if r == nil {
-					return
-				}
-				if err, ok := r.(error); ok && err.Error() == "send on closed channel" {
-					return
-				}
-				panic(r)
-			}()
-			select {
-			case outChan <- mock:
-			default:
-			}
-		}()
 		return
+	case bound && !m.firstReqSeen:
+		m.mu.Unlock()
+		m.sendToOutChan(mock)
+		return
+	default:
+		m.buffer = append(m.buffer, mock)
+		m.mu.Unlock()
 	}
-	m.buffer = append(m.buffer, mock)
-	m.mu.Unlock()
 }
 
-// CloseOutChan closes the output channel under outChanMu so it
-// cannot race an in-flight AddMock send. Idempotent — a second
-// call is a no-op. Callers that previously did `close(session.MC)`
-// directly from the proxy shutdown path should switch to this
-// so the record session can quiesce without the -race detector
-// firing and without the send goroutine relying on a recovered
-// panic for correctness.
+// outChanStatus snapshots (bound, closed) under outChanMu.RLock so
+// AddMock's fork decision sees a consistent pair.
+func (m *SyncMockManager) outChanStatus() (bound, closed bool) {
+	m.outChanMu.RLock()
+	defer m.outChanMu.RUnlock()
+	return m.outChan != nil && !m.outChanClosed, m.outChanClosed
+}
+
+// SendConfigMock forwards a config mock directly to the outgoing
+// channel, bypassing the firstReqSeen buffering that AddMock does.
+// DNS is the only caller today: it recognizes queries by a
+// (name, qtype) dedupe key and wants every unique query mocked the
+// first time it's seen, regardless of whether the first app request
+// has already fired. Shares the same outChanMu guard as AddMock so
+// DNS sends also stay safe against proxy shutdown.
+func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
+	if m == nil {
+		return
+	}
+	m.sendToOutChan(mock)
+}
+
+// CloseOutChan closes the outgoing mock channel under the writer
+// lock so an in-flight sendToOutChan cannot race the close.
+// Idempotent; safe to call with outChan still nil.
 func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
-	if m.outChanClosed || m.outChan == nil {
-		m.outChanClosed = true
+	if m.outChanClosed {
 		return
 	}
-	close(m.outChan)
+	if m.outChan != nil {
+		close(m.outChan)
+	}
 	m.outChanClosed = true
-}
-
-// ResetForNewSession clears the closed flag so a subsequent
-// SetOutputChannel + record session can reuse this manager.
-// Required by re-record flows where the same manager survives
-// multiple Start/Close cycles.
-func (m *SyncMockManager) ResetForNewSession() {
-	if m == nil {
-		return
-	}
-	m.outChanMu.Lock()
-	defer m.outChanMu.Unlock()
-	m.outChanClosed = false
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -201,16 +197,18 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
-	// Collect mocks and mapping data under the lock, then send to channels
-	// AFTER releasing it. Sending while holding mu can deadlock: the channel
-	// consumer (e.g. gob encoder in HandleOutgoing) may block, and a
-	// concurrent AddMock caller waiting on mu would stall the pipeline.
+	// Collect mocks and mapping data under the lock, then send to the
+	// outgoing channels AFTER releasing it. Holding m.mu across a
+	// channel send can deadlock on ordering: a buffer-full outChan
+	// would keep mu held, blocking every AddMock waiting to enqueue.
+	// We have outChanMu (inside sendToOutChan) to guard the actual
+	// send against close, so m.mu release here is safe.
 	var mocksToSend []*models.Mock
 	var associatedMockIDs []string
 	var mappingEntry *models.TestMockMapping
 
 	m.mu.Lock()
-	outChan := m.outChan
+	outChanBound := m.outChan != nil // snapshot for the "is wired yet" check only
 	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
@@ -233,7 +231,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			if keep {
 				// If output channel is not wired yet, keep matching mocks buffered
 				// so they can be emitted later instead of blocking on a nil channel.
-				if outChan == nil {
+				if !outChanBound {
 					m.buffer[keepIdx] = mock
 					keepIdx++
 					continue
@@ -270,13 +268,12 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 
 	m.mu.Unlock()
 
-	// Send mocks and mapping outside the lock to avoid deadlock.
-	// Non-blocking sends: during shutdown the consumers may have stopped.
+	// Route mock sends through sendToOutChan so the close-vs-send
+	// race is serialized the same way AddMock does it. Mapping
+	// channel is never closed by the shutdown path today — if that
+	// ever changes, lift the mapping send under an equivalent guard.
 	for _, mock := range mocksToSend {
-		select {
-		case outChan <- mock:
-		default:
-		}
+		m.sendToOutChan(mock)
 	}
 	if mappingEntry != nil && mappingChan != nil {
 		select {

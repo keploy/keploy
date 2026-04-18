@@ -549,14 +549,29 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		zap.Int("rcode", in.Rcode),
 	)
 
-	if session.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.SetOutputChannel(session.MC)
+	// DNS is a separate key-value map, not a streaming parser; each
+	// (name, qtype) unique query is captured exactly once via the
+	// p.recordedDNSMocks dedupe above, independent of whether the
+	// first app request has been seen. Route every DNS mock through
+	// SyncMockManager so its outChanMu also guards the send against
+	// a concurrent CloseOutChan during proxy shutdown — a bare
+	// `session.MC <- mock` here would race the close, which is what
+	// the Synchronous branch below already avoids via AddMock but
+	// the async branch used to skip.
+	//
+	// SendConfigMock is the bypass-buffering path: unlike AddMock
+	// it does not observe firstReqSeen, matching the original async
+	// behavior of always forwarding immediately. The Synchronous
+	// path keeps AddMock so its session-level ordering (startup
+	// buffer then flush) stays intact.
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(session.MC)
+		if session.Synchronous {
 			mgr.AddMock(mock)
-			return resp, nil
+		} else {
+			mgr.SendConfigMock(mock)
 		}
 	}
-	session.MC <- mock
 	return resp, nil
 }
 

@@ -48,96 +48,44 @@ func TestSetMemoryPressureClearsBufferedMocksAndDropsNewOnes(t *testing.T) {
 	}
 }
 
-// TestAddMockSwallowsClosedChannelPanic exercises the shutdown-race
-// branch in AddMock where HandleOutgoing has closed outChan while a
-// parser goroutine is still calling AddMock. The expected behavior:
-// AddMock returns normally (the mock is silently dropped; the reader
-// is gone so no consumer remains), and nothing panics past the
-// function boundary.
-func TestAddMockSwallowsClosedChannelPanic(t *testing.T) {
+// TestAddMockAfterCloseDropsSilently exercises the shutdown path:
+// once CloseOutChan has fired, AddMock must silently drop (no panic,
+// no send) instead of racing a closed channel. Previously this was
+// guarded by recover(); the refactor relies on outChanClosed being
+// read under the same lock as the send so there is nothing to
+// recover from.
+func TestAddMockAfterCloseDropsSilently(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 1)
-	close(ch)
-
 	mgr := &SyncMockManager{
-		buffer:  make([]*models.Mock, 0, defaultMockBufferCapacity),
-		outChan: ch,
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	mgr.SetOutputChannel(ch)
+	mgr.CloseOutChan()
 
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("AddMock must not propagate closed-channel panic, got %v", r)
+			t.Fatalf("AddMock must not panic after CloseOutChan; got %v", r)
 		}
 	}()
 
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-}
 
-// TestAddMockRepanicsUnrelatedValues proves the recover() is narrow:
-// if something in the send path panics with any value other than the
-// runtime's "send on closed channel" error, AddMock re-panics so the
-// real bug surfaces. We cannot easily inject a non-closed-channel
-// panic into the real chansend path, so we verify the recover logic
-// inline instead.
-func TestAddMockRepanicsUnrelatedValues(t *testing.T) {
-	t.Parallel()
-
-	tryRecover := func(toPanic interface{}) (repanicked interface{}) {
-		defer func() {
-			repanicked = recover()
-		}()
-		func() {
-			defer func() {
-				r := recover()
-				if r == nil {
-					return
-				}
-				if err, ok := r.(error); ok && err.Error() == "send on closed channel" {
-					return
-				}
-				panic(r)
-			}()
-			panic(toPanic)
-		}()
-		return nil
-	}
-
-	cases := []struct {
-		name        string
-		value       interface{}
-		wantRepanic bool
-	}{
-		{"closed channel message", chanSendError{}, false},
-		{"other runtime error", otherError{msg: "something else entirely"}, true},
-		{"plain string panic", "boom", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := tryRecover(tc.value)
-			if tc.wantRepanic && got == nil {
-				t.Fatalf("expected re-panic for %v, but recover swallowed it", tc.value)
-			}
-			if !tc.wantRepanic && got != nil {
-				t.Fatalf("expected %v to be swallowed, but got re-panic: %v", tc.value, got)
-			}
-		})
+	// Mock must not have been buffered either — we aren't after
+	// firstReqSeen in this test, but outChan is closed so the
+	// send path bails early. ResolveRange-style reemission of the
+	// dropped mock is out of scope here.
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("post-close AddMock should not buffer; buffer=%d", len(mgr.buffer))
 	}
 }
 
-type chanSendError struct{}
-
-func (chanSendError) Error() string { return "send on closed channel" }
-
-type otherError struct{ msg string }
-
-func (e otherError) Error() string { return e.msg }
-
-// TestCloseOutChanRacesAddMock exercises the exact shutdown race
-// -race flagged on keploy#4045 CI: proxy shutdown closing outChan
-// while parsers are still calling AddMock. With the RWMutex in
-// place, running under `go test -race` must stay clean across
-// thousands of send/close interleavings.
+// TestCloseOutChanRacesAddMock is the direct regression for the
+// -race report seen on keploy#4045 CI: 8 goroutines calling AddMock
+// concurrently with a midstream CloseOutChan. With sendToOutChan's
+// RLock, no send can interleave the close. Must stay clean under
+// `go test -race`.
 func TestCloseOutChanRacesAddMock(t *testing.T) {
 	t.Parallel()
 
@@ -146,9 +94,9 @@ func TestCloseOutChanRacesAddMock(t *testing.T) {
 
 	ch := make(chan *models.Mock, 1024)
 	mgr := &SyncMockManager{
-		buffer:  make([]*models.Mock, 0, defaultMockBufferCapacity),
-		outChan: ch,
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	mgr.SetOutputChannel(ch)
 
 	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
 	var wg sync.WaitGroup
@@ -157,36 +105,214 @@ func TestCloseOutChanRacesAddMock(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < sendsPerSender; j++ {
-				// AddMock here goes through the RLock-guarded path.
-				// Must not panic even when CloseOutChan fires mid-way.
 				mgr.AddMock(mock)
 			}
 		}()
 	}
 
-	// Close midstream — simulates the proxy shutdown path firing
-	// while parser goroutines are still producing mocks.
 	time.Sleep(time.Millisecond)
 	mgr.CloseOutChan()
-	// A second close must be a no-op, not a panic.
+	// Second close must be a no-op, not a panic.
 	mgr.CloseOutChan()
 
 	wg.Wait()
+	drainChan(t, ch, senders*sendsPerSender)
+}
 
-	// Drain whatever made it into the channel pre-close so the test
-	// doesn't leak; count is unpredictable but must be >= 0 and
-	// <= senders*sendsPerSender.
+// TestCloseOutChanRacesResolveRange is the ResolveRange equivalent.
+// ResolveRange's send loop previously ran outside any lock after
+// releasing m.mu, so a proxy shutdown calling CloseOutChan during
+// dedup processing would reproduce the same data race. The refactor
+// routes ResolveRange's sends through sendToOutChan; that must stay
+// -race clean under the same concurrent Close pattern.
+func TestCloseOutChanRacesResolveRange(t *testing.T) {
+	t.Parallel()
+
+	const resolvers = 4
+	const mocksPerResolver = 200
+
+	ch := make(chan *models.Mock, 1024)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Seed the buffer across a known time range so every ResolveRange
+	// call finds at least one mock to emit.
+	now := time.Now()
+	for i := 0; i < resolvers*mocksPerResolver; i++ {
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, &models.Mock{
+			Spec: models.MockSpec{ReqTimestampMock: now.Add(time.Duration(i) * time.Microsecond)},
+		})
+		mgr.mu.Unlock()
+	}
+
+	start := now
+	end := now.Add(time.Hour)
+
+	var wg sync.WaitGroup
+	for i := 0; i < resolvers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < mocksPerResolver; j++ {
+				mgr.ResolveRange(start, end, "t", true, false)
+			}
+		}()
+	}
+
+	time.Sleep(time.Millisecond)
+	mgr.CloseOutChan()
+
+	wg.Wait()
+	drainChan(t, ch, resolvers*mocksPerResolver)
+}
+
+// TestSetOutputChannelAfterCloseReopens covers the TOCTOU sequence
+// surfaced in code review: CloseOutChan closes ch1, SetOutputChannel
+// binds a fresh ch2 (clearing outChanClosed), and a subsequent
+// AddMock should send on ch2 — not on the stale closed ch1. The
+// refactor pulls outChan into sendToOutChan under the same RLock
+// that checks outChanClosed, so the local-variable staleness bug
+// cannot recur.
+func TestSetOutputChannelAfterCloseReopens(t *testing.T) {
+	t.Parallel()
+
+	ch1 := make(chan *models.Mock, 1)
+	ch2 := make(chan *models.Mock, 1)
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch1)
+	mgr.CloseOutChan()
+
+	mgr.SetOutputChannel(ch2)
+	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	mgr.AddMock(mock)
+
+	select {
+	case got := <-ch2:
+		if got != mock {
+			t.Fatalf("expected mock on ch2, got something else")
+		}
+	default:
+		t.Fatalf("expected AddMock to forward to ch2 after SetOutputChannel")
+	}
+
+	// ch1 must remain empty — no stale send should have landed on it.
+	select {
+	case got, ok := <-ch1:
+		if ok {
+			t.Fatalf("unexpected mock on old (closed) ch1: %v", got)
+		}
+	default:
+	}
+}
+
+// TestSendConfigMockDropsAfterClose locks in the DNS-path contract:
+// after CloseOutChan, SendConfigMock is a no-op (no panic, no send).
+// DNS is the only caller today and its dedupe map guarantees each
+// (name, qtype) is sent at most once per run, so a silent drop
+// during shutdown is the correct outcome.
+func TestSendConfigMockDropsAfterClose(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.CloseOutChan()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SendConfigMock must not panic after close; got %v", r)
+		}
+	}()
+
+	mgr.SendConfigMock(&models.Mock{Kind: models.DNS})
+}
+
+// TestSendConfigMockIgnoresFirstReqSeen pins the semantic split
+// from AddMock: DNS records must always forward immediately,
+// including after SetFirstRequestSignaled. AddMock would buffer
+// here; SendConfigMock must not.
+func TestSendConfigMockIgnoresFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	mock := &models.Mock{Kind: models.DNS}
+	mgr.SendConfigMock(mock)
+
+	select {
+	case got := <-ch:
+		if got != mock {
+			t.Fatalf("expected SendConfigMock to forward even after firstReqSeen")
+		}
+	default:
+		t.Fatalf("SendConfigMock dropped the mock despite outChan being open")
+	}
+}
+
+// TestCloseOutChanRacesSendConfigMock mirrors the AddMock race test
+// for the DNS path so the guard is exercised end-to-end.
+func TestCloseOutChanRacesSendConfigMock(t *testing.T) {
+	t.Parallel()
+
+	const senders = 4
+	const sendsPerSender = 500
+
+	ch := make(chan *models.Mock, 1024)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	mock := &models.Mock{Kind: models.DNS}
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < sendsPerSender; j++ {
+				mgr.SendConfigMock(mock)
+			}
+		}()
+	}
+
+	time.Sleep(time.Millisecond)
+	mgr.CloseOutChan()
+
+	wg.Wait()
+	drainChan(t, ch, senders*sendsPerSender)
+}
+
+// drainChan empties ch up to max elements; fails if more arrive than
+// the sender configuration could have possibly produced.
+func drainChan(t *testing.T, ch chan *models.Mock, max int) {
+	t.Helper()
 	count := 0
 	for {
 		select {
 		case _, ok := <-ch:
 			if !ok {
-				if count > senders*sendsPerSender {
-					t.Fatalf("drained %d mocks, exceeds max %d", count, senders*sendsPerSender)
+				if count > max {
+					t.Fatalf("drained %d mocks, exceeds max %d", count, max)
 				}
 				return
 			}
 			count++
+			if count > max {
+				t.Fatalf("drained %d mocks, exceeds max %d", count, max)
+			}
 		default:
 			return
 		}
