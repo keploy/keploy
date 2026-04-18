@@ -2,7 +2,8 @@
 
 Canonical listing of all env vars keploy reads that are not already
 documented in CLI help or `keploy.yml`. If you add a new variable,
-document it here — the PR review checks for this file being updated.
+please document it here so reviewers and operators have one place
+to find env-var knobs.
 
 Config-file fields always win over their env-var counterpart — except
 where noted (the env var is an ad-hoc override for power-user

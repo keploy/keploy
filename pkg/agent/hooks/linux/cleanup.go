@@ -57,10 +57,21 @@ func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string)
 		return 0
 	}
 
-	cleaned := 0
+	// Open the cgroup directory once for all per-name detaches. The
+	// inner loop used to open/close the cgroup per program name,
+	// which meant 2 extra syscalls × len(keployBPFProgNames) on every
+	// startup. Reuse the FD for every query/detach in this run.
+	cgroupFD, err := os.Open(cgroupPath)
+	if err != nil {
+		logger.Debug("Cannot open cgroup for orphan detection",
+			zap.String("path", cgroupPath), zap.Error(err))
+		return 0
+	}
+	defer cgroupFD.Close()
 
+	cleaned := 0
 	for progName, attachType := range keployBPFProgNames {
-		n := detachOrphanedByName(logger, cgroupPath, progName, attachType)
+		n := detachOrphanedByName(logger, cgroupFD, cgroupPath, progName, attachType)
 		cleaned += n
 	}
 
@@ -79,15 +90,11 @@ func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string)
 // invoking it only after DetectAndCleanOrphanedCgroupPrograms has confirmed
 // no other keploy process is alive — a name match at that point is
 // definitionally an orphan from a crashed prior run.
-func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string, attachType ebpf.AttachType) int {
-	// Open the cgroup directory to get an FD for querying.
-	cgroupFD, err := os.Open(cgroupPath)
-	if err != nil {
-		logger.Debug("Cannot open cgroup for orphan detection",
-			zap.String("path", cgroupPath), zap.Error(err))
-		return 0
-	}
-	defer cgroupFD.Close()
+//
+// Caller owns the cgroup FD (opened once in
+// DetectAndCleanOrphanedCgroupPrograms and reused across every program-name
+// iteration); cgroupPath is kept around only for log context.
+func detachOrphanedByName(logger *zap.Logger, cgroupFD *os.File, cgroupPath string, progName string, attachType ebpf.AttachType) int {
 
 	// Query all programs attached to this cgroup for this attach type.
 	// queryAttachedPrograms calls link.QueryPrograms (cilium/ebpf's
