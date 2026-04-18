@@ -450,8 +450,22 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// directory, then rename over gobPath. os.Rename on the same
 	// filesystem is atomic, so a concurrent reader either sees the
 	// full old file or the full new one.
+	//
+	// Preserve the existing file's permissions across the rewrite.
+	// os.CreateTemp creates its file 0600, so without the chmod below
+	// pruning would quietly narrow mocks.gob from whatever mode the
+	// record writer produced (typically 0644 via umask 0022) down to
+	// owner-only, which breaks replay for any other user/process on
+	// the box. Stat before CreateTemp: if the source file is gone,
+	// fall back to the same mode the gob writer uses when it opens
+	// mocks.gob fresh (0644) so we do not introduce a new
+	// mode-inheritance path.
 	dir := filepath.Dir(gobPath)
 	base := filepath.Base(gobPath)
+	var originalMode os.FileMode = 0644
+	if info, statErr := os.Stat(gobPath); statErr == nil {
+		originalMode = info.Mode().Perm()
+	}
 	tmp, err := os.CreateTemp(dir, base+".prune.*.tmp")
 	if err != nil {
 		return fmt.Errorf("create gob prune tmp: %w", err)
@@ -463,6 +477,13 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	// Match mocks.gob's permissions on the tmp file before the
+	// rename. Must happen before any concurrent reader observes the
+	// renamed file.
+	if err := os.Chmod(tmpPath, originalMode); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod gob prune tmp to %o: %w", originalMode, err)
+	}
 
 	bw := bufio.NewWriterSize(tmp, 256*1024)
 	if _, err := bw.WriteString(gobMockMagic); err != nil {
