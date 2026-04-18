@@ -17,6 +17,13 @@ jobs:
   build-and-upload:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    # Bound wall-clock so a hung cgo link step (historically: a
+    # deadlock inside libwindows_redirector.a's shutdown path) cannot
+    # sit on a self-hosted Windows runner for 6h. Healthy runs are
+    # ~5 min; 30 gives 6x headroom. Without this the job was getting
+    # stuck at 40+ min on run 24608731505 with no visible step
+    # progress, blocking every subsequent queued Windows job.
+    timeout-minutes: 30
     steps:
       # Bootstrap a consistent shell environment on every self-hosted
       # Windows runner. Some runners in the fleet ship without pwsh
@@ -301,6 +308,10 @@ jobs:
     needs: [docker-image-build]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    # Same rationale as build-and-upload: bound the wall-clock so a
+    # hung self-hosted Windows runner cannot stall the whole pipeline.
+    # This job is pull-only (Docker image load); 30 min is generous.
+    timeout-minutes: 30
 
     steps:
       # Remove stale SSH redirects from global config before checkout
