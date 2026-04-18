@@ -29,9 +29,11 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 // InterceptPostgresSSLRequest controls whether the proxy itself
 // responds to the Postgres SSLRequest preamble (by replying 'S' and
 // upgrading to TLS). Disabled by default: the default keploy build
-// injects a Postgres parser (via extraparsers.go) that handles the
-// SSLRequest through the TLSUpgrader interface, and double-handling
-// breaks the parser-driven flow.
+// is released with a Postgres parser from keploy/integrations
+// (wired in via the CI-generated pkg/agent/proxy/extraparsers.go
+// blank-import — see .github/actions/setup-private-parsers) that
+// handles the SSLRequest through the TLSUpgrader interface, and
+// double-handling breaks the parser-driven flow.
 //
 // Scope when enabled: this flag only covers the client-facing half
 // of the handshake (read SSLRequest, reply 'S', MITM TLS with the

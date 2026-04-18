@@ -290,6 +290,24 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	lock.Lock()
 	defer lock.Unlock()
 
+	// When the session was recorded in gob format, mocks.yaml does
+	// not exist — UpdateMocks's YAML-only read/rewrite would be a
+	// silent no-op. Surface this explicitly so operators who enable
+	// RemoveUnusedMocks + KEPLOY_MOCK_FORMAT=gob together know that
+	// pruning is currently a YAML-only feature and that mocks.gob
+	// will keep growing across runs until they either switch the
+	// session back to yaml for the pruning run or a follow-up adds
+	// gob support to UpdateMocks.
+	if useGobMockFormat() {
+		gobPath := filepath.Join(path, mockFileName+".gob")
+		if _, err := os.Stat(gobPath); err == nil {
+			ys.Logger.Warn("mock pruning skipped: mocks.gob is in use and UpdateMocks only supports mocks.yaml today. mocks.gob will keep growing across runs; set KEPLOY_MOCK_FORMAT=yaml for the pruning pass, or re-record with yaml, until gob pruning lands as a follow-up",
+				zap.String("testSetID", testSetID),
+				zap.String("path", gobPath))
+			return nil
+		}
+	}
+
 	ys.Logger.Debug("pruning unused mocks",
 		zap.Any("consumedMocks", mockNames),
 		zap.String("testSetID", testSetID),
