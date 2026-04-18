@@ -497,7 +497,17 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 		ys.gobRunning = true
 		go ys.gobWriterLoop()
 	}
-	job := gobWriteJob{mock: mock, testSetPath: mockPath, filename: mockFileName}
+	// Deep-copy before enqueue. InsertMock returns synchronously; a
+	// caller that subsequently mutates the same *Mock (e.g. a
+	// RecordHooks.AfterMockInsert that tags telemetry fields on the
+	// same pointer, or a producer pool that reuses Mock structs)
+	// would otherwise race with the async gob encoder and persist
+	// an unintended payload. DeepCopy handles the nested Noise /
+	// Metadata / per-protocol-slice fields. The copy cost is
+	// bounded by the mock's own size and is acceptable vs. the
+	// alternative (encoding to bytes synchronously on every
+	// InsertMock, which would defeat the whole async-writer win).
+	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
 		ys.gobLifecycleMu.Unlock()
