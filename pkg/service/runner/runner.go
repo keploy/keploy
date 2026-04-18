@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -325,6 +326,25 @@ func (r *Runner) checkMockMismatches(ctx context.Context, expected []string) *Mo
 	}
 }
 
+// waitForApp blocks until the app at serviceURL is BOTH TCP-reachable
+// AND responds to an HTTP request, or the timeout elapses.
+//
+// The HTTP probe is what makes this correct for docker-compose deployments.
+// `ports: a:b` has dockerd bind the host listener at container-create time,
+// so a plain TCP dial succeeds against dockerd's port forwarder while the
+// in-container app is still booting. Requests that follow get forwarded
+// to a dead inner socket and come back ECONNRESET — the exact symptom
+// that broke the enterprise sandbox's auto-replay phase on macOS.
+//
+// Any HTTP status code (200/404/400/...) counts as ready — we're not
+// asserting anything about a specific endpoint, just that the app has
+// accepted a connection, routed it, and produced a response. Only a
+// transport-level error means it's still coming up.
+//
+// Native processes (bind-ready == traffic-ready) and Kubernetes Services
+// (gated on Pod readiness by the control plane) also satisfy the HTTP
+// probe trivially, so this is a strict superset of the previous
+// TCP-only check.
 func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
@@ -341,8 +361,34 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	}
 	addr := net.JoinHostPort(host, port)
 
-	if conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond); dialErr == nil {
+	probeClient := &http.Client{
+		Timeout: 3 * time.Second,
+		// New connection each probe so we're exercising real readiness
+		// rather than a cached keep-alive from an earlier attempt.
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+
+	probe := func() error {
+		conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if dialErr != nil {
+			return dialErr
+		}
 		_ = conn.Close()
+
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL, nil)
+		if reqErr != nil {
+			return reqErr
+		}
+		resp, httpErr := probeClient.Do(req)
+		if httpErr != nil {
+			return httpErr
+		}
+		_ = resp.Body.Close()
+		return nil
+	}
+
+	if err := probe(); err == nil {
+		logger.Debug("app is reachable", zap.String("addr", addr))
 		return nil
 	}
 
@@ -356,8 +402,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		case <-waitCtx.Done():
 			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
 		case <-ticker.C:
-			if conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond); dialErr == nil {
-				_ = conn.Close()
+			if err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
 				return nil
 			}
