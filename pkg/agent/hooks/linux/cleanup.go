@@ -96,7 +96,18 @@ func detachOrphanedByName(logger *zap.Logger, cgroupPath string, progName string
 	// from that helper.
 	progIDs, err := queryAttachedPrograms(cgroupFD.Fd(), attachType)
 	if err != nil {
-		// Not all attach types support querying; skip silently.
+		// Surface the query failure at Debug. Not all attach types are
+		// queryable on every kernel (EINVAL on older kernels, EPERM
+		// when the process lacks CAP_SYS_ADMIN/CAP_BPF, etc.), and the
+		// silent-skip path pre-this-PR made "orphan cleanup became a
+		// no-op" invisible — operators would then hit the downstream
+		// attach with "program already attached" and have no starting
+		// point for diagnosis. Debug keeps it out of normal logs while
+		// --debug runs get a trail.
+		logger.Debug("cannot query cgroup-attached BPF programs for orphan cleanup; the helper will become a no-op for this attach type — verify kernel support for BPF_PROG_QUERY on this attach type, ensure CAP_SYS_ADMIN/CAP_BPF are granted, check the cgroup v2 mount, and use bpftool to clear stale attachments manually if the subsequent attach fails with 'program already attached'",
+			zap.String("cgroupPath", cgroupPath),
+			zap.String("attachType", attachType.String()),
+			zap.Error(err))
 		return 0
 	}
 

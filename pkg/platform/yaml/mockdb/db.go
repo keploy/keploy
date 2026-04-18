@@ -1060,19 +1060,23 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 
 	// Refuse any testSetID that could escape the configured mocks
 	// directory. The test-set layout is "<MockPath>/<testSetID>/mocks.*",
-	// so the ID must be a single non-empty path segment with no
-	// separators and no "." / ".." components. A re-record request
-	// with testSetID="../../etc" or "a/b" could otherwise turn
-	// os.Remove into an arbitrary-file delete or pick up a different
-	// test-set's directory; guard before we touch the filesystem.
+	// so the ID must be a single non-empty path segment. A re-record
+	// request with testSetID="../../etc" or "a/b" could otherwise
+	// turn os.Remove into an arbitrary-file delete or pick up a
+	// different test-set's directory; guard before we touch the
+	// filesystem.
+	//
+	// Legitimate names with a '..' substring (e.g. "v1..v2", "team..a")
+	// are allowed as long as no path element equals "." or "..". We
+	// check that by enforcing: no separator, not absolute, not "." or
+	// ".." verbatim, and stable under filepath.Clean.
 	if testSetID == "" ||
 		testSetID == "." ||
 		testSetID == ".." ||
 		strings.ContainsAny(testSetID, "/\\") ||
-		strings.Contains(testSetID, "..") ||
 		filepath.IsAbs(testSetID) ||
 		filepath.Clean(testSetID) != testSetID {
-		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no '.' or '..') under the mocks output directory", testSetID)
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, not '.' or '..') under the mocks output directory", testSetID)
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 
