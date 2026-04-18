@@ -35,22 +35,22 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 // handles the SSLRequest through the TLSUpgrader interface, and
 // double-handling breaks the parser-driven flow.
 //
-// Scope when enabled: this flag only covers the client-facing half
-// of the handshake (read SSLRequest, reply 'S', MITM TLS with the
-// client). The proxy does NOT currently forward an SSLRequest to
-// the upstream Postgres server — tls.Dial goes straight into a TLS
-// ClientHello. A real Postgres server on port 5432 expects the
-// 8-byte SSLRequest preamble before TLS and will typically reject a
-// direct TLS handshake.
+// Scope when enabled: the flag covers both sides of the handshake.
+// - Client side: read SSLRequest, reply 'S', MITM TLS with the client.
+// - Upstream side: when the destination port is 5432, the proxy
+//   dials plain TCP, writes the SSLRequest preamble, reads the
+//   'S'/'N' response from the upstream Postgres server, and only
+//   then upgrades the existing socket to TLS via tls.Client. This
+//   is what a real Postgres server expects; tls.Dial directly on
+//   5432 would be rejected by the server. Non-5432 destinations
+//   still go through the plain tls.Dial path — if a downstream
+//   deployment runs Postgres on a non-standard port, it needs to
+//   either (a) accept direct TLS, or (b) register a Postgres parser
+//   via the integrations TLSUpgrader path.
 //
-// Usable today in: (a) downstream builds that decrypt the client
-// side and forward plaintext elsewhere rather than to a live
-// Postgres server, or (b) upstreams that explicitly accept direct
-// TLS on the destination port (e.g. a Postgres-compatible gateway,
-// or a test fixture that skips SSLRequest). For end-to-end MITM
-// against a vanilla Postgres, use the parser-driven TLSUpgrader
-// path in keploy/integrations instead, or wait for symmetric
-// upstream SSLRequest forwarding to land as a follow-up.
+// End-to-end MITM against a vanilla Postgres now works under this
+// flag. The parser-driven TLSUpgrader path from keploy/integrations
+// remains the richer option when you want protocol-aware mocking.
 var InterceptPostgresSSLRequest bool
 
 // ProxyHook allows an optional auxiliary proxy hook to run after proxy startup.

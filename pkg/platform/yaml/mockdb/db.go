@@ -301,14 +301,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	// loads.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		// Info (not Warn): the outcome is expected and benign — this
-		// test set is backed by gob on disk, pruning is YAML-only
-		// today, and we have a concrete next step. Repo logging
-		// guidelines discourage new Warn logs.
-		ys.Logger.Info("mock pruning skipped: mocks.gob is present for this test set (replay prefers it over mocks.yaml) and UpdateMocks only supports mocks.yaml today. mocks.gob will keep growing across runs; re-record this test set with mocks.yaml if pruning is required, until gob pruning lands as a follow-up",
-			zap.String("testSetID", testSetID),
-			zap.String("path", gobPath))
-		return nil
+		return ys.updateMocksGob(ctx, testSetID, gobPath, mockNames, pruneBefore, firstTestCaseTime)
 	}
 
 	ys.Logger.Debug("pruning unused mocks",
@@ -394,6 +387,118 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.Int("pruned", prunedCount),
 		zap.Time("pruneBefore", pruneBefore))
 
+	return nil
+}
+
+// updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
+// filter decision matches the YAML path exactly (keep config mocks,
+// mocks named in mockNames, post-replay mocks, and pre-first-test
+// startup mocks — prune everything else). The rewrite rules are
+// different because gob doesn't support append: we read the whole
+// file, filter, and atomically rewrite a fresh single-encoder
+// stream with the magic header. An existing gob writer on this
+// MockYaml must be quiesced before we touch the file so a
+// concurrent InsertMock doesn't race the truncate-and-rewrite.
+func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath string, mockNames map[string]models.MockState, pruneBefore, firstTestCaseTime time.Time) error {
+	ys.Logger.Debug("pruning unused mocks (gob)",
+		zap.Any("consumedMocks", mockNames),
+		zap.String("testSetID", testSetID),
+		zap.String("path", gobPath),
+		zap.Time("pruneBefore", pruneBefore))
+
+	// Quiesce any in-flight async writer on this MockYaml before we
+	// rewrite the gob file. An active writer holds ys.gobFile /
+	// ys.gobBufw / ys.gobEnc; rewriting the file out from under it
+	// would corrupt the next Encode. Close drains the queue and
+	// resets lifecycle state; the next InsertMock restarts a fresh
+	// writer via the inline init in insertMockGob.
+	if err := ys.Close(); err != nil {
+		utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before pruning; check disk space and writer state", zap.String("path", gobPath))
+		return err
+	}
+
+	mocks, err := readGobMocks(gobPath)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read gob mocks for pruning", zap.String("path", gobPath))
+		return err
+	}
+
+	newMocks := make([]*models.Mock, 0, len(mocks))
+	prunedCount := 0
+	for _, mock := range mocks {
+		if mock.Spec.Metadata["type"] == "config" {
+			newMocks = append(newMocks, mock)
+			continue
+		}
+		if _, ok := mockNames[mock.Name]; ok {
+			newMocks = append(newMocks, mock)
+			continue
+		}
+		if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
+			newMocks = append(newMocks, mock)
+			continue
+		}
+		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+			newMocks = append(newMocks, mock)
+			continue
+		}
+		prunedCount++
+	}
+
+	// Atomic rewrite: write to a sibling tmp file under the same
+	// directory, then rename over gobPath. os.Rename on the same
+	// filesystem is atomic, so a concurrent reader either sees the
+	// full old file or the full new one.
+	dir := filepath.Dir(gobPath)
+	base := filepath.Base(gobPath)
+	tmp, err := os.CreateTemp(dir, base+".prune.*.tmp")
+	if err != nil {
+		return fmt.Errorf("create gob prune tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	bw := bufio.NewWriterSize(tmp, 256*1024)
+	if _, err := bw.WriteString(gobMockMagic); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write gob magic to prune tmp: %w", err)
+	}
+	enc := gob.NewEncoder(bw)
+	for _, mock := range newMocks {
+		if err := enc.Encode(mock); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("encode mock during gob prune: %w", err)
+		}
+	}
+	if err := bw.Flush(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("flush gob prune tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync gob prune tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close gob prune tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, gobPath); err != nil {
+		return fmt.Errorf("rename gob prune tmp over %s: %w", gobPath, err)
+	}
+	cleanup = false
+
+	ys.Logger.Debug("pruned mocks successfully (gob)",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", len(mocks)),
+		zap.Int("kept", len(newMocks)),
+		zap.Int("pruned", prunedCount),
+		zap.Time("pruneBefore", pruneBefore))
+	_ = ctx
 	return nil
 }
 

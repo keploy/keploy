@@ -159,6 +159,71 @@ func isPostgresSSLRequestPrefix(b []byte) bool {
 	return b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x00 && b[3] == 0x08 && b[4] == 0x04
 }
 
+// dialPostgresSSLUpstream opens a Postgres-aware TLS connection to
+// addr: plain-TCP dial, write the 8-byte SSLRequest, read the
+// 1-byte 'S'/'N' response, upgrade to TLS via tls.Client only on 'S'.
+// A real Postgres server on 5432 expects this sequence; tls.Dial
+// would send a ClientHello directly and the server would reject it.
+//
+// Used by the proxy when agent.InterceptPostgresSSLRequest is set
+// and the destination port is 5432. The dial deadline is borrowed
+// from the passed-in context so a hung upstream does not block the
+// parser goroutine indefinitely; a 10 s default kicks in when the
+// context has no deadline (typical for record/replay mode).
+func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(10 * time.Second)
+	}
+	dialer := net.Dialer{Deadline: deadline}
+	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("postgres SSL upstream: plain dial %s failed: %w", addr, err)
+	}
+	if err := rawConn.SetDeadline(deadline); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: set deadline: %w", err)
+	}
+	// SSLRequest: int32 length=8, int32 code=80877103 (0x04D2162F).
+	sslRequest := []byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f}
+	if _, err := rawConn.Write(sslRequest); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: write SSLRequest to %s failed: %w", addr, err)
+	}
+	reply := make([]byte, 1)
+	if _, err := io.ReadFull(rawConn, reply); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: read SSLRequest reply from %s failed: %w", addr, err)
+	}
+	switch reply[0] {
+	case 'S':
+		// Server accepted TLS. Upgrade the existing socket and run
+		// the handshake. Clear the deadline on the raw conn first —
+		// tls.Handshake manages its own.
+		if err := rawConn.SetDeadline(time.Time{}); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("postgres SSL upstream: clear deadline after 'S': %w", err)
+		}
+		tlsConn := tls.Client(rawConn, cfg)
+		handshakeCtx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+			_ = tlsConn.Close()
+			return nil, fmt.Errorf("postgres SSL upstream: TLS handshake after 'S' failed: %w", err)
+		}
+		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
+			zap.String("addr", addr),
+			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
+		return tlsConn, nil
+	case 'N':
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream %s refused TLS (SSLRequest reply 'N'); the client expects TLS but the upstream was built without it — enable SSL on the Postgres server or disable InterceptPostgresSSLRequest for this deployment", addr)
+	default:
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream %s returned unexpected byte 0x%02x as SSLRequest reply (expected 'S' or 'N'); check that the destination is actually a Postgres server and not something else listening on 5432", addr, reply[0])
+	}
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
@@ -1177,7 +1242,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
 					zap.String("target", addr))
 			} else {
-				dstConn, err = tls.Dial("tcp", addr, cfg)
+				// When InterceptPostgresSSLRequest is on AND the
+				// destination is a Postgres service (port 5432 is
+				// the reliable-enough heuristic — documented in the
+				// hook docstring), precede the TLS dial with the
+				// Postgres SSLRequest preamble the server expects.
+				// Otherwise tls.Dial to 5432 sends a ClientHello
+				// directly, which a vanilla Postgres rejects — the
+				// flag's client-side 'S' reply would then succeed
+				// while the upstream connection fails, leaving the
+				// replayed client staring at a broken stream.
+				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
+					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+				} else {
+					dstConn, err = tls.Dial("tcp", addr, cfg)
+				}
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
 					return err
