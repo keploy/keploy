@@ -38,7 +38,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
       - name: Clean up workspace
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         continue-on-error: true
         run: |
           Write-Host "== Cleaning keploy artifacts =="
@@ -62,7 +62,7 @@ jobs:
 
       - name: Install Record Binary
         id: setup_record
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
@@ -76,7 +76,7 @@ jobs:
 
       - name: Install Replay Binary
         id: setup_replay
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
@@ -93,7 +93,7 @@ jobs:
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
           DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
           DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           cd samples-go/${{ matrix.app.path }}
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-native-windows.ps1"

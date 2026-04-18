@@ -92,7 +92,7 @@ jobs:
         # step with 'pwsh: command not found'. Every cmdlet used
         # below (Get-PSDrive, Get-ChildItem, Where-Object, etc.) is
         # PS5.1-compatible.
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $ErrorActionPreference = 'Continue'
           # The shared self-hosted Windows runners have hit "not
@@ -205,7 +205,7 @@ jobs:
       # Inline because this runs BEFORE checkout (workspace may not exist).
       # Logic mirrors .github/scripts/windows/setup-git-isolation.ps1.
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $ErrorActionPreference = 'Stop'
           $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
@@ -294,7 +294,7 @@ jobs:
           go-cache: false
 
       - name: Add MinGW gcc to PATH
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           # Search common MinGW/msys64 install locations; different runners
           # in the fleet stage MinGW in different paths (msys64, direct
@@ -343,7 +343,7 @@ jobs:
 
 
       - name: CGO toolchain sanity
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           Write-Host "PATH=$env:PATH"
           where.exe gcc
@@ -368,7 +368,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
@@ -426,7 +426,7 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
@@ -440,7 +440,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -480,7 +480,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
@@ -503,7 +503,7 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
@@ -517,7 +517,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup per-run git isolation
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -544,7 +544,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
