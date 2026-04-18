@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -79,6 +80,13 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 		return err
 	}
+
+	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
+		a.logger.Info("Memory guard unavailable, continuing without memory-aware recording. "+
+			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
+			zap.Error(err))
+	}
+
 	select {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():
@@ -232,6 +240,10 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	return a.Proxy.GetConsumedMocks(ctx)
+}
+
+func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	return a.Proxy.GetMockErrors(ctx)
 }
 
 // StoreMocks stores the filtered and unfiltered mocks for a client ID

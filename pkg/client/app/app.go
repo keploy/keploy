@@ -2,21 +2,31 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/pkg/stdcopy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
@@ -38,8 +48,10 @@ type App struct {
 	kind            utils.CmdType
 	opts            models.SetupOptions
 	container       string
+	composeService  string
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
+	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
 	EnableTesting   bool
 	Mode            models.Mode
 }
@@ -149,6 +161,12 @@ func (a *App) SetupCompose(extraArgs []string) error {
 		return errors.New("container name not found")
 	}
 
+	// In-memory path: compose content was provided directly (e.g. from the enterprise
+	// cloud command) to avoid writing sensitive env vars to disk.
+	if len(a.opts.InMemoryCompose) > 0 {
+		return a.setupComposeInMemory(extraArgs)
+	}
+
 	// In SetupCompose, first we try to find all the docker compose file paths in the current context.
 	// Then, we find the compose file which contains the user app container.
 	// After that, we add the keploy agent service in a copy of the found user app compose file (by creating docker-compose-tmp.yaml).
@@ -177,6 +195,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	a.opts.AppPorts = serviceInfo.Ports
 	a.opts.AppNetworks = serviceInfo.Networks
 	a.opts.ExtraArgs = extraArgs
+	a.composeService = serviceInfo.AppServiceName
 	compose := serviceInfo.Compose
 
 	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
@@ -213,6 +232,58 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	return nil
 }
 
+// setupComposeInMemory handles the in-memory variant of SetupCompose. It parses the
+// compose YAML that was passed via opts.InMemoryCompose (never written to disk),
+// injects the keploy-agent service, serialises the result back to bytes, and
+// configures the command to pipe the content via stdin ("-f -").
+func (a *App) setupComposeInMemory(extraArgs []string) error {
+	var compose docker.Compose
+	if err := yaml.Unmarshal(a.opts.InMemoryCompose, &compose); err != nil {
+		return fmt.Errorf("failed to parse in-memory compose YAML: %w", err)
+	}
+
+	serviceInfo, err := a.docker.FindContainerInCompose(&compose, a.container)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to find container in in-memory compose")
+		return err
+	}
+
+	a.opts.AppPorts = serviceInfo.Ports
+	a.opts.AppNetworks = serviceInfo.Networks
+	a.opts.ExtraArgs = extraArgs
+	a.composeService = serviceInfo.AppServiceName
+
+	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, a.container); err != nil {
+		utils.LogError(a.logger, err, "failed to modify in-memory compose for keploy integration")
+		return err
+	}
+
+	if HookImpl != nil {
+		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), &compose, a.container)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
+			return err
+		}
+		if changed {
+			a.logger.Debug("Successfully ran BeforeDockerComposeSetup hook and modified volumes")
+		}
+	}
+
+	content, err := a.docker.MarshalCompose(&compose)
+	if err != nil {
+		return fmt.Errorf("failed to serialise modified compose to YAML: %w", err)
+	}
+	a.composeContent = content
+
+	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
+	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService)
+
+	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
+		zap.String("cmd", a.cmd))
+
+	return nil
+}
+
 func (a *App) SetAppCommand(appCommand string) {
 	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
 	a.cmd = appCommand
@@ -229,6 +300,11 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 func (a *App) Run(ctx context.Context) models.AppError {
 	return a.run(ctx)
 }
+
+func (a *App) RecentLogs(ctx context.Context) string {
+	return a.recentAppLogs(ctx)
+}
+
 func (a *App) waitTillExit() {
 	timeout := time.NewTimer(30 * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
@@ -258,21 +334,208 @@ func (a *App) waitTillExit() {
 	}
 }
 
+func (a *App) recentAppLogs(ctx context.Context) string {
+	if !utils.IsDockerCmd(a.kind) {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	logTarget := a.logTargetContainer(ctx)
+	if logTarget == "" {
+		return ""
+	}
+
+	logReader, err := a.docker.ContainerLogs(ctx, logTarget, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "50",
+	})
+	if err != nil {
+		a.logger.Debug("failed to fetch recent app logs", zap.String("container", logTarget), zap.Error(err))
+		return ""
+	}
+	defer func() {
+		if closeErr := logReader.Close(); closeErr != nil {
+			a.logger.Debug("failed to close recent app logs reader", zap.String("container", logTarget), zap.Error(closeErr))
+		}
+	}()
+
+	rawLogs, err := io.ReadAll(logReader)
+	if err != nil {
+		a.logger.Debug("failed to read recent app logs", zap.String("container", logTarget), zap.Error(err))
+		return ""
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, bytes.NewReader(rawLogs)); err != nil {
+		return trimRecentAppLogs(string(rawLogs), 20)
+	}
+
+	combined := strings.TrimSpace(stdoutBuf.String())
+	stderrLogs := strings.TrimSpace(stderrBuf.String())
+	if stderrLogs != "" {
+		if combined != "" {
+			combined += "\n"
+		}
+		combined += stderrLogs
+	}
+
+	return trimRecentAppLogs(combined, 20)
+}
+
+func (a *App) logTargetContainer(ctx context.Context) string {
+	if !utils.IsDockerCmd(a.kind) {
+		return ""
+	}
+	if a.kind != utils.DockerCompose || a.composeService == "" {
+		return a.container
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if projectLabel := a.composeProjectLabel(ctx); projectLabel != "" {
+		projectArgs := filters.NewArgs(
+			filters.Arg("label", "com.docker.compose.service="+a.composeService),
+			filters.Arg("label", "com.docker.compose.project="+projectLabel),
+		)
+		containers, err := a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: projectArgs})
+		if err != nil {
+			a.logger.Debug(
+				"failed to list compose containers for recent app logs using compose project label; falling back to service-only matching",
+				zap.String("service", a.composeService),
+				zap.String("project", projectLabel),
+				zap.Error(err),
+			)
+		} else if len(containers) > 0 {
+			sort.Slice(containers, func(i, j int) bool {
+				return containers[i].Created > containers[j].Created
+			})
+			return containers[0].ID
+		}
+	}
+
+	args := filters.NewArgs(filters.Arg("label", "com.docker.compose.service="+a.composeService))
+	containers, err := a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	if err != nil {
+		a.logger.Debug("failed to list compose containers for recent app logs", zap.String("service", a.composeService), zap.Error(err))
+		return a.container
+	}
+	if len(containers) == 0 {
+		return a.container
+	}
+	sort.Slice(containers, func(i, j int) bool {
+		return containers[i].Created > containers[j].Created
+	})
+
+	return containers[0].ID
+}
+
+func (a *App) composeProjectLabel(ctx context.Context) string {
+	if a.container == "" {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	containerInfo, err := a.docker.ContainerInspect(ctx, a.container)
+	if err != nil {
+		a.logger.Debug(
+			"failed to inspect compose container for project label when fetching recent app logs; falling back to service-only matching",
+			zap.String("service", a.composeService),
+			zap.String("container", a.container),
+			zap.Error(err),
+		)
+		return ""
+	}
+	if containerInfo.Config == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(containerInfo.Config.Labels["com.docker.compose.project"])
+}
+
+func trimRecentAppLogs(logs string, maxLines int) string {
+	if logs == "" || maxLines <= 0 {
+		return ""
+	}
+
+	lines := strings.Split(strings.ReplaceAll(logs, "\r\n", "\n"), "\n")
+	meaningful := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(sanitizeAppLogLine(line))
+		if trimmed == "" {
+			continue
+		}
+		meaningful = append(meaningful, trimmed)
+	}
+
+	if len(meaningful) > maxLines {
+		meaningful = meaningful[len(meaningful)-maxLines:]
+	}
+
+	return strings.Join(meaningful, "\n")
+}
+
+func sanitizeAppLogLine(line string) string {
+	line = ansiEscapePattern.ReplaceAllString(line, "")
+	line = strings.ReplaceAll(line, "\t", "  ")
+	return strings.TrimSpace(line)
+}
+
 // composeDown runs docker compose down to remove all containers and networks
 // created by the compose stack. Without this, stopped containers retain
 // references to image layers; a subsequent docker image prune can delete
 // those layers and corrupt Docker Desktop's overlayfs snapshots.
 func (a *App) composeDown() {
-	if a.composeFile == "" {
+	var downCmd *exec.Cmd
+
+	switch {
+	case len(a.composeContent) > 0:
+		// In-memory mode: pipe compose YAML via stdin, no file on disk.
+		// Preserve project-scoping flags (-p/--project-name, --project-directory)
+		// from the original command so teardown targets the correct project.
+		a.logger.Debug("Running docker compose down using in-memory compose content")
+		args := []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "down")
+		downCmd = exec.Command("docker", args...)
+		downCmd.Stdin = bytes.NewReader(a.composeContent)
+	case a.composeFile != "":
+		a.logger.Debug("Running docker compose down to clean up containers and networks",
+			zap.String("composeFile", a.composeFile))
+		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down")
+	default:
 		return
 	}
-	a.logger.Debug("Running docker compose down to clean up containers and networks",
-		zap.String("composeFile", a.composeFile))
-	downCmd := exec.Command("docker", "compose", "-f", a.composeFile, "down")
+
 	if output, err := downCmd.CombinedOutput(); err != nil {
 		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
 			zap.Error(err), zap.String("output", string(output)))
 	}
+}
+
+// extractProjectFlags returns any project-scoping flags (-p/--project-name,
+// --project-directory) found in the given docker compose command.
+func extractProjectFlags(cmd string) []string {
+	parts := strings.Fields(cmd)
+	var flags []string
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory") && i+1 < len(parts):
+			flags = append(flags, parts[i], parts[i+1])
+			i++
+		case strings.HasPrefix(parts[i], "-p=") || strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
+			flags = append(flags, parts[i])
+		}
+	}
+	return flags
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
@@ -334,11 +597,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
-			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err}
+			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err, AppLogs: a.recentAppLogs(ctx)}
 		case utils.Runtime:
 			err = cmdErr.Err
 		}
@@ -353,16 +616,18 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
+		appLogs := a.recentAppLogs(ctx)
+
 		if a.Mode == models.MODE_RECORD && a.EnableTesting {
 			a.logger.Info("waiting for some time before returning the error to allow recording of test cases when testing keploy with itself")
 			time.Sleep(3 * time.Second)
 			a.logger.Debug("test binary stopped", zap.Error(err))
-			return models.AppError{AppErrorType: models.ErrTestBinStopped, Err: context.Canceled}
+			return models.AppError{AppErrorType: models.ErrTestBinStopped, Err: context.Canceled, AppLogs: appLogs}
 		}
 
 		if err != nil {
-			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
+			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err, AppLogs: appLogs}
 		}
-		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil, AppLogs: appLogs}
 	}
 }

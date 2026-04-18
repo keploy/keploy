@@ -32,9 +32,19 @@ type Recorder struct {
 	testSetConf     TestSetConfig
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
+	hooks           RecordHooks
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
+// Used by the orchestrator during re-record mode.
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
+}
+
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
+	if hooks == nil {
+		hooks = BaseRecordHooks{}
+	}
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
@@ -44,7 +54,20 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 		instrumentation: instrumentation,
 		testSetConf:     testSetConf,
 		config:          config,
+		hooks:           hooks,
 	}
+}
+
+// SetRecordHooks replaces the current hooks. Mirrors SetTestHooks on the Replayer.
+func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
+	if hooks != nil {
+		r.hooks = hooks
+	}
+}
+
+// GetRecordHooks returns the current hooks.
+func (r *Recorder) GetRecordHooks() RecordHooks {
+	return r.hooks
 }
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
@@ -186,8 +209,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		passPortsUint32[i] = uint32(port)
 	}
 
+	memoryLimit := uint64(0)
+	if r.config.CommandType == string(utils.DockerRun) || r.config.CommandType == string(utils.DockerCompose) {
+		memoryLimit = r.config.Record.MemoryLimit
+	}
+
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
+	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -269,6 +297,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 			if reRecordCfg.TestSet == "" {
+				if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
+					TestCase: testCase, TestSetID: newTestSetID,
+				}); hookErr != nil {
+					r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+						zap.Error(hookErr),
+						zap.String("testSetID", newTestSetID),
+						zap.String("testCaseName", testCase.Name))
+				}
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {
 					if ctx.Err() == context.Canceled {
@@ -278,6 +314,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				} else {
 					testCount++
 					r.telemetry.RecordedTestAndMocks()
+					if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
+						TestCase: testCase, TestSetID: newTestSetID,
+					}); hookErr != nil {
+						r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
+							zap.Error(hookErr),
+							zap.String("testSetID", newTestSetID),
+							zap.String("testCaseName", testCase.Name))
+					}
 				}
 			} else {
 				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
@@ -290,18 +334,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			// Send a copy to global mock channel for correlation manager if available
-			if r.globalMockCh != nil {
-				currMockID := r.mockDB.GetCurrMockID()
-				// Create a deep copy of the mock to avoid race conditions
-				mockCopy := *mock
-				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
-				select {
-				case r.globalMockCh <- &mockCopy:
-					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
-				default:
-					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
-				}
+			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
+				Mock: mock, TestSetID: newTestSetID,
+			}); hookErr != nil {
+				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+					zap.Error(hookErr),
+					zap.String("testSetID", newTestSetID),
+					zap.String("mockName", mock.Name),
+					zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
@@ -310,6 +350,15 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				insertMockErrChan <- err
 			} else {
+				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
+					Mock: mock, TestSetID: newTestSetID,
+				}); hookErr != nil {
+					r.logger.Error("AfterMockInsert hook failed; mock was inserted successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
+						zap.Error(hookErr),
+						zap.String("testSetID", newTestSetID),
+						zap.String("mockName", mock.Name),
+						zap.String("mockKind", mock.GetKind()))
+				}
 				if tempID != "" && mock.Name != "" {
 					correlationMap.Store(tempID, models.MockEntry{
 						Name:             mock.Name,
@@ -321,6 +370,35 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				// Forward a lightweight mock reference to the orchestrator's
+				// correlation manager after InsertMock succeeds, so mappings
+				// only reference persisted mocks. Metadata map is copied to
+				// avoid data races with concurrent goroutines.
+				if r.globalMockCh != nil {
+					var metadata map[string]string
+					if mock.Spec.Metadata != nil {
+						metadata = make(map[string]string, len(mock.Spec.Metadata))
+						for k, v := range mock.Spec.Metadata {
+							metadata[k] = v
+						}
+					}
+					ref := &models.Mock{
+						Version: mock.Version,
+						Kind:    mock.Kind,
+						Name:    mock.Name,
+						Spec: models.MockSpec{
+							Metadata:         metadata,
+							ReqTimestampMock: mock.Spec.ReqTimestampMock,
+							ResTimestampMock: mock.Spec.ResTimestampMock,
+						},
+					}
+					select {
+					case r.globalMockCh <- ref:
+					default:
+						r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
+							zap.String("mockName", ref.Name))
+					}
+				}
 			}
 		}
 		return nil
@@ -664,10 +742,4 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
-}
-
-// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
-func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
-	r.globalMockCh = mockCh
-	r.logger.Info("Global mock channel set for record service")
 }

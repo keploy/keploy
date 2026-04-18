@@ -57,13 +57,14 @@ type OutgoingOptions struct {
 	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay    time.Duration // This is the same as Application delay.
-	Mocking     bool          // used to enable/disable mocking
-	DstCfg      *ConditionalDstCfg
-	Backdate    time.Time                      // used to set backdate in cacert request
-	NoiseConfig map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
-	SkipTLSMITM bool
-	ConnKey     string // connection-level key for TLSHandshakeStore correlation
+	SQLDelay               time.Duration // This is the same as Application delay.
+	Mocking                bool          // used to enable/disable mocking
+	DstCfg                 *ConditionalDstCfg
+	Backdate               time.Time                      // used to set backdate in cacert request
+	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
+	SkipTLSMITM            bool
+	ConnKey                string // connection-level key for TLSHandshakeStore correlation
 }
 
 type ConditionalDstCfg struct {
@@ -99,9 +100,14 @@ type SetupOptions struct {
 	NetworkAliases    map[string][]string
 	BuildDelay        uint64
 	PassThroughPorts  []uint
+	MemoryLimit       uint64
 	ConfigPath        string
 	ExtraArgs         []string
 	EnableSampling    int
+	// InMemoryCompose holds docker-compose YAML content to avoid writing sensitive
+	// environment variables to disk. When non-nil, SetupCompose uses this content
+	// directly instead of reading from a file path extracted from the command.
+	InMemoryCompose []byte
 }
 
 type RunOptions struct {

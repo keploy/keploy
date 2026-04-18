@@ -45,6 +45,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/stop", a.Stop)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
+		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
@@ -214,16 +215,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 	a.logger.Debug("Incoming stream connection established and headers flushed")
 
-	// Keep the connection alive and stream data
-	for t := range tc {
+	// Keep the connection alive and stream data.
+	// Use select (not for-range) so context cancellation is checked
+	// concurrently with channel receive — otherwise the handler blocks
+	// forever during shutdown when no test cases are arriving.
+	for {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
-			// Client closed the connection or context was cancelled
 			return
-		default:
+		case t, ok := <-tc:
+			if !ok {
+				return
+			}
 			// Stream each test case as JSON
-			a.logger.Debug("Sending test case", zap.Any("test_case", t))
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
 			header.Set("Content-Disposition", `form-data; name="metadata"`)

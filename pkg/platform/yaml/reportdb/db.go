@@ -6,8 +6,11 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -102,9 +105,10 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	}
 
 	testReport.CreatedAt = time.Now().Unix()
+	report := sanitizeReportForYAML(*testReport)
 
 	data := []byte{}
-	d, err := yamlLib.Marshal(&testReport)
+	d, err := yamlLib.Marshal(&report)
 	if err != nil {
 		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
 	}
@@ -117,6 +121,39 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		return err
 	}
 	return nil
+}
+
+func sanitizeReportForYAML(report models.TestReport) models.TestReport {
+	report.AppLogs = normalizeReportYAMLText(report.AppLogs)
+	report.FailureReason = normalizeReportYAMLText(report.FailureReason)
+	report.CmdUsed = normalizeReportYAMLText(report.CmdUsed)
+	return report
+}
+
+func normalizeReportYAMLText(value string) string {
+	if value == "" {
+		return ""
+	}
+
+	value = strings.ToValidUTF8(value, "")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, "\t", "  ")
+
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		if r == '\n' {
+			builder.WriteRune(r)
+			continue
+		}
+		if r == utf8.RuneError || unicode.IsControl(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+
+	return builder.String()
 }
 
 func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, coverageReport any) error {

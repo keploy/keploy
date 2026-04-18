@@ -172,13 +172,21 @@ func IsEOFPacket(data []byte) bool {
 		return false // Packet is too short to be valid
 	}
 
-	// Check if the first byte is 5 or 7
-	if data[0] != 5 && data[0] != 7 {
+	// First payload byte must be 0xFE (EOF marker).
+	if data[4] != 0xFE {
 		return false
 	}
 
-	// Check if the packet contains the EOF marker 0xFE
-	return len(data) > 0 && data[4] == 0xFE
+	// Validate the full 3-byte payload length (little-endian) to avoid
+	// false positives on larger packets whose LSB happens to be 5 or 1.
+	// Legacy EOF payload is 5 bytes (with CLIENT_PROTOCOL_41) or 1 byte.
+	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+
+	// Also verify the buffer is long enough to contain the claimed payload.
+	if uint32(len(data)-4) < payloadLen {
+		return false
+	}
+	return payloadLen == 5 || payloadLen == 1
 }
 
 func IsERRPacket(data []byte) bool {
@@ -187,6 +195,69 @@ func IsERRPacket(data []byte) bool {
 
 func IsOKPacket(data []byte) bool {
 	return len(data) > 7 && data[4] == mysql.OK
+}
+
+// maxOKReplacingEOFPayload is the maximum reasonable payload size for an
+// OK-replacing-EOF terminator packet. An OK terminator for a SELECT carries
+// header (1) + affected_rows (1) + last_insert_id (1) + status_flags (2) +
+// warnings (2) + optional session state info. Even with large session state,
+// this should never exceed 1024 bytes. Text row packets using 0xFE
+// length-encoded integers encode values >= 16 MB, so their total payload
+// will always exceed this bound — eliminating false positives.
+const maxOKReplacingEOFPayload = 1024
+
+// IsOKReplacingEOF detects the OK packet that replaces EOF when
+// CLIENT_DEPRECATE_EOF is negotiated. This packet uses the 0xFE header
+// byte (same as legacy EOF) but carries OK-packet structure. We validate
+// strictly: header 0xFE, consistent payload length, both affected_rows and
+// last_insert_id zero (always true for SELECT terminators), and a
+// reasonable payload size upper bound to avoid false positives with text
+// row packets whose first column uses the 0xFE length-encoded integer
+// form (which encodes values >= 16 MB).
+// See: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_ok_packet.html
+func IsOKReplacingEOF(data []byte) bool {
+	if len(data) < 11 {
+		return false
+	}
+
+	// Payload length is stored in the first 3 bytes (little-endian).
+	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+	if payloadLen != uint32(len(data)-4) {
+		return false
+	}
+
+	// The payload starts at data[4]. Header byte must be 0xFE.
+	if data[4] != 0xFE {
+		return false
+	}
+
+	// For a result-set terminator the OK packet carries zero affected rows
+	// and zero last-insert-id, both encoded as single-byte lenenc ints.
+	if data[5] != 0x00 || data[6] != 0x00 {
+		return false
+	}
+
+	// Payload must be at least 7 bytes (header + 2 zeroes + status_flags +
+	// warnings) and at most maxOKReplacingEOFPayload. The upper bound rules
+	// out text rows with 0xFE lenenc integers, which encode values >= 16 MB
+	// and thus produce payloads far exceeding this limit.
+	return payloadLen >= 7 && payloadLen <= maxOKReplacingEOFPayload
+}
+
+// IsResultSetTerminator checks if a packet terminates a result set row
+// stream. When deprecateEOF is false, only legacy EOF packets terminate.
+// When deprecateEOF is true, the 0xFE-based OK-replacing-EOF also
+// terminates. Because row packets can begin with 0xFE (length-encoded
+// integer 8-byte form), OK-replacing-EOF is identified by its packet
+// structure (header + zero affected_rows + zero last_insert_id).
+func IsResultSetTerminator(data []byte, deprecateEOF bool) bool {
+	if IsEOFPacket(data) {
+		return true
+	}
+	if deprecateEOF && IsOKReplacingEOF(data) {
+		return true
+	}
+	return false
 }
 
 func IsGenericResponse(data []byte) (string, bool) {
