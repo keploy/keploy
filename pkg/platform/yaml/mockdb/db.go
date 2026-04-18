@@ -301,7 +301,11 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	if useGobMockFormat() {
 		gobPath := filepath.Join(path, mockFileName+".gob")
 		if _, err := os.Stat(gobPath); err == nil {
-			ys.Logger.Warn("mock pruning skipped: mocks.gob is in use and UpdateMocks only supports mocks.yaml today. mocks.gob will keep growing across runs; set KEPLOY_MOCK_FORMAT=yaml for the pruning pass, or re-record with yaml, until gob pruning lands as a follow-up",
+			// Info (not Warn): the outcome is expected and benign — the
+			// user has explicitly opted into gob mode, pruning is
+			// YAML-only today, and they have a concrete next step.
+			// Repo logging guidelines discourage new Warn logs.
+			ys.Logger.Info("mock pruning skipped: mocks.gob is in use and UpdateMocks only supports mocks.yaml today. mocks.gob will keep growing across runs; set KEPLOY_MOCK_FORMAT=yaml for the pruning pass, or re-record with yaml, until gob pruning lands as a follow-up",
 				zap.String("testSetID", testSetID),
 				zap.String("path", gobPath))
 			return nil
