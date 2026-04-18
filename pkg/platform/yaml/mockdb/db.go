@@ -888,7 +888,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 
 			for _, mock := range mocks {
 				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-
 				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
