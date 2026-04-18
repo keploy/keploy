@@ -1227,15 +1227,34 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	//
 	// Legitimate names with a '..' substring (e.g. "v1..v2", "team..a")
 	// are allowed as long as no path element equals "." or "..". We
-	// check that by enforcing: no separator, not absolute, not "." or
-	// ".." verbatim, and stable under filepath.Clean.
+	// check that by enforcing: no separator, no volume qualifier,
+	// not absolute, not "." or ".." verbatim, and stable under
+	// filepath.Clean.
+	//
+	// The VolumeName check is the Windows-only escape Copilot
+	// flagged on keploy#4045 review round 26: `filepath.IsAbs("C:")`
+	// returns false, `Clean("C:") == "C:"`, and there are no
+	// separators, but `filepath.Join(base, "C:")` on Windows
+	// absorbs the volume qualifier and drops the base, so a
+	// re-record request with testSetID="C:" would turn os.Remove
+	// into a delete at the root of drive C: on a Windows runner.
+	// filepath.VolumeName returns the drive / UNC prefix when the
+	// path carries one, and is empty on the legitimate path.
+	// filepath.VolumeName is Windows-specific at runtime and returns
+	// "" for "C:" on Linux, so we ALSO explicitly reject any ID
+	// containing ':' — a legitimate test-set name has no reason
+	// to carry one, and this makes the Linux build reject the
+	// same strings the Windows runtime would. strings.HasPrefix
+	// catches UNC-style ("\\\\server") and extended-length
+	// ("\\\\?\\C:") prefixes for the same cross-platform reason.
 	if testSetID == "" ||
 		testSetID == "." ||
 		testSetID == ".." ||
-		strings.ContainsAny(testSetID, "/\\") ||
+		strings.ContainsAny(testSetID, "/\\:") ||
+		filepath.VolumeName(testSetID) != "" ||
 		filepath.IsAbs(testSetID) ||
 		filepath.Clean(testSetID) != testSetID {
-		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, not '.' or '..') under the mocks output directory", testSetID)
+		return fmt.Errorf("rejecting DeleteMocksForSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..') under the mocks output directory", testSetID)
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
 

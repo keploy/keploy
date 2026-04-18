@@ -263,3 +263,34 @@ func TestGobMagicHeaderRejectsMismatch(t *testing.T) {
 		t.Fatalf("expected 'unrecognized magic' in error, got: %v", err)
 	}
 }
+
+// TestDeleteMocksForSetRejectsVolumeQualifier pins the Windows
+// path-traversal guard for volume-qualified IDs (e.g. "C:" or
+// UNC-prefixed). filepath.Join(base, "C:") on Windows absorbs the
+// drive prefix, so a testSetID like "C:" would otherwise turn
+// os.Remove into a delete at the root of drive C:. Copilot
+// review round 26 on keploy#4045.
+func TestDeleteMocksForSetRejectsVolumeQualifier(t *testing.T) {
+	ctx := context.Background()
+	ys := &MockYaml{MockPath: t.TempDir()}
+
+	cases := []string{
+		"C:",     // classic drive prefix
+		"D:foo",  // drive-relative
+		`\\srv`,  // UNC prefix (Windows)
+		`\\?\C:`, // extended-length path
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			err := ys.DeleteMocksForSet(ctx, id)
+			if err == nil {
+				t.Fatalf("expected DeleteMocksForSet to reject %q, got nil", id)
+			}
+			if !strings.Contains(err.Error(), "drive/volume prefix") &&
+				!strings.Contains(err.Error(), "separators") &&
+				!strings.Contains(err.Error(), "single-segment") {
+				t.Fatalf("unexpected error for %q: %v", id, err)
+			}
+		})
+	}
+}
