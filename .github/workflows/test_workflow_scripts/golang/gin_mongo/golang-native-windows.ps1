@@ -229,11 +229,26 @@ for ($i = 1; $i -le 2; $i++) {
     Remove-Job $recJob -Force
 
     # Scan for errors, but apply filter (force-kill on Windows causes expected app termination errors)
+    # NativeCommandError / NativeCommandErrorMessage: Windows PowerShell 5.1
+    # promotes any stderr text from a native process to a PowerShell
+    # ErrorRecord when the child process is run under a Start-Job. The
+    # ErrorCategory and FullyQualifiedErrorId fields literally contain the
+    # substring "ERROR", so Tee-Object'd pipeline output ends up matching
+    # the "ERROR" scan here even when keploy itself logged nothing of
+    # the sort. pwsh (7+) formats these differently and does not emit
+    # those lines into the tee'd stream, which is why the old pwsh
+    # runner pool never tripped on this. Exclude both the NativeCommand
+    # boilerplate and any lines prefixed with "+ " (PS's error-record
+    # backtrace arrows).
     $recErrors = Select-String -Path $logFile -Pattern "ERROR"
     $filteredRecErrors = $recErrors | Where-Object {
         $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
         $_.Line -notmatch "user application terminated unexpectedly" -and
-        $_.Line -notmatch "unknown error received from application"
+        $_.Line -notmatch "unknown error received from application" -and
+        $_.Line -notmatch "NativeCommandError" -and
+        $_.Line -notmatch "RemoteException" -and
+        $_.Line -notmatch "^\s*\+\s" -and
+        $_.Line -notmatch "ParentContainsErrorRecordException"
     }
 
     if ($filteredRecErrors) {
