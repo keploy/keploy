@@ -239,17 +239,30 @@ func readMemoryCurrent(path string) (int64, error) {
 // If memory.stat is unavailable the raw memory.current value is returned so
 // the guard still functions (conservatively).
 func readWorkingSetBytes(memCurrentPath string) (int64, error) {
-	currentBytes, err := readMemoryCurrent(memCurrentPath)
+	currentBytes, inactiveFile, err := readMemoryStats(memCurrentPath)
 	if err != nil {
 		return 0, err
+	}
+	workingSet := currentBytes - inactiveFile
+	if workingSet < 0 {
+		workingSet = 0
+	}
+	return workingSet, nil
+}
+
+// readMemoryStats returns (memory.current, inactive_file). Exposed for
+// local-testing diagnostics so callers can log both components of the
+// working-set calculation.
+func readMemoryStats(memCurrentPath string) (int64, int64, error) {
+	currentBytes, err := readMemoryCurrent(memCurrentPath)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	statPath := filepath.Join(filepath.Dir(memCurrentPath), "memory.stat")
 	data, err := os.ReadFile(statPath)
 	if err != nil {
-		// Graceful degradation: memory.stat may not exist on cgroup v1 paths
-		// or in some constrained environments; fall back to raw usage.
-		return currentBytes, nil
+		return currentBytes, 0, nil
 	}
 
 	var inactiveFile int64
@@ -262,12 +275,7 @@ func readWorkingSetBytes(memCurrentPath string) (int64, error) {
 			break
 		}
 	}
-
-	workingSet := currentBytes - inactiveFile
-	if workingSet < 0 {
-		workingSet = 0
-	}
-	return workingSet, nil
+	return currentBytes, inactiveFile, nil
 }
 
 func resolveMemoryUsagePath(procMountsPath, procSelfCgroupPath, procMountInfoPath string) (string, cgroupLayout, error) {
@@ -287,37 +295,36 @@ func resolveMemoryUsagePath(procMountsPath, procSelfCgroupPath, procMountInfoPat
 		}
 	}
 
-	// Secondary path: scan identifiers extracted from the environment, hostname,
-	// /proc/self/cgroup, and /proc/self/mountinfo, then walk the cgroup tree
-	// looking for a scope directory whose name contains one of those identifiers.
-	identifiers, err := collectContainerIdentifiers(procSelfCgroupPath, procMountInfoPath)
-	if err != nil {
-		return "", cgroupLayout{}, err
-	}
-
+	// Secondary path: walk every cgroup.procs file under the mount point and
+	// find the scope that actually owns this process (matched by its
+	// root-namespace PID read from NSpid in /proc/self/status). This is
+	// unambiguous — exactly one cgroup contains our PID — so we prefer it
+	// over identifier matching, which can fuzzy-match sibling container
+	// scopes when multiple pod cgroups are visible (kind, nested Docker).
 	var resolutionErrs []string
-	for _, layout := range layouts {
-		candidate, err := findMemoryUsagePathByIdentifier(layout, identifiers)
-		if err == nil {
-			return candidate, layout, nil
-		}
-		resolutionErrs = append(resolutionErrs, err.Error())
-	}
-
-	// Tertiary / macOS-kind fallback: on macOS with Docker Desktop the cgroup
-	// namespace is not propagated into kind node containers, so
-	// /proc/self/cgroup reports "/" and the container ID does not appear in
-	// mountinfo.  Walk every cgroup.procs file under the mount point and find
-	// the scope that actually owns this process (matched by its root-namespace
-	// PID read from NSpid in /proc/self/status).
-	// This path is never reached on a normal Linux setup, so it has zero impact
-	// on the existing Linux flow.
 	for _, layout := range layouts {
 		candidate, err := findCgroupByOwnPID(layout)
 		if err == nil {
 			return candidate, layout, nil
 		}
 		resolutionErrs = append(resolutionErrs, fmt.Sprintf("pid-walk: %v", err))
+	}
+
+	// Tertiary path: scan identifiers extracted from the environment, hostname,
+	// /proc/self/cgroup, and /proc/self/mountinfo, then walk the cgroup tree
+	// looking for a scope directory whose name contains one of those identifiers.
+	// Used only when PID-based resolution fails (e.g. environments where
+	// /proc/self/status NSpid is hidden or cgroup.procs is not readable).
+	identifiers, err := collectContainerIdentifiers(procSelfCgroupPath, procMountInfoPath)
+	if err != nil {
+		return "", cgroupLayout{}, err
+	}
+	for _, layout := range layouts {
+		candidate, err := findMemoryUsagePathByIdentifier(layout, identifiers)
+		if err == nil {
+			return candidate, layout, nil
+		}
+		resolutionErrs = append(resolutionErrs, err.Error())
 	}
 
 	return "", cgroupLayout{}, fmt.Errorf("no container-specific cgroup memory file found (%s)", strings.Join(resolutionErrs, "; "))
@@ -512,34 +519,58 @@ func extractHexIdentifiers(value string) []string {
 // /kubepods/burstable/pod.../cri-containerd-<id>) and is the fastest,
 // most reliable resolution method.
 //
-// On macOS with Docker Desktop + kind the cgroup namespace is not propagated,
-// so /proc/self/cgroup reports "/" (the root of the entire VM's cgroup tree).
-// When cgroupPath is "/" (root), this is valid in containers with proper
-// cgroup namespace isolation where the container sits at the root of its
-// own cgroup namespace. buildMountedCgroupPath handles the "/" case and
-// fileExists validates the resolved path, so we do not reject "/" here.
-// If the resolved path doesn't exist (e.g. macOS Docker Desktop + kind
-// where "/" maps to VM-wide memory), fileExists will fail and the caller
-// falls through to identifier-based or PID-based resolution.
+// When the resolved path is the root ("/"), the mounted candidate may point
+// at an ancestor cgroup rather than the container's own: macOS Docker Desktop
+// exposes the VM's root cgroup, and kind nodes expose the node-level tree.
+// For the root case we therefore require proof that the candidate cgroup
+// actually owns this process (its cgroup.procs contains our PID); otherwise
+// the caller falls through to PID-based or identifier-based resolution.
+// If cgroup.procs cannot be read (e.g. unit tests with a fake tree), the
+// candidate is accepted optimistically to preserve previous behavior.
 func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (string, error) {
-    cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
-    if err != nil {
-        return "", err
-    }
+	cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
+	if err != nil {
+		return "", err
+	}
 
-    // Reject the root path ("/") so it is forced to use your PID-based fallback on macOS
-    if cgroupPath == "/" || cgroupPath == "" {
-        return "", fmt.Errorf("cgroup self-path is root (%q); skipping to container-specific resolution", cgroupPath)
-    }
+	candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
+	if !ok {
+		return "", fmt.Errorf("unable to map cgroup path %q to mount %q", cgroupPath, layout.mountPoint)
+	}
+	if !fileExists(candidate) {
+		return "", fmt.Errorf("cgroup memory file %q not found", candidate)
+	}
 
-    candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
-    if !ok {
-        return "", fmt.Errorf("unable to map cgroup path %q to mount %q", cgroupPath, layout.mountPoint)
-    }
-    if !fileExists(candidate) {
-        return "", fmt.Errorf("cgroup memory file %q not found", candidate)
-    }
-    return candidate, nil
+	if cgroupPath == "/" || cgroupPath == "" {
+		if owns, checked := cgroupOwnsSelf(filepath.Dir(candidate)); checked && !owns {
+			return "", fmt.Errorf("cgroup %q is not container-specific (self not listed in cgroup.procs)", filepath.Dir(candidate))
+		}
+	}
+
+	return candidate, nil
+}
+
+// cgroupOwnsSelf reports whether the cgroup at cgroupDir owns this process.
+// The second return value indicates whether we could actually read
+// cgroup.procs — callers use it to distinguish "verified not ours" from
+// "unable to verify" so missing-file environments (e.g. unit tests) don't
+// incorrectly fail resolution.
+func cgroupOwnsSelf(cgroupDir string) (owns, checked bool) {
+	data, err := os.ReadFile(filepath.Join(cgroupDir, "cgroup.procs"))
+	if err != nil {
+		return false, false
+	}
+	pid, err := getRootNSPID()
+	if err != nil {
+		return false, false
+	}
+	pidStr := strconv.Itoa(pid)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == pidStr {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 func buildMountedCgroupPath(mountPoint, mountRoot, cgroupPath, usageFile string) (string, bool) {
