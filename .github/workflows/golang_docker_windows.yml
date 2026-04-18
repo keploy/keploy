@@ -37,7 +37,7 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: pwsh
+        shell: powershell
         run: |
           $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
@@ -53,7 +53,7 @@ jobs:
           clean: true
 
       - name: Setup per-run git isolation
-        shell: pwsh
+        shell: powershell
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -66,7 +66,7 @@ jobs:
 
       - name: Install Record Binary
         id: setup_record
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
@@ -81,7 +81,7 @@ jobs:
 
       - name: Install Replay Binary
         id: setup_replay
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
@@ -107,7 +107,7 @@ jobs:
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
           # DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
           # DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
-        shell: pwsh
+        shell: powershell
         run: |
           cd samples-go/${{ matrix.app.path }}
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
@@ -115,6 +115,6 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: powershell
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
