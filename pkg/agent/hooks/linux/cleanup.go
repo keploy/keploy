@@ -213,10 +213,24 @@ func CleanOrphanedBPFPins(logger *zap.Logger) {
 			if statErr != nil {
 				continue
 			}
+			var removeErr error
 			if info.IsDir() {
-				_ = os.RemoveAll(m)
+				removeErr = os.RemoveAll(m)
 			} else {
-				_ = os.Remove(m)
+				removeErr = os.Remove(m)
+			}
+			if removeErr != nil {
+				// Surface the failure so the operator can diagnose the
+				// subsequent "program already attached" / "pin exists"
+				// error that will otherwise hit on the next attach.
+				// Common root causes: bpffs mounted read-only, wrong
+				// keploy user, another live keploy still holding the
+				// pin (the HasOtherKeployProcesses guard above should
+				// prevent that but belt-and-suspenders).
+				logger.Error("failed to remove stale BPF pin during orphan cleanup; verify /sys/fs/bpf is writable, this process has CAP_SYS_ADMIN/CAP_BPF, and no other keploy instance has the pin in use, then retry startup",
+					zap.String("path", m),
+					zap.Error(removeErr))
+				continue
 			}
 			logger.Debug("Removed stale BPF pin", zap.String("path", m))
 		}

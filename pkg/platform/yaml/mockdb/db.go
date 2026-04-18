@@ -501,30 +501,6 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	}
 }
 
-// ensureGobWriter starts the async writer goroutine if it is not
-// already running. Safe to call repeatedly — both within one session
-// (as an idempotent init) and across sessions (after a Close, the
-// next InsertMock re-starts a fresh goroutine with fresh channels,
-// so the same MockYaml instance survives re-record cycles).
-//
-// The writer goroutine does not take the caller's ctx: InsertMock's
-// ctx can be request-scoped and cancel partway through a recording
-// session, but the writer must survive until Close() is called so it
-// can drain the queue and flush the tail batch to disk. InsertMock
-// still honors its own ctx for the enqueue step.
-func (ys *MockYaml) ensureGobWriter(_ context.Context) {
-	ys.gobLifecycleMu.Lock()
-	defer ys.gobLifecycleMu.Unlock()
-	if ys.gobRunning {
-		return
-	}
-	ys.gobQueue = make(chan gobWriteJob, 4096)
-	ys.gobStop = make(chan struct{})
-	ys.gobDone = make(chan struct{})
-	ys.gobRunning = true
-	go ys.gobWriterLoop()
-}
-
 func (ys *MockYaml) gobWriterLoop() {
 	defer close(ys.gobDone)
 	for {
@@ -691,17 +667,19 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // Close drains the async gob writer and flushes the file. Safe to
 // call multiple times, and safe to call between record sessions —
 // the writer goroutine exits after flushing, and the next InsertMock
-// starts a fresh goroutine via ensureGobWriter. This is what makes
-// re-record cycles (multiple Recorder.Start on the same mockDB
-// instance) work without dropping mocks.
+// starts a fresh goroutine via its own inline init (see
+// insertMockGob). This is what makes re-record cycles (multiple
+// Recorder.Start on the same mockDB instance) work without dropping
+// mocks.
 func (ys *MockYaml) Close() error {
 	// Hold the lifecycle lock for the entire teardown. While we wait
-	// for the writer goroutine to drain, no concurrent ensureGobWriter
-	// can run — ys.gobRunning stays true and ys.gobQueue / ys.gobStop
-	// / ys.gobDone cannot be reassigned out from under the draining
-	// goroutine. A second concurrent Close() blocks on this same lock
-	// and observes gobRunning=false after the first Close completes,
-	// so close(gobStop) is never called twice.
+	// for the writer goroutine to drain, no concurrent InsertMock
+	// can start a new writer — ys.gobRunning stays true and
+	// ys.gobQueue / ys.gobStop / ys.gobDone cannot be reassigned out
+	// from under the draining goroutine. A second concurrent Close()
+	// blocks on this same lock and observes gobRunning=false after
+	// the first Close completes, so close(gobStop) is never called
+	// twice.
 	ys.gobLifecycleMu.Lock()
 	defer ys.gobLifecycleMu.Unlock()
 	if !ys.gobRunning {
@@ -737,7 +715,7 @@ func (ys *MockYaml) Close() error {
 			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
 				zap.Uint64("overflowedMocks", overflows),
 				zap.Int("queueCapacity", cap(ys.gobQueue)),
-				zap.String("hint", "queue capacity is the hard-coded channel size in ensureGobWriter; raise it in code if disk/encoding is the bottleneck"))
+				zap.String("hint", "queue capacity is the hard-coded channel size inlined in insertMockGob's writer-init block; raise it in code if disk/encoding is the bottleneck"))
 		}
 	}
 	// Surface the final flush/close error from the writer goroutine so
