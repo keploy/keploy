@@ -350,6 +350,13 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("invalid service URL %q: check the ServiceURL and ensure it includes a valid host", serviceURL)
 	}
+	// Scheme is validated up front — the HTTP probe below can only dial
+	// http/https. An unsupported scheme would make every probe attempt
+	// fail at http.NewRequestWithContext time and spin the loop all
+	// the way to the timeout with a misleading "timed out" error.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("invalid service URL %q: scheme must be http or https (got %q)", serviceURL, parsed.Scheme)
+	}
 	host := parsed.Hostname()
 	port := parsed.Port()
 	if port == "" {
@@ -361,6 +368,14 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	}
 	addr := net.JoinHostPort(host, port)
 
+	// Scope the overall waiting deadline up front so every probe
+	// attempt — including the very first — is cancelled when the
+	// budget runs out. Using the parent ctx for the probe while the
+	// outer select watches waitCtx would let a single slow probe run
+	// past the budget.
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	probeClient := &http.Client{
 		Timeout: 3 * time.Second,
 		// New connection each probe so we're exercising real readiness
@@ -368,32 +383,38 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 
-	probe := func() error {
-		conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if dialErr != nil {
-			return dialErr
-		}
-		_ = conn.Close()
-
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL, nil)
+	// probe issues a single HTTP GET against serviceURL and returns:
+	//   nil          — response received (any status code; we care
+	//                  about liveness, not correctness).
+	//   fatal=true   — deterministic request-construction error; no
+	//                  point retrying.
+	//   fatal=false  — transport error (connect refused, reset, TLS
+	//                  handshake fail, etc.); retry on the next tick.
+	//
+	// The HTTP client performs its own TCP dial, so an explicit
+	// net.DialTimeout before the GET would double the number of
+	// connections per probe without catching anything the GET doesn't
+	// already catch. Dropped for that reason.
+	probe := func() (fatal bool, err error) {
+		req, reqErr := http.NewRequestWithContext(waitCtx, http.MethodGet, serviceURL, nil)
 		if reqErr != nil {
-			return reqErr
+			return true, reqErr
 		}
 		resp, httpErr := probeClient.Do(req)
 		if httpErr != nil {
-			return httpErr
+			return false, httpErr
 		}
 		_ = resp.Body.Close()
-		return nil
+		return false, nil
 	}
 
-	if err := probe(); err == nil {
+	if fatal, err := probe(); err == nil {
 		logger.Debug("app is reachable", zap.String("addr", addr))
 		return nil
+	} else if fatal {
+		return fmt.Errorf("failed to probe %s: %w", addr, err)
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -402,9 +423,11 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		case <-waitCtx.Done():
 			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
 		case <-ticker.C:
-			if err := probe(); err == nil {
+			if fatal, err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
 				return nil
+			} else if fatal {
+				return fmt.Errorf("failed to probe %s: %w", addr, err)
 			}
 		}
 	}
