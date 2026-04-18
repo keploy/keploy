@@ -14,7 +14,7 @@ concurrency:
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
-    # Same hung-FFI-shutdown rationale as golang_native_windows —
+    # Same hung-FFI-shutdown rationale as golang_native_windows -
     # cap per-job wall-clock at 30 min so a stuck intercepted
     # process cannot hold a self-hosted Windows runner for 6h.
     timeout-minutes: 30

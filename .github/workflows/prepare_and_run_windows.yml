@@ -88,7 +88,7 @@ jobs:
       - name: Free runner disk space
         # Use Windows PowerShell 5.1 (always preinstalled) instead of
         # pwsh. The new win-runner-[1-4] pool doesn't ship
-        # PowerShell 7 — job 71974521109 failed at the first pwsh
+        # PowerShell 7 - job 71974521109 failed at the first pwsh
         # step with 'pwsh: command not found'. Every cmdlet used
         # below (Get-PSDrive, Get-ChildItem, Where-Object, etc.) is
         # PS5.1-compatible.
