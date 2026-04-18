@@ -9,6 +9,14 @@ on:
 jobs:
   golang_native_windows:
     runs-on: windows-latest
+    # Cap per-job wall-clock so a hung Windows FFI shutdown loop
+    # (keploy's native capture layer can spew "Packet sent
+    # successfully!" indefinitely if the intercepted process exits
+    # before the driver is unloaded) fails within 30 min instead
+    # of burning the default 6h runner slot. 30 min matches the
+    # existing timeout used on macOS/java-linux integration jobs;
+    # healthy runs finish in ~5 min.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

@@ -24,6 +24,9 @@ jobs:
   rerecord_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'rerecord_fuzzer') }}
     runs-on: ${{ inputs.runner }}
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +108,9 @@ jobs:
   mysql_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
     runs-on: ${{ inputs.runner }}
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -172,6 +178,9 @@ jobs:
   grpc_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'grpc_fuzzer') }}
     runs-on: ${{ inputs.runner }}
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -251,6 +260,9 @@ jobs:
   postgres_fuzzer:
     if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
     runs-on: ${{ inputs.runner }}
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -324,6 +336,9 @@ jobs:
 
   mongo_fuzzer:
     runs-on: ubuntu-latest
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
