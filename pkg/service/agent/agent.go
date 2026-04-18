@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"go.keploy.io/server/v3/config"
@@ -56,6 +57,14 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
+
+	// Remove stale readiness file from a previous run so the Docker
+	// healthcheck (`cat /tmp/agent.ready`) does not pass before the
+	// CLI has stored mocks on the agent.  The file is re-created by
+	// MakeAgentReadyForDockerCompose once everything is set up.
+	if err := os.Remove("/tmp/agent.ready"); err != nil && !os.IsNotExist(err) {
+		a.logger.Warn("failed to remove stale agent readiness file", zap.Error(err))
+	}
 
 	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
