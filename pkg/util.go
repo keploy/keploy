@@ -217,9 +217,59 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	return header
 }
 
+// looksLikeTime is a fast-path byte-prefix check that rejects strings which
+// cannot possibly match any of the date/time formats we try below. Avoiding
+// the time.Parse loop on the 99%+ of strings that obviously aren't times
+// saves an enormous amount of allocations (each failed time.Parse allocates
+// a *time.parseError + a copied error message).
+//
+// We accept a string as a candidate iff its first non-whitespace byte is:
+//   - a digit (most ISO/RFC formats start with year or day)
+//   - one of Mon/Tue/Wed/Thu/Fri/Sat/Sun (RFC1123, RFC850 weekday prefixes)
+//   - one of Jan/Feb/Mar/Apr/May/Jun/Jul/Aug/Sep/Oct/Nov/Dec (ANSIC,
+//     UnixDate, RubyDate, time.Stamp* prefixes)
+//   - one of '0'..'9' for the time.Kitchen "3:04PM" format (digit handled above)
+//
+// Anything else (random hex blobs, JSON keys, "true"/"false"/"null",
+// payload values) returns false immediately, skipping 20 failed time.Parse
+// calls — each of which would allocate ~120 bytes.
+func looksLikeTime(s string) bool {
+	// strip leading whitespace cheaply
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return false
+	}
+	c := s[i]
+	if c >= '0' && c <= '9' {
+		return true
+	}
+	// Check 3-letter prefix against weekday/month abbreviations.
+	if len(s)-i < 3 {
+		return false
+	}
+	switch s[i : i+3] {
+	case "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+		"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec":
+		return true
+	}
+	return false
+}
+
 // IsTime verifies whether a given string represents a valid date or not.
+//
+// Hot-path optimisation: a fast-path looksLikeTime check rules out 99%+ of
+// non-time strings before the 20-format time.Parse loop. Without this, every
+// non-time string allocates ~20 *time.parseError objects (~2.4 KB) — when
+// called millions of times during a load test, that's GBs of GC pressure.
 func IsTime(stringDate string) bool {
 	date := strings.TrimSpace(stringDate)
+	if date == "" {
+		return false
+	}
 	if secondsFloat, err := strconv.ParseFloat(date, 64); err == nil {
 		seconds := int64(secondsFloat / 1e9)
 		nanoseconds := int64(secondsFloat) % 1e9
@@ -228,6 +278,11 @@ func IsTime(stringDate string) bool {
 		if currentTime.Sub(expectedTime) < 24*time.Hour && currentTime.Sub(expectedTime) > -24*time.Hour {
 			return true
 		}
+	}
+	// Cheap byte-prefix gate to avoid the 20-format time.Parse loop on
+	// obvious non-time inputs.
+	if !looksLikeTime(date) {
+		return false
 	}
 	for _, dateFormat := range dateFormats {
 		_, err := time.Parse(dateFormat, date)

@@ -9,20 +9,25 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 type MappingDb struct {
 	logger      *zap.Logger
 	path        string
 	MapFileName string
+	Format      yaml.Format
 }
 
 func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
+	return NewWithFormat(logger, path, mapFileName, yaml.FormatYAML)
+}
+
+func NewWithFormat(logger *zap.Logger, path string, mapFileName string, format yaml.Format) *MappingDb {
 	return &MappingDb{
 		logger:      logger,
 		path:        path,
 		MapFileName: mapFileName,
+		Format:      format,
 	}
 }
 
@@ -33,52 +38,54 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if fileName == "" {
 		fileName = "mappings"
 	}
-	fullFilePath := filepath.Join(mappingPath, fileName+".yaml")
 
 	finalMappings := make(map[string][]models.MockEntry)
 
-	// Check if file exists
-	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	// Detect whether a mappings file already exists in either format,
+	// and remember which one so we write back in the same format.
+	exists, detected, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists", zap.String("path", mappingPath))
 		return err
 	}
 
+	effFormat := db.Format
 	if exists {
-		data, err := os.ReadFile(fullFilePath)
+		effFormat = detected
+		data, err := os.ReadFile(filepath.Join(mappingPath, fileName+"."+effFormat.FileExtension()))
 		if err != nil {
-			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", fullFilePath))
+			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
 			return err
 		}
 
 		var existingConfig models.Mapping
-		if err := yamlLib.Unmarshal(data, &existingConfig); err != nil {
-			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", fullFilePath))
+		if err := yaml.UnmarshalGeneric(effFormat, data, &existingConfig); err != nil {
+			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
 			return err
 		}
 
-		// Convert existing struct data into our map for merging
 		for _, t := range existingConfig.TestCases {
 			finalMappings[t.ID] = t.Mocks
 		}
 	}
 
-	// Overwrite existing keys, add new ones from the incoming mapping
 	for _, t := range mapping.TestCases {
 		finalMappings[t.ID] = t.Mocks
 	}
 
 	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
 
-	yamlData, err := EncodeMapping(newMapping, db.logger)
+	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to encode mapping to yaml", zap.String("testSetID", testSetID))
+		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
 	}
-	yamlData = append([]byte(utils.GetVersionAsComment()), yamlData...)
-	err = yaml.WriteFile(ctx, db.logger, mappingPath, fileName, yamlData, false)
+	if effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to write mapping to yaml file", zap.String("path", fullFilePath))
+		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
 		return err
 	}
 
@@ -101,7 +108,7 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 
 	var mapping *models.Mapping
 
-	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	exists, detected, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists",
 			zap.String("path", mappingPath),
@@ -109,17 +116,19 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		return err
 	}
 
+	effFormat := db.Format
 	if exists {
-		yamlData, err := yaml.ReadFile(ctx, db.logger, mappingPath, fileName)
+		effFormat = detected
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read mapping file for upsert",
 				zap.String("testSetID", testSetID))
 			return err
 		}
 
-		mapping, err = DecodeMapping(yamlData, db.logger)
+		mapping, err = DecodeMappingF(fileData, db.logger, effFormat)
 		if err != nil {
-			utils.LogError(db.logger, err, "failed to decode mapping from yaml",
+			utils.LogError(db.logger, err, "failed to decode mapping",
 				zap.String("testSetID", testSetID))
 			return err
 		}
@@ -149,21 +158,20 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		mapping.TestCases = append(mapping.TestCases, newTest)
 	}
 
-	yamlData, err := EncodeMapping(mapping, db.logger)
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to encode mapping to yaml during upsert",
+		utils.LogError(db.logger, err, "failed to encode mapping during upsert",
 			zap.String("testSetID", testSetID))
 		return err
 	}
 
-	// Add version comment if we are creating a fresh file
-	if !exists {
-		yamlData = append([]byte(utils.GetVersionAsComment()), yamlData...)
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 
-	err = yaml.WriteFile(ctx, db.logger, mappingPath, fileName, yamlData, false)
+	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to write mapping to yaml file during upsert",
+		utils.LogError(db.logger, err, "failed to write mapping file during upsert",
 			zap.String("testSetID", testSetID))
 		return err
 	}
@@ -186,25 +194,14 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 		fileName = "mappings"
 	}
 
-	// Check if file exists
-	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to check if mapping file exists",
-			zap.String("path", mappingPath),
-			zap.String("fileName", fileName))
-		return nil, false, err
-	}
-
-	if !exists {
-		db.logger.Debug("Mapping file does not exist, returning empty mappings",
-			zap.String("testSetID", testSetID),
-			zap.String("path", mappingPath))
-		return make(map[string][]models.MockEntry), false, nil
-	}
-
-	// Read the file
-	yamlData, err := yaml.ReadFile(ctx, db.logger, mappingPath, fileName)
-	if err != nil {
+		if os.IsNotExist(err) {
+			db.logger.Debug("Mapping file does not exist, returning empty mappings",
+				zap.String("testSetID", testSetID),
+				zap.String("path", mappingPath))
+			return make(map[string][]models.MockEntry), false, nil
+		}
 		utils.LogError(db.logger, err, "failed to read mapping file",
 			zap.String("testSetID", testSetID),
 			zap.String("path", mappingPath),
@@ -212,18 +209,15 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 		return nil, false, err
 	}
 
-	// Decode the YAML data
-	mapping, err := DecodeMapping(yamlData, db.logger)
+	mapping, err := DecodeMappingF(fileData, db.logger, detected)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to decode mapping from yaml",
+		utils.LogError(db.logger, err, "failed to decode mapping",
 			zap.String("testSetID", testSetID))
 		return nil, false, err
 	}
 
-	// Convert to map format
 	testMockMappings := GetMappings(mapping, db.logger)
 
-	// Check if we have any meaningful mappings (non-empty test cases with mocks)
 	hasMeaningfulMappings := false
 	for _, mocks := range testMockMappings {
 		if len(mocks) > 0 {
@@ -234,7 +228,7 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 
 	db.logger.Info("Successfully loaded test-mock mappings",
 		zap.String("testSetID", testSetID),
-		zap.String("filePath", filepath.Join(mappingPath, fileName+".yaml")),
+		zap.String("filePath", filepath.Join(mappingPath, fileName+"."+detected.FileExtension())),
 		zap.Int("numTests", len(testMockMappings)),
 		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 

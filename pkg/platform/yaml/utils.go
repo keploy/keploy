@@ -197,7 +197,23 @@ func ValidatePath(path string) (string, error) {
 }
 
 // FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
-func FindLastIndex(path string, _ *zap.Logger) (int, error) {
+func FindLastIndex(path string, logger *zap.Logger) (int, error) {
+	return FindLastIndexF(path, logger, FormatYAML)
+}
+
+func FindLastIndexF(path string, logger *zap.Logger, format Format) (int, error) {
+	// Delegate to the format-agnostic scanner: when allocating the next
+	// test-N index we must see BOTH .yaml and .json files so we don't
+	// hand out a number that collides with an existing file of the other
+	// format after a StorageFormat switch.
+	_ = format
+	return FindLastIndexAny(path, logger)
+}
+
+// FindLastIndexAny scans `path` for both test-N.yaml and test-N.json (and
+// report-N.*) and returns the next index, ensuring newly-created files never
+// collide with pre-existing files of the other format.
+func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
@@ -209,18 +225,22 @@ func FindLastIndex(path string, _ *zap.Logger) (int, error) {
 
 	lastIndex := 0
 	for _, v := range files {
-		if v.Name() == "mocks.yaml" || v.Name() == "config.yaml" {
+		name := v.Name()
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".json" {
 			continue
 		}
-		fileName := filepath.Base(v.Name())
-		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
-		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		// Skip well-known non-test files in either format.
+		base := name[:len(name)-len(ext)]
+		if base == "mocks" || base == "config" {
+			continue
+		}
+		fileNameParts := strings.Split(base, "-")
 		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
 			continue
 		}
-		indxStr := fileNameParts[1]
-		indx, err := strconv.Atoi(indxStr)
-		if err != nil {
+		indx, convErr := strconv.Atoi(fileNameParts[1])
+		if convErr != nil {
 			continue
 		}
 		if indx > lastIndex {
@@ -386,18 +406,40 @@ func generateSchemaName(src string) string {
 }
 
 func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	return FileExistsF(nil, logger, path, fileName, FormatYAML)
+}
+
+func FileExistsF(_ context.Context, logger *zap.Logger, path string, fileName string, format Format) (bool, error) {
+	filePath, err := ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
 	if err != nil {
-		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to validate the file path", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
-	if _, err := os.Stat(yamlPath); err != nil {
+	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		utils.LogError(logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to check if the file exists", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
 
 	return true, nil
+}
+
+// FileExistsAny checks whether <path>/<fileName>.<ext> exists for either
+// supported format, preferring `preferred`. Returns true + the format that
+// was found. Use this on read paths where the stored file may be in a
+// different format than the current StorageFormat.
+func FileExistsAny(ctx context.Context, logger *zap.Logger, path string, fileName string, preferred Format) (bool, Format, error) {
+	other := otherFormat(preferred)
+	for _, f := range [2]Format{preferred, other} {
+		exists, err := FileExistsF(ctx, logger, path, fileName, f)
+		if err != nil {
+			return false, "", err
+		}
+		if exists {
+			return true, f, nil
+		}
+	}
+	return false, preferred, nil
 }
