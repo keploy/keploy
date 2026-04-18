@@ -85,6 +85,107 @@ jobs:
             Write-Host "pwsh already available: $((Get-Command pwsh).Source)"
           }
 
+      - name: Free runner disk space
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The shared self-hosted Windows runners have hit "not
+          # enough space on the disk" mid-build (go build writes
+          # importcfg into SystemTemp and gets ENOSPC). Tiered
+          # cleanup: fast-path on healthy disk (>=4 GB free), light
+          # sweep (stale go-build temp + other runners' _diag /
+          # _temp + other-repo _work >7d), heavy sweep (user %TEMP%
+          # + Windows Update download cache), then last-resort go
+          # module/cache purge. Hard-fail under 2 GB so subsequent
+          # CGO builds don't die confused.
+          $targetFree = 4GB
+          $beforeC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: before cleanup: {0:N0} bytes" -f $beforeC)
+          if ($beforeC -ge $targetFree) {
+            Write-Host ("Already have {0:N0} bytes free (>= {1:N0}); skipping cleanup" -f $beforeC, $targetFree)
+            exit 0
+          }
+
+          # 1. Stale go-build intermediate directories under SystemTemp.
+          # 'go build' leaves per-invocation go-buildNNN folders; they
+          # are safe to remove once no build is running on this job
+          # (we're still before Checkout).
+          foreach ($base in @("C:\WINDOWS\SystemTemp", "C:\Windows\Temp")) {
+            if (Test-Path $base) {
+              Get-ChildItem -Path $base -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'go-build*' } |
+                ForEach-Object {
+                  Write-Host "Removing $($_.FullName)"
+                  Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+          }
+
+          # 2. Other runners' _diag/_temp + stale other-repo _work
+          # checkouts (>7 days), across every C:\actions-runners\*.
+          $runnersRoot = "C:\actions-runners"
+          if (Test-Path $runnersRoot) {
+            foreach ($rel in @("_diag", "_temp")) {
+              Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $p = Join-Path $_.FullName $rel
+                if (Test-Path $p) {
+                  Write-Host "Purging $p (entries older than 1 day)"
+                  Get-ChildItem -Path $p -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                }
+              }
+            }
+            $thisRepoDir = $env:GITHUB_REPOSITORY.Split('/')[-1]
+            Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+              $work = Join-Path $_.FullName "_work"
+              if (Test-Path $work) {
+                Get-ChildItem -Path $work -Directory -Force -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -ne $thisRepoDir -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
+                  ForEach-Object {
+                    Write-Host "Removing stale work dir $($_.FullName)"
+                    Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+              }
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            # 3. User %TEMP% - CI jobs leak go-build*, MSI*, etc.
+            $userTemp = $env:TEMP
+            if ($userTemp -and (Test-Path $userTemp)) {
+              Write-Host "Sweeping $userTemp"
+              Get-ChildItem -Path $userTemp -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            # 4. Windows Update download cache.
+            $sd = "C:\Windows\SoftwareDistribution\Download"
+            if (Test-Path $sd) {
+              Write-Host "Sweeping $sd"
+              Get-ChildItem -Path $sd -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            # 5. Last resort: go module cache. Forces a redownload
+            # on next build, so only used when nothing else has hit
+            # the threshold.
+            foreach ($cache in @("$env:USERPROFILE\go\pkg\mod", "$env:LOCALAPPDATA\go-build")) {
+              if (Test-Path $cache) {
+                Write-Host "Removing $cache"
+                Remove-Item -Path $cache -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          $afterC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: after cleanup:  {0:N0} bytes (freed {1:N0})" -f $afterC, ($afterC - $beforeC))
+          if ($afterC -lt 2GB) {
+            Write-Error "Free on C: is under 2 GB after cleanup - not enough headroom for a CGO Windows build. The self-hosted runner operator should expand the C: volume; this job will fail during go build otherwise."
+            exit 1
+          }
+
       - name: Create workflow start lock
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |

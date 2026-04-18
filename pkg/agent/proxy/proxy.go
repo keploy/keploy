@@ -899,13 +899,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// that ship without a Postgres parser (pure proxy-mode) flip the
 	// flag on via agent.SetInterceptPostgresSSLRequest.
 	//
-	// Client-side only: this block terminates TLS with the client but
-	// does NOT forward an SSLRequest to the upstream Postgres server.
-	// See the runtime_hooks.go docstring on InterceptPostgresSSLRequest
-	// for the supported deployment shapes (downstream builds that do
-	// not re-originate the upstream connection, or upstreams accepting
-	// direct TLS). End-to-end MITM against a vanilla Postgres still
-	// goes through the parser-driven TLSUpgrader path.
+	// This block handles the client-facing side of SSLRequest: read
+	// the 8-byte preamble, reply 'S', and terminate TLS with the
+	// client. It is NOT client-side-only for the whole handshake —
+	// when the destination is port 5432, the upstream dial path
+	// (dialPostgresSSLUpstream) independently originates its own
+	// Postgres SSLRequest before wrapping the upstream socket in
+	// tls.Client. See the runtime_hooks.go docstring on
+	// InterceptPostgresSSLRequest for the full deployment-shape
+	// matrix. End-to-end MITM against a vanilla Postgres now works
+	// under this flag; the parser-driven TLSUpgrader path from
+	// keploy/integrations remains the richer option when you want
+	// protocol-aware mocking.
 	//
 	// We only extend the Peek to 8 bytes when the first 5 bytes match
 	// the SSLRequest prefix (`00 00 00 08 04`). That prefix is unique

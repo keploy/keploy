@@ -295,6 +295,41 @@ func TestCloseOutChanRacesSendConfigMock(t *testing.T) {
 	drainChan(t, ch, senders*sendsPerSender)
 }
 
+// TestSetOutputChannelSamePointerAfterCloseKeepsClosed locks in
+// the idempotence rule: re-binding the same channel pointer after
+// CloseOutChan must NOT reset outChanClosed. DNS recordDNSMock
+// calls SetOutputChannel(session.MC) on every mock; if that reset
+// the flag, a post-shutdown DNS mock would send on the closed
+// session.MC and panic. Reviewed on keploy#4045 / ee0332e.
+func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.CloseOutChan()
+
+	// Re-bind the SAME channel. Must be a no-op — not a reopen.
+	mgr.SetOutputChannel(ch)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SendConfigMock after same-pointer re-bind post-close must not panic; got %v", r)
+		}
+	}()
+	mgr.SendConfigMock(&models.Mock{Kind: models.DNS})
+	// Nothing should have been written to ch (it's closed).
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatalf("unexpected send on closed channel after same-pointer re-bind")
+		}
+	default:
+	}
+}
+
 // drainChan empties ch up to max elements; fails if more arrive than
 // the sender configuration could have possibly produced.
 func drainChan(t *testing.T, ch chan *models.Mock, max int) {

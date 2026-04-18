@@ -47,17 +47,22 @@ func Get() *SyncMockManager {
 	return instance
 }
 
-// SetOutputChannel plugs a fresh outgoing mock channel into the
-// manager and reopens it for sends. Re-record flows call this each
-// time a new session starts. The reset of outChanClosed has to
-// happen under the same lock as the outChan assignment so a
-// concurrent sender always sees a consistent (outChan, closed)
-// tuple.
+// SetOutputChannel plugs an outgoing mock channel into the manager.
+// Only resets outChanClosed when the channel pointer changes —
+// re-setting the same pointer after CloseOutChan must NOT reopen
+// the closed flag, otherwise a subsequent send would hit a
+// post-close channel and panic. The proxy calls this once per
+// accepted connection with rule.MC (same channel across the whole
+// session), so idempotent same-channel calls are the hot path.
+// A distinct channel pointer means a new session (re-record), and
+// only then do we clear the closed flag.
 func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	m.outChanMu.Lock()
-	m.outChan = out
-	m.outChanClosed = false
-	m.outChanMu.Unlock()
+	defer m.outChanMu.Unlock()
+	if out != m.outChan {
+		m.outChan = out
+		m.outChanClosed = false
+	}
 }
 
 func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
@@ -208,7 +213,11 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	var mappingEntry *models.TestMockMapping
 
 	m.mu.Lock()
-	outChanBound := m.outChan != nil // snapshot for the "is wired yet" check only
+	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
+	// so we don't race SetOutputChannel / CloseOutChan. Only the
+	// bound boolean is needed — the actual send later goes through
+	// sendToOutChan which reacquires the RLock.
+	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
