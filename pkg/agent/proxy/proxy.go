@@ -582,12 +582,24 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
-		//closing the mock channel (if any in record mode)
-		p.sessionMu.RLock()
-		if p.session != nil && p.session.MC != nil {
-			close(p.session.MC)
+		// Close the mock channel (if any in record mode) via
+		// SyncMockManager so the close is serialized with in-flight
+		// AddMock sends. A bare close(p.session.MC) here races the
+		// record session's parser goroutines — the race detector
+		// flagged this on keploy#4045 during the petclinic
+		// record_build_replay_latest job, where the race also
+		// correlated with a 28-min process hang at runtime.
+		// CloseOutChan takes an RWMutex that AddMock holds for read,
+		// guaranteeing every send completes before close runs.
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.CloseOutChan()
+		} else {
+			p.sessionMu.RLock()
+			if p.session != nil && p.session.MC != nil {
+				close(p.session.MC)
+			}
+			p.sessionMu.RUnlock()
 		}
-		p.sessionMu.RUnlock()
 
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {

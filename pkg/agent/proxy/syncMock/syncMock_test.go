@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -131,3 +132,63 @@ func (chanSendError) Error() string { return "send on closed channel" }
 type otherError struct{ msg string }
 
 func (e otherError) Error() string { return e.msg }
+
+// TestCloseOutChanRacesAddMock exercises the exact shutdown race
+// -race flagged on keploy#4045 CI: proxy shutdown closing outChan
+// while parsers are still calling AddMock. With the RWMutex in
+// place, running under `go test -race` must stay clean across
+// thousands of send/close interleavings.
+func TestCloseOutChanRacesAddMock(t *testing.T) {
+	t.Parallel()
+
+	const senders = 8
+	const sendsPerSender = 500
+
+	ch := make(chan *models.Mock, 1024)
+	mgr := &SyncMockManager{
+		buffer:  make([]*models.Mock, 0, defaultMockBufferCapacity),
+		outChan: ch,
+	}
+
+	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < sendsPerSender; j++ {
+				// AddMock here goes through the RLock-guarded path.
+				// Must not panic even when CloseOutChan fires mid-way.
+				mgr.AddMock(mock)
+			}
+		}()
+	}
+
+	// Close midstream — simulates the proxy shutdown path firing
+	// while parser goroutines are still producing mocks.
+	time.Sleep(time.Millisecond)
+	mgr.CloseOutChan()
+	// A second close must be a no-op, not a panic.
+	mgr.CloseOutChan()
+
+	wg.Wait()
+
+	// Drain whatever made it into the channel pre-close so the test
+	// doesn't leak; count is unpredictable but must be >= 0 and
+	// <= senders*sendsPerSender.
+	count := 0
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				if count > senders*sendsPerSender {
+					t.Fatalf("drained %d mocks, exceeds max %d", count, senders*sendsPerSender)
+				}
+				return
+			}
+			count++
+		default:
+			return
+		}
+	}
+}

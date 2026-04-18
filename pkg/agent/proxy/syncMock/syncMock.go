@@ -26,6 +26,26 @@ type SyncMockManager struct {
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
+
+	// outChanMu serializes outChan sends with CloseOutChan so the
+	// race detector doesn't flag concurrent close(outChan) against
+	// an in-flight send(outChan). Senders hold RLock, the closer
+	// holds Lock. Without this, proxy shutdown racing the tail of
+	// a record session produced the data race seen in #4045 CI:
+	//
+	//   Write at ... by goroutine 46:
+	//     runtime.closechan()     ← proxy.go:576 close(p.session.MC)
+	//   Previous read at ... by goroutine 69:
+	//     runtime.chansend()      ← AddMock(outChan <- mock)
+	//
+	// The prior recover() caught the resulting panic but did not
+	// prevent the race; under -race the runtime reports unsynchronized
+	// access, and on CI it co-occurred with a 28-minute hang in the
+	// petclinic record_build_replay_latest job. We still keep the
+	// recover as defence-in-depth for the tiny window between
+	// reading outChanClosed and the actual send.
+	outChanMu     sync.RWMutex
+	outChanClosed bool
 }
 
 // Global instance is initialized at package load time
@@ -40,10 +60,15 @@ func Get() *SyncMockManager {
 }
 
 // SetOutputChannel allows the Outgoing Proxy to "plug in" the channel later.
+// Also clears the "closed" flag so a second Start (re-record) can hand in a
+// fresh channel after the previous CloseOutChan.
 func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.outChan = out
+	m.mu.Unlock()
+	m.outChanMu.Lock()
+	m.outChanClosed = false
+	m.outChanMu.Unlock()
 }
 
 func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
@@ -72,23 +97,23 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	if !m.firstReqSeen && m.outChan != nil {
 		outChan := m.outChan
 		m.mu.Unlock()
-		// Non-blocking send with narrow closed-channel recovery:
-		// during shutdown HandleOutgoing stops reading AND may close
-		// the channel. A bare `outChan <- mock` panics with "send on
-		// closed channel" even through a default case — the select
-		// does not catch closed-channel sends. Swallow exactly that
-		// panic (the shutdown race is benign — the mock was never
-		// needed after the reader went away) and re-panic on anything
-		// else so unrelated bugs surface normally instead of being
-		// silently lost.
-		//
-		// The panic value from chansend1's closed-channel path is a
-		// runtime.plainError ("send on closed channel"), which is a
-		// runtime-internal unexported type that satisfies `error`
-		// but NOT the exported `runtime.Error` interface. Type-assert
-		// to `error` and match on the message; this is the same
-		// pattern the Go stdlib tests use for this exact panic.
+		// Take outChanMu as a reader so concurrent AddMock calls can
+		// still proceed in parallel; CloseOutChan takes the write
+		// side to serialize the close(outChan) call against every
+		// in-flight send. Check outChanClosed under the same lock
+		// to skip sending on an already-closed channel without
+		// relying on a panic. The recover() inside the inner func
+		// stays as defence-in-depth: if a future caller invokes
+		// Close() directly without going through CloseOutChan, the
+		// closed-channel panic is still swallowed rather than
+		// propagating to the parser goroutine.
+		m.outChanMu.RLock()
+		if m.outChanClosed {
+			m.outChanMu.RUnlock()
+			return
+		}
 		func() {
+			defer m.outChanMu.RUnlock()
 			defer func() {
 				r := recover()
 				if r == nil {
@@ -108,6 +133,40 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.buffer = append(m.buffer, mock)
 	m.mu.Unlock()
+}
+
+// CloseOutChan closes the output channel under outChanMu so it
+// cannot race an in-flight AddMock send. Idempotent — a second
+// call is a no-op. Callers that previously did `close(session.MC)`
+// directly from the proxy shutdown path should switch to this
+// so the record session can quiesce without the -race detector
+// firing and without the send goroutine relying on a recovered
+// panic for correctness.
+func (m *SyncMockManager) CloseOutChan() {
+	if m == nil {
+		return
+	}
+	m.outChanMu.Lock()
+	defer m.outChanMu.Unlock()
+	if m.outChanClosed || m.outChan == nil {
+		m.outChanClosed = true
+		return
+	}
+	close(m.outChan)
+	m.outChanClosed = true
+}
+
+// ResetForNewSession clears the closed flag so a subsequent
+// SetOutputChannel + record session can reuse this manager.
+// Required by re-record flows where the same manager survives
+// multiple Start/Close cycles.
+func (m *SyncMockManager) ResetForNewSession() {
+	if m == nil {
+		return
+	}
+	m.outChanMu.Lock()
+	defer m.outChanMu.Unlock()
+	m.outChanClosed = false
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
