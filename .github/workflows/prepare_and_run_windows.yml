@@ -294,7 +294,7 @@ jobs:
           go-cache: false
 
       - name: Add MinGW gcc to PATH
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
           # Search common MinGW/msys64 install locations; different runners
           # in the fleet stage MinGW in different paths (msys64, direct
@@ -313,13 +313,17 @@ jobs:
             if (Test-Path (Join-Path $c "gcc.exe")) { $gccBin = $c; break }
           }
           if (-not $gccBin) {
+            $onPath = Get-Command gcc -ErrorAction SilentlyContinue
+            if ($onPath) { $gccBin = Split-Path $onPath.Source }
+          }
+          if (-not $gccBin) {
             Write-Host "No MinGW found in known paths; installing portable MinGW-w64 14.2.0 (WinLibs ZIP)."
             $portableRoot = Join-Path $env:USERPROFILE ".mingw64-portable"
             $portableBin = Join-Path $portableRoot "mingw64\bin"
             if (-not (Test-Path (Join-Path $portableBin "gcc.exe"))) {
               New-Item -Path $portableRoot -ItemType Directory -Force | Out-Null
               # Use WinLibs (brechtsanders/winlibs_mingw) which publishes
-              # native ZIP archives — unpacks with built-in Expand-Archive
+              # native ZIP archives - unpacks with built-in Expand-Archive
               # on PowerShell 5.1+ so we do not depend on 7z being
               # present on the runner. Pin to a stable posix-seh x86_64
               # build compatible with Go's CGO on Windows.
@@ -336,6 +340,7 @@ jobs:
               throw "MinGW install did not produce gcc.exe at $portableBin"
             }
           }
+          Write-Host "Using mingw gcc at $gccBin"
           echo $gccBin >> $env:GITHUB_PATH
           $env:Path = "$gccBin;$env:Path"
           where.exe gcc
