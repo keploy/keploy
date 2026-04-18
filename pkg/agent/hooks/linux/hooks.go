@@ -58,7 +58,7 @@ type Hooks struct {
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
-	agentRegistartionMap  *ebpf.Map
+	agentRegistrationMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -156,7 +156,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
-	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.agentRegistrationMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------

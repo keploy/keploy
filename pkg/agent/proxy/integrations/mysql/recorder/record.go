@@ -77,13 +77,23 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		upgrader := tlsUpgrader
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts, upgrader)
 		if err != nil {
-			// A capture layer that detects the MySQL CLIENT_SSL capability
-			// bit mid-handshake may close the SimulatedConn so a TLS-aware
-			// consumer (SSL/GoTLS/JSSE uprobe, upstream TLS proxy, etc.)
-			// can take over the plaintext continuation. The parser then
-			// sees EOF on the next read — expected, not an error.
+			// EOF during the initial handshake can come from two
+			// different sources, and we can't tell them apart from
+			// this callsite alone:
+			//
+			//   (a) Intentional short-circuit: a capture layer that
+			//       sees the MySQL CLIENT_SSL capability bit may
+			//       close the SimulatedConn so a TLS-aware consumer
+			//       (SSL/GoTLS/JSSE uprobe, upstream TLS proxy, …)
+			//       can take over the plaintext continuation.
+			//   (b) Ordinary disconnect: the client dropped the TCP
+			//       connection mid-handshake.
+			//
+			// Treat both as non-fatal (the connection is gone either
+			// way) but log a neutral message so (b) is not
+			// misreported as a TLS handoff in production logs.
 			if err == io.EOF {
-				logger.Debug("MySQL handshake short-circuited — client requested TLS; plaintext continuation handled by the TLS-aware consumer",
+				logger.Debug("EOF during MySQL handshake; if this was not an expected TLS handoff to an SSL/GoTLS/JSSE uprobe or upstream TLS proxy, verify whether the client disconnected before completing the handshake",
 					zap.String("connKey", opts.ConnKey))
 				return nil
 			}
