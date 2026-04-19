@@ -453,11 +453,19 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		return false, nil
 	}
 
+	// Track the most recent probe error so the timeout message can
+	// surface the actual failure mode (TLS handshake error, https-vs-
+	// http mismatch, connection reset, DNS failure, ...) instead of a
+	// generic "timed out" — operators need the last observed error to
+	// diagnose why the app never became reachable.
+	var lastErr error
 	if fatal, err := probe(); err == nil {
 		logger.Debug("app is reachable", zap.String("addr", addr))
 		return nil
 	} else if fatal {
 		return fmt.Errorf("failed to probe %s: %w", addr, err)
+	} else {
+		lastErr = err
 	}
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -466,6 +474,9 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	for {
 		select {
 		case <-waitCtx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
+			}
 			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
 		case <-ticker.C:
 			if fatal, err := probe(); err == nil {
@@ -473,6 +484,8 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 				return nil
 			} else if fatal {
 				return fmt.Errorf("failed to probe %s: %w", addr, err)
+			} else {
+				lastErr = err
 			}
 		}
 	}
