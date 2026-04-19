@@ -34,6 +34,14 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+// NextStepDialDestination is the shared remediation hint attached
+// to every "failed to dial the conn to destination server" error.
+// The proxy's destination dial is a single attempt with no retry,
+// so the real fix is always on the test-harness side (sequence
+// the dependency start, raise --delay, or add a readiness probe).
+// Kept as a const so all sites update together.
+const NextStepDialDestination = "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"
+
 // ErrRecordingPausedDueToMemoryPressure tells record-mode parsers to stop
 // decoding and fall back to transparent passthrough while the agent is under
 // memory pressure.
@@ -589,7 +597,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
 		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err
 		}
 		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
@@ -597,7 +605,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 		destConn, err = net.Dial("tcp", dstCfg.Addr)
 		if err != nil {
-			utils.LogError(logger, err, "failed to dial the destination server")
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
 			return nil, err
 		}
 		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))

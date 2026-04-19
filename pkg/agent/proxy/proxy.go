@@ -499,9 +499,30 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	if p.auxiliaryHook != nil {
-		err := p.auxiliaryHook.AfterStart(ctx, p)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook; verify auxiliary hook configuration or disable the hook if not required")
+		if err := p.auxiliaryHook.AfterStart(ctx, p); err != nil {
+			// Do NOT swallow the error. An auxiliary hook only gets
+			// registered when a caller has explicitly opted into the
+			// feature it implements (currently: --low-latency, which
+			// registers the proxyless / sockmap BPF startup). Silently
+			// continuing into userspace-proxy mode after the hook has
+			// declared a failure would give the user a mode they
+			// didn't ask for and no deterministic signal that the
+			// requested mode wasn't delivered.
+			//
+			// The hook itself is expected to embed actionable
+			// remediation in the returned error (e.g. the enterprise
+			// proxyless/sockmap hook wraps the BPF verifier error
+			// with a "Next steps: upgrade kernel / drop --low-latency
+			// / rebuild without the BPF variant" message). Log once
+			// here with the hook's message visible in zap.Error and
+			// a generic next_step pointing at that embedded guidance,
+			// then propagate so the caller can abort. Partial-proxy
+			// goroutines started before this point are torn down by
+			// the caller cancelling proxyCtx (see service/agent.go).
+			utils.LogError(p.logger, err, "auxiliary proxy hook failed; requested feature cannot run on this host",
+				zap.String("next_step", "the hook's error wraps its own 'Next steps:' remediation — read the full error chain for the feature-specific fix (kernel upgrade, disabling the feature flag, or rebuilding without the BPF variant)"),
+			)
+			return fmt.Errorf("auxiliary proxy hook failed: %w", err)
 		}
 	}
 
@@ -808,7 +829,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 			return err
 		}
 
@@ -828,7 +849,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
 			}
 			dstCfg := &models.ConditionalDstCfg{
@@ -1284,7 +1305,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					dstConn, err = tls.Dial("tcp", addr, cfg)
 				}
 				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
 					return err
 				}
 
@@ -1302,7 +1323,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
 			}
 		}

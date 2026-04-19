@@ -260,6 +260,15 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to start proxy")
+		// StartProxy may have spawned proxy goroutines before the
+		// failure point (TCP accept loop, TCP DNS, UDP DNS) — they
+		// stay live until proxyCtx is cancelled. Before this fix
+		// they leaked until the outer agent context was cancelled,
+		// holding ports and consuming resources. Cancel here so the
+		// partial proxy is torn down immediately. Matters now that
+		// StartProxy propagates auxiliary-hook failures (keploy#4078)
+		// rather than swallowing them.
+		proxyCtxCancel()
 		return hookErr
 	}
 
