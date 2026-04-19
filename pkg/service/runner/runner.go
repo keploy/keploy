@@ -336,29 +336,33 @@ func (r *Runner) checkMockMismatches(ctx context.Context, expected []string) *Mo
 	}
 }
 
-// waitForApp blocks until the app at serviceURL is BOTH TCP-reachable
-// AND responds to an HTTP request, or the timeout elapses.
+// waitForApp blocks until the app at serviceURL responds to an HTTP
+// request, or the timeout elapses. TCP reachability is no longer
+// checked separately — the HTTP probe's underlying dial subsumes it
+// and catches the strictly larger set of not-ready conditions (see
+// below).
 //
-// The HTTP probe is what makes this correct for docker-compose deployments.
-// `ports: a:b` has dockerd bind the host listener at container-create time,
-// so a plain TCP dial succeeds against dockerd's port forwarder while the
-// in-container app is still booting. Requests that follow get forwarded
-// to a dead inner socket and come back ECONNRESET — the exact symptom
-// that broke the enterprise sandbox's auto-replay phase on macOS.
+// The HTTP probe is what makes this correct for docker-compose
+// deployments. `ports: a:b` has dockerd bind the host listener at
+// container-create time, so a plain TCP dial succeeds against
+// dockerd's port forwarder while the in-container app is still
+// booting. Requests that follow get forwarded to a dead inner socket
+// and come back ECONNRESET — the exact symptom that broke the
+// enterprise sandbox's auto-replay phase on macOS.
 //
-// Any HTTP status code (200/404/400/...) counts as ready — we're not
-// asserting anything about a specific endpoint, just that the app has
-// accepted a connection, routed it, and produced a response. Only a
-// transport-level error means it's still coming up.
+// Any HTTP status code (200/404/400/405/501/...) counts as ready —
+// we're not asserting anything about a specific endpoint, just that
+// the app has accepted a connection, routed it, and produced a
+// response. Only a transport-level error means it's still coming up.
 //
-// Native processes (bind-ready == traffic-ready) and Kubernetes Services
-// (gated on Pod readiness by the control plane) satisfy the HTTP probe
-// trivially. Note that the HTTP probe adds failure modes the TCP-only
-// check didn't have — client-side request timeout (3s per probe), TLS
-// handshake / cert errors, and slow header writes — so this is stricter
-// than a pure superset. That's intentional: each of those conditions
-// represents an app that isn't yet ready to serve traffic end-to-end,
-// which is exactly the signal we want during startup.
+// Native processes (bind-ready == traffic-ready) and Kubernetes
+// Services (gated on Pod readiness by the control plane) satisfy
+// the HTTP probe trivially. The HTTP probe adds failure modes that
+// a TCP dial alone would have missed — client-side request timeout
+// (3s per probe), TLS handshake / cert errors, slow header writes —
+// and each of those conditions legitimately represents an app that
+// isn't yet ready to serve traffic end-to-end, which is the signal
+// we want during startup.
 func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
