@@ -293,7 +293,35 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		requests := []mysql.Request{{PacketBundle: *pendingCommand}}
 		responses := []mysql.Response{{PacketBundle: *pendingRespBundle}}
 		respOp := pendingRespBundle.Header.Type
-		recordMock(ctx, requests, responses, "mocks", pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
+		// Lifetime classification at record time: prepared-statement
+		// setup (COM_STMT_PREPARE → StmtPrepareOkPacket) is connection-
+		// scoped. The executes that reference the statement by id on
+		// the same connection may land in a different test's window, so
+		// tagging as per-test ("mocks") would have the strict-window
+		// filter drop the setup and break replay. Tagging as session
+		// ("config") would share it across unrelated connections,
+		// which can collide when apps reuse statement names per
+		// connection. LifetimeConnection (= "connection" + connID) is
+		// the correct scope: not window-filtered, scoped to this
+		// connID, matched via GetConnectionMocks(connID) at replay.
+		//
+		// Connection-alive commands (COM_PING, COM_STATISTICS,
+		// COM_DEBUG, COM_RESET_CONNECTION) could semantically be
+		// "config" (input-independent responses, session-reusable) but
+		// we deliberately keep them as "mocks" for BACKWARD COMPAT:
+		// the released keploy replayer skips "config"-tagged mocks at
+		// command phase, so tagging them as "config" from this version
+		// of the recorder would break the released replayer when it
+		// receives a recording made here. The matcher-side
+		// isSessionReusableCommandMock helper still dispatches any
+		// such mock at command phase if it reaches the session pool
+		// (e.g., user-edited recordings), so forward compat is
+		// preserved without burning the bridge behind us.
+		mockType := "mocks"
+		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
+			mockType = "connection"
+		}
+		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil
 		state = stateExpectCommand

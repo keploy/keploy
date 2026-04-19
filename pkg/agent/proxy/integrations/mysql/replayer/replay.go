@@ -20,9 +20,9 @@ import (
 func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
-	unfiltered, err := mockDb.GetUnFilteredMocks()
+	unfiltered, err := mockDb.GetSessionMocks()
 	if err != nil {
-		utils.LogError(logger, err, "failed to get unfiltered mocks")
+		utils.LogError(logger, err, "failed to get session mocks")
 		return err
 	}
 
@@ -30,12 +30,21 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 	var hasMySQLMocks bool
 	var totalMySQLMocks int
 	var dataMocks int
-	// Get the mocks having "config" metadata and check for any MySQL mocks in a single pass.
+	// Partition MySQL mocks into session/config vs data using the
+	// typed Lifetime with a raw-tag fallback. The fallback handles
+	// mocks that reach the pool without DeriveLifetime having set
+	// Lifetime (inline test constructions, legacy paths). Functionally
+	// identical to the pre-unification "type == config" read for any
+	// correctly-tagged mock.
 	for _, mock := range unfiltered {
 		if mock.Kind == models.MySQL {
 			hasMySQLMocks = true
 			totalMySQLMocks++
-			if mock.Spec.Metadata["type"] == "config" {
+			isSession := mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+				(mock.TestModeInfo.Lifetime == models.LifetimePerTest &&
+					mock.Spec.Metadata != nil &&
+					mock.Spec.Metadata["type"] == "config")
+			if isSession {
 				configMocks = append(configMocks, mock)
 			} else {
 				dataMocks++

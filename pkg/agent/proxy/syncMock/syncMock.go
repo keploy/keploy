@@ -53,6 +53,15 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 }
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
+	// Unification (Phase 1): resolve the live mock's Lifetime immediately
+	// on entry so the buffered mock carries a correctly-typed
+	// TestModeInfo.Lifetime into whichever downstream consumer drains
+	// syncMock next (persistence writer, downstream agent via outChan,
+	// etc.). Cheap — single map probe — and removes the need for
+	// downstream code to call DeriveLifetime defensively.
+	if mock != nil {
+		mock.DeriveLifetime()
+	}
 	m.mu.Lock()
 	if m.memoryPause {
 		m.mu.Unlock()
