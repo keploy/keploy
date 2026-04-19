@@ -166,4 +166,23 @@ func TestResolveEnvVars(t *testing.T) {
 			t.Fatal("expected error for invalid key in env file, got nil")
 		}
 	})
+
+	t.Run("rejects reserved key from inline map", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"NODE_EXTRA_CA_CERTS": "/my/cert.pem"}, "")
+		if err == nil {
+			t.Fatal("expected error for reserved key NODE_EXTRA_CA_CERTS, got nil")
+		}
+	})
+
+	t.Run("rejects reserved key from env file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("JAVA_TOOL_OPTIONS=-Xmx512m\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolveEnvVars(nil, path)
+		if err == nil {
+			t.Fatal("expected error for reserved key JAVA_TOOL_OPTIONS in env file, got nil")
+		}
+	})
 }
