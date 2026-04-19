@@ -497,7 +497,17 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
-	if !IsConfigFileFound {
+	// The "create config file if missing" behavior is meaningful
+	// only for user-facing commands (record/test/etc.) that are
+	// expected to persist keploy.yml for reuse. The `agent`
+	// subcommand is a worker process — it receives its config
+	// over CLI flags / env from the parent keploy, never reads
+	// keploy.yml from disk, and often runs inside a container
+	// where the host's absolute --config-path doesn't resolve
+	// anyway. Creating a config file there is a no-op at best
+	// and a misleading ENOENT "failed to write config file"
+	// ERROR at worst (kafka-ecommerce CI run 2541/10).
+	if !IsConfigFileFound && cmd.Name() != "agent" {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
