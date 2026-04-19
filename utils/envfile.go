@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -112,4 +113,18 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 	}
 
 	return merged, nil
+}
+
+// ResolveEnvFilePath resolves a relative envFile path against the directory
+// that contains the keploy config file. If envFile is already absolute, empty,
+// or configPath is empty, it is returned unchanged.
+func ResolveEnvFilePath(configPath, envFile string) string {
+	if envFile == "" || filepath.IsAbs(envFile) || configPath == "" {
+		return envFile
+	}
+	basePath := configPath
+	if info, err := os.Stat(basePath); err == nil && !info.IsDir() {
+		basePath = filepath.Dir(basePath)
+	}
+	return filepath.Join(basePath, envFile)
 }

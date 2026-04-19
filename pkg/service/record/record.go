@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,18 +214,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		memoryLimit = r.config.Record.MemoryLimit
 	}
 
-	envFilePath := r.config.EnvFile
-	if envFilePath != "" && !filepath.IsAbs(envFilePath) && r.config.ConfigPath != "" {
-		basePath := r.config.ConfigPath
-		if info, err := os.Stat(basePath); err == nil && !info.IsDir() {
-			basePath = filepath.Dir(basePath)
-		}
-		envFilePath = filepath.Join(basePath, envFilePath)
-	}
+	envFilePath := utils.ResolveEnvFilePath(r.config.ConfigPath, r.config.EnvFile)
 
 	envVars, err := utils.ResolveEnvVars(r.config.Env, envFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve environment variables: %w. Check that envFile path is correct and the file format uses KEY=VALUE pairs", err)
+		return fmt.Errorf("failed to resolve environment variables: %w. Check env/envFile configuration, ensure variable names are valid and not reserved, and if using envFile confirm it exists and uses KEY=VALUE pairs", err)
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy

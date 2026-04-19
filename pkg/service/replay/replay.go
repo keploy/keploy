@@ -698,21 +698,11 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	// Resolve relative envFile paths against the config file's directory so that
-	// running keploy with --config-path from a different working directory still
-	// finds the .env file next to keploy.yml.
-	envFilePath := r.config.EnvFile
-	if envFilePath != "" && !filepath.IsAbs(envFilePath) && r.config.ConfigPath != "" {
-		basePath := r.config.ConfigPath
-		if info, err := os.Stat(basePath); err == nil && !info.IsDir() {
-			basePath = filepath.Dir(basePath)
-		}
-		envFilePath = filepath.Join(basePath, envFilePath)
-	}
+	envFilePath := utils.ResolveEnvFilePath(r.config.ConfigPath, r.config.EnvFile)
 
 	envVars, err := utils.ResolveEnvVars(r.config.Env, envFilePath)
 	if err != nil {
-		return &InstrumentState{}, fmt.Errorf("failed to resolve environment variables: %w. Check that envFile path is correct and the file format uses KEY=VALUE pairs", err)
+		return &InstrumentState{}, fmt.Errorf("failed to resolve environment variables: %w. Check env/envFile configuration, ensure variable names are valid and not reserved, and if using envFile confirm it exists and uses KEY=VALUE pairs", err)
 	}
 
 	err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose, EnvVars: envVars})
