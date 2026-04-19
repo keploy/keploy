@@ -18,8 +18,68 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     steps:
+      # Bootstrap a consistent shell environment on every self-hosted
+      # Windows runner. Some runners in the fleet ship without pwsh
+      # (PowerShell Core) or with a Restricted ExecutionPolicy that
+      # blocks subsequent step scripts from running. This step makes
+      # every downstream `shell: powershell` and `shell: pwsh`
+      # invocation succeed regardless of which runner the scheduler
+      # picks. Run it unconditionally with explicit -ExecutionPolicy
+      # Bypass so it itself is not subject to the restriction it
+      # repairs.
+      - name: Bootstrap PowerShell environment
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          # CurrentUser scope persists across subsequent GitHub Actions
+          # steps (each is a fresh powershell invocation, so Process scope
+          # would not carry over). Bypass here is scoped to the runner
+          # user account, not the machine.
+          try { Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force } catch { Write-Host "::warning::CurrentUser scope write failed: $_" }
+          if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+            Write-Host "pwsh not found; repairing runner (one-shot per-runner install)."
+            # Try choco first (fastest when present), then fall back to
+            # a portable ZIP download from the official PowerShell
+            # GitHub release so runners without choco are still
+            # repaired. 7.4.6 is the current LTS at time of writing;
+            # pinned to a known-good version so behaviour is
+            # reproducible.
+            $pwshVersion = "7.4.6"
+            $pwshBase = Join-Path $env:USERPROFILE ".pwsh-portable"
+            $pwshBin = Join-Path $pwshBase ("PowerShell-" + $pwshVersion + "-win-x64")
+            $pwshExe = Join-Path $pwshBin "pwsh.exe"
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              try {
+                & choco install pwsh -y --no-progress
+                $env:Path = "$env:ProgramFiles\PowerShell\7;" + $env:Path
+                "$env:ProgramFiles\PowerShell\7" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              } catch {
+                Write-Host "::warning::choco install failed: $_. Falling back to portable ZIP."
+              }
+            }
+            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue) -and -not (Test-Path $pwshExe)) {
+              New-Item -Path $pwshBase -ItemType Directory -Force | Out-Null
+              $zipUrl = "https://github.com/PowerShell/PowerShell/releases/download/v$pwshVersion/PowerShell-$pwshVersion-win-x64.zip"
+              $zipPath = Join-Path $pwshBase ("pwsh-" + $pwshVersion + ".zip")
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+              Expand-Archive -Path $zipPath -DestinationPath $pwshBin -Force
+              Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path $pwshExe) {
+              $env:Path = "$pwshBin;" + $env:Path
+              $pwshBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              Write-Host "Installed portable pwsh at $pwshExe"
+            }
+            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+              Write-Host "::warning::pwsh still unavailable after install attempts. Runner needs manual repair."
+            }
+          } else {
+            Write-Host "pwsh already available: $((Get-Command pwsh).Source)"
+          }
+
       - name: Create workflow start lock
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
           New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
@@ -67,11 +127,27 @@ jobs:
           git config --file $gitConfig core.eol lf
           if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
 
-          # Per-run SSH known_hosts
+          # Per-run SSH known_hosts. Prefer ssh-keyscan so we pick up
+          # any host-key rotation automatically; fall back to GitHub's
+          # published keys (https://api.github.com/meta .ssh_keys) when
+          # ssh-keyscan returns nothing. Some self-hosted runners in
+          # this fleet ship without the OpenSSH client, or have egress
+          # policies that block port 22, so ssh-keyscan can be silent
+          # even though HTTPS git clones work fine. Baking in the
+          # upstream-published keys keeps checkout working on those
+          # runners without requiring manual fleet config.
           $knownHosts = Join-Path $isoDir 'known_hosts'
-          $hostKeys = ssh-keyscan github.com 2>$null
+          $hostKeys = $null
+          if (Get-Command ssh-keyscan -ErrorAction SilentlyContinue) {
+              $hostKeys = & ssh-keyscan github.com 2>$null
+          }
           if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
-              throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+              Write-Host "ssh-keyscan unavailable or empty; using GitHub published host keys."
+              $hostKeys = @(
+                  'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+                  'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
+                  'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
+              )
           }
           $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
 
@@ -81,6 +157,14 @@ jobs:
 
           Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
           Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
+
+          # ssh-keyscan and the benign-exit-5 git config --unset-all calls
+          # leave $LASTEXITCODE non-zero even when the step completes
+          # correctly. pwsh propagates that to the process exit code so
+          # the step is marked failed despite the logical success. Reset
+          # explicitly here and exit 0 to match the intent.
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -98,8 +182,46 @@ jobs:
       - name: Add MinGW gcc to PATH
         shell: pwsh
         run: |
-          $gccBin = "C:\msys64\mingw64\bin"
-          if (!(Test-Path "$gccBin\gcc.exe")) { throw "gcc.exe not found at $gccBin" }
+          # Search common MinGW/msys64 install locations; different runners
+          # in the fleet stage MinGW in different paths (msys64, direct
+          # mingw64 portable, chocolatey layout). If none match, fall back
+          # to a portable install from the official MinGW-w64 release so
+          # the runner is self-repairing for CGO builds.
+          $candidates = @(
+            "C:\msys64\mingw64\bin",
+            "C:\mingw64\bin",
+            "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin",
+            "C:\tools\mingw64\bin",
+            "$env:USERPROFILE\.mingw64-portable\mingw64\bin"
+          )
+          $gccBin = $null
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "gcc.exe")) { $gccBin = $c; break }
+          }
+          if (-not $gccBin) {
+            Write-Host "No MinGW found in known paths; installing portable MinGW-w64 14.2.0 (WinLibs ZIP)."
+            $portableRoot = Join-Path $env:USERPROFILE ".mingw64-portable"
+            $portableBin = Join-Path $portableRoot "mingw64\bin"
+            if (-not (Test-Path (Join-Path $portableBin "gcc.exe"))) {
+              New-Item -Path $portableRoot -ItemType Directory -Force | Out-Null
+              # Use WinLibs (brechtsanders/winlibs_mingw) which publishes
+              # native ZIP archives — unpacks with built-in Expand-Archive
+              # on PowerShell 5.1+ so we do not depend on 7z being
+              # present on the runner. Pin to a stable posix-seh x86_64
+              # build compatible with Go's CGO on Windows.
+              $mingwUrl = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-12.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r3.zip"
+              $archive = Join-Path $portableRoot "mingw64.zip"
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $mingwUrl -OutFile $archive -UseBasicParsing
+              Expand-Archive -Path $archive -DestinationPath $portableRoot -Force
+              Remove-Item -Path $archive -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path (Join-Path $portableBin "gcc.exe")) {
+              $gccBin = $portableBin
+            } else {
+              throw "MinGW install did not produce gcc.exe at $portableBin"
+            }
+          }
           echo $gccBin >> $env:GITHUB_PATH
           $env:Path = "$gccBin;$env:Path"
           where.exe gcc
@@ -116,7 +238,7 @@ jobs:
 
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
@@ -205,13 +327,13 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       - name: Ensure Docker is running
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
           if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
       - name: Wait for Docker to be ready
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $maxAttempts = 30
           $attempt = 0
@@ -233,7 +355,7 @@ jobs:
           }
 
       - name: Pull Docker image
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
@@ -282,7 +404,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       - name: Remove workflow start lock
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
           $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
@@ -291,7 +413,7 @@ jobs:
       - name: Check and cleanup long-running containers (Windows helper)
         id: count_stash
         continue-on-error: true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
           $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/cleanup-windows.ps1'
           if (Test-Path $script) {

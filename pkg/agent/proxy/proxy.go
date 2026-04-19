@@ -231,10 +231,22 @@ func (p *Proxy) getMockManager() *MockManager {
 }
 
 // setMockManager replaces the current mock manager in a thread-safe manner.
+//
+// Swaps the new manager in while holding sessionMu, then closes the
+// PREVIOUS manager after releasing the lock — Close() must not run under
+// sessionMu because Close() synchronises with its own internal workers.
+// Closing the outgoing manager stops its background idle-sweeper
+// goroutine; without this, every Record / Mock session would leak a
+// goroutine since MockManager owns a per-instance ticker that only
+// stops on Close().
 func (p *Proxy) setMockManager(m *MockManager) {
 	p.sessionMu.Lock()
-	defer p.sessionMu.Unlock()
+	prev := p.mockManager
 	p.mockManager = m
+	p.sessionMu.Unlock()
+	if prev != nil {
+		prev.Close()
+	}
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -1242,6 +1254,17 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 		p.dnsCache.Purge()
 	}
 
+	return nil
+}
+
+// SetMocksWithWindow atomically updates mocks AND the test window in a
+// single call so concurrent readers cannot observe a torn (newMocks,
+// oldWindow) view. Used to satisfy the WindowedProxy extension interface.
+func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	if m := p.getMockManager(); m != nil {
+		m.SetMocksWithWindow(filtered, unFiltered, start, end)
+		p.dnsCache.Purge()
+	}
 	return nil
 }
 
