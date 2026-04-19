@@ -499,9 +499,19 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	if p.auxiliaryHook != nil {
-		err := p.auxiliaryHook.AfterStart(ctx, p)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook; verify auxiliary hook configuration or disable the hook if not required")
+		if err := p.auxiliaryHook.AfterStart(ctx, p); err != nil {
+			// Do NOT swallow the error. An auxiliary hook only gets
+			// registered when a caller has explicitly opted into the
+			// feature it implements (currently: --low-latency, which
+			// registers the proxyless / sockmap BPF startup). Silently
+			// continuing into userspace-proxy mode after the hook has
+			// declared a failure gives the user a mode they didn't ask
+			// for and no deterministic signal that the requested mode
+			// wasn't delivered. Return the hook's error so StartProxy
+			// aborts and the caller can surface the "next steps"
+			// message the hook embedded.
+			utils.LogError(p.logger, err, "auxiliary proxy hook failed; requested feature cannot run on this host")
+			return fmt.Errorf("auxiliary proxy hook failed: %w", err)
 		}
 	}
 
@@ -808,7 +818,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"))
 			return err
 		}
 
@@ -828,7 +838,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"))
 				return err
 			}
 			dstCfg := &models.ConditionalDstCfg{
@@ -1284,7 +1294,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					dstConn, err = tls.Dial("tcp", addr, cfg)
 				}
 				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"))
 					return err
 				}
 
@@ -1302,7 +1312,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", "confirm the app's upstream dependency is listening on this address before traffic starts (adjust --delay, add a readiness probe to the test harness, or pre-start the dependency); the dial is a single attempt and will not retry"))
 				return err
 			}
 		}

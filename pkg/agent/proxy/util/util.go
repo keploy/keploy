@@ -589,7 +589,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
 		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", "confirm the upstream dependency (DB / service at this address) is listening before traffic starts; the dial is a single attempt and will not retry"))
 			return nil, err
 		}
 		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
