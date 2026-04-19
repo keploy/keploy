@@ -121,6 +121,10 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
+	// docker start cannot accept --env-file; env vars can only be set at docker run time.
+	if a.kind == utils.DockerStart && len(a.opts.EnvVars) > 0 {
+		return fmt.Errorf("env var injection is not supported for 'docker start': 'docker start' cannot modify container environment at start time; use 'docker run' instead")
+	}
 	// Attach the keploy agent container's PID namespace and network namespace to the app container
 	// Sharing network namespace so that the docker container IPs of both agent and app remain same
 	// sharing pid namespace so that they share the same process tree (common ancestor) in docker
