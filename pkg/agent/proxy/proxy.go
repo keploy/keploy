@@ -908,9 +908,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// tls.Client. See the runtime_hooks.go docstring on
 	// InterceptPostgresSSLRequest for the full deployment-shape
 	// matrix. End-to-end MITM against a vanilla Postgres now works
-	// under this flag; the parser-driven TLSUpgrader path from
-	// keploy/integrations remains the richer option when you want
-	// protocol-aware mocking.
+	// under this flag; a registered parser-driven TLSUpgrader, when
+	// one is wired via pkg/agent/proxy/extraparsers.go, remains the
+	// richer option when you want protocol-aware mocking.
 	//
 	// We only extend the Peek to 8 bytes when the first 5 bytes match
 	// the SSLRequest prefix (`00 00 00 08 04`). That prefix is unique

@@ -29,11 +29,11 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 // InterceptPostgresSSLRequest controls whether the proxy itself
 // responds to the Postgres SSLRequest preamble (by replying 'S' and
 // upgrading to TLS). Disabled by default: the default keploy build
-// is released with a Postgres parser from keploy/integrations
-// (wired in via the CI-generated pkg/agent/proxy/extraparsers.go
-// blank-import — see .github/actions/setup-private-parsers) that
+// may ship with a Postgres parser registered via
+// pkg/agent/proxy/extraparsers.go (blank-imported by the
+// setup-private-parsers composite action at CI time) that already
 // handles the SSLRequest through the TLSUpgrader interface, and
-// double-handling breaks the parser-driven flow.
+// double-handling breaks that parser-driven flow.
 //
 // Scope when enabled: the flag covers both sides of the handshake.
 //   - Client side: read SSLRequest, reply 'S', MITM TLS with the client.
@@ -46,11 +46,11 @@ var AgentInfoCustomizer func(info *structs.AgentInfo)
 //     still go through the plain tls.Dial path — if a downstream
 //     deployment runs Postgres on a non-standard port, it needs to
 //     either (a) accept direct TLS, or (b) register a Postgres parser
-//     via the integrations TLSUpgrader path.
+//     via the TLSUpgrader path.
 //
 // End-to-end MITM against a vanilla Postgres now works under this
-// flag. The parser-driven TLSUpgrader path from keploy/integrations
-// remains the richer option when you want protocol-aware mocking.
+// flag. A parser-driven TLSUpgrader, when one is registered, remains
+// the richer option when you want protocol-aware mocking.
 var InterceptPostgresSSLRequest bool
 
 // ProxyHook allows an optional auxiliary proxy hook to run after proxy startup.
