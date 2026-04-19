@@ -330,13 +330,16 @@ func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveRangeDropsStaleMocksAfterClose locks in the
-// cross-session isolation: once CloseOutChan has fired, any
-// buffered mock that ResolveRange would have retained must be
-// dropped instead. Otherwise a re-record session that binds a
-// fresh channel via SetOutputChannel could inherit stale mocks
-// from the previous session's buffer. Copilot review round 25.
-func TestResolveRangeDropsStaleMocksAfterClose(t *testing.T) {
+// TestResolveRangeAfterCloseStillDrainsMatches locks in the
+// in-window send path: even after CloseOutChan has fired,
+// ResolveRange must still attempt to forward matching mocks (via
+// sendToOutChan, which silently drops on closed). This matters
+// because the record flow's final ResolveRange can fire while
+// shutdown is already in progress, and we previously regressed
+// the mongo fuzzer (record_build_replay_latest on #4045 CI) by
+// pre-dropping those mocks inside ResolveRange instead of letting
+// sendToOutChan handle the close check uniformly.
+func TestResolveRangeAfterCloseStillDrainsMatches(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 4)
@@ -346,24 +349,18 @@ func TestResolveRangeDropsStaleMocksAfterClose(t *testing.T) {
 	mgr.SetOutputChannel(ch)
 
 	now := time.Now()
-	// In-window mock that ResolveRange would normally emit
-	// ("matching" branch).
 	match := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: now}}
-	// Out-of-window but recent — ResolveRange's RETENTION branch
-	// would normally keep it for future matching.
-	retain := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: now.Add(2 * time.Second)}}
 
 	mgr.mu.Lock()
-	mgr.buffer = append(mgr.buffer, match, retain)
+	mgr.buffer = append(mgr.buffer, match)
 	mgr.mu.Unlock()
 
-	// Close the outgoing channel first; ResolveRange should
-	// observe outChanClosed and drop both entries rather than
-	// retaining them.
 	mgr.CloseOutChan()
-
 	mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "t", true, false)
 
+	// Buffer should be cleared for window-matching entries (we
+	// attempted the send; sendToOutChan's outChanClosed guard
+	// dropped it silently — that's fine, the mock isn't retained).
 	mgr.mu.Lock()
 	remaining := len(mgr.buffer)
 	mgr.mu.Unlock()
