@@ -109,11 +109,20 @@ $containerName = "dedup-go-$id"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
 if (Test-Path $dcFile) {
-  Write-Host "Patching docker-compose.yml: replacing port 8080 -> $appPort and service name 'dedup-go' -> '$containerName'"
+  Write-Host "Patching docker-compose.yml: host port 8080 -> $appPort (container-side stays 8080) and service name 'dedup-go' -> '$containerName'"
   $dc = Get-Content -Path $dcFile -Raw -ErrorAction Stop
 
-  # Replace exact port occurrences (word boundary) and the service/container name
-  $dc = [regex]::Replace($dc, '\b8080\b', [string]$appPort)
+  # Patch ONLY the host side of the '"8080:8080"' port mapping; the
+  # container side must remain 8080 because the Go sample inside the
+  # image hardcodes `router.Run(":8080")`. A prior regex that
+  # rewrote every '\b8080\b' turned the mapping into
+  # "$appPort:$appPort", which docker-compose happily honored - but
+  # then docker forwarded host:$appPort to container:$appPort where
+  # nothing was listening, so every HTTP request after the readiness
+  # probe came back with "connection was closed unexpectedly". Match
+  # the "<host>:<container>" shape explicitly so we only touch the
+  # first column.
+  $dc = [regex]::Replace($dc, '(?m)("?)8080:8080\1', ('$1' + $appPort + ':8080$1'))
   $dc = $dc.Replace('dedup-go', $containerName)
 
   Set-Content -Path $dcFile -Value $dc -Encoding UTF8
