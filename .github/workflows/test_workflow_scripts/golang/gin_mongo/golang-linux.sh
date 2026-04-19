@@ -84,7 +84,7 @@ send_request(){
 
     # Wait for keploy to record the tcs and mocks.
     sleep 10
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     if [ -n "$REC_PID" ]; then
