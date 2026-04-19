@@ -168,6 +168,28 @@ func TestPerMockFormat_WireRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("yaml.Marshal doc: %v", err)
 			}
+			// Byte-level omitempty guard: for an empty Format the
+			// wire bytes must not contain a "format:" line at all.
+			// A pure unmarshal round-trip would still yield back.Format
+			// == "" even if the marshal side emitted `format: ""`, so
+			// assert directly on the serialised bytes to catch a
+			// regression where the yaml tag loses its omitempty
+			// modifier. For non-empty formats the same bytes MUST
+			// carry a `format: <value>` line, which keeps the
+			// bidirectional contract explicit.
+			hasFormatLine := false
+			for _, line := range strings.Split(string(raw), "\n") {
+				if strings.HasPrefix(strings.TrimLeft(line, " \t"), "format:") {
+					hasFormatLine = true
+					break
+				}
+			}
+			if tc.format == "" && hasFormatLine {
+				t.Fatalf("empty Format emitted a format: line on the wire; omitempty regression:\n%s", string(raw))
+			}
+			if tc.format != "" && !hasFormatLine {
+				t.Fatalf("non-empty Format %q did not emit a format: line on the wire:\n%s", tc.format, string(raw))
+			}
 			var back yaml.NetworkTrafficDoc
 			if err := yamlLib.Unmarshal(raw, &back); err != nil {
 				t.Fatalf("yaml.Unmarshal doc: %v", err)
