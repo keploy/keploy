@@ -94,7 +94,7 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 			if !validEnvKeyRe.MatchString(k) {
 				return nil, fmt.Errorf("invalid environment variable name %q in env file %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k, envFilePath)
 			}
-			if _, reserved := reservedKeployEnvKeys[k]; reserved {
+			if _, reserved := reservedKeployEnvKeys[strings.ToUpper(k)]; reserved {
 				return nil, fmt.Errorf("environment variable %q is reserved by Keploy for TLS certificate injection and cannot be overridden via env/envFile", k)
 			}
 			merged[k] = v
@@ -106,7 +106,7 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 		if !validEnvKeyRe.MatchString(k) {
 			return nil, fmt.Errorf("invalid environment variable name %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k)
 		}
-		if _, reserved := reservedKeployEnvKeys[k]; reserved {
+		if _, reserved := reservedKeployEnvKeys[strings.ToUpper(k)]; reserved {
 			return nil, fmt.Errorf("environment variable %q is reserved by Keploy for TLS certificate injection and cannot be overridden via env/envFile", k)
 		}
 		merged[k] = v
