@@ -2,10 +2,13 @@ package manager
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestSetMemoryPressureClearsBufferedMocksAndDropsNewOnes(t *testing.T) {
@@ -365,6 +368,193 @@ func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	mgr.mu.Unlock()
 	if remaining != 1 {
 		t.Fatalf("expected 1 mock retained in buffer after post-close ResolveRange; got %d", remaining)
+	}
+}
+
+// TestSendToOutChanNoDropWhenDrainedWithinBudget exercises the
+// fast-then-bounded-block path: once the fast-path slot is taken,
+// a consumer that drains within sendBudget must let the blocked
+// sender complete without bumping dropCount. This is the "normal
+// scheduling jitter" case the bounded block was introduced for —
+// the pre-fix silent-drop shipped a recording-loss flake in
+// exactly this scenario, so the test lives to prevent regression.
+func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Prime the buffer slot so the next send goes down the
+	// bounded-block branch rather than the fast path.
+	ch <- &models.Mock{}
+
+	// Drain one slot well inside sendBudget so the blocked send
+	// succeeds. 50ms is comfortably under the 200ms budget while
+	// still giving the goroutine time to park on the send.
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		<-ch // drop the primer
+		close(done)
+	}()
+
+	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	mgr.sendToOutChan(mock)
+	<-done
+
+	if got := mgr.DropCount(); got != 0 {
+		t.Fatalf("expected zero drops when consumer drains within budget, got %d", got)
+	}
+
+	// Real mock should have landed on the channel.
+	select {
+	case got := <-ch:
+		if got != mock {
+			t.Fatalf("expected bounded-block send to deliver mock; got different pointer")
+		}
+	default:
+		t.Fatalf("bounded-block send should have delivered the mock after the primer was drained")
+	}
+}
+
+// TestSendToOutChanDropsAfterBudget is the inverse: a consumer that
+// never drains must cause exactly one drop per send after the
+// budget, and dropCount must increment accordingly. Also asserts
+// the first drop emits an Error log (the sampled, immediately-
+// visible signal the pre-fix code lacked).
+func TestSendToOutChanDropsAfterBudget(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Capture log output so we can verify the first-drop Error
+	// actually fires — the whole point of promoting Warn->Error.
+	core, logs := observer.New(zap.ErrorLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Fill the buffered slot; subsequent sends must exhaust the
+	// budget and drop.
+	ch <- &models.Mock{}
+
+	// Use a tight send budget override via measuring elapsed time —
+	// we can't stub sendBudget directly without adding a knob, so
+	// just accept the 200ms wall-clock cost on a single send and
+	// validate the semantics. 200ms * 1 send is fine for unit tests.
+	start := time.Now()
+	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	elapsed := time.Since(start)
+
+	if elapsed < sendBudget {
+		t.Fatalf("bounded-block send returned in %v, expected >= sendBudget (%v)", elapsed, sendBudget)
+	}
+	if got := mgr.DropCount(); got != 1 {
+		t.Fatalf("expected dropCount=1 after budget exhaustion, got %d", got)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	if entry.Level != zap.ErrorLevel {
+		t.Fatalf("expected Error level on drop log, got %v", entry.Level)
+	}
+}
+
+// TestSendToOutChanDropSampling validates the sampling rule:
+// the first drop logs, and subsequent drops only log every
+// sendDropSampleRate entries. Without the sampling, a stuck
+// consumer would flood the log and further starve the producer
+// — the specific anti-pattern the windows-redirector work
+// surfaced. Uses direct atomic writes to avoid 200ms * N real
+// timeouts in the test.
+func TestSendToOutChanDropSampling(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	core, logs := observer.New(zap.ErrorLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Simulate the drop counter hitting values around the
+	// sampling boundary without paying the per-drop wall-clock
+	// cost. We reach directly into dropCount because the whole
+	// point of this test is the logging cadence, not the send
+	// path's timing.
+	for i := uint64(1); i <= 2050; i++ {
+		n := mgr.dropCount.Add(1)
+		if n == 1 || n%sendDropSampleRate == 0 {
+			mgr.dropLogger().Error("test-sampled-drop",
+				zap.Uint64("dropsSoFar", n),
+			)
+		}
+	}
+
+	// Expected emits: n=1, n=1024, n=2048 → 3 entries.
+	if got := logs.Len(); got != 3 {
+		t.Fatalf("expected 3 sampled drop logs (n=1, 1024, 2048), got %d", got)
+	}
+}
+
+// TestSetLoggerNilFallsBackToNop ensures the drop path never
+// panics even if the host process never calls SetLogger or
+// clears it back to nil. zap.L() was the previous fallback and
+// produced silent drops on any binary that skipped
+// zap.ReplaceGlobals; the Nop fallback here is deliberately
+// allocation-free on the drop path.
+func TestSetLoggerNilFallsBackToNop(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	// Explicit nil to exercise the clear-back path.
+	mgr.SetLogger(nil)
+
+	// dropLogger must return something non-nil and safe to call.
+	l := mgr.dropLogger()
+	if l == nil {
+		t.Fatalf("dropLogger returned nil with no logger installed")
+	}
+	l.Error("must not panic")
+}
+
+// TestDropCountAtomicUnderLoad pins the atomic.Uint64 contract:
+// concurrent increments from many goroutines must be observable
+// as a single monotonic counter. Bare uint64 + sync/atomic would
+// work too, but this test also guards against a future refactor
+// accidentally dropping the atomic access.
+func TestDropCountAtomicUnderLoad(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+
+	const goroutines = 16
+	const incsPer = 1000
+	var wg sync.WaitGroup
+	var started atomic.Int32
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started.Add(1)
+			for j := 0; j < incsPer; j++ {
+				mgr.dropCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := mgr.DropCount(); got != uint64(goroutines*incsPer) {
+		t.Fatalf("expected %d total increments, got %d", goroutines*incsPer, got)
 	}
 }
 

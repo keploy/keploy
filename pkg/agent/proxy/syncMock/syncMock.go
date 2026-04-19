@@ -13,6 +13,13 @@ import (
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
 
+// nopLogger is the fallback when no logger has been installed via
+// SetLogger. zap.L() is NOT safe here — it returns a Nop until the
+// host process has called zap.ReplaceGlobals, and syncMock is a
+// package-level singleton that loads before any such bootstrap.
+// Using a shared Nop avoids per-call allocation on the drop path.
+var nopLogger = zap.NewNop()
+
 func generateRandomString(n int) string {
 	sb := make([]byte, n)
 	for i := range sb {
@@ -38,9 +45,18 @@ type SyncMockManager struct {
 	outChanClosed bool
 
 	// dropCount tracks send-path drops caused by outChan being full
-	// past the bounded send budget. Sampled to a Warn so customers
-	// get a loud signal without the log-flood anti-pattern.
-	dropCount uint64
+	// past the bounded send budget. Sampled to an Error so customers
+	// get a loud signal without the log-flood anti-pattern. Using
+	// the typed atomic.Uint64 wrapper removes the 32-bit-alignment
+	// footgun that a bare uint64 + sync/atomic.AddUint64 would carry
+	// if this struct ever got embedded or reordered.
+	dropCount atomic.Uint64
+
+	// loggerMu guards logger so SetLogger and the drop path can run
+	// concurrently without a data race. The read lock is taken only
+	// on the (sampled, cold) Error path, so contention is negligible.
+	loggerMu sync.RWMutex
+	logger   *zap.Logger
 }
 
 // Global instance is initialized at package load time
@@ -76,6 +92,31 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mappingChan = ch
+}
+
+// SetLogger installs a zap.Logger for drop-path reporting. Callers
+// are expected to wire this once during proxy bootstrap with a
+// process-scoped logger; nil clears it back to the shared Nop.
+// Safe to call concurrently with the send path.
+func (m *SyncMockManager) SetLogger(l *zap.Logger) {
+	if m == nil {
+		return
+	}
+	m.loggerMu.Lock()
+	defer m.loggerMu.Unlock()
+	m.logger = l
+}
+
+// dropLogger returns the active logger for the drop path, falling
+// back to the shared Nop so callers never have to nil-check and an
+// unwired manager is still safe to report against.
+func (m *SyncMockManager) dropLogger() *zap.Logger {
+	m.loggerMu.RLock()
+	defer m.loggerMu.RUnlock()
+	if m.logger == nil {
+		return nopLogger
+	}
+	return m.logger
 }
 
 // sendBudget is how long sendToOutChan will wait for outChan to drain
@@ -130,16 +171,26 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 	case m.outChan <- mock:
 		timer.Stop()
 	case <-timer.C:
-		n := atomic.AddUint64(&m.dropCount, 1)
+		n := m.dropCount.Add(1)
 		if n == 1 || n%sendDropSampleRate == 0 {
-			zap.L().Warn(
-				"syncMock: outChan full past send budget; dropping mock. Downstream consumer (agent / persistence writer) is not draining fast enough. Recording fidelity will be reduced for this window until the consumer catches up.",
+			m.dropLogger().Error(
+				"syncMock outChan overflow; mock dropped — raise consumer throughput or increase outChan capacity",
 				zap.Uint64("dropsSoFar", n),
 				zap.Int("outChanCap", cap(m.outChan)),
 				zap.Duration("budget", sendBudget),
 			)
 		}
 	}
+}
+
+// DropCount exposes the cumulative drop counter for tests and
+// external observability. The value is monotonically increasing;
+// readers that need a delta should snapshot and diff.
+func (m *SyncMockManager) DropCount() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.dropCount.Load()
 }
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {

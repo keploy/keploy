@@ -244,6 +244,15 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 
+	// Plumb the proxy logger into the package-singleton SyncMockManager
+	// so its drop-path Error emissions actually reach the host logger.
+	// zap.L() would silently fall back to Nop here — syncMock loads at
+	// package init, long before any zap.ReplaceGlobals call — which is
+	// how the overflow warning became invisible on customer runs.
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetLogger(logger)
+	}
+
 	return proxy
 }
 
