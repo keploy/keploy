@@ -283,8 +283,20 @@ $deadline       = (Get-Date).AddMinutes(5)
 $stabilityCount = 3
 $settleSec      = 5
 $okStreak       = 0
+# Loop termination is gated on (a) the time deadline and (b) the
+# keploy record process still being alive — NOT on $recJob.State,
+# because the tail Start-Job can transiently flip out of 'Running'
+# on Windows when Get-Content -Wait briefly races a log rotation
+# and exits, which made the probe bail after ~5 seconds on run
+# 24630134970. Using the keploy PID we already know about is the
+# authoritative signal: if keploy exited, there's no point waiting.
 do {
   Sync-Logs -job $recJob
+  $keployAlive = $true
+  if ($REC_PID) {
+    $keployAlive = [bool](Get-Process -Id $REC_PID -ErrorAction SilentlyContinue)
+    if (-not $keployAlive) { break }
+  }
   try {
     $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) {
@@ -298,7 +310,7 @@ do {
     $okStreak = 0
     Start-Sleep 3
   }
-} while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
+} while ((Get-Date) -lt $deadline)
 
 if ($okStreak -lt $stabilityCount) {
   Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
@@ -418,12 +430,31 @@ $testArgs = @(
 
 Write-Host "Starting keploy replay…"
 Write-Host "Executing: $env:REPLAY_BIN $($testArgs -join ' ')"
-& $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
+# keploy-replay.exe invokes `docker compose up` under the hood and
+# docker writes lifecycle events ("Container … Recreate", "Network
+# … Removing", …) to stderr even on a successful run. With
+# $ErrorActionPreference = 'Stop' set at the top of this script,
+# piping those stderr records through Tee-Object promotes them to
+# a terminating NativeCommandError and the script dies at line
+# 421 before we ever get to read the report file. Seen on run
+# 24630134970/job/72016179815 where replay actually completed but
+# the script exited 1 because docker printed a benign "Recreate"
+# line. Flip to 'Continue' just for the replay invocation; the
+# real pass/fail signal is the report YAML we validate below.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
+  $replayExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+Write-Host "Replay exited with code $replayExit"
 
 # Validate replay report
 $report = ".\keploy\reports\test-run-0\test-set-0-report.yaml"
 if (-not (Test-Path $report)) {
-  Write-Error "Missing report file: $report"
+  Write-Error "Missing report file: $report (replay exit $replayExit)"
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
   exit 1
 }
