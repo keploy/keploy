@@ -160,7 +160,11 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 		}
 		sort.Strings(envKeys)
 		for _, k := range envKeys {
-			fmt.Fprintf(tmpFile, "%s=%s\n", k, a.opts.EnvVars[k])
+			if _, err := fmt.Fprintf(tmpFile, "%s=%s\n", k, a.opts.EnvVars[k]); err != nil {
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				return fmt.Errorf("failed to write env var %q to temp env file: %w", k, err)
+			}
 		}
 		if err := tmpFile.Close(); err != nil {
 			os.Remove(tmpFile.Name())
@@ -171,7 +175,7 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 			return fmt.Errorf("failed to secure temp env file: %w", err)
 		}
 		a.envTempFile = tmpFile.Name()
-		tlsFlags += fmt.Sprintf("--env-file %s ", tmpFile.Name())
+		tlsFlags += fmt.Sprintf("--env-file \"%s\" ", tmpFile.Name())
 	}
 
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
