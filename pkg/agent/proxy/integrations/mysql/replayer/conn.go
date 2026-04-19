@@ -182,10 +182,20 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			}
 		}
 
-		// NEW: If no SSL matches at all, fail immediately (as requested).
+		// When no MySQL mock has a recorded SSLRequest entry — which
+		// happens whenever the recording side captured the traffic
+		// without seeing the pre-TLS SSLRequest packet (e.g. TLS-aware
+		// consumers that attach mid-handshake, or recordings done
+		// against a plaintext endpoint then replayed against a
+		// TLS-requesting client) — fall back to matching against all
+		// mocks. We still do the TLS MITM upgrade below, then match the
+		// post-TLS HandshakeResponse41 against the full mock set. The
+		// post-TLS wire format is identical, so a plaintext-recorded
+		// MySQL flow can still serve a TLS-requesting replay client.
 		if len(sslMatchedMocks) == 0 {
-			utils.LogError(logger, nil, "no mysql mocks matched the SSL request")
-			return res, fmt.Errorf("no mysql mocks matched the SSL request")
+			logger.Debug("no MySQL mock has an SSLRequest entry; " +
+				"falling back to plaintext mock candidates for post-TLS matching")
+			sslMatchedMocks = mocks
 		}
 
 		reqIdx++ // matched (logically) with the mock so increment the index

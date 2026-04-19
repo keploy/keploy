@@ -96,6 +96,14 @@ type Record struct {
 	MemoryLimit       uint64          `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// MockFormat selects the on-disk format for recorded mocks.
+	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
+	// format all tooling expects. "gob" writes a binary mocks.gob — a
+	// ~28% CPU reduction on the record client at high throughput, at
+	// the cost of not being grep/diff-friendly and having no cross-
+	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
+	// takes precedence over this field for ad-hoc experimentation.
+	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
 }
 
 type ReRecord struct {
