@@ -169,29 +169,70 @@ function Sync-Logs {
     } catch {}
 }
 
-# Wait for app readiness
+# Wait for app readiness — same stability window + settle +
+# per-request retry scheme as the docker variant. See that
+# script's comment for the keploy#4076 flake that drove this.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline = (Get-Date).AddMinutes(10)  # go run on cold Windows runners can take 5+ minutes to compile
-$ready = $false
+$deadline       = (Get-Date).AddMinutes(10)  # go run on cold Windows runners can take 5+ minutes to compile
+$stabilityCount = 3
+$settleSec      = 5
+$okStreak       = 0
 do {
-  Sync-Logs -job $recJob # <-- Print Keploy logs here
+  Sync-Logs -job $recJob
   try {
     $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { break }
-  } catch { Start-Sleep 3 }
+    if ($r.StatusCode -eq 200) {
+      $okStreak++
+      if ($okStreak -ge $stabilityCount) { break }
+      Start-Sleep -Seconds 1
+    } else {
+      $okStreak = 0
+    }
+  } catch {
+    $okStreak = 0
+    Start-Sleep 3
+  }
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
-# Send traffic to generate tests
+if ($okStreak -lt $stabilityCount) {
+  Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
+} else {
+  Write-Host "App readiness confirmed ($stabilityCount consecutive 200s). Settling ${settleSec}s before sending traffic…"
+  Start-Sleep -Seconds $settleSec
+}
+
+function Invoke-WithRetry {
+  param(
+    [scriptblock]$Action,
+    [string]$Name,
+    [int]$MaxAttempts = 5,
+    [int]$InitialSleepSec = 2
+  )
+  for ($i = 1; $i -le $MaxAttempts; $i++) {
+    try {
+      & $Action | Out-Null
+      return $true
+    } catch {
+      if ($i -ge $MaxAttempts) {
+        Write-Warning "Request '$Name' failed after $MaxAttempts attempts: $_"
+        return $false
+      }
+      $sleep = [int]($InitialSleepSec * [Math]::Pow(1.5, $i - 1))
+      Write-Host "Request '$Name' attempt $i failed ($_); retrying in ${sleep}s…"
+      Start-Sleep -Seconds $sleep
+    }
+  }
+  return $false
+}
+
 Write-Host "Sending HTTP requests to generate tests…"
 $sent = 0
-try {
-  Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
-  Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
-  Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
-} catch { Write-Warning "A request failed: $_" }
+if (Invoke-WithRetry -Name "GET hello/Keploy"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy" -TimeoutSec 30 })                                                                      { $sent++ }
+if (Invoke-WithRetry -Name "POST user"          -Action { Invoke-RestMethod -Method POST   -Uri "$base/user"         -Body (@{name="John Doe";email="john@keploy.io"}        | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 30 }) { $sent++ }
+if (Invoke-WithRetry -Name "PUT item/item123"   -Action { Invoke-RestMethod -Method PUT    -Uri "$base/item/item123" -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 30 }) { $sent++ }
+if (Invoke-WithRetry -Name "GET products"       -Action { Invoke-RestMethod -Method GET    -Uri "$base/products"     -TimeoutSec 30 })                                                                                                           { $sent++ }
+if (Invoke-WithRetry -Name "DELETE products/…"  -Action { Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001" -TimeoutSec 30 })                                                                                                       { $sent++ }
+if (Invoke-WithRetry -Name "GET api/v2/users"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users" -TimeoutSec 30 })                                                                                                           { $sent++ }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
 
