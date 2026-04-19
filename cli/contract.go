@@ -75,7 +75,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		},
 	}
 
-	cmd.Flags().Bool("infer", true, "Infer OpenAPI contract from recorded traffic (set to false for service-mapping based generation)")
+	cmd.Flags().Bool("infer", false, "Infer OpenAPI contract from recorded traffic (opt-in; the default path is service-mapping based generation)")
 
 	return cmd
 }

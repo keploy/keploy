@@ -437,7 +437,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 				refPath := filepath.Join(keployPath, tc.HTTPReq.BodyRef.Path)
 				data, err := os.ReadFile(refPath)
 				if err != nil {
-					s.logger.Warn("could not read offloaded request body, skipping body for schema inference", zap.String("path", refPath), zap.Error(err))
+					s.logger.Debug("could not read offloaded request body; continuing schema inference without it", zap.String("path", refPath), zap.Error(err), zap.String("hint", "ensure the asset file exists under keploy/<test-set>/assets and is readable"))
 				} else {
 					tc.HTTPReq.Body = string(data)
 					s.logger.Debug("hydrated request body from BodyRef", zap.String("path", refPath), zap.Int64("size", tc.HTTPReq.BodyRef.Size))
