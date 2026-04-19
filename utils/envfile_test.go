@@ -186,3 +186,64 @@ func TestResolveEnvVars(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveEnvFilePath(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "keploy.yml")
+	if err := os.WriteFile(cfgFile, []byte(""), 0600); err != nil {
+		t.Fatalf("failed to create temp config file: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		configPath string
+		envFile    string
+		expected   string
+	}{
+		{
+			name:       "envFile empty returns empty",
+			configPath: "/some/dir",
+			envFile:    "",
+			expected:   "",
+		},
+		{
+			name:       "configPath empty returns envFile unchanged",
+			configPath: "",
+			envFile:    ".env",
+			expected:   ".env",
+		},
+		{
+			name:       "absolute envFile returned unchanged",
+			configPath: "/some/dir",
+			envFile:    "/abs/.env",
+			expected:   "/abs/.env",
+		},
+		{
+			name:       "configPath is a file resolves relative to its directory",
+			configPath: cfgFile,
+			envFile:    ".env",
+			expected:   filepath.Join(dir, ".env"),
+		},
+		{
+			name:       "configPath is a directory resolves relative to it directly",
+			configPath: dir,
+			envFile:    ".env",
+			expected:   filepath.Join(dir, ".env"),
+		},
+		{
+			name:       "nonexistent configPath stat fails path used as-is",
+			configPath: "/nonexistent/cfg.yml",
+			envFile:    ".env",
+			expected:   filepath.Join("/nonexistent/cfg.yml", ".env"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveEnvFilePath(tt.configPath, tt.envFile)
+			if got != tt.expected {
+				t.Errorf("ResolveEnvFilePath(%q, %q) = %q, want %q", tt.configPath, tt.envFile, got, tt.expected)
+			}
+		})
+	}
+}
