@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -26,6 +27,12 @@ func (m *mockMemDb) DeleteFilteredMock(_ models.Mock) bool                    { 
 func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool                  { return false }
 func (m *mockMemDb) GetMySQLCounts() (total, config, data int)                { return 0, 0, 0 }
 func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                        { return false }
+func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)                      {}
+func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error)        { return nil, m.err }
+func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)         { return nil, m.err }
+func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)                 { return m.mocks, m.err }
+func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error)      { return nil, nil }
+func (m *mockMemDb) SessionMockHitCounts() map[string]uint64                  { return nil }
 
 func newHTTP() *HTTP {
 	return &HTTP{Logger: zap.NewNop()}
