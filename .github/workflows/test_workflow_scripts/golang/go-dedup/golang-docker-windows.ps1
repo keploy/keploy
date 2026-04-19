@@ -77,8 +77,19 @@ function Remove-KeployDirs {
 }
 
 # --- Find a free port and generate a random container name, then patch docker-compose ---
+# NOTE: We deliberately do NOT start the search at 8080. On Windows
+# Docker Desktop runners, port 8080 is very commonly held by
+# vpnkit / wsl's port-forwarder or by a prior test's container whose
+# TIME_WAIT hasn't cleared, so Find-FreePort's TcpListener probe
+# reports 8080 as free (briefly) but the subsequent `docker compose
+# up` fails to publish on it with "address already in use". Start
+# from a random high port in the IANA dynamic range (49152-65000
+# with a small margin below the ephemeral cap) and iterate upwards
+# from there. Keeps the host port well clear of anything a
+# developer tool or Docker Desktop typically reserves.
 function Find-FreePort {
-  param([int]$start = 8080)
+  param([int]$start)
+  if (-not $start) { $start = Get-Random -Minimum 49152 -Maximum 60000 }
   for ($p = $start; $p -le 65535; $p++) {
     try {
       $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p)
@@ -92,7 +103,7 @@ function Find-FreePort {
   throw 'No free TCP port found'
 }
 
-$appPort = Find-FreePort -start 8080
+$appPort = Find-FreePort
 $id = ([guid]::NewGuid()).ToString().Split('-')[0]
 $containerName = "dedup-go-$id"
 
