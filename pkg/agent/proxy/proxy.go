@@ -513,11 +513,15 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			// remediation in the returned error (e.g. the enterprise
 			// proxyless/sockmap hook wraps the BPF verifier error
 			// with a "Next steps: upgrade kernel / drop --low-latency
-			// / rebuild without the BPF variant" message). We only
-			// propagate that error upward — the caller of StartProxy
-			// is responsible for surfacing it to the user, and we
-			// skip a LogError here to avoid double-logging the same
-			// failure once the caller logs.
+			// / rebuild without the BPF variant" message). Log once
+			// here with the hook's message visible in zap.Error and
+			// a generic next_step pointing at that embedded guidance,
+			// then propagate so the caller can abort. Partial-proxy
+			// goroutines started before this point are torn down by
+			// the caller cancelling proxyCtx (see service/agent.go).
+			utils.LogError(p.logger, err, "auxiliary proxy hook failed; requested feature cannot run on this host",
+				zap.String("next_step", "the hook's error wraps its own 'Next steps:' remediation — read the full error chain for the feature-specific fix (kernel upgrade, disabling the feature flag, or rebuilding without the BPF variant)"),
+			)
 			return fmt.Errorf("auxiliary proxy hook failed: %w", err)
 		}
 	}

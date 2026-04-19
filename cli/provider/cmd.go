@@ -499,14 +499,20 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 
 	// The "create config file if missing" behavior is meaningful
 	// only for user-facing commands (record/test/etc.) that are
-	// expected to persist keploy.yml for reuse. The `agent`
-	// subcommand is a worker process — it receives its config
-	// over CLI flags / env from the parent keploy, never reads
-	// keploy.yml from disk, and often runs inside a container
-	// where the host's absolute --config-path doesn't resolve
-	// anyway. Creating a config file there is a no-op at best
-	// and a misleading ENOENT "failed to write config file"
-	// ERROR at worst (kafka-ecommerce CI run 2541/10).
+	// expected to persist keploy.yml for reuse across invocations.
+	// The `agent` subcommand is a worker process spawned by the
+	// parent keploy: it still reads an existing keploy.yml via
+	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// settings the parent resolved, but it has no use for writing
+	// a fresh one if the file is missing — the parent has already
+	// handed it the effective config via CLI flags + env. Running
+	// CreateConfigFile from the agent therefore produces a file
+	// no one reads; worse, on containerised runs the host's
+	// absolute --config-path doesn't resolve inside the agent's
+	// filesystem and the call fails with a misleading ENOENT
+	// "failed to write config file" ERROR (kafka-ecommerce CI
+	// run 2541/10). Skip the create-on-missing branch for the
+	// agent subcommand specifically.
 	if !IsConfigFileFound && cmd.Name() != "agent" {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
