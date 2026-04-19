@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -156,3 +157,52 @@ const ClientConnectionIDKey contextKey = "clientConnectionId"
 const DestConnectionIDKey contextKey = "destConnectionId"
 const PostTLSModeKey contextKey = "postTLSMode"
 const TLSHandshakeStoreKey contextKey = "tlsHandshakeStore"
+
+// CapturedReqTimeKey and CapturedRespTimeKey each hold a func() time.Time
+// that returns the wall-clock time associated with the most recent
+// REQUEST or RESPONSE chunk seen on the enclosing connection, as
+// observed by the capture layer. Integration parsers (mongo/mysql/pg/
+// redis) should call CapturedReqTime(ctx) when stamping a mock's
+// reqTimestampMock and CapturedRespTime(ctx) for the response side so
+// timestamps reflect true packet arrival order rather than
+// parser-goroutine scheduling order. A single "latest event" function
+// is unsafe: the response-side fallback would clobber a recorded
+// reqTimestampMock when a stale response from a previous exchange is
+// still in the per-connection atomic at the time the next request is
+// read.
+//
+// If no source is installed on the context (default proxy path, unit
+// tests, module init) the helpers fall back to time.Now() so call
+// sites can use them unconditionally.
+const (
+	CapturedReqTimeKey  contextKey = "capturedReqTime"
+	CapturedRespTimeKey contextKey = "capturedRespTime"
+)
+
+// CapturedReqTime returns the wall time associated with the most
+// recent request chunk on this connection, or time.Now() if the
+// context doesn't carry a captured-time source.
+func CapturedReqTime(ctx context.Context) time.Time {
+	return capturedTime(ctx, CapturedReqTimeKey)
+}
+
+// CapturedRespTime returns the wall time associated with the most
+// recent response chunk on this connection, or time.Now() if the
+// context doesn't carry a captured-time source.
+func CapturedRespTime(ctx context.Context) time.Time {
+	return capturedTime(ctx, CapturedRespTimeKey)
+}
+
+func capturedTime(ctx context.Context, key contextKey) time.Time {
+	if ctx == nil {
+		return time.Now()
+	}
+	if v := ctx.Value(key); v != nil {
+		if fn, ok := v.(func() time.Time); ok {
+			if t := fn(); !t.IsZero() {
+				return t
+			}
+		}
+	}
+	return time.Now()
+}
