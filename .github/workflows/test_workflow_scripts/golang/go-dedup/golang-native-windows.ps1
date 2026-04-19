@@ -177,8 +177,16 @@ $deadline       = (Get-Date).AddMinutes(10)  # go run on cold Windows runners ca
 $stabilityCount = 3
 $settleSec      = 5
 $okStreak       = 0
+# Gate the loop on the keploy PID, not the tail job's state —
+# Get-Content -Wait can transiently drop out of 'Running' on
+# Windows, which made the probe bail after ~5s on the docker
+# variant's run 24630134970. Mirror that fix here.
 do {
   Sync-Logs -job $recJob
+  if ($REC_PID) {
+    $keployAlive = [bool](Get-Process -Id $REC_PID -ErrorAction SilentlyContinue)
+    if (-not $keployAlive) { break }
+  }
   try {
     $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) {
@@ -192,7 +200,7 @@ do {
     $okStreak = 0
     Start-Sleep 3
   }
-} while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
+} while ((Get-Date) -lt $deadline)
 
 if ($okStreak -lt $stabilityCount) {
   Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
@@ -310,12 +318,24 @@ $testArgs = @(
 
 Write-Host "Starting keploy replay…"
 Write-Host "Executing: $env:REPLAY_BIN $($testArgs -join ' ')"
-& $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
+# Native replay also writes benign stderr lines (`go: downloading
+# …`, recover traces, etc.) that under ErrorActionPreference=Stop
+# get promoted to a terminating NativeCommandError. See the
+# docker variant's comment for the full RCA.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
+  $replayExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+Write-Host "Replay exited with code $replayExit"
 
 # Validate replay report
 $report = ".\keploy\reports\test-run-0\test-set-0-report.yaml"
 if (-not (Test-Path $report)) {
-  Write-Error "Missing report file: $report"
+  Write-Error "Missing report file: $report (replay exit $replayExit)"
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
   exit 1
 }
