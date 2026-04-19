@@ -635,10 +635,14 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if writeGob {
 		if _, statErr := os.Stat(yamlFile); statErr == nil {
 			return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
+		} else if !os.IsNotExist(statErr) {
+			return fmt.Errorf("mockdb: failed to verify whether yaml mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, yamlFile, statErr)
 		}
 	} else {
 		if _, statErr := os.Stat(gobFile); statErr == nil {
 			return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
+		} else if !os.IsNotExist(statErr) {
+			return fmt.Errorf("mockdb: failed to verify whether gob mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, gobFile, statErr)
 		}
 	}
 

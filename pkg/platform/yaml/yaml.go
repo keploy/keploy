@@ -40,11 +40,16 @@ type NetworkTrafficDoc struct {
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
 	// Format is the per-mock on-disk format override carried verbatim
 	// from models.Mock.Format. Empty means "fall back to the testset-level
-	// format"; a non-empty value must be "yaml" or "gob". mockdb readers
-	// populate it back onto models.Mock.Format so one session can mix
-	// formats inside a single test-set directory (required by DaemonSet
-	// per-session mockFormat). Omitempty keeps the wire footprint of
-	// existing (non-DS) recordings unchanged.
+	// format"; recognized values are "yaml" or "gob". Any other non-empty
+	// value is treated as unset and falls back to the process-wide
+	// configured format (see resolveMockFormat) — we prefer to preserve
+	// mocks over failing the write when a stale or typo'd format slips
+	// in. mockdb readers populate it back onto models.Mock.Format so
+	// formats can vary across mocks recorded in different test-set
+	// directories or sessions (required by DaemonSet per-session
+	// mockFormat), but each individual test-set directory must remain
+	// single-format. Omitempty keeps the wire footprint of existing
+	// (non-DS) recordings unchanged.
 	Format string `json:"format,omitempty" yaml:"format,omitempty"`
 }
 

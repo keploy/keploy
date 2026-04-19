@@ -49,7 +49,10 @@ type Mock struct {
 	// Format is the per-mock on-disk format hint/override. Empty string
 	// means "fall back to the testset-level format" (whatever the caller
 	// / CLI selected via record.mockFormat / KEPLOY_MOCK_FORMAT).
-	// Non-empty values must be one of "yaml" or "gob".
+	// Recognized values are "yaml" or "gob"; anything else is treated as
+	// empty and falls back to the process-wide configured default (see
+	// mockdb.resolveMockFormat). We deliberately do not reject unknown
+	// values so a stale or typo'd format never blocks recording.
 	//
 	// Writers may propagate this field into the on-disk
 	// NetworkTrafficDoc, and readers may load it back from the same
