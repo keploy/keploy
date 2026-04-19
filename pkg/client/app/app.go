@@ -583,7 +583,14 @@ func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 
 	if a.envTempFile != "" {
-		defer os.Remove(a.envTempFile)
+		defer func(path string) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				a.logger.Debug("failed to remove temporary env file; remove it manually if still present",
+					zap.String("path", path),
+					zap.Error(err),
+				)
+			}
+		}(a.envTempFile)
 	}
 
 	if a.kind == utils.DockerCompose {
