@@ -225,6 +225,26 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 
+	// XXX layering: the SQS parser delegates RecordOutgoing to HTTP and has
+	// no post-record hook to re-tag mocks. Pragmatic shortcut: detect SQS
+	// admin ops here and promote them to "config" so they are reusable
+	// across tests. Replace with a generic record-time augmenter registry
+	// when more parsers need cross-cutting metadata. Tracked as tech debt.
+	//
+	// Promote known cross-test idempotent operations to "config" so they
+	// are not subject to the outer test's [req,res] time window:
+	// AWS SQS discovery/admin operations.
+	if target := req.Header.Get("X-Amz-Target"); target != "" {
+		switch target {
+		case "AmazonSQS.GetQueueUrl",
+			"AmazonSQS.GetQueueAttributes",
+			"AmazonSQS.ListQueues",
+			"AmazonSQS.ChangeMessageVisibility":
+			meta["type"] = "config"
+			meta["sqs_op"] = target // namespaced key avoids colliding with HTTP "operation"
+		}
+	}
+
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))

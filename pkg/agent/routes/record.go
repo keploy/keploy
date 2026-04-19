@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
+	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -400,17 +401,15 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 //	healthcheck:
 //	  test: ["CMD", "cat", "/tmp/agent.ready"]
 func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
-	const readyFile = "/tmp/agent.ready"
-
 	// Create or overwrite the readiness file with a timestamp
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(readyFile, content, 0644); err != nil {
-		a.logger.Error("failed to create readiness file", zap.String("file", readyFile), zap.Error(err))
+	if err := os.WriteFile(kdocker.AgentReadyFile, content, 0644); err != nil {
+		a.logger.Error("failed to create readiness file", zap.String("file", kdocker.AgentReadyFile), zap.Error(err))
 		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
 		return
 	}
 
-	a.logger.Debug("Agent marked as ready", zap.String("file", readyFile))
+	a.logger.Debug("Agent marked as ready", zap.String("file", kdocker.AgentReadyFile))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
