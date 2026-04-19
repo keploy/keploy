@@ -38,6 +38,14 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	// Format is the per-mock on-disk format override carried verbatim
+	// from models.Mock.Format. Empty means "fall back to the testset-level
+	// format"; a non-empty value must be "yaml" or "gob". mockdb readers
+	// populate it back onto models.Mock.Format so one session can mix
+	// formats inside a single test-set directory (required by DaemonSet
+	// per-session mockFormat). Omitempty keeps the wire footprint of
+	// existing (non-DS) recordings unchanged.
+	Format string `json:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support

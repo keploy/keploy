@@ -46,6 +46,18 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
+	// Format is the per-mock on-disk format override. Empty string means
+	// "fall back to the testset-level format" (whatever the caller / CLI
+	// selected via record.mockFormat / KEPLOY_MOCK_FORMAT). Non-empty
+	// values must be one of "yaml" or "gob"; mockdb readers and writers
+	// honor this field so one session can mix formats inside a single
+	// test-set directory — required by the DaemonSet feature where each
+	// RecordingSession.spec.mockFormat is per-session.
+	//
+	// Writers propagate this field into the on-disk NetworkTrafficDoc.
+	// Readers load it back from the same field. No default: an unset
+	// Format means "use whatever mockdb was configured with at startup".
+	Format string `json:"Format,omitempty" bson:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
@@ -197,6 +209,11 @@ func (m *Mock) DeepCopy() *Mock {
 			LifetimeDerived: lifetimeDerived,
 		},
 		ConnectionID: m.ConnectionID,
+		// Format is a per-mock override; it must survive DeepCopy so the
+		// async gob writer's copied payload preserves the caller's
+		// selected on-disk format. Dropping it here would silently demote
+		// gob-tagged mocks to the default format on the write path.
+		Format: m.Format,
 	}
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.

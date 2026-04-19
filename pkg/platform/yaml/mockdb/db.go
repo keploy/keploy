@@ -79,6 +79,31 @@ func useGobMockFormat() bool {
 	return configuredMockFormat == mockFormatGob
 }
 
+// resolveMockFormat picks the on-disk format for a single mock. Per-mock
+// overrides win over the process-wide default; an empty string falls back
+// to the testset-level format (useGobMockFormat). Callers on the write
+// path use this to route a single mock through the gob or yaml writer
+// independent of what the session's default format is. This is what
+// enables the DaemonSet per-session mockFormat: two concurrent
+// RecordingSessions writing into different test-set directories can
+// each tag their mocks with the desired format even though the mockdb
+// package-level configuredMockFormat is process-global.
+//
+// Valid per-mock formats are "yaml" and "gob". Any other non-empty
+// value falls through to the process-wide default — we prefer to
+// preserve mocks over failing the write when a stale or typo'd format
+// slips in from a user-facing CR.
+func resolveMockFormat(perMock string) bool {
+	switch perMock {
+	case mockFormatGob:
+		return true
+	case "yaml":
+		return false
+	default:
+		return useGobMockFormat()
+	}
+}
+
 type MockYaml struct {
 	MockPath  string
 	MockName  string
@@ -561,7 +586,13 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// yaml.v3 encoding at 28-30% of record client CPU; gob round-trips
 	// all interface{} Message fields via the gob.Register calls in
 	// pkg/models/*. Sync fallback on queue-full so mocks never drop.
-	if useGobMockFormat() {
+	//
+	// Per-mock override (mock.Format) takes precedence over the
+	// process-wide configured format so the DS agent can thread each
+	// RecordingSession's spec.mockFormat through to individual mocks
+	// without mutating package-level state. Unset / unrecognised =>
+	// fall back to useGobMockFormat (the pre-DS behaviour).
+	if resolveMockFormat(mock.Format) {
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 
