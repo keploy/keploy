@@ -3,9 +3,11 @@ package manager
 import (
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -34,6 +36,11 @@ type SyncMockManager struct {
 	outChanMu     sync.RWMutex
 	outChan       chan<- *models.Mock
 	outChanClosed bool
+
+	// dropCount tracks send-path drops caused by outChan being full
+	// past the bounded send budget. Sampled to a Warn so customers
+	// get a loud signal without the log-flood anti-pattern.
+	dropCount uint64
 }
 
 // Global instance is initialized at package load time
@@ -71,13 +78,40 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 	m.mappingChan = ch
 }
 
+// sendBudget is how long sendToOutChan will wait for outChan to drain
+// before dropping the mock. 200 ms is sized conservatively: large
+// enough to absorb a GC pause on an oversubscribed CI runner or a
+// transient downstream consumer stall, small enough that shutdown
+// latency (CloseOutChan grabbing the write lock) is imperceptible.
+// The historical code used a non-blocking send with `default: drop`
+// which silently lost pre-first-request mocks under burst —
+// customers saw "some calls didn't replay" with no actionable
+// signal. See the commit that introduced this budget for the
+// customer-facing flake it resolves.
+const sendBudget = 200 * time.Millisecond
+
+// sendDropSampleRate controls Warn emission under sustained overflow.
+// Emitting per-drop under a stuck consumer would flood the log and
+// further starve the very goroutine we're trying to let catch up —
+// the same anti-pattern the Windows redirector hit. Sample every Nth
+// drop so operators still see "something is wrong" without the
+// recorder loop being drowned by its own logging.
+const sendDropSampleRate uint64 = 1024
+
 // sendToOutChan is the single send path to outChan. Holds outChanMu
 // read-lock across the whole observation + send so CloseOutChan (the
 // writer-lock holder) cannot interleave a close between our
-// not-closed check and the chansend. Non-blocking via default — if
-// the reader has fallen behind, the mock is dropped rather than
-// stalling the caller while holding the read lock (which would also
-// stall every concurrent sender and block the closer).
+// not-closed check and the chansend.
+//
+// Tries a non-blocking send first (the fast, jitter-free common case
+// where the consumer is keeping up). When the channel is momentarily
+// full, falls through to a bounded block (sendBudget) before
+// dropping. Holding the read-lock across the bounded wait only
+// lengthens CloseOutChan's shutdown path by at most sendBudget —
+// acceptable because every RLock holder is doing the same thing. The
+// alternative (silent drop after zero wait) was the source of a
+// customer-facing recording-loss flake and is strictly worse than a
+// 200 ms worst-case shutdown delay.
 func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 	m.outChanMu.RLock()
 	defer m.outChanMu.RUnlock()
@@ -86,7 +120,25 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 	}
 	select {
 	case m.outChan <- mock:
+		return
 	default:
+	}
+	// Fast path full. Bounded block so normal scheduling jitter
+	// doesn't cost us a mock.
+	timer := time.NewTimer(sendBudget)
+	select {
+	case m.outChan <- mock:
+		timer.Stop()
+	case <-timer.C:
+		n := atomic.AddUint64(&m.dropCount, 1)
+		if n == 1 || n%sendDropSampleRate == 0 {
+			zap.L().Warn(
+				"syncMock: outChan full past send budget; dropping mock. Downstream consumer (agent / persistence writer) is not draining fast enough. Recording fidelity will be reduced for this window until the consumer catches up.",
+				zap.Uint64("dropsSoFar", n),
+				zap.Int("outChanCap", cap(m.outChan)),
+				zap.Duration("budget", sendBudget),
+			)
+		}
 	}
 }
 
