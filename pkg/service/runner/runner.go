@@ -414,8 +414,8 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// later uses only `svc.Scheme` / `svc.Host` from the configured
 	// ServiceURL (see runner.go:executeAndCompare), so a user setting
 	// ServiceURL = "http://localhost:8080/api/v1" should NOT cause the
-	// readiness probe to GET /api/v1 — the app's root may respond with
-	// 200 while /api/v1 is a 404 that doesn't exist yet, or vice
+	// readiness probe to HEAD /api/v1 — the app's root may respond
+	// with 200 while /api/v1 is a 404 that doesn't exist yet, or vice
 	// versa. Probing the root gives us the same liveness signal every
 	// deployment type (native / k8s / docker-compose) satisfies.
 	probeURL := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/"}).String()
