@@ -10,6 +10,16 @@ import (
 
 var validEnvKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// reservedKeployEnvKeys are env vars Keploy injects for TLS CA interception.
+// Allowing users to override them would silently break certificate injection.
+var reservedKeployEnvKeys = map[string]struct{}{
+	"NODE_EXTRA_CA_CERTS": {},
+	"REQUESTS_CA_BUNDLE":  {},
+	"SSL_CERT_FILE":       {},
+	"CARGO_HTTP_CAINFO":   {},
+	"JAVA_TOOL_OPTIONS":   {},
+}
+
 // ParseEnvFile reads a .env file and returns its contents as a map.
 // It supports:
 //   - KEY=VALUE pairs
@@ -83,6 +93,9 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 			if !validEnvKeyRe.MatchString(k) {
 				return nil, fmt.Errorf("invalid environment variable name %q in env file %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k, envFilePath)
 			}
+			if _, reserved := reservedKeployEnvKeys[k]; reserved {
+				return nil, fmt.Errorf("environment variable %q is reserved by Keploy for TLS certificate injection and cannot be overridden via env/envFile", k)
+			}
 			merged[k] = v
 		}
 	}
@@ -91,6 +104,9 @@ func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]st
 	for k, v := range envMap {
 		if !validEnvKeyRe.MatchString(k) {
 			return nil, fmt.Errorf("invalid environment variable name %q: must match [a-zA-Z_][a-zA-Z0-9_]*", k)
+		}
+		if _, reserved := reservedKeployEnvKeys[k]; reserved {
+			return nil, fmt.Errorf("environment variable %q is reserved by Keploy for TLS certificate injection and cannot be overridden via env/envFile", k)
 		}
 		merged[k] = v
 	}
