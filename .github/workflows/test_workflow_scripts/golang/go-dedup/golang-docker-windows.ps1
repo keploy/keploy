@@ -109,23 +109,44 @@ $containerName = "dedup-go-$id"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
 if (Test-Path $dcFile) {
-  Write-Host "Patching docker-compose.yml: host port 8080 -> $appPort (container-side stays 8080) and service name 'dedup-go' -> '$containerName'"
+  Write-Host "Patching docker-compose.yml: host port 8080 -> $appPort (container-side stays 8080) and container_name 'dedup-go' -> '$containerName'"
   $dc = Get-Content -Path $dcFile -Raw -ErrorAction Stop
 
-  # Patch ONLY the host side of the '"8080:8080"' port mapping; the
-  # container side must remain 8080 because the Go sample inside the
-  # image hardcodes `router.Run(":8080")`. A prior regex that
-  # rewrote every '\b8080\b' turned the mapping into
-  # "$appPort:$appPort", which docker-compose happily honored - but
-  # then docker forwarded host:$appPort to container:$appPort where
-  # nothing was listening, so every HTTP request after the readiness
-  # probe came back with "connection was closed unexpectedly". Match
-  # the "<host>:<container>" shape explicitly so we only touch the
-  # first column.
-  $dc = [regex]::Replace($dc, '(?m)("?)8080:8080\1', ('$1' + $appPort + ':8080$1'))
-  $dc = $dc.Replace('dedup-go', $containerName)
+  # Patch ONLY the host side of the port mapping; the container
+  # side must remain 8080 because the Go sample hardcodes
+  # `router.Run(":8080")`.
+  #
+  # Previous implementation used a backreference regex
+  # `(?m)("?)8080:8080\1` to handle both quoted and unquoted forms
+  # in one go. On Windows PowerShell 5.1 that pattern
+  # intermittently produced `- <appPort>:8080"` (leading quote
+  # stripped, trailing quote kept), which docker-compose parsed as
+  # `containerPort: 8080"` and rejected with `invalid
+  # containerPort: 8080"` — the canonical symptom on
+  # keploy/keploy#4076 run 24629876059. The sample committed at
+  # github.com/keploy/samples-go/go-dedup uses the double-quoted
+  # short form exclusively, so a literal substitution is both
+  # simpler and provably correct. If the sample ever introduces a
+  # different port form we'll fail loudly below rather than
+  # silently writing malformed YAML.
+  $dcPatched = $dc.Replace('"8080:8080"', ('"' + $appPort + ':8080"'))
+  $dcPatched = $dcPatched.Replace('dedup-go', $containerName)
 
-  Set-Content -Path $dcFile -Value $dc -Encoding UTF8
+  $expectedPortFragment = ('"' + $appPort + ':8080"')
+  if ($dcPatched -notlike "*$expectedPortFragment*") {
+    Write-Host "---- docker-compose.yml (unpatched) ----"
+    Write-Host $dc
+    Write-Host "----------------------------------------"
+    throw "Port substitution did not take effect. The base docker-compose.yml does not contain the expected ""8080:8080"" literal — bailing out rather than running the record phase against an unpatched file."
+  }
+
+  # Dump the patched YAML so any future containerPort/hostPort
+  # diagnostic lands with the exact text docker-compose parsed.
+  Write-Host "---- patched docker-compose.yml ----"
+  Write-Host $dcPatched
+  Write-Host "------------------------------------"
+
+  Set-Content -Path $dcFile -Value $dcPatched -Encoding UTF8
 } else {
   Write-Warning "docker-compose.yml not found at $dcFile; continuing without patching."
 }
@@ -237,29 +258,92 @@ function Sync-Logs {
     } catch {}
 }
 
-# Wait for app readiness
+# Wait for app readiness.
+#
+# Previous implementation broke on the first 200 response and sent
+# traffic immediately — and on Windows Docker Desktop that first
+# 200 was unreliable: the port publish can briefly route to a
+# vpnkit/wsl stub that returns 200 before the in-container Go
+# binary is actually listening, so 4 seconds later the real
+# traffic got TCP RST ("Unable to connect to the remote server")
+# and 0 tests were recorded. See keploy/keploy#4076 run
+# 24629542035/job/72014589521 for the canonical symptom.
+#
+# The fix has three parts:
+#   1. Require $stabilityCount consecutive 200s before declaring
+#      ready (instead of a single 200), so a flap can't race.
+#   2. Sleep $settleSec after the probe succeeds, giving keploy's
+#      recording proxy/interception layer time to fully wire up.
+#   3. Wrap each traffic request in Invoke-WithRetry so a transient
+#      connection-refused on the first request no longer aborts
+#      the remaining five — the prior `try { req1; req2; ... } catch`
+#      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline = (Get-Date).AddMinutes(5)
-$ready = $false
+$deadline       = (Get-Date).AddMinutes(5)
+$stabilityCount = 3
+$settleSec      = 5
+$okStreak       = 0
 do {
-  Sync-Logs -job $recJob # <-- Print Keploy logs here
+  Sync-Logs -job $recJob
   try {
     $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { break }
-  } catch { Start-Sleep 3 }
+    if ($r.StatusCode -eq 200) {
+      $okStreak++
+      if ($okStreak -ge $stabilityCount) { break }
+      Start-Sleep -Seconds 1
+    } else {
+      $okStreak = 0
+    }
+  } catch {
+    $okStreak = 0
+    Start-Sleep 3
+  }
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
-# Send traffic to generate tests
+if ($okStreak -lt $stabilityCount) {
+  Write-Warning "App readiness probe did not reach ${stabilityCount} consecutive 200s before deadline; continuing with traffic anyway — downstream record validation will surface the failure."
+} else {
+  Write-Host "App readiness confirmed ($stabilityCount consecutive 200s). Settling ${settleSec}s before sending traffic…"
+  Start-Sleep -Seconds $settleSec
+}
+
+# Per-request retry wrapper. Each API call is independent —
+# retries isolate a transient connection-refused blip from
+# aborting the whole record phase, which is what the old
+# single-try/catch flow did.
+function Invoke-WithRetry {
+  param(
+    [scriptblock]$Action,
+    [string]$Name,
+    [int]$MaxAttempts = 5,
+    [int]$InitialSleepSec = 2
+  )
+  for ($i = 1; $i -le $MaxAttempts; $i++) {
+    try {
+      & $Action | Out-Null
+      return $true
+    } catch {
+      if ($i -ge $MaxAttempts) {
+        Write-Warning "Request '$Name' failed after $MaxAttempts attempts: $_"
+        return $false
+      }
+      $sleep = [int]($InitialSleepSec * [Math]::Pow(1.5, $i - 1))
+      Write-Host "Request '$Name' attempt $i failed ($_); retrying in ${sleep}s…"
+      Start-Sleep -Seconds $sleep
+    }
+  }
+  return $false
+}
+
+# Send traffic to generate tests.
 Write-Host "Sending HTTP requests to generate tests…"
 $sent = 0
-try {
-  Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
-  Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
-  Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
-} catch { Write-Warning "A request failed: $_" }
+if (Invoke-WithRetry -Name "GET hello/Keploy"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy" -TimeoutSec 30 })                                                                      { $sent++ }
+if (Invoke-WithRetry -Name "POST user"          -Action { Invoke-RestMethod -Method POST   -Uri "$base/user"         -Body (@{name="John Doe";email="john@keploy.io"}        | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 30 }) { $sent++ }
+if (Invoke-WithRetry -Name "PUT item/item123"   -Action { Invoke-RestMethod -Method PUT    -Uri "$base/item/item123" -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json" -TimeoutSec 30 }) { $sent++ }
+if (Invoke-WithRetry -Name "GET products"       -Action { Invoke-RestMethod -Method GET    -Uri "$base/products"     -TimeoutSec 30 })                                                                                                           { $sent++ }
+if (Invoke-WithRetry -Name "DELETE products/…"  -Action { Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001" -TimeoutSec 30 })                                                                                                       { $sent++ }
+if (Invoke-WithRetry -Name "GET api/v2/users"   -Action { Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users" -TimeoutSec 30 })                                                                                                           { $sent++ }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
 
