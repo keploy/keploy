@@ -99,6 +99,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
+	agentMemoryLimitFlag := ""
+	if opts.MemoryLimit > 0 {
+		agentMemoryLimitFlag = " --memory-limit " + strconv.FormatUint(opts.MemoryLimit, 10)
+	}
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
@@ -115,12 +119,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
+	// Skip publishing the proxy port when it's zero. Docker rejects
+	// `-p 0:0` outright, so a caller that intentionally sets
+	// ProxyPort=0 (e.g. to run the agent without a listening proxy
+	// socket) would fail the whole docker-run alias build otherwise.
+	proxyPortStr := ""
+	if opts.ProxyPort != 0 {
+		proxyPortStr = " -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort)
+	}
 	switch osName {
 	case "linux":
 
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -136,6 +148,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -184,7 +197,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
@@ -202,6 +215,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			alias += agentMemoryLimitFlag
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -235,7 +249,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
@@ -253,6 +267,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -301,7 +316,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
@@ -319,6 +334,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			alias += agentMemoryLimitFlag
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -351,7 +367,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
-			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
@@ -369,6 +385,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		alias += agentMemoryLimitFlag
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}

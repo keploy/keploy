@@ -21,6 +21,7 @@ import (
 	testdb "go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/contract"
+	"go.keploy.io/server/v3/pkg/service/diff"
 	"go.keploy.io/server/v3/pkg/service/orchestrator"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
@@ -41,10 +42,11 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return nil, err
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
-	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
+	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, nil, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -58,6 +60,8 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return contractSvc, nil
 	case "report":
 		return reportSvc, nil
+	case "diff":
+		return diffSvc, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
@@ -101,6 +105,11 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	}
 
 	instrumentation := http.New(logger, client, c)
+
+	// Propagate the config-file mock-format selection into mockdb. The
+	// env var KEPLOY_MOCK_FORMAT still wins if set, so ad-hoc runs can
+	// override without editing keploy.yml.
+	mockdb.SetConfiguredMockFormat(c.Record.MockFormat)
 
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")

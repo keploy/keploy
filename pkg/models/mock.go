@@ -41,12 +41,56 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	// Noise holds exact-match regex patterns for obfuscated values.
+	// During mock matching, any stored value matching a pattern in this
+	// list is skipped (treated as noise). Written by the enterprise
+	// secret-protection obfuscator.
+	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
 }
 
+// TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
+// enters a runtime pool (disk load, live recorder, agent StoreMocks).
+// None of these fields are serialised to the YAML wire format — the
+// platform/yaml NetworkTrafficDoc does not embed TestModeInfo — so this
+// struct is the right home for cached derived state that must not bleed
+// into recordings.
+//
+// Lifetime and HitCount were added by the unification plan: Lifetime is
+// the typed, cached form of the on-disk Spec.Metadata["type"] tag so
+// hot-path matchers never probe the metadata map; HitCount is an atomic
+// reuse counter used for telemetry of session/connection-scoped mocks
+// (how many times was this reusable mock actually matched across the
+// test run).
 type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+
+	// Lifetime classifies the mock (per-test / session / connection)
+	// once at ingest via (*Mock).DeriveLifetime. Matchers read this
+	// field directly — do NOT re-probe Spec.Metadata["type"] in hot
+	// paths. The field is intentionally untagged for JSON/BSON/YAML:
+	// it is derived from on-disk state on every load, so persisting it
+	// would create a second source of truth.
+	Lifetime Lifetime `json:"-" bson:"-"`
+
+	// LifetimeDerived is set to true the first time DeriveLifetime
+	// completes on this mock. Without this flag, DeriveLifetime cannot
+	// distinguish "never derived" from "derived to LifetimePerTest"
+	// (they share the zero value) and would re-run on every call for
+	// per-test mocks — a minor but avoidable cost given DeriveLifetime
+	// runs at every ingest site (disk load, StoreMocks, syncMock).
+	// Runtime-only, untagged; re-derived fresh on each reload.
+	LifetimeDerived bool `json:"-" bson:"-"`
+
+	// HitCount is incremented atomically on every successful match of
+	// session- or connection-scoped mocks (per-test mocks are consumed
+	// on match so their count is always 0 or 1). Zero-cost when idle
+	// (single LOCK XADD on x86, ~1 ns). Surfaced via MockMemDb's
+	// SessionMockHitCounts for "which reusable mocks actually got
+	// used?" observability — non-zero helps confirm tagging; zero for
+	// a long-lived mock hints at dead recordings worth re-capturing.
+	HitCount uint64 `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -126,18 +170,39 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	id, isFiltered, sortOrder := m.TestModeInfo.ID, m.TestModeInfo.IsFiltered, m.TestModeInfo.SortOrder
+	// HitCount is intentionally NOT carried over: the counter is bound to
+	// the live mock pool instance (it tracks matches against *this*
+	// agent's in-memory pool), so a deep copy starts with a fresh counter.
+	// Callers who want cumulative counts across copies should aggregate at
+	// the MockMemDb level, not via clones. Lifetime + LifetimeDerived ARE
+	// carried over — they're classification state, not runtime counters;
+	// skipping LifetimeDerived would cause DeriveLifetime to re-run on
+	// the copy and double-increment LegacyKindFallbackFires for untagged
+	// kinds.
+	id := m.TestModeInfo.ID
+	isFiltered := m.TestModeInfo.IsFiltered
+	sortOrder := m.TestModeInfo.SortOrder
+	lifetime := m.TestModeInfo.Lifetime
+	lifetimeDerived := m.TestModeInfo.LifetimeDerived
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
 		Kind:    m.Kind,
 		Spec:    m.Spec,
 		TestModeInfo: TestModeInfo{
-			ID:         id,
-			IsFiltered: isFiltered,
-			SortOrder:  sortOrder,
+			ID:              id,
+			IsFiltered:      isFiltered,
+			SortOrder:       sortOrder,
+			Lifetime:        lifetime,
+			LifetimeDerived: lifetimeDerived,
 		},
 		ConnectionID: m.ConnectionID,
+	}
+
+	// Deep copy the Noise slice so mutations to one copy don't affect the other.
+	if len(m.Noise) > 0 {
+		c.Noise = make([]string, len(m.Noise))
+		copy(c.Noise, m.Noise)
 	}
 
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.

@@ -37,13 +37,13 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 	errChan := make(chan error, 2)
 
 	// read requests from client
-	err := pUtil.ReadFromPeer(ctx, logger, client, clientBuffChan, errChan, pUtil.Client)
+	err := pUtil.ReadFromPeer(ctx, logger, client, clientBuffChan, errChan, pUtil.Client, false)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
 
 	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, dest, destBuffChan, errChan, pUtil.Destination)
+	err = pUtil.ReadFromPeer(ctx, logger, dest, destBuffChan, errChan, pUtil.Destination, false)
 	if err != nil {
 		return fmt.Errorf("error reading from destination:%v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,13 @@ type Proxy struct {
 
 	integrationsPriority []ParserPriority
 	errChannel           chan error
+
+	// activeTestErrors accumulates mock-not-found errors during active test execution.
+	// The continuous error drain goroutine routes errors here when non-nil,
+	// and discards errors when nil (no test running). This prevents the
+	// errChannel from filling up with background noise (OTel, health checks).
+	activeTestErrors atomic.Pointer[testErrorAccumulator]
+	errDrainOnce     sync.Once
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -91,6 +99,15 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
+
+	// skipListener disables the TCP accept loop. When true, the proxy
+	// does not bind a port. DNS, parser init, and session state still run.
+	skipListener bool
+}
+
+// SetSkipListener disables the TCP accept loop.
+func (p *Proxy) SetSkipListener(skip bool) {
+	p.skipListener = skip
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -108,6 +125,103 @@ func isNetworkClosedErr(err error) bool {
 		strings.Contains(errStr, "wsarecv") ||
 		strings.Contains(errStr, "wsasend") ||
 		strings.Contains(errStr, "forcibly closed by the remote host")
+}
+
+// isPostgresSSLRequest reports whether the first 8 bytes of a connection
+// are a Postgres SSLRequest packet:
+//
+//	int32 length = 8
+//	int32 code   = 80877103 (0x04D2162F)
+//
+// This is sent by libpq / pgx / pq when `sslmode` is prefer/require/
+// verify-ca/verify-full, BEFORE the TLS handshake begins. The server is
+// expected to reply with a single byte: 'S' (accept TLS) or 'N' (refuse).
+func isPostgresSSLRequest(b []byte) bool {
+	if len(b) < 8 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x00 && b[3] == 0x08 &&
+		b[4] == 0x04 && b[5] == 0xd2 && b[6] == 0x16 && b[7] == 0x2f
+}
+
+// isPostgresSSLRequestPrefix reports whether the first 5 bytes of a
+// connection match the Postgres SSLRequest packet's prefix (length=8
+// + first byte of the 80877103 code). This is the widest prefix we
+// can detect after a 5-byte Peek — used to decide whether it's worth
+// blocking on a second Peek(8) to verify the full signature. The
+// prefix 00 00 00 08 04 does not collide with TLS (0x16 ...), any
+// printable-ASCII protocol greeting, or any PG protocol message
+// other than SSLRequest, so this check is effectively exact.
+func isPostgresSSLRequestPrefix(b []byte) bool {
+	if len(b) < 5 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x00 && b[3] == 0x08 && b[4] == 0x04
+}
+
+// dialPostgresSSLUpstream opens a Postgres-aware TLS connection to
+// addr: plain-TCP dial, write the 8-byte SSLRequest, read the
+// 1-byte 'S'/'N' response, upgrade to TLS via tls.Client only on 'S'.
+// A real Postgres server on 5432 expects this sequence; tls.Dial
+// would send a ClientHello directly and the server would reject it.
+//
+// Used by the proxy when agent.InterceptPostgresSSLRequest is set
+// and the destination port is 5432. The dial deadline is borrowed
+// from the passed-in context so a hung upstream does not block the
+// parser goroutine indefinitely; a 10 s default kicks in when the
+// context has no deadline (typical for record/replay mode).
+func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(10 * time.Second)
+	}
+	dialer := net.Dialer{Deadline: deadline}
+	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("postgres SSL upstream: plain dial %s failed: %w", addr, err)
+	}
+	if err := rawConn.SetDeadline(deadline); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: set deadline: %w", err)
+	}
+	// SSLRequest: int32 length=8, int32 code=80877103 (0x04D2162F).
+	sslRequest := []byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f}
+	if _, err := rawConn.Write(sslRequest); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: write SSLRequest to %s failed: %w", addr, err)
+	}
+	reply := make([]byte, 1)
+	if _, err := io.ReadFull(rawConn, reply); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream: read SSLRequest reply from %s failed: %w", addr, err)
+	}
+	switch reply[0] {
+	case 'S':
+		// Server accepted TLS. Upgrade the existing socket and run
+		// the handshake. Clear the deadline on the raw conn first —
+		// tls.Handshake manages its own.
+		if err := rawConn.SetDeadline(time.Time{}); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("postgres SSL upstream: clear deadline after 'S': %w", err)
+		}
+		tlsConn := tls.Client(rawConn, cfg)
+		handshakeCtx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+			_ = tlsConn.Close()
+			return nil, fmt.Errorf("postgres SSL upstream: TLS handshake after 'S' failed: %w", err)
+		}
+		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
+			zap.String("addr", addr),
+			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
+		return tlsConn, nil
+	case 'N':
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream %s refused TLS (SSLRequest reply 'N'); the client expects TLS but the upstream was built without it — enable SSL on the Postgres server or disable InterceptPostgresSSLRequest for this deployment", addr)
+	default:
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("postgres SSL upstream %s returned unexpected byte 0x%02x as SSLRequest reply (expected 'S' or 'N'); check that the destination is actually a Postgres server and not something else listening on 5432", addr, reply[0])
+	}
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -131,6 +245,32 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	}
 
 	return proxy
+}
+
+// buildRecordSession constructs a RecordSession for a parser in record mode.
+// It wraps src/dst in SafeConn. The caller (handleConnection) is responsible
+// for creating the TLSUpgrader using pointers to its own srcConn/dstConn
+// variables, so the upgrader updates the correct references on TLS upgrade.
+func (p *Proxy) buildRecordSession(
+	srcConn, dstConn net.Conn,
+	mocks chan<- *models.Mock,
+	errGrp *errgroup.Group,
+	logger *zap.Logger,
+	clientConnID, destConnID int64,
+	opts models.OutgoingOptions,
+	tlsUpgrader models.TLSUpgrader,
+) *integrations.RecordSession {
+	return &integrations.RecordSession{
+		Ingress:      util.NewSafeConnWithReader(srcConn, srcConn, logger),
+		Egress:       util.NewSafeConn(dstConn, logger),
+		Mocks:        mocks,
+		ErrGroup:     errGrp,
+		TLSUpgrader:  tlsUpgrader,
+		Logger:       logger,
+		ClientConnID: fmt.Sprint(clientConnID),
+		DestConnID:   fmt.Sprint(destConnID),
+		Opts:         opts,
+	}
 }
 
 // getSession returns the current session in a thread-safe manner.
@@ -197,10 +337,22 @@ func (p *Proxy) getMockManager() *MockManager {
 }
 
 // setMockManager replaces the current mock manager in a thread-safe manner.
+//
+// Swaps the new manager in while holding sessionMu, then closes the
+// PREVIOUS manager after releasing the lock — Close() must not run under
+// sessionMu because Close() synchronises with its own internal workers.
+// Closing the outgoing manager stops its background idle-sweeper
+// goroutine; without this, every Record / Mock session would leak a
+// goroutine since MockManager owns a per-instance ticker that only
+// stops on Close().
 func (p *Proxy) setMockManager(m *MockManager) {
 	p.sessionMu.Lock()
-	defer p.sessionMu.Unlock()
+	prev := p.mockManager
 	p.mockManager = m
+	p.sessionMu.Unlock()
+	if prev != nil {
+		prev.Close()
+	}
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -221,12 +373,21 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
+	// Skip the TCP listener if configured. DNS + parsers + session still run.
+	if agent.SkipProxyListener {
+		p.skipListener = true
+	}
+
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
+
+	// Start the continuous error drain so the error channel never fills up.
+	// This must happen before any connections are handled.
+	p.StartErrorDrain(ctx)
 
 	// set up the CA for tls connections
 	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
@@ -241,12 +402,16 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// Create a channel to signal readiness of each server
 	readyChan := make(chan error, 1)
 
-	// start the proxy server
+	// start the proxy server. p.start is the sole writer of readyChan:
+	// it sends the startup error (or nil on success) exactly once on
+	// every code path — skipListener, listen failure, and successful
+	// listen. Do not send again here; readyChan is buffered size 1
+	// and a second send would block forever because the caller at
+	// line below only reads it once. Before this was fixed, the
+	// skipListener path leaked this goroutine at shutdown.
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		err := p.start(ctx, readyChan)
-
-		readyChan <- err
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
 			return err
@@ -333,12 +498,48 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
-	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
+	if p.skipListener {
+		p.logger.Info("Proxy TCP listener intentionally not bound (SkipProxyListener is set); DNS and session services are live but no port is accepting connections")
+	} else {
+		p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
+	}
 	return nil
 }
 
-// start function starts the proxy server on the idle local port
+// start function starts the proxy server on the idle local port.
+// When skipListener is true, no TCP listener is created.
+// The function blocks on ctx.Done and handles cleanup on shutdown.
 func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
+
+	if p.skipListener {
+		// Info-level notice is emitted once in StartProxy (near the
+		// DNS-control log, which is the conventional "startup banner"
+		// spot). Here we only want a debug trace for the start()
+		// internal entry point so logs aren't duplicated.
+		p.logger.Debug("Proxy TCP listener skipped; DNS and session services active")
+		readyChan <- nil
+		// Block until context is cancelled, then run cleanup.
+		<-ctx.Done()
+		// Intentionally do NOT close p.session.MC in the skipListener
+		// path. The non-skip path above closes MC only after
+		// clientConnErrGrp.Wait() guarantees every per-conn producer
+		// has exited, so no send-to-closed-channel panic can fire.
+		// In skipListener mode there is no clientConnErrGrp — DNS
+		// mock producers and any external capture-layer senders are
+		// still running up to ctx cancellation and may race a close.
+		// Shutdown of downstream consumers is driven by ctx.Done()
+		// instead; the Go runtime garbage-collects MC once all
+		// references drop.
+		p.nsSwitchMutex.Lock()
+		if string(p.nsswitchData) != "" {
+			if err := p.resetNsSwitchConfig(); err != nil {
+				utils.LogError(p.logger, err, "failed to reset the nsswitch config, please retry shutdown or restore the resolver configuration manually from /etc/nsswitch.conf")
+			}
+		}
+		p.nsSwitchMutex.Unlock()
+		p.logger.Debug("proxy (skipListener) stopped")
+		return nil
+	}
 
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
@@ -365,16 +566,40 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
 		clientConnCancel()
+
+		// Close the listener synchronously BEFORE waiting for connection
+		// handlers. Defers are LIFO, so without this the listener-close
+		// defer (func1) runs AFTER this defer (func2). The accept
+		// goroutine blocks on listener.Accept() — if we wait for
+		// clientConnErrGrp before closing the listener, the accept
+		// goroutine never exits, and on 2-CPU CI runners the scheduler
+		// may not run other unblocking goroutines promptly, causing a hang.
+		if listener != nil {
+			listener.Close()
+		}
+
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
-		//closing the mock channel (if any in record mode)
-		p.sessionMu.RLock()
-		if p.session != nil && p.session.MC != nil {
-			close(p.session.MC)
+		// Close the mock channel (if any in record mode) via
+		// SyncMockManager so the close is serialized with in-flight
+		// AddMock sends. A bare close(p.session.MC) here races the
+		// record session's parser goroutines — the race detector
+		// flagged this on keploy#4045 during the petclinic
+		// record_build_replay_latest job, where the race also
+		// correlated with a 28-min process hang at runtime.
+		// CloseOutChan takes an RWMutex that AddMock holds for read,
+		// guaranteeing every send completes before close runs.
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.CloseOutChan()
+		} else {
+			p.sessionMu.RLock()
+			if p.session != nil && p.session.MC != nil {
+				close(p.session.MC)
+			}
+			p.sessionMu.RUnlock()
 		}
-		p.sessionMu.RUnlock()
 
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
@@ -517,6 +742,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+
+	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
+	initialSrcConn := srcConn
+
+	// connCloser is started later (after dstConn is established) to close
+	// both connections on context cancellation, unblocking any goroutine
+	// stuck in a blocking read (ReadBytes → reader.Read).
+	var connCloserStarted bool
+	startConnCloser := func() {
+		if connCloserStarted {
+			return
+		}
+		connCloserStarted = true
+		// Capture dstConn NOW (after dial) so there's no data race.
+		closeDst := dstConn
+		go func() {
+			<-parserCtx.Done()
+			initialSrcConn.Close()
+			if closeDst != nil {
+				closeDst.Close()
+			}
+		}()
+	}
+
 	defer func() {
 		parserCtxCancel()
 
@@ -579,8 +828,25 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			outgoingOpts.DstCfg = dstCfg
 
+			mysqlLogger := p.logger.With(
+				zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
+				zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
+				zap.String("Destination Address", dstAddr),
+			)
+			mysqlSession := &integrations.RecordSession{
+				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
+				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
+				Mocks:        rule.MC,
+				ErrGroup:     parserErrGrp,
+				TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
+				Logger:       mysqlLogger,
+				ClientConnID: fmt.Sprint(clientConnID),
+				DestConnID:   fmt.Sprint(destConnID),
+				Opts:         outgoingOpts,
+			}
+
 			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, mysqlSession)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -605,9 +871,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
+	// Peek 5 bytes first — exactly what the TLS record header needs,
+	// and the widest Peek we can do without risking a deadlock on
+	// short plaintext greetings (e.g. Redis 'PING\r\n' is 6 bytes and
+	// some protocols send <8 bytes then wait for a server reply).
+	testBuffer, err := reader.Peek(5)
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
@@ -622,11 +890,183 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	multiReader := io.MultiReader(reader, srcConn)
+	// ── Postgres SSLRequest handshake (opt-in) ──
+	// When agent.InterceptPostgresSSLRequest is enabled, the proxy itself
+	// replies 'S' and upgrades to TLS. Disabled by default because the
+	// default build registers a Postgres parser (via extraparsers.go)
+	// that already handles SSLRequest through the TLSUpgrader interface;
+	// double-handling breaks the parser-driven flow. Downstream builds
+	// that ship without a Postgres parser (pure proxy-mode) flip the
+	// flag on via agent.SetInterceptPostgresSSLRequest.
+	//
+	// This block handles the client-facing side of SSLRequest: read
+	// the 8-byte preamble, reply 'S', and terminate TLS with the
+	// client. It is NOT client-side-only for the whole handshake —
+	// when the destination is port 5432, the upstream dial path
+	// (dialPostgresSSLUpstream) independently originates its own
+	// Postgres SSLRequest before wrapping the upstream socket in
+	// tls.Client. See the runtime_hooks.go docstring on
+	// InterceptPostgresSSLRequest for the full deployment-shape
+	// matrix. End-to-end MITM against a vanilla Postgres now works
+	// under this flag; a registered parser-driven TLSUpgrader, when
+	// one is wired via pkg/agent/proxy/extraparsers.go, remains the
+	// richer option when you want protocol-aware mocking.
+	//
+	// We only extend the Peek to 8 bytes when the first 5 bytes match
+	// the SSLRequest prefix (`00 00 00 08 04`). That prefix is unique
+	// enough to rule out TLS (0x16 ...), CONNECT ("CONN"), and other
+	// common greetings, so the extra 3-byte wait is deterministic for
+	// exactly the one client that's actually speaking SSLRequest.
+	// This keeps the short-greeting deadlock (Redis PING, memcached
+	// 'quit', etc.) off the default code path.
+	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequestPrefix(testBuffer) {
+		sslBuf, perr := reader.Peek(8)
+		if perr != nil {
+			utils.LogError(p.logger, perr, "client started with a Postgres SSLRequest prefix (00 00 00 08 04) but did not deliver the full 8-byte packet; the connection likely dropped mid-handshake — verify the client is a standard libpq/pgx/pq and check for a mismatched sslmode or an intermediary terminating the TCP stream",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
+			return perr
+		}
+		testBuffer = sslBuf
+	}
+	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
+		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
+			zap.Int("sourcePort", sourcePort),
+			zap.String("dstAddr", dstAddr),
+		)
+		// Consume the 8-byte SSLRequest from the buffered reader so the
+		// downstream parser never sees it.
+		if _, derr := reader.Discard(8); derr != nil {
+			utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes; the 8-byte SSLRequest was peeked but the bufio reader could not be advanced. This usually means the underlying TCP connection was reset between peek and discard — retry the client connection, and if it persists capture a packet trace between the client and the proxy listener",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
+			return derr
+		}
+		// Reply 'S' (TLS accepted). Write straight to the underlying TCP
+		// connection; writes bypass the buffered reader.
+		if _, werr := srcConn.Write([]byte{'S'}); werr != nil {
+			utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client; the proxy accepted the SSLRequest but could not send the one-byte acknowledgment. Verify the client is still connected (not a half-closed stream), check for client-side read timeouts shorter than the proxy's accept latency, and confirm no firewall is dropping 1-byte segments",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr))
+			return werr
+		}
+		// Re-peek for the TLS ClientHello. The client app sends it as soon
+		// as it gets 'S'. 5 bytes is enough for IsTLSHandshake().
+		testBuffer, err = reader.Peek(5)
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				p.logger.Debug("Postgres client closed conn after SSLRequest reply")
+				return nil
+			}
+			// Any non-nil error here means we could not read a complete
+			// 5-byte TLS record header — either the client sent fewer
+			// than 5 bytes before closing (EOF with partial buffer) or
+			// the network errored out. Falling through would leave the
+			// downstream TLS detection running against a truncated
+			// prefix and misclassify the stream as plaintext, so bail.
+			utils.LogError(p.logger, err, "failed to read a complete 5-byte TLS record header after replying 'S' to the Postgres SSLRequest; the client did not deliver enough bytes to identify a TLS ClientHello. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the bytes sent immediately after 'S' to verify a full TLS record header arrives (starting with 0x16)",
+				zap.Uint32("sourcePort", uint32(sourcePort)),
+				zap.String("dstAddr", dstAddr),
+				zap.Int("bytesRead", len(testBuffer)))
+			return err
+		}
+	}
+
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: multiReader,
+		Reader: reader,
 		Logger: p.logger,
+	}
+
+	// ── CONNECT tunnel handling ──
+	// If the first bytes are an HTTP CONNECT request (app is using a corporate
+	// HTTP proxy), we handle the CONNECT handshake here, then re-enter the
+	// normal TLS MITM + parser flow on the unwrapped tunnel.
+	//
+	// Record mode: forward CONNECT to the real proxy, relay the 200, then MITM.
+	// Test mode:   respond with 200 directly (no external proxy needed).
+	var connectResult *connectTunnelResult
+	if isConnectRequest(testBuffer) {
+		p.logger.Debug("Detected HTTP CONNECT request, handling tunnel",
+			zap.Int("sourcePort", sourcePort),
+			zap.String("dstAddr", dstAddr),
+		)
+
+		isTestMode := rule.Mode == models.MODE_TEST
+
+		// In record mode, we need a connection to the corporate proxy.
+		var proxyConn net.Conn
+		if !isTestMode {
+			proxyConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT; verify the proxy address is correct, DNS/network is reachable, and HTTP_PROXY/HTTPS_PROXY settings are configured correctly",
+					zap.String("proxy_addr", dstAddr))
+				return err
+			}
+		}
+
+		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
+		if err != nil {
+			// Close proxyConn on error to avoid leaking the TCP connection,
+			// since it won't be assigned to dstConn for deferred cleanup.
+			if proxyConn != nil {
+				proxyConn.Close()
+			}
+			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
+			return err
+		}
+
+		// The CONNECT handshake is now complete. The app will send the next
+		// bytes (typically a TLS ClientHello) over the same srcConn.
+		// We need to re-peek to detect TLS on the inner connection.
+		//
+		// Also update dstAddr and destInfo to reflect the real target
+		// (e.g., api.example.com:443) instead of the corporate proxy.
+		dstAddr = connectResult.TargetAddr
+		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
+		if connectResult.TargetPort != "" {
+			if portNum, err := strconv.ParseUint(connectResult.TargetPort, 10, 16); err == nil && portNum >= 1 && portNum <= 65535 {
+				destInfo.Port = uint32(portNum)
+			}
+		}
+
+		// Re-peek the next bytes to detect TLS on the inner tunnel.
+		// Use the BufferedReader from handleConnectTunnel to preserve any
+		// bytes it read ahead (e.g., TLS ClientHello pipelined by the client).
+		innerReader := connectResult.BufferedReader
+		testBuffer, err = innerReader.Peek(5)
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				p.logger.Debug("CONNECT tunnel closed immediately after handshake")
+				return nil
+			}
+			if err != io.EOF {
+				utils.LogError(p.logger, err, "failed to peek inner tunnel data after CONNECT")
+				return err
+			}
+			// Partial read with EOF — proceed with what we have.
+		}
+
+		// Wrap the raw TCP connection with innerReader for subsequent reads.
+		// innerReader is the bufio.Reader from handleConnectTunnel that may
+		// hold pipelined bytes (TLS ClientHello) in its internal buffer.
+		srcConn = &util.Conn{
+			Conn:   stripUtilConn(srcConn),
+			Reader: innerReader,
+			Logger: p.logger,
+		}
+
+		// In record mode, dstConn is now the tunneled connection through the
+		// corporate proxy (the CONNECT tunnel is established, raw bytes flow).
+		// We'll set dstConn = proxyConn so the TLS dial below wraps it.
+		if !isTestMode {
+			dstConn = proxyConn
+		}
+
+		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
+			zap.String("target", connectResult.TargetAddr),
+			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
+		)
 	}
 
 	var clientPeerCert *x509.Certificate
@@ -661,7 +1101,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
@@ -722,7 +1162,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Reader: util.NewPrefixReader(initialBuf, srcConn),
 		Logger: p.logger,
 	}
 
@@ -756,7 +1196,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			zap.Bool("isHTTPReq", isHTTP),
 			zap.Bool("isCONNECT", isCONNECT),
 			zap.Int("initialBufLen", len(initialBuf)),
-			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
 		)
 
 		// Allow H2 if:
@@ -770,9 +1209,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
+		serverName := dstURL
+		// If SNI was not captured (e.g., client omitted it after CONNECT),
+		// fall back to the CONNECT target hostname for the TLS handshake.
+		// Skip IP literals — Go's TLS uses IP SANs, not ServerName for those.
+		if serverName == "" && connectResult != nil && net.ParseIP(connectResult.TargetHost) == nil {
+			serverName = connectResult.TargetHost
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         dstURL,
+			ServerName:         serverName,
 			NextProtos:         nextProtos,
 		}
 
@@ -785,20 +1232,58 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		addr := dstAddr
 		if dstURL != "" {
-			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 		}
 
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
+			if connectResult != nil && dstConn != nil {
+				// CONNECT tunnel: dstConn is already connected through the
+				// corporate proxy tunnel. If the proxyReader has buffered
+				// bytes beyond the 200 response, wrap dstConn to preserve them.
+				var tlsTransport net.Conn = dstConn
+				if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
+					tlsTransport = &util.Conn{
+						Conn:   dstConn,
+						Reader: connectResult.DstReader,
+						Logger: p.logger,
+					}
+				}
+				tlsConn := tls.Client(tlsTransport, cfg)
+				if err := tlsConn.Handshake(); err != nil {
+					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
+						zap.String("target", addr))
+					return err
+				}
+				dstConn = tlsConn
+				logger.Debug("TLS over CONNECT tunnel established",
+					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
+					zap.String("target", addr))
+			} else {
+				// When InterceptPostgresSSLRequest is on AND the
+				// destination is a Postgres service (port 5432 is
+				// the reliable-enough heuristic — documented in the
+				// hook docstring), precede the TLS dial with the
+				// Postgres SSLRequest preamble the server expects.
+				// Otherwise tls.Dial to 5432 sends a ClientHello
+				// directly, which a vanilla Postgres rejects — the
+				// flag's client-side 'S' reply would then succeed
+				// while the upstream connection fails, leaving the
+				// replayed client staring at a broken stream.
+				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
+					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+				} else {
+					dstConn, err = tls.Dial("tcp", addr, cfg)
+				}
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr))
+					return err
+				}
+
+				conn := dstConn.(*tls.Conn)
+				state := conn.ConnectionState()
+
+				p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 			}
-
-			conn := dstConn.(*tls.Conn)
-			state := conn.ConnectionState()
-
-			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -816,6 +1301,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	outgoingOpts.DstCfg = dstCfg
+
+	// Start the shutdown goroutine now that dstConn is established.
+	startConnCloser()
+
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {
@@ -848,11 +1337,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
+			// Create TLSUpgrader in handleConnection scope so it holds pointers to
+			// the real srcConn/dstConn variables (not copies in buildRecordSession).
+			var upgrader models.TLSUpgrader
+			if parserType == integrations.MYSQL || parserType == integrations.POSTGRES_V2 {
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
+			}
+			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
+			err := matchedParser.RecordOutgoing(parserCtx, session)
 			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
+				if isNetworkClosedErr(err) {
+					logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+				}
 				return err
 			}
+			logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
@@ -867,7 +1368,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
+			genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, genericSession)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
@@ -1016,6 +1518,17 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	return nil
 }
 
+// SetMocksWithWindow atomically updates mocks AND the test window in a
+// single call so concurrent readers cannot observe a torn (newMocks,
+// oldWindow) view. Used to satisfy the WindowedProxy extension interface.
+func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	if m := p.getMockManager(); m != nil {
+		m.SetMocksWithWindow(filtered, unFiltered, start, end)
+		p.dnsCache.Purge()
+	}
+	return nil
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()
@@ -1025,18 +1538,130 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.GetConsumedMocks(), nil
 }
 
-// GetErrorChannel returns the error channel for external monitoring
+// testErrorAccumulator collects errors during an active test case.
+// It is goroutine-safe via an internal mutex.
+type testErrorAccumulator struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (a *testErrorAccumulator) add(err error) {
+	a.mu.Lock()
+	a.errs = append(a.errs, err)
+	a.mu.Unlock()
+}
+
+func (a *testErrorAccumulator) drain() []error {
+	a.mu.Lock()
+	e := a.errs
+	a.errs = nil
+	a.mu.Unlock()
+	return e
+}
+
+// StartErrorDrain launches a background goroutine that continuously reads from
+// errChannel so it never fills up. Errors are routed to the activeTestErrors
+// accumulator when a test is running, and discarded otherwise.
+// This prevents background services (OTel, health checks) from saturating the
+// 100-slot error channel and blocking test coordination.
+func (p *Proxy) StartErrorDrain(ctx context.Context) {
+	p.errDrainOnce.Do(func() {
+		var discarded atomic.Int64
+		go func() {
+			defer utils.Recover(p.logger)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case err, ok := <-p.errChannel:
+					if !ok {
+						return
+					}
+					if acc := p.activeTestErrors.Load(); acc != nil {
+						acc.add(err)
+					} else {
+						// Log only the first discard and then every 100th to reduce noise.
+						n := discarded.Add(1)
+						if n == 1 || n%100 == 0 {
+							p.logger.Debug("discarding mock error outside active test",
+								zap.Error(err), zap.Int64("totalDiscarded", n))
+						}
+					}
+				}
+			}
+		}()
+	})
+}
+
+// BeginTestErrorCapture starts collecting errors for the current test case.
+// Call EndTestErrorCapture when the test finishes to retrieve collected errors.
+func (p *Proxy) BeginTestErrorCapture() {
+	p.activeTestErrors.Store(&testErrorAccumulator{})
+}
+
+// EndTestErrorCapture stops collecting errors and returns all accumulated errors.
+func (p *Proxy) EndTestErrorCapture() []error {
+	if acc := p.activeTestErrors.Swap(nil); acc != nil {
+		return acc.drain()
+	}
+	return nil
+}
+
+// GetErrorChannel returns the error channel for external monitoring.
+// When StartErrorDrain is active, this channel is continuously drained by the
+// background goroutine. Direct consumers (monitorProxyErrors) will compete
+// for reads. Prefer using BeginTestErrorCapture/EndTestErrorCapture instead.
 func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }
 
-// SendError sends an error to the error channel for external monitoring
+// GetMockErrors drains all mock-not-found errors and returns them.
+// When StartErrorDrain is active, it reads from the test accumulator instead
+// of the channel (which is drained by the background goroutine).
+func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+	var rawErrs []error
+
+	// Prefer test accumulator if active (StartErrorDrain is running)
+	if acc := p.activeTestErrors.Load(); acc != nil {
+		rawErrs = acc.drain()
+	} else {
+		// Fallback: drain from channel directly (legacy path)
+	drainLoop:
+		for {
+			select {
+			case err, ok := <-p.errChannel:
+				if !ok {
+					break drainLoop
+				}
+				rawErrs = append(rawErrs, err)
+			default:
+				break drainLoop
+			}
+		}
+	}
+
+	var errs []models.UnmatchedCall
+	for _, err := range rawErrs {
+		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+			if parserErr.MismatchReport != nil {
+				errs = append(errs, models.UnmatchedCall{
+					Protocol:      parserErr.MismatchReport.Protocol,
+					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					ClosestMock:   parserErr.MismatchReport.ClosestMock,
+					Diff:          parserErr.MismatchReport.Diff,
+					NextSteps:     parserErr.MismatchReport.NextSteps,
+				})
+			}
+		}
+	}
+	return errs, nil
+}
+
+// SendError sends an error to the error channel for external monitoring.
 func (p *Proxy) SendError(err error) {
 	select {
 	case p.errChannel <- err:
-		// Error sent successfully
 	default:
-		// Channel is full, log the error instead
 		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
 	}
 }

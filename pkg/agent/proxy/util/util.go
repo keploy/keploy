@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
@@ -32,6 +33,13 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+// ErrRecordingPausedDueToMemoryPressure tells record-mode parsers to stop
+// decoding and fall back to transparent passthrough while the agent is under
+// memory pressure.
+var ErrRecordingPausedDueToMemoryPressure = errors.New("recording paused due to memory pressure")
+
+var isRecordingPaused = memoryguard.IsRecordingPaused
 
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
@@ -77,18 +85,51 @@ func HasCompleteHTTPHeaders(buf []byte) bool {
 	return bytes.Contains(buf, endOfHeaders)
 }
 
-func IsHTTPReq(buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+// Pre-computed byte slices for IsHTTPReq to avoid per-call allocations.
+var (
+	httpGET           = []byte("GET ")
+	httpPOST          = []byte("POST ")
+	httpPUT           = []byte("PUT ")
+	httpPATCH         = []byte("PATCH ")
+	httpDELETE        = []byte("DELETE ")
+	httpOPTIONS       = []byte("OPTIONS ")
+	httpHEAD          = []byte("HEAD ")
+	httpCONNECT       = []byte("CONNECT ")
+	httpVersionMarker = []byte(" HTTP/")
+)
 
-	return isHTTP
+// IsHTTPReq checks if buf looks like an HTTP request by verifying
+// a method prefix and " HTTP/" version marker in the first line.
+// It does NOT match HTTP responses (use bytes.HasPrefix for "HTTP/").
+func IsHTTPReq(buf []byte) bool {
+	isRequest := bytes.HasPrefix(buf, httpGET) ||
+		bytes.HasPrefix(buf, httpPOST) ||
+		bytes.HasPrefix(buf, httpPUT) ||
+		bytes.HasPrefix(buf, httpPATCH) ||
+		bytes.HasPrefix(buf, httpDELETE) ||
+		bytes.HasPrefix(buf, httpOPTIONS) ||
+		bytes.HasPrefix(buf, httpHEAD) ||
+		bytes.HasPrefix(buf, httpCONNECT)
+
+	if !isRequest {
+		return false
+	}
+	{
+		// Cap the search range first to avoid scanning large non-HTTP payloads.
+		maxScan := 8192 + len(httpVersionMarker)
+		scanBuf := buf
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsHTTP2Preface checks if the buffer starts with the HTTP/2 client connection preface.
@@ -140,8 +181,112 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// ReadBuffConn is used to read the buffer from the connection
-func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
+// DirectChunkReader is implemented by capture-layer net.Conns whose
+// wire bytes already arrive pre-framed on an internal channel (e.g. an
+// eBPF ringbuf feeder). When a conn passed to ReadBuffConn satisfies
+// this interface, the ReadBytes+goroutine hop is bypassed — chunks
+// forward from DirectChunks() into bufferChannel (with a defensive
+// copy so reusable backing arrays in the producer are safe).
+//
+// HasPending reports whether Read() carry-over bytes exist (typically
+// a Prepend'd handshake peek). The fast path drains those via a loop
+// of Read calls before switching to the chunk channel so the parser
+// sees bytes in original order.
+//
+// Slice-ownership contract: implementations MAY recycle the backing
+// array of a []byte they push onto DirectChunks() as soon as the
+// next chunk is produced. ReadBuffConn therefore copies each chunk
+// before handing it to the parser side. New implementations do not
+// need to pre-allocate fresh slices per chunk; they can reuse a
+// scratch buffer.
+//
+// Real net.Conns (TCP/TLS/sockmap-ingress) do not implement this
+// interface and continue through the ReadBytes loop unchanged.
+type DirectChunkReader interface {
+	DirectChunks() <-chan []byte
+	HasPending() bool
+}
+
+// ReadBuffConn is used to read the buffer from the connection.
+// When stopOnRecordingPause is true, it exits as soon as the shared
+// self-aware memory guard pauses recording, allowing record-mode parsers to
+// fall back to passthrough without reading more data for decoding.
+// errChannel should be buffered to hold one terminal error per reader goroutine.
+func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
+	if dcr, ok := conn.(DirectChunkReader); ok {
+		// Drain ALL pending carry-over in a loop before switching to
+		// the chunk channel. A single 64 KiB Read would lose in-order
+		// delivery if the parser has prepended more than one buffer
+		// (e.g., peek + rewind + a protocol upgrade's extra prefix).
+		// Exit when HasPending is false or Read returns (0, err).
+		drain := make([]byte, 64*1024)
+		for dcr.HasPending() {
+			n, err := conn.Read(drain)
+			if n > 0 {
+				out := make([]byte, n)
+				copy(out, drain[:n])
+				select {
+				case bufferChannel <- out:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "direct-chunk carry-over drain failed; the Prepend/peek buffer on the SimulatedConn could not be read. Restart the agent and re-run the session; if it recurs, enable --debug and capture the parser that last called Prepend to see which carry-over was lost")
+				}
+				select {
+				case errChannel <- err:
+				default:
+				}
+				return
+			}
+			if n == 0 {
+				// Should not happen while HasPending is true, but
+				// break defensively to avoid a busy loop on drivers
+				// that mis-report readiness.
+				break
+			}
+		}
+		src := dcr.DirectChunks()
+		for {
+			if stopOnRecordingPause && isRecordingPaused() {
+				select {
+				case errChannel <- ErrRecordingPausedDueToMemoryPressure:
+				default:
+				}
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-src:
+				if !ok {
+					select {
+					case errChannel <- io.EOF:
+					default:
+					}
+					return
+				}
+				// Defensive copy. The DirectChunkReader interface
+				// does not mandate chunk-slice ownership semantics,
+				// and some implementations (ring-buffer backed
+				// carry-over readers, reusable scratch buffers) may
+				// recycle the backing array as soon as the next
+				// chunk is produced. The normal ReadBytes path above
+				// allocates a fresh buffer per read; mirror that so
+				// downstream parsers cannot observe bytes mutating
+				// under them.
+				out := make([]byte, len(chunk))
+				copy(out, chunk)
+				select {
+				case bufferChannel <- out:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
 	//TODO: where to close the errChannel
 	for {
 		select {
@@ -149,6 +294,14 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			// errChannel <- ctx.Err()
 			return
 		default:
+			if stopOnRecordingPause && isRecordingPaused() {
+				select {
+				case errChannel <- ErrRecordingPausedDueToMemoryPressure:
+				default:
+				}
+				return
+			}
+
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
@@ -159,8 +312,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
-
+					if logger.Core().Enabled(zap.DebugLevel) {
+						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+					}
 				}
 				errChannel <- err
 				return
@@ -168,6 +322,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
+
 			bufferChannel <- buffer
 		}
 	}
@@ -248,7 +403,6 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 		return nil, readErr
 	}
 
-	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
 	return initialBuf, nil
 }
 
@@ -398,7 +552,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
-func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffChan chan []byte, errChan chan error, peer Peer) error {
+func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffChan chan []byte, errChan chan error, peer Peer, stopOnRecordingPause bool) error {
 	//get the error group from the context
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -416,7 +570,7 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 	g.Go(func() error {
 		defer Recover(logger, client, dest)
 		defer close(buffChan)
-		ReadBuffConn(ctx, logger, conn, buffChan, errChan)
+		ReadBuffConn(ctx, logger, conn, buffChan, errChan, stopOnRecordingPause)
 		return nil
 	})
 
@@ -474,13 +628,13 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 		}(destConn)
 
-		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel, false)
 	}()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
 		defer close(clientBufferChannel)
-		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel, false)
 	}()
 
 	for {

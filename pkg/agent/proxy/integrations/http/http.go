@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +19,23 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// httpMethodPrefixes are pre-computed to avoid per-call []byte allocations.
+var (
+	httpResponsePrefix = []byte("HTTP/")
+	httpMethodGET      = []byte("GET ")
+	httpMethodPOST     = []byte("POST ")
+	httpMethodPUT      = []byte("PUT ")
+	httpMethodPATCH    = []byte("PATCH ")
+	httpMethodDELETE   = []byte("DELETE ")
+	httpMethodOPTIONS  = []byte("OPTIONS ")
+	httpMethodHEAD     = []byte("HEAD ")
+	httpMethodCONNECT  = []byte("CONNECT ")
+	httpVersionMarker  = []byte(" HTTP/")
+)
+
+// maxRequestLineScan caps how far into the first line we scan for " HTTP/".
+const maxRequestLineScan = 8192
 
 func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
@@ -45,32 +61,62 @@ type FinalHTTP struct {
 	ResTimestampMock time.Time
 }
 
-// MatchType function determines if the outgoing network call is HTTP by comparing the
-// message format with that of an HTTP text message.
+// MatchType determines if the outgoing network call is HTTP by checking for
+// a well-formed HTTP request line (METHOD path HTTP/version) or a response
+// status prefix (HTTP/version). For requests, it verifies " HTTP/" appears in
+// the first line to prevent false positives from binary protocols that start
+// with method-like ASCII bytes. Response detection only checks the prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
-	return isHTTP
+	isResponse := bytes.HasPrefix(buf, httpResponsePrefix)
+	isRequest := bytes.HasPrefix(buf, httpMethodGET) ||
+		bytes.HasPrefix(buf, httpMethodPOST) ||
+		bytes.HasPrefix(buf, httpMethodPUT) ||
+		bytes.HasPrefix(buf, httpMethodPATCH) ||
+		bytes.HasPrefix(buf, httpMethodDELETE) ||
+		bytes.HasPrefix(buf, httpMethodOPTIONS) ||
+		bytes.HasPrefix(buf, httpMethodHEAD) ||
+		bytes.HasPrefix(buf, httpMethodCONNECT)
+
+	if !isRequest && !isResponse {
+		h.Logger.Debug("determined the protocol is not HTTP", zap.Bool("isHTTP", false))
+		return false
+	}
+
+	// For requests, verify the first line contains " HTTP/" to confirm it's a
+	// valid HTTP request line and not a binary protocol that coincidentally
+	// starts with method-like ASCII bytes.
+	if isRequest {
+		// Cap the search range first to bound the scan cost on large non-HTTP payloads.
+		scanBuf := buf
+		maxScan := maxRequestLineScan + len(httpVersionMarker)
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
+			return false
+		}
+	}
+
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", true))
+	return true
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -179,6 +225,26 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 
+	// XXX layering: the SQS parser delegates RecordOutgoing to HTTP and has
+	// no post-record hook to re-tag mocks. Pragmatic shortcut: detect SQS
+	// admin ops here and promote them to "config" so they are reusable
+	// across tests. Replace with a generic record-time augmenter registry
+	// when more parsers need cross-cutting metadata. Tracked as tech debt.
+	//
+	// Promote known cross-test idempotent operations to "config" so they
+	// are not subject to the outer test's [req,res] time window:
+	// AWS SQS discovery/admin operations.
+	if target := req.Header.Get("X-Amz-Target"); target != "" {
+		switch target {
+		case "AmazonSQS.GetQueueUrl",
+			"AmazonSQS.GetQueueAttributes",
+			"AmazonSQS.ListQueues",
+			"AmazonSQS.ChangeMessageVisibility":
+			meta["type"] = "config"
+			meta["sqs_op"] = target // namespaced key avoids colliding with HTTP "operation"
+		}
+	}
+
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -213,8 +279,22 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 
 	if mgr := syncMock.Get(); mgr != nil {
+		// Route HTTP mocks through the sync manager. The manager uses its
+		// internal first-request state to decide whether to buffer or forward
+		// mocks for correct time-window based association.
 		mgr.AddMock(newMock)
 		return nil
+	}
+
+	// Fallback: syncMock manager unavailable, send to mocks channel directly.
+	// Use select with ctx so we don't block forever during shutdown.
+	select {
+	case <-ctx.Done():
+		select {
+		case mocks <- newMock:
+		default:
+		}
+	case mocks <- newMock:
 	}
 	return nil
 }

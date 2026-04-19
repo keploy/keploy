@@ -1,8 +1,6 @@
 package recorder
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -36,7 +34,7 @@ type handshakeRes struct {
 	skipConfigMock    bool
 }
 
-func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
+func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, tlsUpgrader models.TLSUpgrader) (handshakeRes, error) {
 	logger.Debug("handleInitialHandshake: entered",
 		zap.String("connKey", opts.ConnKey),
 		zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
@@ -76,6 +74,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 	// Set the intial request operation
 	res.requestOperation = handshakePkt.Header.Type
+
+	// Store server capabilities for CLIENT_DEPRECATE_EOF handling during query phase
+	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
+		decodeCtx.ServerCaps = greeting.CapabilityFlags
+	}
 
 	// Get the initial Plugin Name
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
@@ -119,6 +122,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		utils.LogError(logger, err, "failed to decode handshake response packet")
 		return res, err
 	}
+
+	// DecodePayload stores the client flags in ClientCapabilities. Also
+	// populate ClientCaps so that DeprecateEOF() (which checks ClientCaps
+	// via effectiveClientCaps()) works correctly in record mode.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 	res.req = append(res.req, mysql.Request{
 		PacketBundle: *handshakeResponsePkt,
@@ -173,74 +181,45 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, nil
 		}
 
-		reader := bufio.NewReader(clientConn)
-		initialData := make([]byte, 5)
-		// reading the initial data from the client connection to determine if the connection is a TLS handshake
-		testBuffer, err := reader.Peek(len(initialData))
+		if tlsUpgrader == nil {
+			logger.Debug("TLS upgrade requested but no TLSUpgrader available (sockmap/non-MITM path)")
+			return res, nil
+		}
+
+		// UpgradeClientTLS peeks the client connection internally to detect
+		// a TLS ClientHello, and if found, performs the TLS termination.
+		upgradedConn, isTLS, _, err := tlsUpgrader.UpgradeClientTLS(ctx, opts.Backdate)
 		if err != nil {
-			if err == io.EOF && len(testBuffer) == 0 {
-				logger.Debug("received EOF, closing conn", zap.Error(err))
-				return res, nil
-			}
-			utils.LogError(logger, err, "failed to peek the mysql request message in proxy")
+			utils.LogError(logger, err, "failed to upgrade client TLS for mysql")
 			return res, err
 		}
-
-		multiReader := io.MultiReader(reader, clientConn)
-		clientConn = &pUtils.Conn{
-			Conn:   clientConn,
-			Reader: multiReader,
-			Logger: logger,
-		}
-
-		// handle the TLS connection and get the upgraded client connection
-		isTLS := pTls.IsTLSHandshake(testBuffer)
+		clientConn = upgradedConn
 		if isTLS {
-			clientConn, _, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
-			if err != nil {
-				utils.LogError(logger, err, "failed to handle TLS conn")
-				return res, err
-			}
-		}
-
-		// upgrade the destConn to TLS if the client connection is upgraded to TLS
-		var tlsDestConn *tls.Conn
-		if isTLS {
-
+			// Upgrade destination side via TLSUpgrader.
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port
 
 			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 			if !ok {
-				utils.LogError(logger, err, "failed to fetch the destination url")
-				return res, err
+				return res, fmt.Errorf("failed to fetch destination url for source port %d", sourcePort)
 			}
-
-			//type case the dstUrl to string
 			dstURL, ok := url.(string)
 			if !ok {
-				utils.LogError(logger, err, "failed to type cast the destination url")
-				return res, err
+				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
 			}
 
-			addr := fmt.Sprintf("%v:%v", dstURL, opts.DstCfg.Port)
 			tlsConfig := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         dstURL,
 			}
+			logger.Debug("Upgrading the destination connection to TLS", zap.String("ServerName", tlsConfig.ServerName))
 
-			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))
-
-			tlsDestConn = tls.Client(destConn, tlsConfig)
-			err = tlsDestConn.Handshake()
+			destConn, err = tlsUpgrader.UpgradeDestTLS(tlsConfig)
 			if err != nil {
 				utils.LogError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
 				return res, err
 			}
-			logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-
-			// Update the destination connection to TLS connection
-			destConn = tlsDestConn
+			logger.Debug("TLS connection established with the destination server")
 		}
 
 		// Update this tls connection information in the handshake result
@@ -285,6 +264,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			utils.LogError(logger, err, "failed to decode handshake response packet")
 			return res, err
 		}
+
+		// After TLS upgrade, the client sends a new HandshakeResponse41 with
+		// the final negotiated capabilities. Update ClientCaps so
+		// DeprecateEOF() reflects the post-TLS negotiation.
+		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 		res.req = append(res.req, mysql.Request{
 			PacketBundle: *handshakeResponsePkt,
@@ -852,6 +836,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
 	decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
 
+	// Seed server capabilities from the restored greeting. Without this,
+	// decodeCtx.ServerCaps stays 0 and DeprecateEOF() returns false,
+	// which makes the TextResultSet handler look for an EOF packet
+	// between column definitions and row data. Modern clients
+	// (mysql-connector-python, mysql-connector-j, Go's go-sql-driver
+	// with DEPRECATE_EOF) send the row bytes immediately, and the
+	// recorder aborts with "expected EOF packet for column definition".
+	// Mirror what handleInitialHandshake does on its path.
+	decodeCtx.ServerCaps = sg.CapabilityFlags
+
 	logger.Debug("Post-TLS MySQL: restored server greeting",
 		zap.String("key", storeKey),
 		zap.String("pluginName", pluginName))
@@ -880,6 +874,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// and go directly to command phase recording.
 		logger.Debug("Post-TLS MySQL: existing connection detected (seq=0), skipping auth — entering command phase directly")
 
+		// We didn't decode a HandshakeResponse41 on this path, so
+		// ClientCaps is still 0. Assume the client is modern and
+		// advertises CLIENT_DEPRECATE_EOF — this matches every
+		// supported driver (mysql-connector-python/j, Go's
+		// go-sql-driver, Node mysql2). If the server ALSO advertised
+		// it (check on line above), DeprecateEOF() will return true
+		// and the EOF-less result set decode path will be used.
+		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
+		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
@@ -891,7 +895,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Feed the first packet back to the parser by wrapping clientConn.
 		wrappedClient := &pUtils.Conn{
 			Conn:   clientConn,
-			Reader: io.MultiReader(bytes.NewReader(firstPkt), clientConn),
+			Reader: pUtils.NewPrefixReader(firstPkt, clientConn),
 			Logger: logger,
 		}
 
@@ -926,6 +930,13 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if err != nil {
 		return fmt.Errorf("failed to decode post-TLS HandshakeResponse41: %w", err)
 	}
+
+	// Mirror handleInitialHandshake: after decoding the client response,
+	// populate ClientCaps so DeprecateEOF() short-circuits the EOF read
+	// in the TextResultSet/BinaryProtocol handlers. Without this the
+	// recorder aborts on the first SELECT response for modern clients
+	// that negotiate CLIENT_DEPRECATE_EOF.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 	requests = append(requests, mysql.Request{PacketBundle: *handshakeResponsePkt})
 

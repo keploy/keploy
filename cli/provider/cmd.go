@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
@@ -278,6 +279,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
 		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
+	case "diff":
+		cmd.Flags().String("run1", "", "First test run ID to compare")
+		cmd.Flags().String("run2", "", "Second test run ID to compare")
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Test-sets to compare e.g. --test-sets \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -311,6 +317,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
@@ -329,6 +336,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 	case "test", "rerecord":
@@ -336,6 +344,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
@@ -344,6 +353,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
 		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
+		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
 			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
@@ -409,6 +419,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
+		"ssePort":               "sse-port",
 		"proxyPort":             "proxy-port",
 		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
@@ -418,6 +429,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"containerName":         "container-name",
 		"networkName":           "network-name",
 		"passThroughPorts":      "pass-through-ports",
+		"memoryLimit":           "memory-limit",
 		"appId":                 "app-id",
 		"appName":               "app-name",
 		"generateGithubActions": "generate-github-actions",
@@ -788,6 +800,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
 		}
 		c.cfg.Report.Format = format
+	case "diff":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTestSets(c.cfg, testSets)
 
 	case "sanitize":
 		path, err := cmd.Flags().GetString("path")
@@ -943,6 +971,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
+		// memory-limit non-Docker gate is applied after flag parsing below
 
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
@@ -1039,6 +1068,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.Metadata = metadata
 
+			if cmd.Flags().Changed("memory-limit") {
+				memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get the memory-limit flag")
+					return fmt.Errorf("failed to get memory-limit flag: %w", err)
+				}
+				c.cfg.Record.MemoryLimit = memoryLimit
+			}
+			if _, err := memoryguard.LimitBytes(c.cfg.Record.MemoryLimit); err != nil {
+				utils.LogError(c.logger, err, "invalid memory limit for keploy agent")
+				return err
+			}
+			if c.cfg.Record.MemoryLimit > 0 {
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType != utils.DockerRun && cmdType != utils.DockerCompose {
+					c.logger.Info("memory-limit is only supported for docker run and docker compose recording; ignoring it for this command type",
+						zap.String("cmd-type", c.cfg.CommandType))
+					c.cfg.Record.MemoryLimit = 0
+				}
+			}
+
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 			if err != nil {
 				errMsg := "failed to get the enable-sampling flag"
@@ -1074,13 +1124,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// get disable-mapping flag value
-			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
-			if err != nil {
-				errMsg := "failed to get the disable-mapping flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
 			}
-			c.cfg.DisableMapping = disableMapping
 
 			retryPassing, err := cmd.Flags().GetBool("retry-passing-test")
 			if err != nil {
@@ -1089,6 +1141,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.RetryPassing = retryPassing
+
+			c.cfg.Test.DisableAutoHeaderNoise, err = cmd.Flags().GetBool("disableAutoHeaderNoise")
+			if err != nil {
+				errMsg := "failed to read the --disableAutoHeaderNoise flag; check the flag name with --help and confirm this command supports it"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
@@ -1114,6 +1173,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.GRPCPort = grpcPort
+
+				ssePort, err := cmd.Flags().GetUint32("sse-port")
+				if err != nil {
+					errMsg := "failed to read --sse-port flag; ensure the value is a valid port number"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.SSEPort = ssePort
 
 				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
 				if err != nil {
@@ -1321,8 +1388,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get dnsPort flag")
-			return nil
+			utils.LogError(c.logger, err, "failed to get dns-port flag; verify the --dns-port value and try again")
+			return fmt.Errorf("failed to get dns-port flag: %w", err)
 		}
 		c.cfg.Agent.DnsPort = dnsPort
 
@@ -1344,17 +1411,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get build-delay flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get build-delay flag; verify the --build-delay value and try again")
+			return fmt.Errorf("failed to get build-delay flag: %w", err)
 		}
 		c.cfg.Agent.BuildDelay = buildDelay
 
 		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag; verify the --pass-through-ports value and try again")
+			return fmt.Errorf("failed to get pass-through-ports flag: %w", err)
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		if cmd.Flags().Changed("memory-limit") {
+			memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+			if err != nil {
+				errMsg := "failed to get memory-limit flag; verify the --memory-limit value and try again"
+				utils.LogError(c.logger, err, errMsg)
+				return fmt.Errorf("failed to get memory-limit flag: %w", err)
+			}
+			c.cfg.Agent.MemoryLimit = memoryLimit
+		}
+		if _, err := memoryguard.LimitBytes(c.cfg.Agent.MemoryLimit); err != nil {
+			utils.LogError(c.logger, err, "invalid memory limit for keploy agent; use a positive MB value within int64 range or set --memory-limit=0 to disable")
+			return err
+		}
+		if c.cfg.Agent.MemoryLimit > 0 && !c.cfg.Agent.IsDocker {
+			c.logger.Info("--memory-limit is only effective in Docker mode; ignoring",
+				zap.Uint64("memory_limit_mb", c.cfg.Agent.MemoryLimit))
+			c.cfg.Agent.MemoryLimit = 0
+		}
 
 	}
 

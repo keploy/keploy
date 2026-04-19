@@ -14,6 +14,10 @@ concurrency:
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
+    # Same hung-FFI-shutdown rationale as golang_native_windows -
+    # cap per-job wall-clock at 30 min so a stuck intercepted
+    # process cannot hold a self-hosted Windows runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -28,18 +32,30 @@ jobs:
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
-      - name: Clean up git config (ensure HTTPS for checkout)
-        continue-on-error: true
-        shell: powershell
+      # Remove stale SSH redirects from global config before checkout
+      # so actions/checkout uses HTTPS, not SSH.
+      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # concurrent jobs' SSH redirects from leaking into our checkout.
+      - name: Pre-checkout git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           clean: true
+
+      - name: Setup per-run git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
       # --- CLI binaries (same as before) ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
@@ -50,7 +66,7 @@ jobs:
 
       - name: Install Record Binary
         id: setup_record
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
@@ -65,23 +81,17 @@ jobs:
 
       - name: Install Replay Binary
         id: setup_replay
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
-      
+
       - id: image
         uses: ./.github/actions/download-image
         with:
           image_tag: ${{ inputs.image_tag }}
           version: ${{ github.sha }}
-
-      - name: Update GitHub SSH known hosts (Windows)
-        shell: pwsh
-        run: |
-          mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
-          ssh-keyscan github.com 2>$null | Set-Content "$env:USERPROFILE\.ssh\known_hosts"
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
@@ -97,16 +107,14 @@ jobs:
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
           # DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
           # DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           cd samples-go/${{ matrix.app.path }}
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
 
-      - name: Clean up git config
+      - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"

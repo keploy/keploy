@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -28,13 +29,19 @@ type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }
 
-// Proxy listens on all available interfaces and forwards traffic to the destination
+// Proxy listens on all available interfaces and forwards traffic to the destination.
+//
+// Proxy is the stable contract; window-aware methods live on the optional
+// WindowedProxy interface below so adding them does not break third-party
+// implementers. Callers should type-assert when they need windowing —
+// see agent.go's UpdateMockParams for the canonical pattern.
 type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
 	Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
@@ -45,6 +52,23 @@ type Proxy interface {
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
 	GetSession() *Session
 	SetAuxiliaryHook(h AuxiliaryProxyHook)
+}
+
+// WindowedProxy is the optional extension implemented by proxies that
+// support per-test [req,res] window enforcement (Option-1 strict
+// containment). Callers MUST type-assert from Proxy and gracefully
+// fall back when the assertion fails — this keeps third-party Proxy
+// implementations compiling without the extra methods.
+//
+//	if wp, ok := p.(WindowedProxy); ok {
+//	    _ = wp.SetMocksWithWindow(ctx, f, u, start, end)
+//	} else {
+//	    _ = p.SetMocks(ctx, f, u)
+//	}
+type WindowedProxy interface {
+	// SetMocksWithWindow atomically replaces mocks AND publishes the active
+	// outer-test [req,res] window.
+	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
 }
 
 type IncomingProxy interface {

@@ -26,13 +26,20 @@ http_code() {
 
 wait_for_postgres() {
   section "Wait for Postgres readiness"
+  # The official postgres image starts the server before running POSTGRES_DB
+  # creation and entrypoint init scripts. pg_isready returns 0 as soon as the
+  # server accepts connections, which can be *before* the "petclinic" database
+  # exists. To avoid the race we wait for the entrypoint to finish by looking
+  # for its completion log line, then verify the database is queryable.
   for i in {1..120}; do
-    if docker exec mypostgres pg_isready -U petclinic -d petclinic >/dev/null 2>&1; then
-      echo "Postgres is ready."
-      endsec; return 0
+    # The official entrypoint prints this line once all init is done.
+    if docker logs mypostgres 2>&1 | grep -q "database system is ready to accept connections"; then
+      # Entrypoint finished — now verify the target DB is reachable.
+      if docker exec mypostgres psql -U petclinic -d petclinic -c "SELECT 1" >/dev/null 2>&1; then
+        echo "Postgres is ready and petclinic database is available."
+        endsec; return 0
+      fi
     fi
-    # Fallback probe
-    docker exec mypostgres psql -U petclinic -d petclinic -c "SELECT 1" >/dev/null 2>&1 && { echo "Postgres responded."; endsec; return 0; }
     sleep 1
   done
   echo "::error::Postgres did not become ready in time"

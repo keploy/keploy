@@ -178,7 +178,14 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 
 	streamID := frame.Header().StreamID
 	if streamID == 0 {
-		// connection control; ignore here
+		// Handle SETTINGS frames to keep HPACK decoders in sync with
+		// the negotiated dynamic table size. Without this, the decoders
+		// stay at the initial MaxDynamicTableSize (8192) and fail to
+		// decode headers when the peer negotiates a larger table via
+		// SETTINGS_HEADER_TABLE_SIZE.
+		if sf, ok := frame.(*http2.SettingsFrame); ok && !sf.IsAck() {
+			sm.updateDecoderTableSize(sf, isOutgoing)
+		}
 		return nil
 	}
 
@@ -200,8 +207,14 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	switch f := frame.(type) {
 
 	case *http2.HeadersFrame:
+		// Copy the header block fragment — http2.Framer reuses its internal
+		// buffer, so f.HeaderBlockFragment() becomes invalid after the next
+		// ReadFrame() call.
+		fragCopy := make([]byte, len(f.HeaderBlockFragment()))
+		copy(fragCopy, f.HeaderBlockFragment())
+
 		if isOutgoing {
-			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			s.respHeaderFrags = append(s.respHeaderFrags, fragCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
 					return err
@@ -216,7 +229,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 				sm.checkStreamCompletion(streamID)
 			}
 		} else {
-			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			s.reqHeaderFrags = append(s.reqHeaderFrags, fragCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
 					return err
@@ -232,15 +245,18 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 
 	case *http2.ContinuationFrame:
+		contCopy := make([]byte, len(f.HeaderBlockFragment()))
+		copy(contCopy, f.HeaderBlockFragment())
+
 		if isOutgoing {
-			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			s.respHeaderFrags = append(s.respHeaderFrags, contCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
 					return err
 				}
 			}
 		} else {
-			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			s.reqHeaderFrags = append(s.reqHeaderFrags, contCopy)
 			if f.HeadersEnded() {
 				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
 					return err
@@ -249,8 +265,13 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 
 	case *http2.DataFrame:
+		// Copy the data — http2.Framer reuses its internal buffer, so
+		// f.Data() becomes invalid after the next ReadFrame() call.
+		dataCopy := make([]byte, len(f.Data()))
+		copy(dataCopy, f.Data())
+
 		if isOutgoing {
-			s.respDataFrames = append(s.respDataFrames, f.Data())
+			s.respDataFrames = append(s.respDataFrames, dataCopy)
 			if f.StreamEnded() {
 				s.respEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
@@ -260,7 +281,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 				sm.checkStreamCompletion(streamID)
 			}
 		} else {
-			s.reqDataFrames = append(s.reqDataFrames, f.Data())
+			s.reqDataFrames = append(s.reqDataFrames, dataCopy)
 			if f.StreamEnded() {
 				s.reqEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
@@ -272,6 +293,41 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	}
 
 	return nil
+}
+
+// updateDecoderTableSize reads SETTINGS_HEADER_TABLE_SIZE from a SETTINGS
+// frame and updates the appropriate HPACK decoder.
+//
+// SETTINGS from the client (isOutgoing=false) tells the server what table size
+// the client's decoder supports → the server's encoder will use that size →
+// we update decoderOut (which decodes server responses).
+//
+// SETTINGS from the server (isOutgoing=true) tells the client what table size
+// the server's decoder supports → the client's encoder will use that size →
+// we update decoderIn (which decodes client requests).
+// maxHPACKDynamicTableSize caps the HPACK dynamic table to prevent unbounded
+// memory growth from a peer advertising a very large table via SETTINGS.
+const maxHPACKDynamicTableSize uint32 = 64 * 1024
+
+func (sm *DefaultStreamManager) updateDecoderTableSize(sf *http2.SettingsFrame, isOutgoing bool) {
+	sf.ForeachSetting(func(s http2.Setting) error {
+		if s.ID == http2.SettingHeaderTableSize {
+			size := s.Val
+			if size > maxHPACKDynamicTableSize {
+				size = maxHPACKDynamicTableSize
+			}
+			if isOutgoing {
+				sm.decoderIn.SetMaxDynamicTableSize(size)
+				sm.logger.Debug("updated request HPACK decoder table size from server SETTINGS",
+					zap.Uint32("requested_size", s.Val), zap.Uint32("applied_size", size))
+			} else {
+				sm.decoderOut.SetMaxDynamicTableSize(size)
+				sm.logger.Debug("updated response HPACK decoder table size from client SETTINGS",
+					zap.Uint32("requested_size", s.Val), zap.Uint32("applied_size", size))
+			}
+		}
+		return nil
+	})
 }
 
 // processHeaderBlock decodes accumulated header fragments for the given side
@@ -467,20 +523,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}
 	// Render any template values in the test case before simulation
-	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
+	templateData := buildTemplateDataSnapshot()
+	if len(templateData) > 0 {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
-		}
-
-		// Build the template data
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
 		}
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
@@ -509,7 +557,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Determine which port to use for test execution.
 	var err error
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
 	if err != nil {
 		return nil, err
 	}

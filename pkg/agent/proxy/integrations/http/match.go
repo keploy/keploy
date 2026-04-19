@@ -19,6 +19,93 @@ import (
 	"go.uber.org/zap"
 )
 
+// flakyHeaders lists HTTP header keys (lowercased) that are known to change
+// on every request due to cryptographic signatures, timestamps, credential
+// rotation, or per-request identifiers. These are automatically treated as
+// noise during mock matching so that replayed requests can find the correct
+// recorded mock even though these artifacts differ. Users who need strict
+// header matching can disable this with --disableAutoHeaderNoise.
+//
+// No single public library maintains such a list. Most recording/replay
+// tools (VCR, WireMock, Hoverfly) avoid the problem by not matching on
+// headers at all by default. Since Keploy does match on header keys, we
+// maintain this list covering the most common sources of non-determinism.
+//
+// Categories:
+//   - Cloud auth/signing:  AWS SigV4, GCP OAuth, Azure HMAC/Bearer
+//   - Tracing/correlation: W3C Trace Context, B3, Datadog, X-Request-Id
+//   - Webhook signatures:  Stripe, GitHub, Slack, Twilio, Shopify
+//   - SDK metadata:        per-call invocation IDs and attempt counters
+var flakyHeaders = []string{
+	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
+	"authorization",         // signature changes every request (all cloud providers)
+	"x-amz-date",            // signing timestamp (yyyymmddThhmmssZ)
+	"x-amz-security-token",  // STS/IRSA session token — may appear or disappear
+	"x-amz-content-sha256",  // payload hash
+	"x-amz-credential",      // credential scope string
+	"x-amz-signature",       // explicit signature value (SigV4 query-string variant)
+	"x-amz-signedheaders",   // list of signed headers (varies with SDK)
+	"x-amz-expires",         // pre-signed URL expiry seconds
+	"x-amz-user-agent",      // SDK metadata
+	"x-amzn-trace-id",       // AWS X-Ray trace propagation
+	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
+	"amz-sdk-request",       // attempt counter (attempt=1; max=3)
+	"date",                  // SigV4 fallback when X-Amz-Date absent. Globally ignored (Date is dynamic for all HTTP); disable per-test via DisableAutoHeaderNoise.
+
+	// ── GCP ──────────────────────────────────────────────────────────
+	"x-goog-api-client",     // SDK metadata (version, runtime info)
+	"x-goog-request-params", // routing parameters, may change with resource
+
+	// ── Azure ────────────────────────────────────────────────────────
+	"x-ms-date",                     // signing timestamp
+	"x-ms-client-request-id",        // client-generated UUID per call
+	"x-ms-content-sha256",           // body hash for HMAC auth
+	"x-ms-return-client-request-id", // echo control flag
+
+	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
+	"traceparent", // unique trace-id + span-id per request
+	"tracestate",  // vendor-specific trace context
+
+	// ── Zipkin B3 propagation ────────────────────────────────────────
+	"x-b3-traceid",
+	"x-b3-spanid",
+	"x-b3-parentspanid",
+	"x-b3-sampled",
+	"b3", // single-header compact format
+
+	// ── Datadog ──────────────────────────────────────────────────────
+	"x-datadog-trace-id",
+	"x-datadog-parent-id",
+	"x-datadog-sampling-priority",
+	"x-datadog-origin",
+
+	// ── Generic request/correlation IDs ──────────────────────────────
+	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
+	"x-correlation-id", // cross-service correlation
+	"request-id",       // ASP.NET Core and others
+
+	// ── Webhook signatures (request-side, inbound webhooks) ──────────
+	"stripe-signature",
+	"x-hub-signature-256", // GitHub
+	"x-hub-signature",     // GitHub (legacy SHA-1)
+	"x-twilio-signature",
+	"x-shopify-hmac-sha256",
+	"x-slack-signature",
+	"x-slack-request-timestamp",
+	"webhook-signature", // Standard Webhooks spec
+	"webhook-timestamp", // Standard Webhooks spec
+	"webhook-id",        // Standard Webhooks spec
+
+	// ── Idempotency / CSRF ───────────────────────────────────────────
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+
+	// ── GCP trace (legacy) ───────────────────────────────────────────
+	"x-cloud-trace-context",
+}
+
 type req struct {
 	method string
 	url    *url.URL
@@ -33,13 +120,43 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, ctx.Err()
 		}
 
-		// Fetch and filter HTTP mocks
-		mocks, err := mockDb.GetUnFilteredMocks()
+		// Fetch HTTP mocks from BOTH pools:
+		//   - Per-test mocks (Lifetime=PerTest): test-specific app
+		//     HTTP calls, window-filtered at ingest, consumed on
+		//     match. These are the MORE SPECIFIC match for the
+		//     current request — they were recorded for exactly this
+		//     test's behaviour.
+		//   - Session mocks (Lifetime=Session): auth/SigV4/SQS
+		//     handshake, reusable across every test, not window-
+		//     filtered, not consumed.
+		//
+		// Ordering: per-test FIRST. If a per-test mock matches, it
+		// wins over any session mock that "sort of" matches at the
+		// same score — a session mock should only be chosen when no
+		// per-test mock matches at all. This prevents the subtle
+		// regression where a per-test mock for the current test gets
+		// passed over in favour of a session mock that tied on
+		// schema but wasn't recorded for this test.
+		//
+		// Pre-unification this parser only consumed session mocks
+		// (via GetUnFilteredMocks returning the full unfiltered pool
+		// that included untagged HTTP as session-by-kind). Post-
+		// Phase-3 tag-only routing, per-test HTTP mocks land in the
+		// per-test pool — they need to be reachable here.
+		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
+			utils.LogError(h.Logger, err, "failed to get per-test mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
-		unfilteredMocks := FilterHTTPMocks(mocks)
+		sessionMocks, err := mockDb.GetSessionMocks()
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to get session mocks")
+			return false, nil, errors.New("error while matching the request with the mocks")
+		}
+		combined := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
+		combined = append(combined, perTestMocks...)
+		combined = append(combined, sessionMocks...)
+		unfilteredMocks := FilterHTTPMocks(combined)
 
 		// Log all mock names in a single line for better readability
 		mockNames := make([]string, len(unfilteredMocks))
@@ -59,6 +176,10 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if len(schemaMatched) == 0 {
 			return false, nil, nil
 		}
+
+		h.Logger.Debug("http mock schema match results",
+			zap.Int("schema_matched", len(schemaMatched)),
+			zap.Int("total_http_mocks", len(unfilteredMocks)))
 
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
@@ -295,7 +416,10 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	return schemaMatched, nil
 }
 
-// ExactBodyMatch Exact body match
+// ExactBodyMatch performs exact body matching with noise awareness.
+// First pass: fast string equality.
+// Second pass: noise-aware JSON comparison that skips obfuscated fields
+// identified by Mock.Noise patterns.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
@@ -304,11 +428,78 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
 
+	// First pass: exact string match (fastest path)
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
+			h.Logger.Debug("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.String("match_type", "exact_body"))
 			return true, mock
 		}
 	}
+
+	// Second pass: noise-aware match for mocks with obfuscated values.
+	// Pre-parse request body once to avoid repeated JSON parsing per mock.
+	isReqJSON := pkg.IsJSON(body)
+	var reqData interface{}
+	if isReqJSON {
+		if err := json.Unmarshal(body, &reqData); err != nil {
+			isReqJSON = false
+		}
+	}
+
+	for _, mock := range schemaMatched {
+		nc := util.NewNoiseChecker(mock.Noise)
+		if nc == nil {
+			continue // no noise patterns → already checked in first pass
+		}
+
+		mockBody := mock.Spec.HTTPReq.Body
+
+		// If the entire body is a single noisy value, auto-match
+		// (schema match already filtered by URL, method, headers)
+		if nc.IsNoisy(mockBody) {
+			h.Logger.Debug("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.Int("noisy_fields_skipped", 1),
+				zap.String("match_type", "exact_body_fully_noisy"))
+			return true, mock
+		}
+
+		// JSON-level comparison skipping noisy fields
+		if !isReqJSON || !pkg.IsJSON([]byte(mockBody)) {
+			continue
+		}
+
+		var mockData interface{}
+		if err := json.Unmarshal([]byte(mockBody), &mockData); err != nil {
+			continue
+		}
+
+		matched, total, noisy := util.JSONBodyMatchScore(mockData, reqData, nc)
+
+		pct := 100.0
+		if total > 0 {
+			pct = float64(matched) / float64(total) * 100
+		}
+		h.Logger.Debug("http mock match score (noise-aware)",
+			zap.String("mock", mock.Name),
+			zap.Int("matched_fields", matched),
+			zap.Int("total_fields", total),
+			zap.Int("noisy_fields_skipped", noisy),
+			zap.Float64("match_percentage", pct))
+
+		if matched == total {
+			// Verify the request has no extra non-noisy keys beyond
+			// what the mock defines — otherwise this isn't truly exact.
+			if !util.HasExtraNonNoisyKeys(mockData, reqData, nc) {
+				return true, mock
+			}
+		}
+	}
+
 	return false, nil
 }
 
@@ -364,11 +555,17 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 			h.Logger.Debug("found a mock with body schema match", zap.String("mock name", mock.Name))
 		}
 	}
+
+	h.Logger.Debug("http mock body key match results",
+		zap.Int("body_key_matched", len(bodyMatched)),
+		zap.Int("schema_matched", len(schemaMatched)))
+
 	return bodyMatched, nil
 }
 
-// Fuzzy match helper for string matching
-func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
+// findStringMatch returns the index of the closest mock string and the
+// Levenshtein distance so callers don't need to recompute it.
+func (h *HTTP) findStringMatch(req string, mockStrings []string) (int, int) {
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
 	for idx, mock := range mockStrings {
@@ -377,40 +574,48 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 		}
 		dist := levenshtein.ComputeDistance(req, mock)
 		if dist == 0 {
-			return 0
+			return idx, 0
 		}
 		if dist < minDist {
 			minDist = dist
 			bestMatch = idx
 		}
 	}
-	return bestMatch
+	return bestMatch, minDist
 }
 
-// TODO: generalize the function to work with any type of integration
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-
+// jaccardBestMatch finds the mock body with the highest Jaccard similarity
+// to reqBuff. mockBodies are pre-decoded/stripped byte slices so the caller
+// controls noise handling. Returns the best index and similarity score.
+func (h *HTTP) jaccardBestMatch(mockBodies [][]byte, reqBuff []byte) (int, float64) {
 	mxSim := -1.0
 	mxIdx := -1
-	// find the fuzzy hash of the mocks
-	for idx, mock := range mocks {
-		encoded, _ := decode(mock.Spec.HTTPReq.Body)
-		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := util.CreateShingles(encoded, k)
-		shingles2 := util.CreateShingles(reqBuff, k)
-		similarity := util.JaccardSimilarity(shingles1, shingles2)
-
-		// log.Debugf("Jaccard Similarity:%f\n", similarity)
-
-		if mxSim < similarity {
+	k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+	reqShingles := util.CreateShingles(reqBuff, k)
+	for idx, body := range mockBodies {
+		mockShingles := util.CreateShingles(body, k)
+		similarity := util.JaccardSimilarity(mockShingles, reqShingles)
+		if similarity > mxSim {
 			mxSim = similarity
 			mxIdx = idx
 		}
 	}
-	return mxIdx
+	return mxIdx, mxSim
 }
 
-// PerformFuzzyMatch Perform fuzzy match on the request
+// findBinaryMatch decodes mock bodies and delegates to jaccardBestMatch.
+func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+	bodies := make([][]byte, len(mocks))
+	for i, mock := range mocks {
+		bodies[i], _ = decode(mock.Spec.HTTPReq.Body)
+	}
+	idx, _ := h.jaccardBestMatch(bodies, reqBuff)
+	return idx
+}
+
+// PerformFuzzyMatch performs fuzzy matching on the request body.
+// Noisy (obfuscated) values are stripped from mock bodies before computing
+// similarity so that redacted padding doesn't skew the score.
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(tcsMocks))
@@ -423,26 +628,54 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			h.Logger.Debug("exact match found", zap.String("mock name", mock.Name))
+			h.Logger.Debug("http mock matched",
+				zap.String("mock", mock.Name),
+				zap.Float64("match_percentage", 100.0),
+				zap.String("match_type", "fuzzy_exact"))
 			return true, mock
 		}
 	}
-	// String-based fuzzy matching
+
+	// Build mock body strings, stripping noisy values for fair comparison
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
-		mockStrings[i] = tcsMocks[i].Spec.HTTPReq.Body
+		nc := util.NewNoiseChecker(tcsMocks[i].Noise)
+		mockStrings[i] = util.StripNoisyJSON(tcsMocks[i].Spec.HTTPReq.Body, nc)
 	}
-	if util.IsASCII(string(reqBuff)) {
-		idx := h.findStringMatch(string(reqBuff), mockStrings)
+
+	// String-based fuzzy matching (Levenshtein distance)
+	reqStr := string(reqBuff)
+	if util.IsASCII(reqStr) {
+		idx, dist := h.findStringMatch(reqStr, mockStrings)
 		if idx != -1 {
-			h.Logger.Debug("string match found", zap.String("mock name", tcsMocks[idx].Name))
+			maxLen := len(reqStr)
+			if len(mockStrings[idx]) > maxLen {
+				maxLen = len(mockStrings[idx])
+			}
+			pct := 0.0
+			if maxLen > 0 {
+				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
+			}
+			h.Logger.Debug("http mock matched",
+				zap.String("mock", tcsMocks[idx].Name),
+				zap.Float64("match_percentage", pct),
+				zap.String("match_type", "fuzzy_levenshtein"))
 			return true, tcsMocks[idx]
 		}
 	}
-	idx := h.findBinaryMatch(tcsMocks, reqBuff)
-	if idx != -1 {
-		h.Logger.Debug("binary match found", zap.String("mock name", tcsMocks[idx].Name))
-		return true, tcsMocks[idx]
+
+	// Binary fuzzy matching (Jaccard similarity) with stripped mock bodies
+	mockBodies := make([][]byte, len(mockStrings))
+	for i := range mockStrings {
+		mockBodies[i] = []byte(mockStrings[i])
+	}
+	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
+	if mxIdx != -1 {
+		h.Logger.Debug("http mock matched",
+			zap.String("mock", tcsMocks[mxIdx].Name),
+			zap.Float64("match_percentage", mxSim*100),
+			zap.String("match_type", "fuzzy_jaccard"))
+		return true, tcsMocks[mxIdx]
 	}
 	return false, nil
 }
@@ -481,13 +714,35 @@ func mediaTypesOverlap(a, b []string) bool {
 	return false
 }
 
-// Update the matched mock (delete or update)
+// updateMock processes the matched mock based on its Lifetime.
+// Per-test mocks are CONSUMED on match (DeleteFilteredMock); session /
+// connection mocks are RETAINED and updated in place (UpdateUnFilteredMock).
+// See the MySQL equivalent in replayer/match.go for the pre- vs post-
+// Phase-2 routing rationale.
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
 	matchedMock.TestModeInfo.IsFiltered = false
 	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-	return updated
+
+	lifetime := matchedMock.TestModeInfo.Lifetime
+	rawConfig := false
+	if matchedMock.Spec.Metadata != nil {
+		rawConfig = matchedMock.Spec.Metadata["type"] == "config"
+	}
+	isSessionOrConnection := lifetime == models.LifetimeSession ||
+		lifetime == models.LifetimeConnection ||
+		(lifetime == models.LifetimePerTest && rawConfig)
+
+	if isSessionOrConnection {
+		return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	}
+	// Per-test: consume via DeleteFilteredMock, with fallback to
+	// UpdateUnFilteredMock for mocks staged into the session pool
+	// during the initial pre-first-test window.
+	if mockDb.DeleteFilteredMock(originalMatchedMock) {
+		return true
+	}
+	return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
@@ -495,7 +750,10 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 // from mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
 	if httpMocks == nil {
-		mocks, err := mockDb.GetUnFilteredMocks()
+		// Mirror match()'s pool-merging + ordering strategy so
+		// mismatch diagnostics see the same candidate set in the
+		// same order the matcher saw. Per-test FIRST, session second.
+		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
 			return &models.MockMismatchReport{
 				Protocol:      "HTTP",
@@ -503,6 +761,17 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integration
 				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
 			}
 		}
+		sessionMocks, err := mockDb.GetSessionMocks()
+		if err != nil {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
+			}
+		}
+		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
+		mocks = append(mocks, perTestMocks...)
+		mocks = append(mocks, sessionMocks...)
 		if len(mocks) == 0 {
 			return &models.MockMismatchReport{
 				Protocol:      "HTTP",
