@@ -17,6 +17,13 @@ jobs:
   build-and-upload:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    # Bound wall-clock so a hung cgo link step (historically: a
+    # deadlock inside libwindows_redirector.a's shutdown path) cannot
+    # sit on a self-hosted Windows runner for 6h. Healthy runs are
+    # ~5 min; 30 gives 6x headroom. Without this the job was getting
+    # stuck at 40+ min on run 24608731505 with no visible step
+    # progress, blocking every subsequent queued Windows job.
+    timeout-minutes: 30
     steps:
       # Bootstrap a consistent shell environment on every self-hosted
       # Windows runner. Some runners in the fleet ship without pwsh
@@ -78,6 +85,113 @@ jobs:
             Write-Host "pwsh already available: $((Get-Command pwsh).Source)"
           }
 
+      - name: Free runner disk space
+        # Use Windows PowerShell 5.1 (always preinstalled) instead of
+        # pwsh. The new win-runner-[1-4] pool doesn't ship
+        # PowerShell 7 - job 71974521109 failed at the first pwsh
+        # step with 'pwsh: command not found'. Every cmdlet used
+        # below (Get-PSDrive, Get-ChildItem, Where-Object, etc.) is
+        # PS5.1-compatible.
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The shared self-hosted Windows runners have hit "not
+          # enough space on the disk" mid-build (go build writes
+          # importcfg into SystemTemp and gets ENOSPC). Tiered
+          # cleanup: fast-path on healthy disk (>=4 GB free), light
+          # sweep (stale go-build temp + other runners' _diag /
+          # _temp + other-repo _work >7d), heavy sweep (user %TEMP%
+          # + Windows Update download cache), then last-resort go
+          # module/cache purge. Hard-fail under 2 GB so subsequent
+          # CGO builds don't die confused.
+          $targetFree = 4GB
+          $beforeC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: before cleanup: {0:N0} bytes" -f $beforeC)
+          if ($beforeC -ge $targetFree) {
+            Write-Host ("Already have {0:N0} bytes free (>= {1:N0}); skipping cleanup" -f $beforeC, $targetFree)
+            exit 0
+          }
+
+          # 1. Stale go-build intermediate directories under SystemTemp.
+          # 'go build' leaves per-invocation go-buildNNN folders; they
+          # are safe to remove once no build is running on this job
+          # (we're still before Checkout).
+          foreach ($base in @("C:\WINDOWS\SystemTemp", "C:\Windows\Temp")) {
+            if (Test-Path $base) {
+              Get-ChildItem -Path $base -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'go-build*' } |
+                ForEach-Object {
+                  Write-Host "Removing $($_.FullName)"
+                  Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+          }
+
+          # 2. Other runners' _diag/_temp + stale other-repo _work
+          # checkouts (>7 days), across every C:\actions-runners\*.
+          $runnersRoot = "C:\actions-runners"
+          if (Test-Path $runnersRoot) {
+            foreach ($rel in @("_diag", "_temp")) {
+              Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $p = Join-Path $_.FullName $rel
+                if (Test-Path $p) {
+                  Write-Host "Purging $p (entries older than 1 day)"
+                  Get-ChildItem -Path $p -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                }
+              }
+            }
+            $thisRepoDir = $env:GITHUB_REPOSITORY.Split('/')[-1]
+            Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+              $work = Join-Path $_.FullName "_work"
+              if (Test-Path $work) {
+                Get-ChildItem -Path $work -Directory -Force -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -ne $thisRepoDir -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
+                  ForEach-Object {
+                    Write-Host "Removing stale work dir $($_.FullName)"
+                    Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+              }
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            # 3. User %TEMP% - CI jobs leak go-build*, MSI*, etc.
+            $userTemp = $env:TEMP
+            if ($userTemp -and (Test-Path $userTemp)) {
+              Write-Host "Sweeping $userTemp"
+              Get-ChildItem -Path $userTemp -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            # 4. Windows Update download cache.
+            $sd = "C:\Windows\SoftwareDistribution\Download"
+            if (Test-Path $sd) {
+              Write-Host "Sweeping $sd"
+              Get-ChildItem -Path $sd -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            # 5. Last resort: go module cache. Forces a redownload
+            # on next build, so only used when nothing else has hit
+            # the threshold.
+            foreach ($cache in @("$env:USERPROFILE\go\pkg\mod", "$env:LOCALAPPDATA\go-build")) {
+              if (Test-Path $cache) {
+                Write-Host "Removing $cache"
+                Remove-Item -Path $cache -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          $afterC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: after cleanup:  {0:N0} bytes (freed {1:N0})" -f $afterC, ($afterC - $beforeC))
+          if ($afterC -lt 2GB) {
+            Write-Error "Free on C: is under 2 GB after cleanup - not enough headroom for a CGO Windows build. The self-hosted runner operator should expand the C: volume; this job will fail during go build otherwise."
+            exit 1
+          }
+
       - name: Create workflow start lock
         shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
         run: |
@@ -91,10 +205,10 @@ jobs:
       # Inline because this runs BEFORE checkout (workspace may not exist).
       # Logic mirrors .github/scripts/windows/setup-git-isolation.ps1.
       - name: Setup per-run git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           $ErrorActionPreference = 'Stop'
-          $isoDir = Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
           # Seed per-run gitconfig from the global one (if it exists)
@@ -180,7 +294,7 @@ jobs:
           go-cache: false
 
       - name: Add MinGW gcc to PATH
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
           # Search common MinGW/msys64 install locations; different runners
           # in the fleet stage MinGW in different paths (msys64, direct
@@ -199,13 +313,17 @@ jobs:
             if (Test-Path (Join-Path $c "gcc.exe")) { $gccBin = $c; break }
           }
           if (-not $gccBin) {
+            $onPath = Get-Command gcc -ErrorAction SilentlyContinue
+            if ($onPath) { $gccBin = Split-Path $onPath.Source }
+          }
+          if (-not $gccBin) {
             Write-Host "No MinGW found in known paths; installing portable MinGW-w64 14.2.0 (WinLibs ZIP)."
             $portableRoot = Join-Path $env:USERPROFILE ".mingw64-portable"
             $portableBin = Join-Path $portableRoot "mingw64\bin"
             if (-not (Test-Path (Join-Path $portableBin "gcc.exe"))) {
               New-Item -Path $portableRoot -ItemType Directory -Force | Out-Null
               # Use WinLibs (brechtsanders/winlibs_mingw) which publishes
-              # native ZIP archives — unpacks with built-in Expand-Archive
+              # native ZIP archives - unpacks with built-in Expand-Archive
               # on PowerShell 5.1+ so we do not depend on 7z being
               # present on the runner. Pin to a stable posix-seh x86_64
               # build compatible with Go's CGO on Windows.
@@ -222,6 +340,7 @@ jobs:
               throw "MinGW install did not produce gcc.exe at $portableBin"
             }
           }
+          Write-Host "Using mingw gcc at $gccBin"
           echo $gccBin >> $env:GITHUB_PATH
           $env:Path = "$gccBin;$env:Path"
           where.exe gcc
@@ -229,7 +348,7 @@ jobs:
 
 
       - name: CGO toolchain sanity
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           Write-Host "PATH=$env:PATH"
           where.exe gcc
@@ -254,7 +373,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
@@ -301,6 +420,10 @@ jobs:
     needs: [docker-image-build]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    # Same rationale as build-and-upload: bound the wall-clock so a
+    # hung self-hosted Windows runner cannot stall the whole pipeline.
+    # This job is pull-only (Docker image load); 30 min is generous.
+    timeout-minutes: 30
 
     steps:
       # Remove stale SSH redirects from global config before checkout
@@ -308,9 +431,9 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
           $gitConfig = Join-Path $isoDir 'gitconfig'
           New-Item -Path $gitConfig -ItemType File -Force | Out-Null
@@ -322,7 +445,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup per-run git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -362,7 +485,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
@@ -385,9 +508,9 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
-          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
           $gitConfig = Join-Path $isoDir 'gitconfig'
           New-Item -Path $gitConfig -ItemType File -Force | Out-Null
@@ -399,7 +522,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup per-run git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -426,7 +549,7 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
