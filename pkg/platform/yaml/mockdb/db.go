@@ -93,6 +93,15 @@ func useGobMockFormat() bool {
 // value falls through to the process-wide default — we prefer to
 // preserve mocks over failing the write when a stale or typo'd format
 // slips in from a user-facing CR.
+//
+// Constraint: the read/prune paths (GetFilteredMocks / GetUnFilteredMocks /
+// UpdateMocks) prefer mocks.gob by file presence and do not merge a
+// sibling mocks.yaml when both exist in one test-set directory. A single
+// test-set is therefore required to be uniformly one format; InsertMock
+// enforces that at write time by rejecting a mock whose resolved format
+// disagrees with any already-written file in the test-set directory.
+// Sessions that need to mix formats must route to sibling test-set
+// directories (the DaemonSet per-session flow).
 func resolveMockFormat(perMock string) bool {
 	switch perMock {
 	case mockFormatGob:
@@ -573,6 +582,21 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	return nil
 }
 
+// InsertMock persists one mock under "<MockPath>/<testSetID>/<mockFileName>.(yaml|gob)".
+// The on-disk format is picked by resolveMockFormat: a non-empty
+// mock.Format wins, otherwise the process-wide configured format
+// applies.
+//
+// Mixed-format constraint: read/prune paths (GetFilteredMocks /
+// GetUnFilteredMocks / UpdateMocks) choose mocks.gob over mocks.yaml by
+// file presence and do not merge both when they coexist in one
+// test-set directory. To keep the on-disk state consistent with what
+// those readers will later load, InsertMock rejects a mock whose
+// resolved format disagrees with a file already present in the
+// test-set directory — i.e. a yaml-format mock cannot be written into
+// a test-set that already contains mocks.gob, and vice versa. Sessions
+// that need to mix formats must route to sibling test-set directories
+// (the DaemonSet per-session flow).
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockPath := filepath.Join(ys.MockPath, testSetID)
@@ -592,7 +616,33 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// RecordingSession's spec.mockFormat through to individual mocks
 	// without mutating package-level state. Unset / unrecognised =>
 	// fall back to useGobMockFormat (the pre-DS behaviour).
-	if resolveMockFormat(mock.Format) {
+	writeGob := resolveMockFormat(mock.Format)
+
+	// Reject a mock whose resolved format disagrees with whatever is
+	// already on disk for this test-set. Without this check InsertMock
+	// would happily create a second file (mocks.gob next to mocks.yaml,
+	// or vice versa) which the reader/pruner paths then silently ignore
+	// (they pick gob over yaml by file presence and never merge).
+	// Forcing one format per test-set keeps the write-side and read-
+	// side views identical and fails fast at record time instead of at
+	// replay with missing mocks. File existence (not size) is the
+	// correct signal here: the gob writer is async-buffered, so the
+	// file is created by gobReopenLocked before any bytes hit disk —
+	// a size-based check would miss that window and let a yaml
+	// InsertMock slip in before the first gob flush.
+	yamlFile := filepath.Join(mockPath, mockFileName+".yaml")
+	gobFile := filepath.Join(mockPath, mockFileName+".gob")
+	if writeGob {
+		if _, statErr := os.Stat(yamlFile); statErr == nil {
+			return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
+		}
+	} else {
+		if _, statErr := os.Stat(gobFile); statErr == nil {
+			return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
+		}
+	}
+
+	if writeGob {
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 

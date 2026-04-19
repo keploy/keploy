@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -203,4 +204,69 @@ func TestPerMockFormat_DeepCopyPreserves(t *testing.T) {
 	if out.Format != "gob" {
 		t.Fatalf("DeepCopy dropped Format: got %q", out.Format)
 	}
+}
+
+// TestInsertMock_RejectsMixedFormat guards the read/prune-side
+// contract: GetFilteredMocks / GetUnFilteredMocks / UpdateMocks prefer
+// mocks.gob over mocks.yaml by file presence and never merge the two.
+// InsertMock therefore must refuse to create a second file in a
+// different format once one format's file already exists in the
+// test-set directory — otherwise the yaml mocks would be silently
+// ignored at replay. Both directions are covered: yaml-then-gob and
+// gob-then-yaml.
+func TestInsertMock_RejectsMixedFormat(t *testing.T) {
+	// Guard against pollution from sibling tests.
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+
+	t.Run("yaml first, then gob is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		ys := New(zap.NewNop(), dir, "mocks")
+		if err := ys.InsertMock(context.Background(), newHTTPMock("yaml"), "set-0"); err != nil {
+			t.Fatalf("first InsertMock (yaml): %v", err)
+		}
+		err := ys.InsertMock(context.Background(), newHTTPMock("gob"), "set-0")
+		if err == nil {
+			t.Fatalf("expected InsertMock(gob) to fail after yaml file present, got nil")
+		}
+		if !strings.Contains(err.Error(), "uniform per-testset format required") {
+			t.Fatalf("error message missing uniform-format hint: %v", err)
+		}
+		// The rejected write must not have produced a sibling file.
+		if _, statErr := os.Stat(filepath.Join(dir, "set-0", "mocks.gob")); statErr == nil {
+			t.Fatalf("mocks.gob was created despite the mixed-format rejection")
+		}
+		// Clean up any async writer state (no-op for yaml path).
+		if err := ys.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+
+	t.Run("gob first, then yaml is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		ys := New(zap.NewNop(), dir, "mocks")
+		if err := ys.InsertMock(context.Background(), newHTTPMock("gob"), "set-0"); err != nil {
+			t.Fatalf("first InsertMock (gob): %v", err)
+		}
+		// The gob writer is async: InsertMock returns after enqueue
+		// but before gobReopenLocked has actually created mocks.gob
+		// on disk. Close() drains the queue + flushes the file, so
+		// the subsequent stat-based rejection is deterministic.
+		// Pre-close races were possible without this step.
+		if err := ys.Close(); err != nil {
+			t.Fatalf("Close after gob insert: %v", err)
+		}
+		err := ys.InsertMock(context.Background(), newHTTPMock("yaml"), "set-0")
+		if err == nil {
+			t.Fatalf("expected InsertMock(yaml) to fail after gob file present, got nil")
+		}
+		if !strings.Contains(err.Error(), "uniform per-testset format required") {
+			t.Fatalf("error message missing uniform-format hint: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "set-0", "mocks.yaml")); statErr == nil {
+			t.Fatalf("mocks.yaml was created despite the mixed-format rejection")
+		}
+	})
 }
