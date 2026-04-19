@@ -425,6 +425,16 @@ $testArgs = @(
   '--container-name', $testContainer,
   '--api-timeout', '60',
   '--delay', '30',
+  # Record captured the in-container URL (`localhost:8080`) because
+  # that's the port the Gin app actually binds. We patched
+  # docker-compose to publish the container on `$appPort`:8080 to
+  # avoid colliding with vpnkit/wsl on Windows runners. keploy's
+  # --port flag rewrites the testcase destination at replay time,
+  # so the recorded localhost:8080 lands on localhost:$appPort
+  # where docker is actually publishing — which is the only
+  # reachable listener on the host. Without this flag replay
+  # dials :8080 and gets TCP RST (run 24630753752, tests 1-9).
+  '--port', "$appPort",
   '--generate-github-actions=false'
 )
 
