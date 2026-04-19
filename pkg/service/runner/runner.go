@@ -391,9 +391,28 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		// New connection each probe so we're exercising real readiness
 		// rather than a cached keep-alive from an earlier attempt.
 		Transport: &http.Transport{DisableKeepAlives: true},
+		// Don't follow redirects. Our readiness contract is "any HTTP
+		// status code = ready": a 301/302 from a warming-up app IS a
+		// valid response, but the default http.Client would chase it
+		// and potentially error out on the redirect target (TLS failure,
+		// unreachable host, redirect loop) — surfacing a false negative.
+		// Returning ErrUseLastResponse lets Do() return the raw 3xx.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
-	// probe issues a single HTTP GET against serviceURL and returns:
+	// Build the probe URL from scheme + host only. `executeAndCompare`
+	// later uses only `svc.Scheme` / `svc.Host` from the configured
+	// ServiceURL (see runner.go:executeAndCompare), so a user setting
+	// ServiceURL = "http://localhost:8080/api/v1" should NOT cause the
+	// readiness probe to GET /api/v1 — the app's root may respond with
+	// 200 while /api/v1 is a 404 that doesn't exist yet, or vice
+	// versa. Probing the root gives us the same liveness signal every
+	// deployment type (native / k8s / docker-compose) satisfies.
+	probeURL := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/"}).String()
+
+	// probe issues a single HTTP GET against probeURL and returns:
 	//   nil          — response received (any status code; we care
 	//                  about liveness, not correctness).
 	//   fatal=true   — deterministic request-construction error; no
@@ -406,7 +425,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// connections per probe without catching anything the GET doesn't
 	// already catch. Dropped for that reason.
 	probe := func() (fatal bool, err error) {
-		req, reqErr := http.NewRequestWithContext(waitCtx, http.MethodGet, serviceURL, nil)
+		req, reqErr := http.NewRequestWithContext(waitCtx, http.MethodGet, probeURL, nil)
 		if reqErr != nil {
 			return true, reqErr
 		}
