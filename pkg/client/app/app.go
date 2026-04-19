@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -52,6 +53,7 @@ type App struct {
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
+	envTempFile     string // path to temp --env-file for docker run; cleaned up after run
 	EnableTesting   bool
 	Mode            models.Mode
 }
@@ -147,14 +149,29 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
 	}
 
-	envKeys := make([]string, 0, len(a.opts.EnvVars))
-	for k := range a.opts.EnvVars {
-		envKeys = append(envKeys, k)
-	}
-	sort.Strings(envKeys)
-	for _, k := range envKeys {
-		escapedVal := strings.ReplaceAll(a.opts.EnvVars[k], "'", "'\\''")
-		tlsFlags += fmt.Sprintf("-e %s='%s' ", k, escapedVal)
+	if len(a.opts.EnvVars) > 0 {
+		tmpFile, err := os.CreateTemp("", "keploy-env-*.env")
+		if err != nil {
+			return fmt.Errorf("failed to create temp env file for docker run: %w", err)
+		}
+		envKeys := make([]string, 0, len(a.opts.EnvVars))
+		for k := range a.opts.EnvVars {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			fmt.Fprintf(tmpFile, "%s=%s\n", k, a.opts.EnvVars[k])
+		}
+		if err := tmpFile.Close(); err != nil {
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to write temp env file for docker run: %w", err)
+		}
+		if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to secure temp env file: %w", err)
+		}
+		a.envTempFile = tmpFile.Name()
+		tlsFlags += fmt.Sprintf("--env-file %s ", tmpFile.Name())
 	}
 
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
@@ -550,6 +567,10 @@ func extractProjectFlags(cmd string) []string {
 
 func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
+
+	if a.envTempFile != "" {
+		defer os.Remove(a.envTempFile)
+	}
 
 	if a.kind == utils.DockerCompose {
 		defer a.composeDown()
