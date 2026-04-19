@@ -74,6 +74,22 @@ test:
   compareAll: false
   updateTestMapping: false
   disableAutoHeaderNoise: false
+  # strictMockWindow enforces cross-test bleed prevention. Per-test
+  # (LifetimePerTest) mocks whose request timestamp falls outside the
+  # outer test window are dropped rather than promoted across tests.
+  #
+  # Phase 1 ships with default FALSE — many real-world apps
+  # legitimately share data-plane mocks across tests (e.g., fixture
+  # rows queried by every test in a suite), and flipping the default
+  # to true would silently break those suites on upgrade. Opt into
+  # strict containment by setting this to true in keploy.yaml or
+  # exporting KEPLOY_STRICT_MOCK_WINDOW=1. A follow-up will flip the
+  # default once every stateful-protocol recorder classifies mocks
+  # finely enough (per-connection data mocks, session vs per-test
+  # distinction for connection-alive commands) that legitimate
+  # cross-test sharing is encoded as session/connection lifetime
+  # rather than implicit out-of-window reuse.
+  strictMockWindow: false
 record:
   recordTimer: 0s
   filters: []

@@ -391,24 +391,17 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
 				}
-				isFilteredMock := true
-				switch mock.Kind {
-				case "Generic":
-					isFilteredMock = false
-				case "Postgres":
-					isFilteredMock = false
-				case "Http":
-					isFilteredMock = false
-				case "Http2":
-					isFilteredMock = false
-				case "Redis":
-					isFilteredMock = false
-				case "MySQL":
-					isFilteredMock = false
-				case "DNS":
-					isFilteredMock = false
-				}
-				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
+				// Unification (Phase 3): resolve the mock's typed
+				// Lifetime once via DeriveLifetime — which reads
+				// Spec.Metadata["type"] first and falls back to the
+				// legacy kind-switch only for pre-tag recordings
+				// (logged via LegacyKindFallbackFires). Routing into
+				// the per-test (tcsMocks) pool is then purely
+				// Lifetime-driven. LifetimePerTest lands here; Session
+				// and Connection land in the unfiltered/config pool
+				// returned by the sibling GetUnFilteredMocks below.
+				mock.DeriveLifetime()
+				if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
 					tcsMocks = append(tcsMocks, mock)
 				}
 			}
@@ -420,10 +413,21 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 	}
 
-	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
-	ys.Logger.Debug("filtered mocks count", zap.Int("count", len(filtered)))
-
-	return filtered, nil
+	// NO disk-level window filter: return every per-test mock this
+	// test-set needs and let the agent's SetMocksWithWindow decide
+	// what to keep. FilterTcsMocks discards the unfiltered (out-of-
+	// window) slice, which would silently eat STARTUP-INIT mocks
+	// (app-bootstrap traffic whose req-timestamp is strictly before
+	// the first test's window start — Hibernate pool init, HikariCP
+	// connection validation, driver handshake). The agent's pre-
+	// filter promotes those to the session pool via its
+	// firstWindowStart cache; dropping them here would defeat that.
+	//
+	// Pruning based on TestCase mappings (mocksWeNeed /
+	// mocksThatHaveMappings) already ran in the per-doc loop above,
+	// so what reaches here is the minimal relevant set.
+	ys.Logger.Debug("per-test mocks count", zap.Int("count", len(tcsMocks)))
+	return tcsMocks, nil
 }
 
 func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
@@ -477,31 +481,24 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
 				}
-				isUnFilteredMock := false
-				switch mock.Kind {
-				case "Generic":
-					isUnFilteredMock = true
-				case "Postgres":
-					isUnFilteredMock = true
-				case "Http":
-					isUnFilteredMock = true
-				case "Http2":
-					isUnFilteredMock = true
-				case "Redis":
-					isUnFilteredMock = true
-				case "MySQL", "PostgresV2":
-					isUnFilteredMock = true
-				case "DNS":
-					isUnFilteredMock = true
-				}
-				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
+				// Unification (Phase 3): Lifetime-only routing. A mock
+				// lands in the session/config pool iff DeriveLifetime
+				// classified it as Session or Connection. Old kind-
+				// switch behaviour is preserved byte-for-byte for pre-
+				// tag recordings because DeriveLifetime's compat
+				// fallback maps the same kind list to LifetimeSession.
+				mock.DeriveLifetime()
+				if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+					mock.TestModeInfo.Lifetime == models.LifetimeConnection {
 					configMocks = append(configMocks, mock)
 				}
 			}
 		}
 	}
 
-	unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime)
+	// See FilterTcsMocks call above: the disk loader runs lax; the
+	// agent-level filter enforces strictness based on config.
+	unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime, false)
 
 	return unfiltered, nil
 }
