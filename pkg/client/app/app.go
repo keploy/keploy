@@ -160,7 +160,13 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 		}
 		sort.Strings(envKeys)
 		for _, k := range envKeys {
-			if _, err := fmt.Fprintf(tmpFile, "%s=%s\n", k, a.opts.EnvVars[k]); err != nil {
+			value := a.opts.EnvVars[k]
+			if strings.ContainsAny(value, "\r\n") {
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				return fmt.Errorf("env var %q value contains a newline or carriage return, which is not supported in docker --env-file; provide a single-line value", k)
+			}
+			if _, err := fmt.Fprintf(tmpFile, "%s=%s\n", k, value); err != nil {
 				tmpFile.Close()
 				os.Remove(tmpFile.Name())
 				return fmt.Errorf("failed to write env var %q to temp env file: %w", k, err)
@@ -632,7 +638,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, a.opts.EnvVars)
+	execEnvVars := a.opts.EnvVars
+	if utils.IsDockerCmd(a.kind) {
+		execEnvVars = nil
+	}
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, execEnvVars)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
