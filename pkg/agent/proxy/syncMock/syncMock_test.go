@@ -330,16 +330,15 @@ func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveRangeAfterCloseStillDrainsMatches locks in the
-// in-window send path: even after CloseOutChan has fired,
-// ResolveRange must still attempt to forward matching mocks (via
-// sendToOutChan, which silently drops on closed). This matters
-// because the record flow's final ResolveRange can fire while
-// shutdown is already in progress, and we previously regressed
-// the mongo fuzzer (record_build_replay_latest on #4045 CI) by
-// pre-dropping those mocks inside ResolveRange instead of letting
-// sendToOutChan handle the close check uniformly.
-func TestResolveRangeAfterCloseStillDrainsMatches(t *testing.T) {
+// TestResolveRangePostCloseRetainsBuffer documents the
+// post-revert contract: after CloseOutChan fires, ResolveRange
+// treats outChan as "unbound" and retains matching mocks in the
+// buffer (they will never drain, but we accept the small leak in
+// exchange for dropping the pre-drop branch that was suspected
+// of regressing #4045 Mongo Fuzzer record_build_replay_latest).
+// The retention path is bounded by the 7-second cutoffTime
+// at the top of ResolveRange, so the leak is time-capped.
+func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 4)
@@ -350,7 +349,6 @@ func TestResolveRangeAfterCloseStillDrainsMatches(t *testing.T) {
 
 	now := time.Now()
 	match := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: now}}
-
 	mgr.mu.Lock()
 	mgr.buffer = append(mgr.buffer, match)
 	mgr.mu.Unlock()
@@ -358,14 +356,11 @@ func TestResolveRangeAfterCloseStillDrainsMatches(t *testing.T) {
 	mgr.CloseOutChan()
 	mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "t", true, false)
 
-	// Buffer should be cleared for window-matching entries (we
-	// attempted the send; sendToOutChan's outChanClosed guard
-	// dropped it silently — that's fine, the mock isn't retained).
 	mgr.mu.Lock()
 	remaining := len(mgr.buffer)
 	mgr.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("expected buffer drained after ResolveRange-post-close; got %d mocks left", remaining)
+	if remaining != 1 {
+		t.Fatalf("expected 1 mock retained in buffer after post-close ResolveRange; got %d", remaining)
 	}
 }
 
