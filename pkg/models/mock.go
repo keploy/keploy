@@ -46,17 +46,17 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
-	// Format is the per-mock on-disk format override. Empty string means
-	// "fall back to the testset-level format" (whatever the caller / CLI
-	// selected via record.mockFormat / KEPLOY_MOCK_FORMAT). Non-empty
-	// values must be one of "yaml" or "gob"; mockdb readers and writers
-	// honor this field so one session can mix formats inside a single
-	// test-set directory — required by the DaemonSet feature where each
-	// RecordingSession.spec.mockFormat is per-session.
+	// Format is the per-mock on-disk format hint/override. Empty string
+	// means "fall back to the testset-level format" (whatever the caller
+	// / CLI selected via record.mockFormat / KEPLOY_MOCK_FORMAT).
+	// Non-empty values must be one of "yaml" or "gob".
 	//
-	// Writers propagate this field into the on-disk NetworkTrafficDoc.
-	// Readers load it back from the same field. No default: an unset
-	// Format means "use whatever mockdb was configured with at startup".
+	// Writers may propagate this field into the on-disk
+	// NetworkTrafficDoc, and readers may load it back from the same
+	// field. However, this metadata alone does not imply that mocks from
+	// both mocks.yaml and mocks.gob are merged when both files exist in a
+	// single test-set directory. No default: an unset Format means "use
+	// whatever mockdb was configured with at startup".
 	Format string `json:"Format,omitempty" bson:"format,omitempty" yaml:"format,omitempty"`
 }
 
