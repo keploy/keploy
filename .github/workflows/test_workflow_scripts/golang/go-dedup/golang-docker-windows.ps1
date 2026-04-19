@@ -109,23 +109,44 @@ $containerName = "dedup-go-$id"
 
 $dcFile = Join-Path (Get-Location) 'docker-compose.yml'
 if (Test-Path $dcFile) {
-  Write-Host "Patching docker-compose.yml: host port 8080 -> $appPort (container-side stays 8080) and service name 'dedup-go' -> '$containerName'"
+  Write-Host "Patching docker-compose.yml: host port 8080 -> $appPort (container-side stays 8080) and container_name 'dedup-go' -> '$containerName'"
   $dc = Get-Content -Path $dcFile -Raw -ErrorAction Stop
 
-  # Patch ONLY the host side of the '"8080:8080"' port mapping; the
-  # container side must remain 8080 because the Go sample inside the
-  # image hardcodes `router.Run(":8080")`. A prior regex that
-  # rewrote every '\b8080\b' turned the mapping into
-  # "$appPort:$appPort", which docker-compose happily honored - but
-  # then docker forwarded host:$appPort to container:$appPort where
-  # nothing was listening, so every HTTP request after the readiness
-  # probe came back with "connection was closed unexpectedly". Match
-  # the "<host>:<container>" shape explicitly so we only touch the
-  # first column.
-  $dc = [regex]::Replace($dc, '(?m)("?)8080:8080\1', ('$1' + $appPort + ':8080$1'))
-  $dc = $dc.Replace('dedup-go', $containerName)
+  # Patch ONLY the host side of the port mapping; the container
+  # side must remain 8080 because the Go sample hardcodes
+  # `router.Run(":8080")`.
+  #
+  # Previous implementation used a backreference regex
+  # `(?m)("?)8080:8080\1` to handle both quoted and unquoted forms
+  # in one go. On Windows PowerShell 5.1 that pattern
+  # intermittently produced `- <appPort>:8080"` (leading quote
+  # stripped, trailing quote kept), which docker-compose parsed as
+  # `containerPort: 8080"` and rejected with `invalid
+  # containerPort: 8080"` — the canonical symptom on
+  # keploy/keploy#4076 run 24629876059. The sample committed at
+  # github.com/keploy/samples-go/go-dedup uses the double-quoted
+  # short form exclusively, so a literal substitution is both
+  # simpler and provably correct. If the sample ever introduces a
+  # different port form we'll fail loudly below rather than
+  # silently writing malformed YAML.
+  $dcPatched = $dc.Replace('"8080:8080"', ('"' + $appPort + ':8080"'))
+  $dcPatched = $dcPatched.Replace('dedup-go', $containerName)
 
-  Set-Content -Path $dcFile -Value $dc -Encoding UTF8
+  $expectedPortFragment = ('"' + $appPort + ':8080"')
+  if ($dcPatched -notlike "*$expectedPortFragment*") {
+    Write-Host "---- docker-compose.yml (unpatched) ----"
+    Write-Host $dc
+    Write-Host "----------------------------------------"
+    throw "Port substitution did not take effect. The base docker-compose.yml does not contain the expected ""8080:8080"" literal — bailing out rather than running the record phase against an unpatched file."
+  }
+
+  # Dump the patched YAML so any future containerPort/hostPort
+  # diagnostic lands with the exact text docker-compose parsed.
+  Write-Host "---- patched docker-compose.yml ----"
+  Write-Host $dcPatched
+  Write-Host "------------------------------------"
+
+  Set-Content -Path $dcFile -Value $dcPatched -Encoding UTF8
 } else {
   Write-Warning "docker-compose.yml not found at $dcFile; continuing without patching."
 }
