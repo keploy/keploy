@@ -352,9 +352,13 @@ func (r *Runner) checkMockMismatches(ctx context.Context, expected []string) *Mo
 // transport-level error means it's still coming up.
 //
 // Native processes (bind-ready == traffic-ready) and Kubernetes Services
-// (gated on Pod readiness by the control plane) also satisfy the HTTP
-// probe trivially, so this is a strict superset of the previous
-// TCP-only check.
+// (gated on Pod readiness by the control plane) satisfy the HTTP probe
+// trivially. Note that the HTTP probe adds failure modes the TCP-only
+// check didn't have — client-side request timeout (3s per probe), TLS
+// handshake / cert errors, and slow header writes — so this is stricter
+// than a pure superset. That's intentional: each of those conditions
+// represents an app that isn't yet ready to serve traffic end-to-end,
+// which is exactly the signal we want during startup.
 func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
@@ -412,7 +416,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// deployment type (native / k8s / docker-compose) satisfies.
 	probeURL := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/"}).String()
 
-	// probe issues a single HTTP GET against probeURL and returns:
+	// probe issues a single HTTP HEAD against probeURL and returns:
 	//   nil          — response received (any status code; we care
 	//                  about liveness, not correctness).
 	//   fatal=true   — deterministic request-construction error; no
@@ -420,12 +424,20 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	//   fatal=false  — transport error (connect refused, reset, TLS
 	//                  handshake fail, etc.); retry on the next tick.
 	//
+	// HEAD instead of GET: we only care that the handler pipeline is
+	// live. HEAD doesn't trigger response-body generation, so it's
+	// safer against apps whose `/` has side effects (analytics pings,
+	// DB reads, expensive rendering) during startup. Servers that
+	// don't implement HEAD for the route will reply 405 Method Not
+	// Allowed / 501 Not Implemented — still counts as ready because
+	// the connection was accepted and routed.
+	//
 	// The HTTP client performs its own TCP dial, so an explicit
-	// net.DialTimeout before the GET would double the number of
-	// connections per probe without catching anything the GET doesn't
-	// already catch. Dropped for that reason.
+	// net.DialTimeout before the HEAD would double the number of
+	// connections per probe without catching anything the HEAD
+	// doesn't already catch. Dropped for that reason.
 	probe := func() (fatal bool, err error) {
-		req, reqErr := http.NewRequestWithContext(waitCtx, http.MethodGet, probeURL, nil)
+		req, reqErr := http.NewRequestWithContext(waitCtx, http.MethodHead, probeURL, nil)
 		if reqErr != nil {
 			return true, reqErr
 		}
