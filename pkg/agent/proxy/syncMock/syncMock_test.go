@@ -98,14 +98,18 @@ func TestCloseOutChanRacesAddMock(t *testing.T) {
 	}
 	mgr.SetOutputChannel(ch)
 
-	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	// Each goroutine owns its mock slice to avoid racing on the same
+	// *models.Mock's TestModeInfo — AddMock calls DeriveLifetime on
+	// entry and mutates the struct, so sharing a pointer across
+	// senders would race even though the manager's internal state
+	// stays serialized.
 	var wg sync.WaitGroup
 	for i := 0; i < senders; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < sendsPerSender; j++ {
-				mgr.AddMock(mock)
+				mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 			}
 		}()
 	}
