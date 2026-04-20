@@ -171,6 +171,24 @@ func mockFileLockKey(path, fileName string) string {
 	return fullPath
 }
 
+// testSetLockKey builds the key for the in-memory per-testset format
+// map (ys.testSetFormat). The map is keyed by the full test-set
+// directory path — "<MockPath>/<testSetID>" — rather than the bare
+// testSetID because MockYaml.MockPath is mutable: GetHTTPMocks
+// rewrites it to the caller's mockPath, and any other code path that
+// holds onto the same *MockYaml across different root directories
+// (e.g. a re-configured recorder, a pooled instance in the DS agent)
+// would otherwise let two different directories share one lock
+// bucket. With the bare-testSetID key a second root could observe
+// the first root's format claim, turning a same-name-but-different-
+// path test-set into a mixed-format rejection or — worse — silently
+// inheriting the wrong format without rehydrating from disk.
+// Anchoring on the full path makes each on-disk test-set directory
+// own an independent lock.
+func testSetLockKey(ys *MockYaml, testSetID string) string {
+	return filepath.Join(ys.MockPath, testSetID)
+}
+
 func getMockFileLock(lockKey string) *sync.RWMutex {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(lockKey))
@@ -669,7 +687,8 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// prefer gob, so silently locking to gob would orphan the yaml
 	// mocks. Surface the mixed-on-disk state as a hard error and let
 	// the user intervene instead of picking a side.
-	if _, loaded := ys.testSetFormat.Load(testSetID); !loaded {
+	lockKey := testSetLockKey(ys, testSetID)
+	if _, loaded := ys.testSetFormat.Load(lockKey); !loaded {
 		_, gobStatErr := os.Stat(gobFile)
 		gobExists := gobStatErr == nil
 		if gobStatErr != nil && !os.IsNotExist(gobStatErr) {
@@ -686,9 +705,9 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 			return fmt.Errorf("mockdb: found both gob and yaml mock files for testset %q in %s; delete or refresh the testset directory so only one of %s or %s remains, then retry", testSetID, filepath.Dir(gobFile), filepath.Base(gobFile), filepath.Base(yamlFile))
 		}
 		if gobExists {
-			ys.testSetFormat.LoadOrStore(testSetID, true)
+			ys.testSetFormat.LoadOrStore(lockKey, true)
 		} else if yamlExists {
-			ys.testSetFormat.LoadOrStore(testSetID, false)
+			ys.testSetFormat.LoadOrStore(lockKey, false)
 		}
 	}
 
@@ -721,7 +740,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		// already locked to. If no lock yet, LoadOrStore claims the
 		// process default; the returned actual is always the value
 		// that will be visible to subsequent callers.
-		actual, _ := ys.testSetFormat.LoadOrStore(testSetID, useGobMockFormat())
+		actual, _ := ys.testSetFormat.LoadOrStore(lockKey, useGobMockFormat())
 		writeGob = actual.(bool)
 		explicitFormat = false
 	}
@@ -734,7 +753,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// branch above already consulted LoadOrStore and cannot fail a
 	// mismatch check (it adopted whatever was stored).
 	if explicitFormat {
-		actual, loaded := ys.testSetFormat.LoadOrStore(testSetID, writeGob)
+		actual, loaded := ys.testSetFormat.LoadOrStore(lockKey, writeGob)
 		if loaded && actual.(bool) != writeGob {
 			if writeGob {
 				return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
@@ -1028,6 +1047,22 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 	return ys.gobBufw.Flush()
 }
 
+// clearTestSetFormats drops every entry from the in-memory per-
+// testset format map. sync.Map does not expose a bulk Clear in the
+// Go std lib version this project builds against, so we walk it via
+// Range and Delete each key. Invoked from Close to bound memory in
+// long-lived processes (DaemonSet mode, multi-session recorders)
+// where the typical shutdown path never hits DeleteMocksForSet.
+// Callers must hold ys.gobLifecycleMu so a concurrent InsertMock
+// cannot racily repopulate the map between our Range and the caller
+// observing an empty map.
+func (ys *MockYaml) clearTestSetFormats() {
+	ys.testSetFormat.Range(func(key, _ any) bool {
+		ys.testSetFormat.Delete(key)
+		return true
+	})
+}
+
 // Close drains the async gob writer and flushes the file. Safe to
 // call multiple times, and safe to call between record sessions —
 // the writer goroutine exits after flushing, and the next InsertMock
@@ -1035,6 +1070,17 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // insertMockGob). This is what makes re-record cycles (multiple
 // Recorder.Start on the same mockDB instance) work without dropping
 // mocks.
+//
+// Close also clears the in-memory per-testset format map so long-
+// lived processes (DaemonSet mode, a multi-session Recorder) do not
+// grow the sync.Map unboundedly. Typical record flows terminate a
+// session with Close, not DeleteMocksForSet, so without this clear
+// every test-set ever touched would leak an entry for the full
+// lifetime of the process. The next InsertMock for any testSetID
+// will rehydrate from on-disk state via os.Stat on the first call
+// (see the rehydrate block in InsertMock), so dropping the map is
+// semantically identical to a fresh MockYaml — only the memory
+// footprint changes.
 func (ys *MockYaml) Close() error {
 	// Hold the lifecycle lock for the entire teardown. While we wait
 	// for the writer goroutine to drain, no concurrent InsertMock
@@ -1046,6 +1092,13 @@ func (ys *MockYaml) Close() error {
 	// twice.
 	ys.gobLifecycleMu.Lock()
 	defer ys.gobLifecycleMu.Unlock()
+	// Always clear the per-testset format map — even when no gob
+	// writer ran this session (pure-yaml sessions never set
+	// gobRunning=true, but they still populate the map via the
+	// LoadOrStore calls in InsertMock). Doing this before the early-
+	// return is what caps the map's growth across record sessions on
+	// a long-lived MockYaml.
+	ys.clearTestSetFormats()
 	if !ys.gobRunning {
 		return nil
 	}
@@ -1455,7 +1508,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 		}
 	}
 
-	// Clear the in-memory per-testSetID format lock now that the on-disk
+	// Clear the in-memory per-testset format lock now that the on-disk
 	// files are gone. Without this drop the lock would survive the
 	// cleanup and reject the next InsertMock whose format differs
 	// from the deleted set's, breaking re-record flows that switch
@@ -1463,7 +1516,10 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	// guard remains intact for concurrent sessions that do NOT route
 	// through this explicit cleanup (the in-memory lock in the
 	// InsertMock path still closes the async-writer race window).
-	ys.testSetFormat.Delete(testSetID)
+	// Key matches InsertMock: full test-set directory path so
+	// same-named test-sets under different MockPath roots don't cross-
+	// wipe each other.
+	ys.testSetFormat.Delete(testSetLockKey(ys, testSetID))
 
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
 	return nil

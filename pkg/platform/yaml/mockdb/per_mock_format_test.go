@@ -681,8 +681,196 @@ func TestInsertMock_RehydrateDetectsMixedOnDiskState(t *testing.T) {
 
 	// No in-memory format lock should have been claimed. User
 	// intervention is required; pre-claiming either side would steer
-	// the next InsertMock after cleanup down the wrong path.
-	if _, loaded := ys.testSetFormat.Load("set-0"); loaded {
+	// the next InsertMock after cleanup down the wrong path. Key is
+	// the full test-set directory path (see testSetLockKey) so the
+	// map lookup mirrors what InsertMock does.
+	if _, loaded := ys.testSetFormat.Load(testSetLockKey(ys, "set-0")); loaded {
 		t.Fatalf("testSetFormat should not have an entry after a mixed-on-disk rejection")
+	}
+}
+
+// TestInsertMock_LockKeyIncludesPath is a regression guard for the
+// per-testset format map's collision bug with bare testSetID keys.
+// Two MockYaml instances rooted at different MockPath directories can
+// share a testSetID (e.g. both have "set-0" under their own mocks
+// roots). Keying ys.testSetFormat by just the testSetID would let
+// one instance's format claim bleed into the other's decision path;
+// worse, MockYaml.MockPath is mutable — GetHTTPMocks overwrites it —
+// so a single instance can even collide with itself across different
+// root directories. Anchor the key on the full test-set directory
+// path (MockPath + testSetID) so each on-disk test-set owns an
+// independent lock.
+func TestInsertMock_LockKeyIncludesPath(t *testing.T) {
+	// Isolate from sibling tests' process-wide state.
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+
+	// Two disjoint root directories. The shared testSetID ("set-0")
+	// is the whole point: with the pre-fix bare-key schema, the
+	// second InsertMock would observe the first instance's format
+	// lock under the same key and the in-memory guards would cross-
+	// contaminate even though the on-disk directories are unrelated.
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	const testSetID = "set-0"
+
+	ysA := New(zap.NewNop(), rootA, "mocks")
+	ysB := New(zap.NewNop(), rootB, "mocks")
+	t.Cleanup(func() {
+		if err := ysA.Close(); err != nil {
+			t.Errorf("deferred Close ysA: %v", err)
+		}
+		if err := ysB.Close(); err != nil {
+			t.Errorf("deferred Close ysB: %v", err)
+		}
+	})
+
+	// Route the two instances to opposite formats on purpose. If the
+	// lock keys collide, the second instance's InsertMock will fail
+	// the mixed-format guard (or silently adopt the other's format)
+	// instead of happily writing its own file.
+	if err := ysA.InsertMock(context.Background(), newHTTPMock("gob"), testSetID); err != nil {
+		t.Fatalf("ysA InsertMock(gob): %v", err)
+	}
+	if err := ysB.InsertMock(context.Background(), newHTTPMock("yaml"), testSetID); err != nil {
+		t.Fatalf("ysB InsertMock(yaml) — lock keys may be colliding across roots: %v", err)
+	}
+
+	// Drain both async gob writers before asserting on-disk state.
+	if err := ysA.Close(); err != nil {
+		t.Fatalf("ysA Close: %v", err)
+	}
+	if err := ysB.Close(); err != nil {
+		t.Fatalf("ysB Close: %v", err)
+	}
+
+	// Post-Close the format map must be empty (see Fix 2), but we
+	// can still inspect the filesystem to prove the two instances'
+	// decisions did not cross-talk.
+	if _, err := os.Stat(filepath.Join(rootA, testSetID, "mocks.gob")); err != nil {
+		t.Fatalf("rootA should have mocks.gob from ysA's gob InsertMock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootA, testSetID, "mocks.yaml")); err == nil {
+		t.Fatalf("rootA must not have mocks.yaml — cross-contamination from ysB")
+	}
+	if _, err := os.Stat(filepath.Join(rootB, testSetID, "mocks.yaml")); err != nil {
+		t.Fatalf("rootB should have mocks.yaml from ysB's yaml InsertMock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootB, testSetID, "mocks.gob")); err == nil {
+		t.Fatalf("rootB must not have mocks.gob — cross-contamination from ysA")
+	}
+
+	// Independence on the in-memory side as well: re-insert after the
+	// Close-triggered clear and inspect the map directly. Each
+	// instance's key must carry only its own MockPath.
+	if err := ysA.InsertMock(context.Background(), newHTTPMock("gob"), testSetID); err != nil {
+		t.Fatalf("ysA second InsertMock: %v", err)
+	}
+	if err := ysB.InsertMock(context.Background(), newHTTPMock("yaml"), testSetID); err != nil {
+		t.Fatalf("ysB second InsertMock: %v", err)
+	}
+	keyA := testSetLockKey(ysA, testSetID)
+	keyB := testSetLockKey(ysB, testSetID)
+	if keyA == keyB {
+		t.Fatalf("lock keys must differ across roots: keyA=%q keyB=%q", keyA, keyB)
+	}
+	vA, okA := ysA.testSetFormat.Load(keyA)
+	vB, okB := ysB.testSetFormat.Load(keyB)
+	if !okA {
+		t.Fatalf("ysA testSetFormat missing entry for %q", keyA)
+	}
+	if !okB {
+		t.Fatalf("ysB testSetFormat missing entry for %q", keyB)
+	}
+	if vA.(bool) != true {
+		t.Fatalf("ysA should be locked to gob (true), got %v", vA)
+	}
+	if vB.(bool) != false {
+		t.Fatalf("ysB should be locked to yaml (false), got %v", vB)
+	}
+	// Cross-lookup must miss: ysA's key must not be present in ysB's
+	// map (same sync.Map instance per MockYaml, but the key check
+	// still guards against any future refactor that shares state).
+	if _, loaded := ysA.testSetFormat.Load(keyB); loaded {
+		t.Fatalf("ysA must not carry ysB's key %q", keyB)
+	}
+	if _, loaded := ysB.testSetFormat.Load(keyA); loaded {
+		t.Fatalf("ysB must not carry ysA's key %q", keyA)
+	}
+}
+
+// TestMockYaml_CloseClearsFormatLocks verifies that Close drops the
+// in-memory per-testset format map. Long-lived processes (DaemonSet
+// agent, a multi-session recorder) call Close at the end of each
+// session but never DeleteMocksForSet; without the clear, the map
+// would accumulate an entry per distinct testset for the lifetime
+// of the MockYaml, leaking memory proportional to session count.
+// After Close the map must be empty, and a subsequent InsertMock
+// must still succeed (the rehydrate path picks the lock back up
+// from on-disk state).
+func TestMockYaml_CloseClearsFormatLocks(t *testing.T) {
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+
+	// Seed several testsets with mixed formats so the map populates
+	// across both the rehydrate branch (none, files are fresh) and
+	// the explicit-format branch (LoadOrStore fires).
+	seed := []struct {
+		testSetID string
+		format    string
+	}{
+		{"set-0", "yaml"},
+		{"set-1", "gob"},
+		{"set-2", ""}, // falls through to testset default (yaml)
+	}
+	for _, s := range seed {
+		if err := ys.InsertMock(context.Background(), newHTTPMock(s.format), s.testSetID); err != nil {
+			t.Fatalf("InsertMock(%q, %q): %v", s.testSetID, s.format, err)
+		}
+	}
+
+	// Sanity: all three entries present under the full-path keys.
+	for _, s := range seed {
+		key := testSetLockKey(ys, s.testSetID)
+		if _, loaded := ys.testSetFormat.Load(key); !loaded {
+			t.Fatalf("pre-Close: testSetFormat missing entry for %q", key)
+		}
+	}
+
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Post-Close: the map is empty. Walk Range and count; anything >
+	// 0 fails the test.
+	remaining := 0
+	ys.testSetFormat.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	if remaining != 0 {
+		t.Fatalf("Close should have cleared testSetFormat, still has %d entries", remaining)
+	}
+
+	// Re-insert post-Close: the rehydrate branch repopulates the map
+	// from on-disk state (mocks.yaml / mocks.gob already exist from
+	// the seed phase), so the format is preserved across the Close
+	// boundary and the next InsertMock succeeds for the same format.
+	// For set-1 we re-assert gob; for set-0 yaml.
+	if err := ys.InsertMock(context.Background(), newHTTPMock("gob"), "set-1"); err != nil {
+		t.Fatalf("post-Close InsertMock set-1: %v", err)
+	}
+	if err := ys.InsertMock(context.Background(), newHTTPMock("yaml"), "set-0"); err != nil {
+		t.Fatalf("post-Close InsertMock set-0: %v", err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
