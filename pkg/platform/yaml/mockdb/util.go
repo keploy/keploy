@@ -263,6 +263,20 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
 			return nil, err
 		}
+	case models.Kafka:
+		kafkaSpec := models.KafkaSchema{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         mock.Spec.KafkaRequests,
+			Responses:        mock.Spec.KafkaResponses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(kafkaSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the Kafka input-output as yaml")
+			return nil, err
+		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
@@ -441,6 +455,21 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				Created:          http2Spec.Created,
 				ReqTimestampMock: http2Spec.ReqTimestampMock,
 				ResTimestampMock: http2Spec.ResTimestampMock,
+			}
+		case models.Kafka:
+			kafkaSpec := models.KafkaSchema{}
+			err := m.Spec.Decode(&kafkaSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into kafka mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         kafkaSpec.Metadata,
+				KafkaRequests:    kafkaSpec.Requests,
+				KafkaResponses:   kafkaSpec.Responses,
+				Created:          kafkaSpec.CreatedAt,
+				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
+				ResTimestampMock: kafkaSpec.ResTimestampMock,
 			}
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
