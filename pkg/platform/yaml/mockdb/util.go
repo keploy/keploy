@@ -23,6 +23,14 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
 	}
+	handled, err := encodeRegisteredMock(mock, &yamlDoc)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal the registered mock kind as yaml", zap.String("kind", string(mock.Kind)))
+		return nil, err
+	}
+	if handled {
+		return &yamlDoc, nil
+	}
 	switch mock.Kind {
 	case models.Mongo:
 		requests := []models.RequestYaml{}
@@ -144,20 +152,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		err := yamlDoc.Spec.Encode(kafkaSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
-			return nil, err
-		}
-	case models.HBASE:
-		hbaseSpec := models.HbaseSchema{
-			Metadata: mock.Spec.Metadata,
-
-			HbaseRequests:    mock.Spec.HbaseRequests,
-			HbaseResponses:   mock.Spec.HbaseResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(hbaseSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the hbase input-output as yaml")
 			return nil, err
 		}
 	case models.PostgresV2:
@@ -296,6 +290,15 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
 		}
+		handled, err := decodeRegisteredMock(m, &mock)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal a registered mock yaml doc", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
+			return nil, err
+		}
+		if handled {
+			mocks = append(mocks, &mock)
+			continue
+		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {
 			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
@@ -410,21 +413,6 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				KafkaResponses:   kafkaSpec.KafkaResponses,
 				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
 				ResTimestampMock: kafkaSpec.ResTimestampMock,
-			}
-		case models.HBASE:
-			hbaseSpec := models.HbaseSchema{}
-			err := m.Spec.Decode(&hbaseSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into hbase mock", zap.String("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: hbaseSpec.Metadata,
-
-				HbaseRequests:    hbaseSpec.HbaseRequests,
-				HbaseResponses:   hbaseSpec.HbaseResponses,
-				ReqTimestampMock: hbaseSpec.ReqTimestampMock,
-				ResTimestampMock: hbaseSpec.ResTimestampMock,
 			}
 		case models.PostgresV2:
 
