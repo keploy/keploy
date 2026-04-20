@@ -1096,8 +1096,8 @@ func (ys *MockYaml) clearTestSetFormats() {
 // pending gob write — a mixed-format on-disk state the readers
 // cannot cope with. This function therefore orders teardown as:
 //
-//   t0: Close drains the async gob writer  (mocks.gob fully on disk)
-//   t1: Close calls clearTestSetFormats    (stat rehydrate sees real mocks.gob)
+//	t0: Close drains the async gob writer  (mocks.gob fully on disk)
+//	t1: Close calls clearTestSetFormats    (stat rehydrate sees real mocks.gob)
 //
 // By the time the map is cleared, every pending gob write has
 // materialised, so any concurrent InsertMock(yaml) racing the clear
