@@ -634,9 +634,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// process-wide configured format so the DS agent can thread each
 	// RecordingSession's spec.mockFormat through to individual mocks
 	// without mutating package-level state. Unset / unrecognised =>
-	// fall back to useGobMockFormat (the pre-DS behaviour).
-	writeGob := resolveMockFormat(mock.Format)
-
+	// fall back to the already-locked testset format when one exists,
+	// else to useGobMockFormat (the pre-DS behaviour). The lock-aware
+	// fallback matters because resolveMockFormat alone would route a
+	// typo like Format="gbo" to the process default even when the
+	// testset is already locked to the opposite format — turning an
+	// unknown value into a mixed-format rejection instead of the
+	// graceful inherit-the-lock behaviour the surrounding docs
+	// promise.
+	//
 	// Reject a mock whose resolved format disagrees with whatever is
 	// already claimed for this test-set. Without this check InsertMock
 	// would happily create a second file (mocks.gob next to mocks.yaml,
@@ -684,6 +690,28 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 			ys.testSetFormat.LoadOrStore(testSetID, false)
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("mockdb: failed to verify whether yaml mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, yamlFile, statErr)
+		}
+	}
+
+	// Pick writeGob with the three-step lock-aware policy. The legacy
+	// resolveMockFormat is kept for callers that do not have a
+	// testSetID in hand; here we inline the policy so an unrecognised
+	// per-mock value (e.g. a typo'd "gbo") inherits the testset's
+	// already-locked format instead of silently bouncing off the
+	// mixed-format guard. Recognised overrides still win — a caller
+	// that explicitly asks for "gob" on a yaml-locked testset gets
+	// the mixed-format error below, which is the intended guard.
+	var writeGob bool
+	switch mock.Format {
+	case mockFormatGob:
+		writeGob = true
+	case "yaml":
+		writeGob = false
+	default:
+		if locked, ok := ys.testSetFormat.Load(testSetID); ok {
+			writeGob = locked.(bool)
+		} else {
+			writeGob = useGobMockFormat()
 		}
 	}
 

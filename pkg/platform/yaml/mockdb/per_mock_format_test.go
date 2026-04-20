@@ -312,6 +312,81 @@ func TestInsertMock_RejectsMixedFormat(t *testing.T) {
 	})
 }
 
+// TestInsertMock_UnknownFormatHonorsLockedTestset covers the
+// three-step lock-aware fallback in InsertMock: an unrecognised
+// per-mock Format ("gbo" typo, stale value, anything that is not
+// "yaml" or "gob") must inherit the testset's already-locked format
+// rather than bounce off the mixed-format guard via the process
+// default.
+//
+// Scenario: process default is gob (simulating a run with
+// KEPLOY_MOCK_FORMAT=gob), but the first InsertMock for testSetID
+// "t1" explicitly asks for yaml — locking t1 to yaml. A follow-up
+// InsertMock with Format="gbo" (typo) would, under the old
+// resolveMockFormat-only policy, route to the process default (gob)
+// and be rejected by the mixed-format guard, dropping the mock. The
+// lock-aware policy routes it to the locked format instead and
+// appends cleanly into mocks.yaml, preserving the recording.
+func TestInsertMock_UnknownFormatHonorsLockedTestset(t *testing.T) {
+	// Guard against pollution from sibling tests.
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	// Process default = gob for the duration of this test. Env var
+	// wins over configuredMockFormat in useGobMockFormat so this is
+	// the most reliable knob.
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	t.Cleanup(func() {
+		if err := ys.Close(); err != nil {
+			t.Errorf("deferred Close: %v", err)
+		}
+	})
+
+	// Mock 1: explicit yaml into t1. Locks t1=yaml in the sync.Map.
+	mock1 := newHTTPMock("yaml")
+	if err := ys.InsertMock(context.Background(), mock1, "t1"); err != nil {
+		t.Fatalf("first InsertMock (yaml): %v", err)
+	}
+
+	// Mock 2: typo'd "gbo". Under the old policy this would resolve
+	// to useGobMockFormat()=true (because env is gob) and the
+	// LoadOrStore-check would reject it as mixed-format. The new
+	// policy sees the unknown value, consults the lock (yaml), and
+	// routes the mock into the yaml file.
+	mock2 := newHTTPMock("gbo")
+	if err := ys.InsertMock(context.Background(), mock2, "t1"); err != nil {
+		t.Fatalf("second InsertMock (gbo typo) should have inherited the yaml lock, got error: %v", err)
+	}
+
+	// mocks.yaml must exist and contain BOTH mock names. mocks.gob
+	// must not have been created.
+	yamlPath := filepath.Join(dir, "t1", "mocks.yaml")
+	gobPath := filepath.Join(dir, "t1", "mocks.gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		t.Fatalf("mocks.gob was created despite the testset being yaml-locked")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error statting %s: %v", gobPath, err)
+	}
+	raw, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("read mocks.yaml: %v", err)
+	}
+	body := string(raw)
+	// Both mocks were auto-assigned sequential names via getNextID
+	// starting at 0. Assert both show up in the wire bytes so a
+	// regression that silently drops mock2 (or routes it elsewhere)
+	// would be caught.
+	if !strings.Contains(body, "mock-0") {
+		t.Fatalf("mocks.yaml missing mock-0:\n%s", body)
+	}
+	if !strings.Contains(body, "mock-1") {
+		t.Fatalf("mocks.yaml missing mock-1 (typo'd Format likely dropped):\n%s", body)
+	}
+}
+
 // TestInsertMock_RaceFreeMixedFormatGuard exercises the race window
 // that the on-disk os.Stat check alone cannot close: the gob writer
 // is asynchronous, so InsertMock(gob) enqueues a job and returns

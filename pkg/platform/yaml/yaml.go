@@ -42,7 +42,7 @@ type NetworkTrafficDoc struct {
 	// from models.Mock.Format. Empty means "fall back to the testset-level
 	// format"; recognized values are "yaml" or "gob". Any other non-empty
 	// value is treated as unset and falls back to the process-wide
-	// configured format (see resolveMockFormat) — we prefer to preserve
+	// configured format (see mockdb.resolveMockFormat) — we prefer to preserve
 	// mocks over failing the write when a stale or typo'd format slips
 	// in. mockdb readers populate it back onto models.Mock.Format so
 	// formats can vary across mocks recorded in different test-set
