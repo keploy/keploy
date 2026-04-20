@@ -75,6 +75,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract Rerecord Fuzzer
         id: rerecord_fuzzer
         env:
@@ -90,7 +93,8 @@ jobs:
             --account-key "$AZURE_STORAGE_KEY" \
             --container-name "$AZURE_STORAGE_CONTAINER" \
             --name "$KEY" \
-            --file rerecord-fuzzer-linux-amd64.tar.gz
+            --file rerecord-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
           chmod +x ./rerecord-client ./rerecord-server
           echo "client=$(realpath ./rerecord-client)" >> $GITHUB_OUTPUT
@@ -151,6 +155,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract MySQL Fuzzer
         id: mysql_fuzzer
         env:
@@ -166,7 +173,8 @@ jobs:
             --account-key "$AZURE_STORAGE_KEY" \
             --container-name "$AZURE_STORAGE_CONTAINER" \
             --name "$KEY" \
-            --file mysql-fuzzer-linux-amd64.tar.gz
+            --file mysql-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf mysql-fuzzer-linux-amd64.tar.gz
           chmod +x ./mysql-fuzzer
           echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
@@ -225,6 +233,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract gRPC Fuzzer
         id: fuzzer
         env:
@@ -240,7 +251,8 @@ jobs:
             --account-key "$AZURE_STORAGE_KEY" \
             --container-name "$AZURE_STORAGE_CONTAINER" \
             --name "$KEY" \
-            --file grpc-fuzzer-linux-amd64.tar.gz
+            --file grpc-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf grpc-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
           echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
@@ -302,6 +314,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract Postgres Fuzzer
         id: postgres_fuzzer
         env:
@@ -317,7 +332,8 @@ jobs:
             --account-key "$AZURE_STORAGE_KEY" \
             --container-name "$AZURE_STORAGE_CONTAINER" \
             --name "$KEY" \
-            --file postgres-fuzzer-linux-amd64.tar.gz
+            --file postgres-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf postgres-fuzzer-linux-amd64.tar.gz
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
@@ -373,6 +389,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract Mongo Fuzzer
         id: mongo_fuzzer
         env:
@@ -388,7 +407,8 @@ jobs:
             --account-key "$AZURE_STORAGE_KEY" \
             --container-name "$AZURE_STORAGE_CONTAINER" \
             --name "$KEY" \
-            --file mongo-fuzzer-linux-amd64.tar.gz
+            --file mongo-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf mongo-fuzzer-linux-amd64.tar.gz
           chmod +x ./mongo-fuzzer
           echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT

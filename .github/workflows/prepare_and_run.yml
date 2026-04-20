@@ -120,7 +120,7 @@ jobs:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
       PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
   run_node_mapping:
     needs: [build-and-upload, upload-latest]
