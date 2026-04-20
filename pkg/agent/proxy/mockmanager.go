@@ -1173,10 +1173,20 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		m.treesMu.Lock()
 		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new)
 
-		// Self-heal if global updated but per-kind missed (e.g., not present yet)
+		// Self-heal if global updated but per-kind missed.
+		//
+		// This is the legitimate filtered→unfiltered promotion case: a
+		// parser (Postgres v2 matcher is the load-bearing caller) calls
+		// UpdateUnFilteredMock on a mock that lived only in the filtered
+		// pool, so the unfiltered per-kind tree was never seeded with
+		// it. The insert below brings per-kind into sync with global so
+		// future per-kind fast-path reads (GetMySQLCounts,
+		// GetPostgresSessionMocks, etc.) see the consumed mock. Kept at
+		// Debug because it fires dozens of times per normal replay and
+		// is not user-actionable.
 		if updatedGlobal && !updatedNewKind {
-			if m.logger != nil {
-				m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
+			if m.logger != nil && m.logger.Core().Enabled(zap.DebugLevel) {
+				m.logger.Debug("seeding per-kind unfiltered tree from global on first update",
 					zap.String("kind", string(newK)),
 					zap.String("mockName", new.Name),
 					zap.Any("testModeInfo", new.TestModeInfo),

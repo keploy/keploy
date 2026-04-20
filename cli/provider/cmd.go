@@ -626,11 +626,18 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-	jsonOutput, err := cmd.Flags().GetBool("json")
-	if err != nil {
-		errMsg := "failed to get the json flag"
-		utils.LogError(c.logger, err, errMsg)
-		return errors.New(errMsg)
+	// The --json flag isn't registered on every subcommand (record / agent
+	// don't define it in enterprise builds), so Lookup + fallback avoids
+	// an early-return that would skip every subsequent validation step
+	// below (including the agent-mode wiring that the agent subprocess
+	// needs — without it, the agent starts up with mode="").
+	jsonOutput := false
+	if cmd.Flags().Lookup("json") != nil {
+		if v, err := cmd.Flags().GetBool("json"); err == nil {
+			jsonOutput = v
+		} else {
+			utils.LogError(c.logger, err, "failed to get the json flag")
+		}
 	}
 	c.cfg.JSONOutput = jsonOutput
 

@@ -1594,7 +1594,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 			}
 
-			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks)
+			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
+			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks, tcReqTime, tcRespTime)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -2024,7 +2025,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					"\033[91m", tc.Name, "\033[0m")
 			}
 
-			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks)
+			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
+			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks, tcReqTimeStream, tcRespTimeStream)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
