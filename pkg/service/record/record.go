@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +34,31 @@ type Recorder struct {
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
+
+	// cleanups is run in LIFO order from Start's defer. Downstream
+	// builds and internal subsystems register shutdown work here
+	// rather than each one type-asserting its own io.Closer into the
+	// store interfaces. Register with RegisterCleanup.
+	cleanupMu sync.Mutex
+	cleanups  []func() error
+}
+
+// RegisterCleanup appends a shutdown callback that Recorder.Start's
+// defer will drain in LIFO order. Thread-safe. Callbacks should be
+// idempotent — Recorder may be restarted in some flows (re-record).
+func (r *Recorder) RegisterCleanup(fn func() error) {
+	if fn == nil {
+		return
+	}
+	r.cleanupMu.Lock()
+	r.cleanups = append(r.cleanups, fn)
+	r.cleanupMu.Unlock()
+}
+
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
+// Used by the orchestrator during re-record mode.
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
@@ -67,6 +93,42 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+
+	// Auto-register mockDB.Close if it implements io.Closer. MockYaml
+	// implements Close unconditionally: in gob mode it drains the
+	// async writer and flushes the file; in yaml mode it is a no-op
+	// (gobStop is nil, so Close returns nil immediately). Registered
+	// via RegisterCleanup so it drains in LIFO order alongside any
+	// other subsystems the caller has registered (telemetry flush,
+	// mapping-DB sync, etc.).
+	if closer, ok := r.mockDB.(io.Closer); ok {
+		r.RegisterCleanup(closer.Close)
+	}
+
+	// Drain all registered cleanups in LIFO order on return. Errors
+	// are logged but do not abort subsequent cleanups — each subsystem
+	// gets its flush regardless of what came before.
+	defer func() {
+		r.cleanupMu.Lock()
+		cleanups := r.cleanups
+		r.cleanups = nil
+		r.cleanupMu.Unlock()
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if err := cleanups[i](); err != nil {
+				// A cleanup error usually means a mock-file flush or
+				// telemetry-drain returned non-nil — the session data
+				// is still on disk (the writer buffers drain before
+				// Close returns err on inner failures), but the tail
+				// batch may be incomplete. Log at Error so the
+				// operator sees it on exit summary; include cleanup
+				// index so `record cleanup N failed` is actionable
+				// against the known RegisterCleanup call sites.
+				r.logger.Error("record cleanup returned an error; inspect the mock file for a truncated tail and check disk space/permissions at the recording output directory",
+					zap.Int("cleanupIndex", i),
+					zap.Error(err))
+			}
+		}
+	}()
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -203,8 +265,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		passPortsUint32[i] = uint32(port)
 	}
 
+	memoryLimit := uint64(0)
+	if r.config.CommandType == string(utils.DockerRun) || r.config.CommandType == string(utils.DockerCompose) {
+		memoryLimit = r.config.Record.MemoryLimit
+	}
+
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
+	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -323,19 +390,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			// Send a copy to global mock channel for correlation manager if available
-			if r.globalMockCh != nil {
-				currMockID := r.mockDB.GetCurrMockID()
-				// Create a deep copy of the mock to avoid race conditions
-				mockCopy := *mock
-				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
-				select {
-				case r.globalMockCh <- &mockCopy:
-					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
-				default:
-					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
-				}
-			}
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
 				Mock: mock, TestSetID: newTestSetID,
 			}); hookErr != nil {
@@ -372,6 +426,35 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				// Forward a lightweight mock reference to the orchestrator's
+				// correlation manager after InsertMock succeeds, so mappings
+				// only reference persisted mocks. Metadata map is copied to
+				// avoid data races with concurrent goroutines.
+				if r.globalMockCh != nil {
+					var metadata map[string]string
+					if mock.Spec.Metadata != nil {
+						metadata = make(map[string]string, len(mock.Spec.Metadata))
+						for k, v := range mock.Spec.Metadata {
+							metadata[k] = v
+						}
+					}
+					ref := &models.Mock{
+						Version: mock.Version,
+						Kind:    mock.Kind,
+						Name:    mock.Name,
+						Spec: models.MockSpec{
+							Metadata:         metadata,
+							ReqTimestampMock: mock.Spec.ReqTimestampMock,
+							ResTimestampMock: mock.Spec.ResTimestampMock,
+						},
+					}
+					select {
+					case r.globalMockCh <- ref:
+					default:
+						r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
+							zap.String("mockName", ref.Name))
+					}
+				}
 			}
 		}
 		return nil
@@ -715,10 +798,4 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
-}
-
-// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
-func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
-	r.globalMockCh = mockCh
-	r.logger.Info("Global mock channel set for record service")
 }

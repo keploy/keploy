@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -837,6 +836,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
 	decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
 
+	// Seed server capabilities from the restored greeting. Without this,
+	// decodeCtx.ServerCaps stays 0 and DeprecateEOF() returns false,
+	// which makes the TextResultSet handler look for an EOF packet
+	// between column definitions and row data. Modern clients
+	// (mysql-connector-python, mysql-connector-j, Go's go-sql-driver
+	// with DEPRECATE_EOF) send the row bytes immediately, and the
+	// recorder aborts with "expected EOF packet for column definition".
+	// Mirror what handleInitialHandshake does on its path.
+	decodeCtx.ServerCaps = sg.CapabilityFlags
+
 	logger.Debug("Post-TLS MySQL: restored server greeting",
 		zap.String("key", storeKey),
 		zap.String("pluginName", pluginName))
@@ -865,6 +874,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// and go directly to command phase recording.
 		logger.Debug("Post-TLS MySQL: existing connection detected (seq=0), skipping auth — entering command phase directly")
 
+		// We didn't decode a HandshakeResponse41 on this path, so
+		// ClientCaps is still 0. Assume the client is modern and
+		// advertises CLIENT_DEPRECATE_EOF — this matches every
+		// supported driver (mysql-connector-python/j, Go's
+		// go-sql-driver, Node mysql2). If the server ALSO advertised
+		// it (check on line above), DeprecateEOF() will return true
+		// and the EOF-less result set decode path will be used.
+		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
+		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
@@ -876,7 +895,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Feed the first packet back to the parser by wrapping clientConn.
 		wrappedClient := &pUtils.Conn{
 			Conn:   clientConn,
-			Reader: io.MultiReader(bytes.NewReader(firstPkt), clientConn),
+			Reader: pUtils.NewPrefixReader(firstPkt, clientConn),
 			Logger: logger,
 		}
 
@@ -911,6 +930,13 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if err != nil {
 		return fmt.Errorf("failed to decode post-TLS HandshakeResponse41: %w", err)
 	}
+
+	// Mirror handleInitialHandshake: after decoding the client response,
+	// populate ClientCaps so DeprecateEOF() short-circuits the EOF read
+	// in the TextResultSet/BinaryProtocol handlers. Without this the
+	// recorder aborts on the first SELECT response for modern clients
+	// that negotiate CLIENT_DEPRECATE_EOF.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 	requests = append(requests, mysql.Request{PacketBundle: *handshakeResponsePkt})
 

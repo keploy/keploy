@@ -39,12 +39,18 @@ import (
 var flakyHeaders = []string{
 	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
 	"authorization",         // signature changes every request (all cloud providers)
-	"x-amz-date",            // signing timestamp
+	"x-amz-date",            // signing timestamp (yyyymmddThhmmssZ)
 	"x-amz-security-token",  // STS/IRSA session token — may appear or disappear
 	"x-amz-content-sha256",  // payload hash
 	"x-amz-credential",      // credential scope string
+	"x-amz-signature",       // explicit signature value (SigV4 query-string variant)
+	"x-amz-signedheaders",   // list of signed headers (varies with SDK)
+	"x-amz-expires",         // pre-signed URL expiry seconds
+	"x-amz-user-agent",      // SDK metadata
+	"x-amzn-trace-id",       // AWS X-Ray trace propagation
 	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
 	"amz-sdk-request",       // attempt counter (attempt=1; max=3)
+	"date",                  // SigV4 fallback when X-Amz-Date absent. Globally ignored (Date is dynamic for all HTTP); disable per-test via DisableAutoHeaderNoise.
 
 	// ── GCP ──────────────────────────────────────────────────────────
 	"x-goog-api-client",     // SDK metadata (version, runtime info)
@@ -114,13 +120,43 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, ctx.Err()
 		}
 
-		// Fetch and filter HTTP mocks
-		mocks, err := mockDb.GetUnFilteredMocks()
+		// Fetch HTTP mocks from BOTH pools:
+		//   - Per-test mocks (Lifetime=PerTest): test-specific app
+		//     HTTP calls, window-filtered at ingest, consumed on
+		//     match. These are the MORE SPECIFIC match for the
+		//     current request — they were recorded for exactly this
+		//     test's behaviour.
+		//   - Session mocks (Lifetime=Session): auth/SigV4/SQS
+		//     handshake, reusable across every test, not window-
+		//     filtered, not consumed.
+		//
+		// Ordering: per-test FIRST. If a per-test mock matches, it
+		// wins over any session mock that "sort of" matches at the
+		// same score — a session mock should only be chosen when no
+		// per-test mock matches at all. This prevents the subtle
+		// regression where a per-test mock for the current test gets
+		// passed over in favour of a session mock that tied on
+		// schema but wasn't recorded for this test.
+		//
+		// Pre-unification this parser only consumed session mocks
+		// (via GetUnFilteredMocks returning the full unfiltered pool
+		// that included untagged HTTP as session-by-kind). Post-
+		// Phase-3 tag-only routing, per-test HTTP mocks land in the
+		// per-test pool — they need to be reachable here.
+		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
+			utils.LogError(h.Logger, err, "failed to get per-test mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
-		unfilteredMocks := FilterHTTPMocks(mocks)
+		sessionMocks, err := mockDb.GetSessionMocks()
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to get session mocks")
+			return false, nil, errors.New("error while matching the request with the mocks")
+		}
+		combined := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
+		combined = append(combined, perTestMocks...)
+		combined = append(combined, sessionMocks...)
+		unfilteredMocks := FilterHTTPMocks(combined)
 
 		// Log all mock names in a single line for better readability
 		mockNames := make([]string, len(unfilteredMocks))
@@ -678,13 +714,35 @@ func mediaTypesOverlap(a, b []string) bool {
 	return false
 }
 
-// Update the matched mock (delete or update)
+// updateMock processes the matched mock based on its Lifetime.
+// Per-test mocks are CONSUMED on match (DeleteFilteredMock); session /
+// connection mocks are RETAINED and updated in place (UpdateUnFilteredMock).
+// See the MySQL equivalent in replayer/match.go for the pre- vs post-
+// Phase-2 routing rationale.
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
 	matchedMock.TestModeInfo.IsFiltered = false
 	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-	return updated
+
+	lifetime := matchedMock.TestModeInfo.Lifetime
+	rawConfig := false
+	if matchedMock.Spec.Metadata != nil {
+		rawConfig = matchedMock.Spec.Metadata["type"] == "config"
+	}
+	isSessionOrConnection := lifetime == models.LifetimeSession ||
+		lifetime == models.LifetimeConnection ||
+		(lifetime == models.LifetimePerTest && rawConfig)
+
+	if isSessionOrConnection {
+		return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	}
+	// Per-test: consume via DeleteFilteredMock, with fallback to
+	// UpdateUnFilteredMock for mocks staged into the session pool
+	// during the initial pre-first-test window.
+	if mockDb.DeleteFilteredMock(originalMatchedMock) {
+		return true
+	}
+	return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
@@ -692,7 +750,10 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 // from mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
 	if httpMocks == nil {
-		mocks, err := mockDb.GetUnFilteredMocks()
+		// Mirror match()'s pool-merging + ordering strategy so
+		// mismatch diagnostics see the same candidate set in the
+		// same order the matcher saw. Per-test FIRST, session second.
+		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
 			return &models.MockMismatchReport{
 				Protocol:      "HTTP",
@@ -700,6 +761,17 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integration
 				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
 			}
 		}
+		sessionMocks, err := mockDb.GetSessionMocks()
+		if err != nil {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
+			}
+		}
+		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
+		mocks = append(mocks, perTestMocks...)
+		mocks = append(mocks, sessionMocks...)
 		if len(mocks) == 0 {
 			return &models.MockMismatchReport{
 				Protocol:      "HTTP",

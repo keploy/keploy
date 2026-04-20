@@ -3,7 +3,6 @@ package integrations
 import (
 	"net"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -36,11 +35,6 @@ type RecordSession struct {
 	// as part of the planned migration to pass it explicitly through
 	// RecordSession rather than via context.
 	ErrGroup *errgroup.Group
-
-	// MemLimiter tracks memory usage across all proxy connections.
-	// nil means unlimited. All MemoryLimiter methods are nil-safe,
-	// so parsers never need to nil-check.
-	MemLimiter *util.MemoryLimiter
 
 	// TLSUpgrader provides controlled mid-stream TLS upgrade for
 	// parsers that need it (PostgreSQL SSLRequest, MySQL CLIENT_SSL).

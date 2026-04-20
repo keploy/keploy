@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,11 @@ const (
 	KeployTLSVolumeName = "keploy-tls-certs"
 	// The path inside the container where certs are mounted
 	KeployTLSMountPath = "/tmp/keploy-tls"
+
+	// AgentReadyFile is the readiness marker file written by the agent once
+	// setup is complete. Used by the Docker Compose healthcheck and cleared
+	// on agent startup to prevent stale state from passing the healthcheck.
+	AgentReadyFile = "/tmp/agent.ready"
 
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
@@ -590,6 +596,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if opts.MemoryLimit > 0 {
+		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
+	}
 	if models.IsAnsiDisabled {
 		command = append(command, "--disable-ansi")
 	}
@@ -739,7 +748,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "test"},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
-				{Kind: yaml.ScalarNode, Value: "cat /tmp/agent.ready"},
+				{Kind: yaml.ScalarNode, Value: "cat " + AgentReadyFile},
 			}},
 
 			// interval
@@ -1018,36 +1027,55 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
-// Helper to add/update an environment variable
-func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
-	var envNode *yaml.Node
-
-	// Find 'environment' key
+// getOrCreateEnvNode finds the 'environment' node inside a service, creating
+// a SequenceNode if none exists. It centralizes the lookup/create logic for
+// environment mutations performed by helper methods.
+func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
 	for i := 0; i < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
-			envNode = serviceNode.Content[i+1]
-			break
+			return serviceNode.Content[i+1]
 		}
 	}
 
-	// Create 'environment' if missing
-	if envNode == nil {
-		envNode = &yaml.Node{Kind: yaml.SequenceNode}
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
-			envNode,
-		)
-	}
+	// Not found — create it.
+	envNode := &yaml.Node{Kind: yaml.SequenceNode}
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+		envNode,
+	)
+	return envNode
+}
+
+// Helper to add/update an environment variable.
+// If the key already exists, its value is replaced (upsert semantics).
+func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
+	envNode := idc.getOrCreateEnvNode(serviceNode)
 
 	// Handle Sequence (array) style environment: ["KEY=VAL"]
 	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				// Key already exists — update in place.
+				node.Value = fmt.Sprintf("%s=%s", envKey, envValue)
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content, &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Value: fmt.Sprintf("%s=%s", envKey, envValue),
 		})
+		return
 	}
 	// Handle Mapping (dict) style environment: { KEY: VAL }
 	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				// Key already exists — update in place.
+				envNode.Content[i+1].Value = envValue
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envKey},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envValue},
@@ -1055,13 +1083,64 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 }
 
-// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS)
+// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS).
+// If the key already exists, the new value is appended (space-separated).
+// If it does not exist, a new entry is created.
 func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
-	// Logic: Find existing key. If found, append string " " + value. If not, create it.
-	// (Simplified implementation reuse addServiceEnvVar for now, assuming override is fine or strictly adding)
-	// For Java Tool Options, users rarely hardcode it in compose, but if they do, we ideally append.
-	// For simplicity in this iteration:
-	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+	envNode := idc.getOrCreateEnvNode(serviceNode)
+
+	// Handle Sequence (array) style: ["KEY=VAL", ...]
+	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				existingVal := strings.TrimPrefix(node.Value, prefix)
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				node.Value = node.Value + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
+
+	// Handle Mapping (dict) style: { KEY: VAL }
+	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				existingVal := envNode.Content[i+1].Value
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				envNode.Content[i+1].Value = existingVal + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
 }
 
 // Helper to ensure top-level volumes exists

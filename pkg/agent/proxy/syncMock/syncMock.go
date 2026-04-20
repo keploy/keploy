@@ -3,12 +3,22 @@ package manager
 import (
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const defaultMockBufferCapacity = 100
+
+// nopLogger is the fallback when no logger has been installed via
+// SetLogger. zap.L() is NOT safe here — it returns a Nop until the
+// host process has called zap.ReplaceGlobals, and syncMock is a
+// package-level singleton that loads before any such bootstrap.
+// Using a shared Nop avoids per-call allocation on the drop path.
+var nopLogger = zap.NewNop()
 
 func generateRandomString(n int) string {
 	sb := make([]byte, n)
@@ -19,16 +29,39 @@ func generateRandomString(n int) string {
 }
 
 type SyncMockManager struct {
+	// mu guards buffer, firstReqSeen, memoryPause, mappingChan.
 	mu           sync.Mutex
 	buffer       []*models.Mock
-	outChan      chan<- *models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
+	memoryPause  bool
+
+	// outChanMu guards outChan and outChanClosed together. Senders
+	// RLock across the whole read+send; the closer Locks across the
+	// close. This is the only lock protecting outChan — see commit
+	// history of #4045 for the data race this serializes against.
+	outChanMu     sync.RWMutex
+	outChan       chan<- *models.Mock
+	outChanClosed bool
+
+	// dropCount tracks send-path drops caused by outChan being full
+	// past the bounded send budget. Sampled to an Error so customers
+	// get a loud signal without the log-flood anti-pattern. Using
+	// the typed atomic.Uint64 wrapper removes the 32-bit-alignment
+	// footgun that a bare uint64 + sync/atomic.AddUint64 would carry
+	// if this struct ever got embedded or reordered.
+	dropCount atomic.Uint64
+
+	// loggerMu guards logger so SetLogger and the drop path can run
+	// concurrently without a data race. The read lock is taken only
+	// on the (sampled, cold) Error path, so contention is negligible.
+	loggerMu sync.RWMutex
+	logger   *zap.Logger
 }
 
 // Global instance is initialized at package load time
 var instance = &SyncMockManager{
-	buffer:       make([]*models.Mock, 0, 100),
+	buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
 	firstReqSeen: false,
 }
 
@@ -37,11 +70,22 @@ func Get() *SyncMockManager {
 	return instance
 }
 
-// SetOutputChannel allows the Outgoing Proxy to "plug in" the channel later.
+// SetOutputChannel plugs an outgoing mock channel into the manager.
+// Only resets outChanClosed when the channel pointer changes —
+// re-setting the same pointer after CloseOutChan must NOT reopen
+// the closed flag, otherwise a subsequent send would hit a
+// post-close channel and panic. The proxy calls this once per
+// accepted connection with rule.MC (same channel across the whole
+// session), so idempotent same-channel calls are the hot path.
+// A distinct channel pointer means a new session (re-record), and
+// only then do we clear the closed flag.
 func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.outChan = out
+	m.outChanMu.Lock()
+	defer m.outChanMu.Unlock()
+	if out != m.outChan {
+		m.outChan = out
+		m.outChanClosed = false
+	}
 }
 
 func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
@@ -50,21 +94,183 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 	m.mappingChan = ch
 }
 
-func (m *SyncMockManager) AddMock(mock *models.Mock) {
-	m.mu.Lock()
-
-	// storing startup mocks until first request is seen
-	if !m.firstReqSeen && m.outChan != nil {
-		outChan := m.outChan
-		m.mu.Unlock()
-		// Send outside the lock to avoid deadlock: if the channel is
-		// full, holding mu would block AddMock callers and any
-		// ResolveRange call trying to flush the buffer.
-		outChan <- mock
+// SetLogger installs a zap.Logger for drop-path reporting. Callers
+// are expected to wire this once during proxy bootstrap with a
+// process-scoped logger; nil clears it back to the shared Nop.
+// Safe to call concurrently with the send path.
+func (m *SyncMockManager) SetLogger(l *zap.Logger) {
+	if m == nil {
 		return
 	}
-	m.buffer = append(m.buffer, mock)
-	m.mu.Unlock()
+	m.loggerMu.Lock()
+	defer m.loggerMu.Unlock()
+	m.logger = l
+}
+
+// dropLogger returns the active logger for the drop path, falling
+// back to the shared Nop so callers never have to nil-check and an
+// unwired manager is still safe to report against.
+func (m *SyncMockManager) dropLogger() *zap.Logger {
+	m.loggerMu.RLock()
+	defer m.loggerMu.RUnlock()
+	if m.logger == nil {
+		return nopLogger
+	}
+	return m.logger
+}
+
+// sendBudget is how long sendToOutChan will wait for outChan to drain
+// before dropping the mock. 200 ms is sized conservatively: large
+// enough to absorb a GC pause on an oversubscribed CI runner or a
+// transient downstream consumer stall, small enough that shutdown
+// latency (CloseOutChan grabbing the write lock) is imperceptible.
+// The historical code used a non-blocking send with `default: drop`
+// which silently lost pre-first-request mocks under burst —
+// customers saw "some calls didn't replay" with no actionable
+// signal. See the commit that introduced this budget for the
+// customer-facing flake it resolves.
+const sendBudget = 200 * time.Millisecond
+
+// sendDropSampleRate controls Warn emission under sustained overflow.
+// Emitting per-drop under a stuck consumer would flood the log and
+// further starve the very goroutine we're trying to let catch up —
+// the same anti-pattern the Windows redirector hit. Sample every Nth
+// drop so operators still see "something is wrong" without the
+// recorder loop being drowned by its own logging.
+const sendDropSampleRate uint64 = 1024
+
+// sendToOutChan is the single send path to outChan. Holds outChanMu
+// read-lock across the whole observation + send so CloseOutChan (the
+// writer-lock holder) cannot interleave a close between our
+// not-closed check and the chansend.
+//
+// Tries a non-blocking send first (the fast, jitter-free common case
+// where the consumer is keeping up). When the channel is momentarily
+// full, falls through to a bounded block (sendBudget) before
+// dropping. Holding the read-lock across the bounded wait only
+// lengthens CloseOutChan's shutdown path by at most sendBudget —
+// acceptable because every RLock holder is doing the same thing. The
+// alternative (silent drop after zero wait) was the source of a
+// customer-facing recording-loss flake and is strictly worse than a
+// 200 ms worst-case shutdown delay.
+func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
+	m.outChanMu.RLock()
+	defer m.outChanMu.RUnlock()
+	if m.outChanClosed || m.outChan == nil {
+		return
+	}
+	select {
+	case m.outChan <- mock:
+		return
+	default:
+	}
+	// Fast path full. Bounded block so normal scheduling jitter
+	// doesn't cost us a mock.
+	timer := time.NewTimer(sendBudget)
+	select {
+	case m.outChan <- mock:
+		timer.Stop()
+	case <-timer.C:
+		n := m.dropCount.Add(1)
+		if n == 1 || n%sendDropSampleRate == 0 {
+			m.dropLogger().Error(
+				"syncMock outChan overflow; mock dropped — raise consumer throughput or increase outChan capacity",
+				zap.Uint64("dropsSoFar", n),
+				zap.Int("outChanCap", cap(m.outChan)),
+				zap.Duration("budget", sendBudget),
+			)
+		}
+	}
+}
+
+// DropCount exposes the cumulative drop counter for tests and
+// external observability. The value is monotonically increasing;
+// readers that need a delta should snapshot and diff.
+func (m *SyncMockManager) DropCount() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.dropCount.Load()
+}
+
+func (m *SyncMockManager) AddMock(mock *models.Mock) {
+	// Unification (Phase 1): resolve the live mock's Lifetime immediately
+	// on entry so the buffered mock carries a correctly-typed
+	// TestModeInfo.Lifetime into whichever downstream consumer drains
+	// syncMock next (persistence writer, downstream agent via outChan,
+	// etc.). Cheap — single map probe — and removes the need for
+	// downstream code to call DeriveLifetime defensively.
+	if mock != nil {
+		mock.DeriveLifetime()
+	}
+	m.mu.Lock()
+	if m.memoryPause {
+		m.mu.Unlock()
+		return
+	}
+
+	// Decide forward vs buffer vs drop under a single snapshot of
+	// (outChan, outChanClosed). The trio has three legal outcomes:
+	//
+	//   closed          → drop (shutdown in progress, buffer would leak)
+	//   unbound (nil)   → buffer (SetOutputChannel hasn't fired yet;
+	//                     ResolveRange will emit once bound)
+	//   bound + open    → forward via sendToOutChan, unless we're
+	//                     past firstReqSeen in which case the mock
+	//                     belongs in the dedup buffer for windowing
+	bound, closed := m.outChanStatus()
+	switch {
+	case closed:
+		m.mu.Unlock()
+		return
+	case bound && !m.firstReqSeen:
+		m.mu.Unlock()
+		m.sendToOutChan(mock)
+		return
+	default:
+		m.buffer = append(m.buffer, mock)
+		m.mu.Unlock()
+	}
+}
+
+// outChanStatus snapshots (bound, closed) under outChanMu.RLock so
+// AddMock's fork decision sees a consistent pair.
+func (m *SyncMockManager) outChanStatus() (bound, closed bool) {
+	m.outChanMu.RLock()
+	defer m.outChanMu.RUnlock()
+	return m.outChan != nil && !m.outChanClosed, m.outChanClosed
+}
+
+// SendConfigMock forwards a config mock directly to the outgoing
+// channel, bypassing the firstReqSeen buffering that AddMock does.
+// DNS is the only caller today: it recognizes queries by a
+// (name, qtype) dedupe key and wants every unique query mocked the
+// first time it's seen, regardless of whether the first app request
+// has already fired. Shares the same outChanMu guard as AddMock so
+// DNS sends also stay safe against proxy shutdown.
+func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
+	if m == nil {
+		return
+	}
+	m.sendToOutChan(mock)
+}
+
+// CloseOutChan closes the outgoing mock channel under the writer
+// lock so an in-flight sendToOutChan cannot race the close.
+// Idempotent; safe to call with outChan still nil.
+func (m *SyncMockManager) CloseOutChan() {
+	if m == nil {
+		return
+	}
+	m.outChanMu.Lock()
+	defer m.outChanMu.Unlock()
+	if m.outChanClosed {
+		return
+	}
+	if m.outChan != nil {
+		close(m.outChan)
+	}
+	m.outChanClosed = true
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -78,17 +284,44 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	defer m.mu.Unlock()
 	return m.firstReqSeen
 }
+
+func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.memoryPause = enabled
+	if !enabled {
+		return
+	}
+
+	for i := range m.buffer {
+		m.buffer[i] = nil
+	}
+	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
+}
+
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
-	// Collect mocks and mapping data under the lock, then send to channels
-	// AFTER releasing it. Sending while holding mu can deadlock: the channel
-	// consumer (e.g. gob encoder in HandleOutgoing) may block, and a
-	// concurrent AddMock caller waiting on mu would stall the pipeline.
+	// Collect mocks and mapping data under the lock, then send to the
+	// outgoing channels AFTER releasing it. Holding m.mu across a
+	// channel send can deadlock on ordering: a buffer-full outChan
+	// would keep mu held, blocking every AddMock waiting to enqueue.
+	// We have outChanMu (inside sendToOutChan) to guard the actual
+	// send against close, so m.mu release here is safe.
 	var mocksToSend []*models.Mock
 	var associatedMockIDs []string
 	var mappingEntry *models.TestMockMapping
 
 	m.mu.Lock()
-	outChan := m.outChan
+	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
+	// so we don't race SetOutputChannel / CloseOutChan. Only the
+	// bound boolean is needed — the actual send later goes through
+	// sendToOutChan which reacquires the RLock and will skip the
+	// send itself when outChanClosed is true.
+	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
@@ -109,9 +342,16 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
-				// If output channel is not wired yet, keep matching mocks buffered
-				// so they can be emitted later instead of blocking on a nil channel.
-				if outChan == nil {
+				// If output channel is not wired yet, keep matching
+				// mocks buffered so they can be emitted later instead
+				// of blocking on a nil channel. Shutdown-vs-normal
+				// distinction is left to sendToOutChan (it no-ops
+				// silently on outChanClosed), so we don't pre-drop
+				// here — dropping in ResolveRange masked legitimate
+				// mocks from the mongo fuzzer when CloseOutChan
+				// fired between outChanStatus and the send (see
+				// #4045 CI regression on record_build_replay_latest).
+				if !outChanBound {
 					m.buffer[keepIdx] = mock
 					keepIdx++
 					continue
@@ -125,8 +365,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			continue
 		}
 
-		// RETENTION: Keep the mock if it's recent (within 7s) but didn't match this specific window.
-		// It might be matched by a future out-of-order request.
+		// RETENTION: Keep the mock if it's recent (within 7s) but
+		// didn't match this specific window. It might be matched
+		// by a future out-of-order request.
 		m.buffer[keepIdx] = mock
 		keepIdx++
 	}
@@ -148,12 +389,18 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 
 	m.mu.Unlock()
 
-	// Send mocks and mapping outside the lock to avoid deadlock.
+	// Route mock sends through sendToOutChan so the close-vs-send
+	// race is serialized the same way AddMock does it. Mapping
+	// channel is never closed by the shutdown path today — if that
+	// ever changes, lift the mapping send under an equivalent guard.
 	for _, mock := range mocksToSend {
-		outChan <- mock
+		m.sendToOutChan(mock)
 	}
 	if mappingEntry != nil && mappingChan != nil {
-		mappingChan <- *mappingEntry
+		select {
+		case mappingChan <- *mappingEntry:
+		default:
+		}
 	}
 }
 
