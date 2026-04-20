@@ -79,40 +79,6 @@ func useGobMockFormat() bool {
 	return configuredMockFormat == mockFormatGob
 }
 
-// resolveMockFormat picks the on-disk format for a single mock. Per-mock
-// overrides win over the process-wide default; an empty string falls back
-// to the testset-level format (useGobMockFormat). Callers on the write
-// path use this to route a single mock through the gob or yaml writer
-// independent of what the session's default format is. This is what
-// enables the DaemonSet per-session mockFormat: two concurrent
-// RecordingSessions writing into different test-set directories can
-// each tag their mocks with the desired format even though the mockdb
-// package-level configuredMockFormat is process-global.
-//
-// Valid per-mock formats are "yaml" and "gob". Any other non-empty
-// value falls through to the process-wide default — we prefer to
-// preserve mocks over failing the write when a stale or typo'd format
-// slips in from a user-facing CR.
-//
-// Constraint: the read/prune paths (GetFilteredMocks / GetUnFilteredMocks /
-// UpdateMocks) prefer mocks.gob by file presence and do not merge a
-// sibling mocks.yaml when both exist in one test-set directory. A single
-// test-set is therefore required to be uniformly one format; InsertMock
-// enforces that at write time by rejecting a mock whose resolved format
-// disagrees with any already-written file in the test-set directory.
-// Sessions that need to mix formats must route to sibling test-set
-// directories (the DaemonSet per-session flow).
-func resolveMockFormat(perMock string) bool {
-	switch perMock {
-	case mockFormatGob:
-		return true
-	case "yaml":
-		return false
-	default:
-		return useGobMockFormat()
-	}
-}
-
 type MockYaml struct {
 	MockPath  string
 	MockName  string
@@ -650,12 +616,12 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// without mutating package-level state. Unset / unrecognised =>
 	// fall back to the already-locked testset format when one exists,
 	// else to useGobMockFormat (the pre-DS behaviour). The lock-aware
-	// fallback matters because resolveMockFormat alone would route a
-	// typo like Format="gbo" to the process default even when the
-	// testset is already locked to the opposite format — turning an
-	// unknown value into a mixed-format rejection instead of the
-	// graceful inherit-the-lock behaviour the surrounding docs
-	// promise.
+	// fallback matters because a plain per-mock → process-default
+	// routing would send a typo like Format="gbo" to the process
+	// default even when the testset is already locked to the opposite
+	// format — turning an unknown value into a mixed-format rejection
+	// instead of the graceful inherit-the-lock behaviour the
+	// surrounding docs promise.
 	//
 	// Reject a mock whose resolved format disagrees with whatever is
 	// already claimed for this test-set. Without this check InsertMock
@@ -707,14 +673,12 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		}
 	}
 
-	// Pick writeGob with the three-step lock-aware policy. The legacy
-	// resolveMockFormat is kept for callers that do not have a
-	// testSetID in hand; here we inline the policy so an unrecognised
-	// per-mock value (e.g. a typo'd "gbo") inherits the testset's
-	// already-locked format instead of silently bouncing off the
-	// mixed-format guard. Recognised overrides still win — a caller
-	// that explicitly asks for "gob" on a yaml-locked testset gets
-	// the mixed-format error below, which is the intended guard.
+	// Pick writeGob with the three-step lock-aware policy: an
+	// unrecognised per-mock value (e.g. a typo'd "gbo") inherits the
+	// testset's already-locked format instead of silently bouncing off
+	// the mixed-format guard. Recognised overrides still win — a caller
+	// that explicitly asks for "gob" on a yaml-locked testset gets the
+	// mixed-format error below, which is the intended guard.
 	//
 	// The unknown-format branch is resolved with an atomic
 	// LoadOrStore rather than a read-then-write pair so a racing

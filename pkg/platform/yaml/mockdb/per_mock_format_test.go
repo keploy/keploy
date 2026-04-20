@@ -1,38 +1,11 @@
-// Coverage for the per-mock Format override (task #225 / DaemonSet
-// Phase 0 per-session mock format) and its mixed-format guard. Tests:
-//
-//  1. TestPerMockFormat_RouteSelection — table-driven InsertMock
-//     routing: empty Format falls back to the testset-level format
-//     (yaml for the fixture), explicit "yaml" matches the default,
-//     "gob" routes a single mock to mocks.gob, and an unknown value
-//     ("xml") falls through to the testset default rather than
-//     erroring, which is what unblocks multi-session DS flows.
-//
-//  2. TestPerMockFormat_WireRoundTrip — encode/decode preservation
-//     of the Format field through the EncodeMock -> yaml.Marshal ->
-//     yaml.Unmarshal -> DecodeMocks path, including byte-level
-//     omitempty checks on the `format:` line. Pure function test,
-//     no filesystem.
-//
-//  3. TestPerMockFormat_DeepCopyPreserves — regression guard that
-//     models.Mock.DeepCopy carries the Format field through, so the
-//     async gob writer's deep-copy-before-enqueue step cannot drop
-//     the override mid-flight.
-//
-//  4. TestInsertMock_RejectsMixedFormat — both directions (yaml then
-//     gob, gob then yaml) of the single-testset-one-format contract.
-//     Read/prune paths prefer mocks.gob by file presence and never
-//     merge a sibling mocks.yaml, so InsertMock must reject the
-//     second-format write; the assertion covers both the error
-//     message and that no sibling file was created.
-//
-//  5. TestInsertMock_RaceFreeMixedFormatGuard — race-window coverage
-//     for the in-process guard: a gob InsertMock enqueues to the
-//     async writer without waiting for gobReopenLocked to create
-//     mocks.gob on disk, and an immediately-following yaml InsertMock
-//     in the same goroutine must still be rejected by the in-memory
-//     per-testSetID format map rather than racing the async file
-//     creation.
+// per_mock_format_test.go covers the per-mock Format override feature
+// (slice #225 "P0 per-session mock format") and its mixed-format guard:
+// routing policy (recognized / locked-testset / process-default),
+// wire round-trip through YAML encode/decode, deep-copy preservation
+// for async gob writes, mixed-format rejection, race safety against
+// the async gob writer, locked-testset inheritance for unknown formats,
+// concurrent explicit-vs-unknown format ordering, and lock cleanup
+// after DeleteMocksForSet.
 package mockdb
 
 import (
@@ -323,9 +296,9 @@ func TestInsertMock_RejectsMixedFormat(t *testing.T) {
 // Scenario: process default is gob (simulating a run with
 // KEPLOY_MOCK_FORMAT=gob), but the first InsertMock for testSetID
 // "t1" explicitly asks for yaml — locking t1 to yaml. A follow-up
-// InsertMock with Format="gbo" (typo) would, under the old
-// resolveMockFormat-only policy, route to the process default (gob)
-// and be rejected by the mixed-format guard, dropping the mock. The
+// InsertMock with Format="gbo" (typo) would, under a plain per-mock
+// → process-default policy, route to the process default (gob) and
+// be rejected by the mixed-format guard, dropping the mock. The
 // lock-aware policy routes it to the locked format instead and
 // appends cleanly into mocks.yaml, preserving the recording.
 func TestInsertMock_UnknownFormatHonorsLockedTestset(t *testing.T) {
