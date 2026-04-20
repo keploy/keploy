@@ -154,6 +154,25 @@ type MockYaml struct {
 	// instead of silently losing the tail of mocks.gob on a disk-full
 	// or permission-change shutdown.
 	gobFlushErr error
+
+	// testSetFormat tracks the format chosen by the first InsertMock
+	// call for each testSetID within this MockYaml. Subsequent
+	// InsertMock calls for the same testSetID must agree with the
+	// stored value; a mismatch is rejected synchronously before any
+	// I/O. The map is a race-free in-process guard that complements
+	// — but does not replace — the os.Stat check on mocks.gob /
+	// mocks.yaml further down. The stat check is still needed on a
+	// fresh MockYaml (cross-process restart against an already-
+	// populated test-set directory), but the stat alone cannot close
+	// the intra-process race: the gob writer is async, so an
+	// InsertMock(gob) returns before gobReopenLocked creates the
+	// file, and a tightly-following InsertMock(yaml) for the same
+	// testSetID would see ENOENT on mocks.gob and happily create
+	// mocks.yaml alongside the still-queued gob write. The readers
+	// prefer mocks.gob and silently ignore mocks.yaml in that case,
+	// so the yaml mocks vanish at replay. The sync.Map's
+	// LoadOrStore is the primary guard; true = gob, false = yaml.
+	testSetFormat sync.Map
 }
 
 type gobWriteJob struct {
@@ -619,31 +638,65 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	writeGob := resolveMockFormat(mock.Format)
 
 	// Reject a mock whose resolved format disagrees with whatever is
-	// already on disk for this test-set. Without this check InsertMock
+	// already claimed for this test-set. Without this check InsertMock
 	// would happily create a second file (mocks.gob next to mocks.yaml,
 	// or vice versa) which the reader/pruner paths then silently ignore
 	// (they pick gob over yaml by file presence and never merge).
 	// Forcing one format per test-set keeps the write-side and read-
 	// side views identical and fails fast at record time instead of at
-	// replay with missing mocks. File existence (not size) is the
-	// correct signal here: the gob writer is async-buffered, so the
-	// file is created by gobReopenLocked before any bytes hit disk —
-	// a size-based check would miss that window and let a yaml
-	// InsertMock slip in before the first gob flush.
+	// replay with missing mocks.
+	//
+	// Two guards, layered: (1) an in-memory per-testSetID map
+	// (testSetFormat) that wins the race against the async gob
+	// writer, and (2) an os.Stat of mocks.gob / mocks.yaml that
+	// rehydrates the in-memory map on a fresh MockYaml (cross-
+	// process restart against an already-populated directory).
+	//
+	// Why the stat alone is insufficient: the gob writer is async-
+	// buffered. InsertMock(gob) enqueues a job and returns before
+	// gobReopenLocked creates mocks.gob, so an immediately-following
+	// InsertMock(yaml) for the same testSetID would see ENOENT on
+	// mocks.gob, pass the stat, and create mocks.yaml alongside the
+	// still-queued gob write. Readers prefer mocks.gob, so the yaml
+	// mocks silently disappear at replay. The sync.Map's atomic
+	// LoadOrStore closes that window by synchronously binding the
+	// testSetID to a format on the very first call, regardless of
+	// how slowly the gob writer gets around to the file creation.
 	yamlFile := filepath.Join(mockPath, mockFileName+".yaml")
 	gobFile := filepath.Join(mockPath, mockFileName+".gob")
-	if writeGob {
-		if _, statErr := os.Stat(yamlFile); statErr == nil {
-			return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
+
+	// Rehydrate the in-memory format binding from on-disk state on
+	// the first InsertMock for this testSetID in this process. If a
+	// file already exists from a previous process (or from a prior
+	// Close/re-open cycle on this MockYaml), lock its format in
+	// before we evaluate writeGob. LoadOrStore makes this idempotent
+	// across concurrent callers: only one stat-derived Store wins,
+	// subsequent callers observe the stored value unchanged. File
+	// existence (not size) is the right signal here: the gob writer
+	// creates mocks.gob before the first flush, so a size check
+	// would race the async writer.
+	if _, loaded := ys.testSetFormat.Load(testSetID); !loaded {
+		if _, statErr := os.Stat(gobFile); statErr == nil {
+			ys.testSetFormat.LoadOrStore(testSetID, true)
+		} else if !os.IsNotExist(statErr) {
+			return fmt.Errorf("mockdb: failed to verify whether gob mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, gobFile, statErr)
+		} else if _, statErr := os.Stat(yamlFile); statErr == nil {
+			ys.testSetFormat.LoadOrStore(testSetID, false)
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("mockdb: failed to verify whether yaml mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, yamlFile, statErr)
 		}
-	} else {
-		if _, statErr := os.Stat(gobFile); statErr == nil {
-			return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
-		} else if !os.IsNotExist(statErr) {
-			return fmt.Errorf("mockdb: failed to verify whether gob mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, gobFile, statErr)
+	}
+
+	// Primary guard: atomic claim-or-check on the in-memory map.
+	// This is race-free against a still-in-flight async gob writer
+	// and against another goroutine's concurrent InsertMock for the
+	// same testSetID, because LoadOrStore is documented as atomic.
+	actual, loaded := ys.testSetFormat.LoadOrStore(testSetID, writeGob)
+	if loaded && actual.(bool) != writeGob {
+		if writeGob {
+			return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
 		}
+		return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
 	}
 
 	if writeGob {

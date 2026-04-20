@@ -1,20 +1,38 @@
-// Table-driven coverage for the per-mock Format override (task #225 /
-// DaemonSet Phase 0 per-session mock format). Three cases:
+// Coverage for the per-mock Format override (task #225 / DaemonSet
+// Phase 0 per-session mock format) and its mixed-format guard. Tests:
 //
-//  1. Empty Format field falls back to the testset-level format (yaml
-//     here, exercised with a fresh MockYaml that was not configured
-//     for gob). The mock lands in mocks.yaml and carries no Format
-//     on disk.
+//  1. TestPerMockFormat_RouteSelection — table-driven InsertMock
+//     routing: empty Format falls back to the testset-level format
+//     (yaml for the fixture), explicit "yaml" matches the default,
+//     "gob" routes a single mock to mocks.gob, and an unknown value
+//     ("xml") falls through to the testset default rather than
+//     erroring, which is what unblocks multi-session DS flows.
 //
-//  2. A per-mock Format="gob" override routes one mock to mocks.gob
-//     even though the testset-level format is yaml — this is the case
-//     that unblocks multi-session DS (one session writing gob while
-//     another writes yaml into a sibling test-set directory).
+//  2. TestPerMockFormat_WireRoundTrip — encode/decode preservation
+//     of the Format field through the EncodeMock -> yaml.Marshal ->
+//     yaml.Unmarshal -> DecodeMocks path, including byte-level
+//     omitempty checks on the `format:` line. Pure function test,
+//     no filesystem.
 //
-//  3. Round-trip preserves the field: encode a mock with Format set
-//     through the platform/yaml EncodeMock -> DecodeMocks path and
-//     assert the field survives the wire-format hop. (Pure function
-//     test, no filesystem.)
+//  3. TestPerMockFormat_DeepCopyPreserves — regression guard that
+//     models.Mock.DeepCopy carries the Format field through, so the
+//     async gob writer's deep-copy-before-enqueue step cannot drop
+//     the override mid-flight.
+//
+//  4. TestInsertMock_RejectsMixedFormat — both directions (yaml then
+//     gob, gob then yaml) of the single-testset-one-format contract.
+//     Read/prune paths prefer mocks.gob by file presence and never
+//     merge a sibling mocks.yaml, so InsertMock must reject the
+//     second-format write; the assertion covers both the error
+//     message and that no sibling file was created.
+//
+//  5. TestInsertMock_RaceFreeMixedFormatGuard — race-window coverage
+//     for the in-process guard: a gob InsertMock enqueues to the
+//     async writer without waiting for gobReopenLocked to create
+//     mocks.gob on disk, and an immediately-following yaml InsertMock
+//     in the same goroutine must still be rejected by the in-memory
+//     per-testSetID format map rather than racing the async file
+//     creation.
 package mockdb
 
 import (
@@ -272,11 +290,12 @@ func TestInsertMock_RejectsMixedFormat(t *testing.T) {
 		if err := ys.InsertMock(context.Background(), newHTTPMock("gob"), "set-0"); err != nil {
 			t.Fatalf("first InsertMock (gob): %v", err)
 		}
-		// The gob writer is async: InsertMock returns after enqueue
-		// but before gobReopenLocked has actually created mocks.gob
-		// on disk. Close() drains the queue + flushes the file, so
-		// the subsequent stat-based rejection is deterministic.
-		// Pre-close races were possible without this step.
+		// Close() drains the async gob writer so the file is
+		// present on disk for this variant. The race-free
+		// in-memory guard (sync.Map in MockYaml) would catch the
+		// rejection even without this Close — see
+		// TestInsertMock_RaceFreeMixedFormatGuard — but draining
+		// here exercises the on-disk side of the guard too.
 		if err := ys.Close(); err != nil {
 			t.Fatalf("Close after gob insert: %v", err)
 		}
@@ -291,4 +310,72 @@ func TestInsertMock_RejectsMixedFormat(t *testing.T) {
 			t.Fatalf("mocks.yaml was created despite the mixed-format rejection")
 		}
 	})
+}
+
+// TestInsertMock_RaceFreeMixedFormatGuard exercises the race window
+// that the on-disk os.Stat check alone cannot close: the gob writer
+// is asynchronous, so InsertMock(gob) enqueues a job and returns
+// before gobReopenLocked has created mocks.gob on disk. A
+// tightly-following InsertMock(yaml) for the same testSetID in the
+// same goroutine must still be rejected — otherwise it would stat
+// mocks.gob, get ENOENT, and create mocks.yaml alongside the
+// still-queued gob write, at which point the readers (which prefer
+// mocks.gob by file presence) would silently drop the yaml mocks at
+// replay.
+//
+// The test deliberately does NOT call ys.Close() between the two
+// InsertMock calls. That would drain the gob writer and materialise
+// mocks.gob on disk, which would turn this into a cover of the
+// TestInsertMock_RejectsMixedFormat case. What we want here is the
+// intra-process, pre-flush window — the bug the in-memory sync.Map
+// guard in MockYaml was added for.
+func TestInsertMock_RaceFreeMixedFormatGuard(t *testing.T) {
+	// Guard against pollution from sibling tests.
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	// Drain the writer at the end of the test so the goroutine and
+	// any open file descriptors are released even though the test
+	// itself deliberately does not invoke Close mid-flight.
+	t.Cleanup(func() {
+		if err := ys.Close(); err != nil {
+			t.Errorf("deferred Close: %v", err)
+		}
+	})
+
+	// First insert: gob. The async writer may or may not have run
+	// the creation side by the time InsertMock returns — the point
+	// is that the subsequent yaml insert must be rejected either
+	// way, and crucially in the "writer hasn't flushed yet" slice
+	// of that either-way.
+	if err := ys.InsertMock(context.Background(), newHTTPMock("gob"), "set-0"); err != nil {
+		t.Fatalf("first InsertMock (gob): %v", err)
+	}
+
+	// Second insert: yaml, same testSetID, same goroutine, no
+	// Close() in between. With only the os.Stat guard in place this
+	// call could observe ENOENT on mocks.gob and proceed to create
+	// mocks.yaml. The in-memory sync.Map guard catches it
+	// deterministically.
+	err := ys.InsertMock(context.Background(), newHTTPMock("yaml"), "set-0")
+	if err == nil {
+		t.Fatalf("expected InsertMock(yaml) to fail after same-testset gob insert, got nil")
+	}
+	if !strings.Contains(err.Error(), "uniform per-testset format required") {
+		t.Fatalf("error message missing uniform-format hint: %v", err)
+	}
+
+	// Crucially: mocks.yaml must not have been created by the
+	// rejected call. Check before Close so a late writer flush
+	// cannot mask a buggy write path.
+	yamlPath := filepath.Join(dir, "set-0", "mocks.yaml")
+	if _, statErr := os.Stat(yamlPath); statErr == nil {
+		t.Fatalf("mocks.yaml was created despite the race-free mixed-format rejection")
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected error statting %s: %v", yamlPath, statErr)
+	}
 }
