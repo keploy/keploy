@@ -27,7 +27,7 @@ jobs:
           sudo apt -y install build-essential gcc libc-dev     
 
       - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -81,7 +81,7 @@ jobs:
       runner: ${{ inputs.runner }}
       jobs_to_run: 'private_only'
   run_fuzzer_linux:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     with:
