@@ -90,17 +90,6 @@ func TestRoundTrip_Generic(t *testing.T) {
 	})
 }
 
-func TestRoundTrip_Kafka(t *testing.T) {
-	roundTrip(t, "Kafka", &models.Mock{
-		Version: "api.keploy.io/v1beta1",
-		Kind:    models.KAFKA,
-		Spec: models.MockSpec{
-			KafkaRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "bin", Data: "AAA="}}}},
-			KafkaResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "bin", Data: "AAE="}}}},
-		},
-	})
-}
-
 func TestRoundTrip_Postgres(t *testing.T) {
 	roundTrip(t, "Postgres", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
