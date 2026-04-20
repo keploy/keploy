@@ -94,12 +94,13 @@ type MockYaml struct {
 	// "quiesced"; gobRunning tracks which state we are in. The
 	// writer can transition from quiesced back to running via
 	// insertMockGob's inline init when a fresh MockYaml receives
-	// its first gob mock — but Close itself is terminal (it sets
-	// ys.closed=true and InsertMock refuses further writes on the
-	// same instance). Re-record / multi-session flows must build a
-	// fresh MockYaml after Close; only updateMocksGob (replay-side
-	// pruning) legitimately calls Close mid-instance, and its own
-	// file rewrite does not go through InsertMock.
+	// its first gob mock. Close drains the queue and flushes the
+	// file, and is safe to call multiple times on the same
+	// instance — a subsequent InsertMock on a drained MockYaml
+	// simply re-inits the writer on demand. updateMocksGob
+	// (replay-side pruning) calls Close mid-instance to quiesce
+	// the writer before rewriting the file via tmp+rename; its
+	// own file rewrite does not go through InsertMock.
 	gobLifecycleMu sync.Mutex
 	gobRunning     bool
 	gobQueue       chan gobWriteJob
@@ -132,37 +133,15 @@ type MockYaml struct {
 	// — but does not replace — the os.Stat check on mocks.gob /
 	// mocks.yaml further down. The stat check is still needed on a
 	// fresh MockYaml (cross-process restart against an already-
-	// populated test-set directory), but the stat alone cannot close
-	// the intra-process race: the gob writer is async, so an
-	// InsertMock(gob) returns before gobReopenLocked creates the
-	// file, and a tightly-following InsertMock(yaml) for the same
-	// testSetID would see ENOENT on mocks.gob and happily create
-	// mocks.yaml alongside the still-queued gob write. The readers
-	// prefer mocks.gob and silently ignore mocks.yaml in that case,
-	// so the yaml mocks vanish at replay. The sync.Map's
+	// populated test-set directory), and — because Close drains the
+	// async gob writer BEFORE clearing this map (see Close below) —
+	// the stat alone is also sufficient to close the intra-process
+	// race: by the time the map is cleared, every queued gob write
+	// has materialised on disk, so a follow-up InsertMock(yaml)
+	// observing a cleared entry will find the real mocks.gob via
+	// os.Stat and bounce off the mixed-format guard. The sync.Map's
 	// LoadOrStore is the primary guard; true = gob, false = yaml.
 	testSetFormat sync.Map
-
-	// closed is set to true by Close() as its FIRST action, before
-	// any teardown begins. Every public mutating method (InsertMock,
-	// DeleteMocksForSet, UpdateMocks) consults this flag on entry
-	// and refuses to proceed if it is already set. This closes the
-	// Close-vs-concurrent-InsertMock(yaml) race:
-	//
-	// The YAML InsertMock path does not take gobLifecycleMu — only
-	// the gob path does — so without this gate, Close could clear
-	// testSetFormat while a yaml InsertMock is mid-flight, and
-	// another yaml InsertMock that arrives after the clear would
-	// see ENOENT on mocks.gob (the pending gob write may not have
-	// materialised yet) and create mocks.yaml alongside the still-
-	// queued gob write. With closed=true set before any teardown,
-	// any InsertMock that arrives at or after the store sees the
-	// closed flag and returns early, so it can never bypass the
-	// guard during the teardown window.
-	//
-	// atomic.Bool (Go 1.19+) is used because sync/atomic is already
-	// imported for gobOverflows and idCounter; no extra dependency.
-	closed atomic.Bool
 }
 
 type gobWriteJob struct {
@@ -471,13 +450,11 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// rewrite the gob file. An active writer holds ys.gobFile /
 	// ys.gobBufw / ys.gobEnc; rewriting the file out from under it
 	// would corrupt the next Encode. Close drains the queue and
-	// flushes the file. Close is terminal (ys.closed is set to true
-	// and InsertMock rejects further writes); this is safe here
-	// because UpdateMocks is a replay-side operation — the replay
-	// MockYaml instance is never subsequently used as a record sink.
-	// Any future prune pass on this same instance still works
-	// because updateMocksGob rewrites mocks.gob via tmp+rename
-	// rather than via InsertMock.
+	// flushes the file. Close is re-entrant on this instance: a
+	// future InsertMock would re-init the writer on demand, but
+	// UpdateMocks is a replay-side operation so no InsertMock is
+	// expected to follow. The tmp+rename rewrite below is the only
+	// subsequent write to the gob path.
 	if err := ys.Close(); err != nil {
 		utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before pruning; check disk space and writer state", zap.String("path", gobPath))
 		return err
@@ -644,19 +621,6 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // that need to mix formats must route to sibling test-set directories
 // (the DaemonSet per-session flow).
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	// Reject any InsertMock that arrives at or after Close() has
-	// started its teardown. Close sets ys.closed as its FIRST action
-	// (before clearing testSetFormat or touching the async gob
-	// writer), so an atomic Load here is sufficient to stop the
-	// yaml-path race: a yaml InsertMock that slipped past the guard
-	// would otherwise observe a cleared testSetFormat + an ENOENT on
-	// mocks.gob (the queued gob write may not have flushed yet) and
-	// create mocks.yaml next to the still-pending mocks.gob. With
-	// this check in place, any caller that sees closed=true bails
-	// before stating or writing anything.
-	if ys.closed.Load() {
-		return fmt.Errorf("mockdb: InsertMock called on closed MockYaml (testSetID=%q)", testSetID)
-	}
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
@@ -1096,17 +1060,17 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // long-lived processes (DaemonSet mode, multi-session recorders)
 // where the typical shutdown path never hits DeleteMocksForSet.
 //
-// Concurrency contract: this helper is only safe to call once Close
-// has (a) stored ys.closed=true so every public mutating path bails
-// before touching testSetFormat, and (b) drained the async gob
-// writer so every queued mocks.gob has materialised on disk. With
-// those preconditions, no concurrent InsertMock can repopulate the
-// map during the Range/Delete walk, and the stat-based rehydrate
-// path on a subsequent fresh MockYaml will still observe the on-disk
-// format correctly. The earlier doc comment claimed that holding
-// gobLifecycleMu was sufficient — that was incorrect because the
-// yaml InsertMock path never takes gobLifecycleMu; the ys.closed
-// gate is what actually makes the map-clear race-safe.
+// Concurrency contract ("drain-before-clear"): this helper must be
+// called only AFTER Close has drained the async gob writer so every
+// queued mocks.gob has materialised on disk. With that precondition
+// the on-disk stat rehydrate in a concurrent-or-subsequent
+// InsertMock will observe the real mocks.gob and bounce off the
+// mixed-format guard — even if that InsertMock arrives between the
+// clear and Close returning. Without drain-before-clear, the map
+// could be stripped while a pending gob write was still in the
+// queue, and a concurrent InsertMock(yaml) would see both ENOENT on
+// mocks.gob and a cleared map, then happily create mocks.yaml
+// alongside the still-queued gob write.
 func (ys *MockYaml) clearTestSetFormats() {
 	ys.testSetFormat.Range(func(key, _ any) bool {
 		ys.testSetFormat.Delete(key)
@@ -1114,55 +1078,42 @@ func (ys *MockYaml) clearTestSetFormats() {
 	})
 }
 
-// Close drains the async gob writer, flushes the file, and marks
-// this MockYaml instance as terminal. Once Close has stored
-// ys.closed=true, any subsequent InsertMock / DeleteMocksForSet on
-// the same instance returns an error instead of racing the teardown.
-// Close itself is idempotent and safe to call multiple times — the
-// second call is a no-op once gobRunning is cleared.
+// Close drains the async gob writer, flushes the file, and clears
+// the in-memory per-testset format map. It is idempotent and safe
+// to call multiple times — the second call is a no-op once
+// gobRunning is cleared. Close does NOT block subsequent InsertMock
+// or DeleteMocksForSet calls on the same instance: a re-record flow
+// (--rerecord) legitimately calls DeleteMocksForSet after a Close/
+// reopen cycle, and updateMocksGob calls Close mid-instance to
+// quiesce the writer before rewriting mocks.gob; both must be able
+// to continue operating on the same MockYaml.
 //
-// Why Close is terminal (R9 fix): the yaml InsertMock path does not
-// take gobLifecycleMu (only the gob path does). Previously Close
-// cleared testSetFormat BEFORE draining the async writer, which left
-// a window where a concurrent InsertMock(yaml) could observe the
-// cleared map plus an ENOENT on the still-queued mocks.gob and
-// create mocks.yaml alongside it — producing a mixed-format on-disk
-// state the readers cannot cope with. The closed gate blocks that
-// second InsertMock cold; the clear is then postponed until AFTER
-// the writer has drained, so every testSetFormat entry whose lock
-// points at a pending gob write has had its file materialise by the
-// time the map is walked.
+// Race safety ("drain-before-clear"): the yaml InsertMock path does
+// not take gobLifecycleMu (only the gob path does). If Close cleared
+// testSetFormat BEFORE draining the async writer, a concurrent
+// InsertMock(yaml) could observe the cleared map plus an ENOENT on
+// the still-queued mocks.gob and create mocks.yaml alongside the
+// pending gob write — a mixed-format on-disk state the readers
+// cannot cope with. This function therefore orders teardown as:
+//
+//   t0: Close drains the async gob writer  (mocks.gob fully on disk)
+//   t1: Close calls clearTestSetFormats    (stat rehydrate sees real mocks.gob)
+//
+// By the time the map is cleared, every pending gob write has
+// materialised, so any concurrent InsertMock(yaml) racing the clear
+// will find the real mocks.gob via os.Stat and bounce off the
+// mixed-format guard. No "closed" flag is needed — the ordering
+// alone closes the race.
 //
 // Close also clears the in-memory per-testset format map so long-
 // lived processes (DaemonSet mode, a multi-session Recorder) do not
 // grow the sync.Map unboundedly. Typical record flows terminate a
 // session with Close, not DeleteMocksForSet, so without this clear
 // every test-set ever touched would leak an entry for the full
-// lifetime of the process. Multi-session workflows must build a
-// fresh MockYaml per session (via New) — Close cannot be reused as
-// a restart point, because that would re-introduce the race the
-// closed gate was added to close. The rehydrate path in InsertMock
-// (os.Stat on mocks.gob / mocks.yaml) still handles a fresh
-// MockYaml pointed at an existing test-set directory correctly.
+// lifetime of the process. The rehydrate path in InsertMock (os.Stat
+// on mocks.gob / mocks.yaml) handles the cleared-map case correctly
+// for subsequent inserts on the same or a fresh MockYaml.
 func (ys *MockYaml) Close() error {
-	// Set the closing gate as the VERY FIRST action — before any lock
-	// or teardown. Every public mutating path (InsertMock /
-	// DeleteMocksForSet / UpdateMocks) consults ys.closed on entry and
-	// bails if it is already set. Doing this before we acquire
-	// gobLifecycleMu or touch testSetFormat blocks new inserts from
-	// slipping past the format guard during the teardown window:
-	//
-	//   t0: Close stores closed=true            <-- new inserts rejected here
-	//   t1: Close drains the async gob writer   (mocks.gob fully on disk)
-	//   t2: Close calls clearTestSetFormats     (safe — no new entries can arrive)
-	//
-	// Without the t0 store, step t2 could strip a live yaml testset's
-	// lock while the gob writer's mocks.gob hasn't materialised yet;
-	// a concurrent InsertMock(yaml) path (which does NOT take
-	// gobLifecycleMu) would then stat the missing mocks.gob, pass the
-	// mixed-format guard, and create mocks.yaml alongside the still-
-	// queued gob write.
-	ys.closed.Store(true)
 	// Hold the lifecycle lock for the entire teardown. While we wait
 	// for the writer goroutine to drain, no concurrent InsertMock
 	// can start a new writer — ys.gobRunning stays true and
@@ -1178,8 +1129,9 @@ func (ys *MockYaml) Close() error {
 		// still populate testSetFormat via the LoadOrStore calls in
 		// InsertMock. Clear the map before returning so long-lived
 		// processes (DaemonSet mode, multi-session Recorders) do not
-		// grow the sync.Map unboundedly. The closed gate above
-		// already blocked any fresh InsertMock from repopulating it.
+		// grow the sync.Map unboundedly. Safe to clear unconditionally
+		// here: no async gob write can be in flight (gobRunning=false),
+		// so drain-before-clear holds trivially.
 		ys.clearTestSetFormats()
 		return nil
 	}
@@ -1208,9 +1160,9 @@ func (ys *MockYaml) Close() error {
 	// has drained. By this point every queued gob write has
 	// materialised its mocks.gob on disk, so the subsequent
 	// clearTestSetFormats cannot strip a lock whose backing file is
-	// still in-flight. The closed gate set at the top of Close
-	// prevents any new InsertMock from repopulating the map between
-	// here and the caller observing Close has returned.
+	// still in-flight — any concurrent InsertMock racing this clear
+	// will find the real mocks.gob via os.Stat and re-lock via the
+	// rehydrate branch, or bounce off the mixed-format guard.
 	ys.clearTestSetFormats()
 	// Operator visibility: if the async queue filled up during the
 	// session and the sync fallback fired, report the count so disk
@@ -1539,14 +1491,13 @@ func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath
 }
 
 func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) error {
-	// Mirror InsertMock's closing gate: a DeleteMocksForSet that
-	// arrives while Close is draining must not race the cleanup of
-	// testSetFormat or the writer shutdown. Closed MockYaml
-	// instances are terminal — the caller must build a fresh one
-	// (or reset via New) before mutating the on-disk layout.
-	if ys.closed.Load() {
-		return fmt.Errorf("mockdb: DeleteMocksForSet called on closed MockYaml (testSetID=%q)", testSetID)
-	}
+	// DeleteMocksForSet must remain callable after Close: --rerecord
+	// invokes this method on a MockYaml that has been through a
+	// Close/reopen cycle (or whose Close fired before re-record
+	// started) to clear stale mocks before the next recording pass.
+	// The drain-before-clear ordering in Close already prevents any
+	// mixed-format on-disk state during teardown, so no additional
+	// gate is required here.
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
