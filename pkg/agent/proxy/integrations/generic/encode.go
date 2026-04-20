@@ -188,11 +188,12 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				clientCh = nil
 				continue
 			}
-			// Back-stop for the rare case where an exchange arrived but
-			// was never paired with a response (e.g. the server closed
-			// without replying). The common case is flushed the moment
-			// the first response chunk arrives below, so this branch is
-			// normally a no-op.
+			// Back-stop for the rare case where the previous completed
+			// request/response exchange was not flushed when its first
+			// response chunk arrived. When the next client chunk shows
+			// up, flush that already-paired exchange before starting a
+			// new one. The common case is flushed below on the first
+			// response chunk, so this branch is normally a no-op.
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				flushMock()
 			}
