@@ -245,19 +245,96 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 	return true
 }
 
+// recordReqResTimestamps returns the RECORD-TIME request and response
+// timestamps for a test case, regardless of kind (HTTP vs gRPC). The fallback
+// to tc.Created covers very old fixtures that only carry the coarse creation
+// timestamp. Either value may be zero when the recording did not populate it.
+func recordReqResTimestamps(tc *models.TestCase) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+	var req, resp time.Time
+	if !tc.HTTPReq.Timestamp.IsZero() {
+		req = tc.HTTPReq.Timestamp
+	} else if !tc.GrpcReq.Timestamp.IsZero() {
+		req = tc.GrpcReq.Timestamp
+	}
+	if !tc.HTTPResp.Timestamp.IsZero() {
+		resp = tc.HTTPResp.Timestamp
+	} else if !tc.GrpcResp.Timestamp.IsZero() {
+		resp = tc.GrpcResp.Timestamp
+	}
+	if req.IsZero() && tc.Created > 0 {
+		req = time.Unix(tc.Created, 0)
+	}
+	if resp.IsZero() && !req.IsZero() {
+		// When the recording has no response timestamp, fall back to
+		// the request timestamp plus a 1-second grace. That covers the
+		// common case where the app responds quickly and the missing
+		// resp timestamp comes from a fixture gap rather than a long
+		// request. Longer-running requests will simply lose some
+		// trailing mocks from the window — still deterministic.
+		resp = req.Add(time.Second)
+	}
+	return req, resp
+}
+
 // upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
 // consumed during the replay of a specific test case.
-func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, consumedMocks []models.MockState) {
+//
+// tcReq / tcResp are the RECORD-TIME request/response timestamps of the test case.
+// When both are non-zero, consumed mocks are filtered by their recorded
+// ReqTimestampMock / ResTimestampMock falling inside [tcReq, tcResp]. This keeps
+// mapping assignment deterministic on the record data instead of tracking
+// replay-time consumption order, which can drift when a dependency reconnects
+// across tests (e.g. a Redis client re-handshaking during a later test's
+// window would otherwise attribute the startup-time HELLO mock to the wrong
+// test case). When both timestamps are zero, filtering is skipped and the
+// legacy append-all behavior is used.
+func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, consumedMocks []models.MockState, tcReq, tcResp time.Time) {
 	if actualTestMockMappings == nil || testCaseID == "" || len(consumedMocks) == 0 {
 		return
 	}
 
+	filter := !tcReq.IsZero() && !tcResp.IsZero() && !tcResp.Before(tcReq)
+
 	newMocks := make([]models.MockEntry, 0, len(consumedMocks))
 	for _, m := range consumedMocks {
 		timestamp := m.Timestamp
+		var parsedReqTime, parsedResTime time.Time
 		if m.ReqTimestampMock != "" {
-			if parsedReqTime, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
-				timestamp = parsedReqTime.Unix()
+			if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+				parsedReqTime = t
+				timestamp = t.Unix()
+			}
+		}
+		if m.ResTimestampMock != "" {
+			if t, err := time.Parse(time.RFC3339Nano, m.ResTimestampMock); err == nil {
+				parsedResTime = t
+			}
+		}
+
+		if filter {
+			// Keep the mock only if its recorded request or response
+			// timestamp overlaps the test case's recorded window.
+			// Mocks recorded strictly before the test case's request
+			// or strictly after its response belong to a different
+			// test (or to session-level traffic that should not be
+			// per-test). DNS mocks have no stable timestamps and are
+			// intentionally never filtered out here.
+			if strings.EqualFold(string(m.Kind), string(models.DNS)) {
+				// DNS: always keep.
+			} else {
+				reqInWindow := !parsedReqTime.IsZero() && !parsedReqTime.Before(tcReq) && !parsedReqTime.After(tcResp)
+				resInWindow := !parsedResTime.IsZero() && !parsedResTime.Before(tcReq) && !parsedResTime.After(tcResp)
+				hasAnyTimestamp := !parsedReqTime.IsZero() || !parsedResTime.IsZero()
+				// If we have ANY record timestamp and none of them
+				// fall in the test's window, drop it. If the mock has
+				// no record timestamp at all, we can't tell — keep it
+				// to preserve the legacy behavior for that edge case.
+				if hasAnyTimestamp && !reqInWindow && !resInWindow {
+					continue
+				}
 			}
 		}
 
@@ -268,6 +345,10 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 			ReqTimestampMock: m.ReqTimestampMock,
 			ResTimestampMock: m.ResTimestampMock,
 		})
+	}
+
+	if len(newMocks) == 0 {
+		return
 	}
 
 	// If the test case already has an entry, append the new mocks to it.
