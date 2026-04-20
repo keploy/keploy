@@ -24,9 +24,9 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 		case <-ctx.Done():
 			return false, nil, ctx.Err()
 		default:
-			mocks, err := mockDb.GetUnFilteredMocks()
+			mocks, err := mockDb.GetSessionMocks()
 			if err != nil {
-				return false, nil, fmt.Errorf("error while getting unfiltered mocks %v", err)
+				return false, nil, fmt.Errorf("error while getting session mocks: %w", err)
 			}
 
 			var filteredMocks []*models.Mock

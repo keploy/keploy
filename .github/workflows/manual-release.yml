@@ -2,6 +2,12 @@ name: Manual Release Trigger
 
 on:
   workflow_dispatch:
+    inputs:
+      oss_branch:
+        description: 'OSS branch to build from (keploy/keploy)'
+        required: true
+        default: 'main'
+        type: string
 
 permissions:
   contents: read
@@ -18,10 +24,12 @@ jobs:
     steps:
       - name: Resolve commit
         id: commit
+        env:
+          OSS_BRANCH: ${{ inputs.oss_branch }}
         run: |
           set -e
           source_repo="https://github.com/keploy/keploy.git"
-          source_branch="flipkart"
+          source_branch="${OSS_BRANCH}"
           commit_sha="$(git ls-remote "${source_repo}" "refs/heads/${source_branch}" | awk '{print $1}')"
           if [ -z "$commit_sha" ]; then
             echo "Failed to resolve the head commit for branch '${source_branch}' from repository '${source_repo}'."

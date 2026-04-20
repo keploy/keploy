@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
@@ -13,6 +14,25 @@ import (
 )
 
 // ---------------- MockManager (kind-aware) ----------------
+//
+// Lock-ordering invariant (MUST be preserved to avoid deadlock):
+//
+//	swapMu  →  treesMu  →  windowMu
+//	swapMu  →  revMu         (SetMocksWithWindow calls Set*Mocks which
+//	                          bump revisions; revMu is a leaf lock —
+//	                          never re-acquire swapMu/treesMu from under it)
+//	swapMu  →  consumedMu    (independent; never hold consumedMu then swapMu)
+//
+// Any new code path that acquires more than one of these MUST take them
+// in the declared order. Readers of {mock pool, test window} as an
+// atomic pair MUST go through GetFilteredMocksInWindow (which RLocks
+// swapMu). Writers that swap the pool AND publish a new window MUST go
+// through SetMocksWithWindow (which Locks swapMu end-to-end).
+//
+// Fine-grained single-field updates (SetFilteredMocks, SetUnFilteredMocks,
+// SetCurrentTestWindow) do NOT take swapMu — they only serialize on their
+// respective fine-grained mutex. Callers who need whole-snapshot
+// consistency must use the atomic variants above.
 
 type MockManager struct {
 	// legacy "all" trees (kept for compatibility with existing callers)
@@ -45,6 +65,154 @@ type MockManager struct {
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
 	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
+
+	// windowMu guards windowStart/windowEnd. They bound the REQUEST-time
+	// window for the outer HTTP/gRPC test currently being replayed; parsers
+	// use them via GetFilteredMocksInWindow to reject non-config mocks whose
+	// recorded REQUEST timestamp falls outside the window. Recorded
+	// responses may legitimately extend past windowEnd (downstream async
+	// completion is normal), so response containment is NOT enforced — only
+	// mocks with response timestamps earlier than their request timestamps
+	// (inconsistent recordings) are dropped as a sanity check.
+	// Zero values mean "no window set", in which case GetFilteredMocksInWindow
+	// falls back to GetFilteredMocks behaviour.
+	windowMu    sync.RWMutex
+	windowStart time.Time
+	windowEnd   time.Time
+
+	// firstWindowStart caches the earliest windowStart observed across
+	// all SetMocksWithWindow calls for this manager's lifetime. It's
+	// used by the strict pre-filter to distinguish STARTUP-INIT mocks
+	// (req < firstWindowStart — app bootstrapped before the first test
+	// fired, e.g. Hibernate/HikariCP pool init on Spring apps) from
+	// STALE PREVIOUS-TEST mocks (firstWindowStart <= req < currentStart).
+	// Startup-init mocks are preserved in the session pool because
+	// their absence breaks replay (pool warm-up can't find the
+	// recorded SELECT 1 / COM_PING); previous-test mocks continue to
+	// be dropped to prevent cross-test bleed.
+	//
+	// Zero until the first SetMocksWithWindow call with a non-zero
+	// start arrives; after that it's sticky (only goes earlier, never
+	// later — see updateFirstWindowStart).
+	firstWindowStart time.Time
+
+	// swapMu guards the {filtered, unfiltered, window} swap performed by
+	// SetMocksWithWindow. Writers Lock(); readers via GetFilteredMocksInWindow
+	// RLock() the snapshot read so they cannot observe a torn (newMocks,
+	// oldWindow) view. Legacy GetFilteredMocks/GetUnFilteredMocks do NOT
+	// take this lock — they trade snapshot atomicity for back-compat with
+	// callers that don't care about the window. New windowed callers should
+	// use GetFilteredMocksInWindow exclusively.
+	swapMu sync.RWMutex
+
+	// droppedOutOfWindow counts mocks that GetFilteredMocksInWindow filtered
+	// out because their timestamps fell outside the current test window.
+	// Reset to 0 by SetMocksWithWindow / SetCurrentTestWindow so each test
+	// gets a fresh count usable for "did this test drop anything?" debugging.
+	droppedOutOfWindow uint64
+
+	// connMu guards the connection-scoped pool map. Phase 2.5 of the
+	// mock-lifetime unification plan: prepared-statement setup mocks
+	// (Postgres Parse, MySQL COM_STMT_PREPARE) live here, keyed by the
+	// connID that owns them. Visibility is bounded by the connection's
+	// lifecycle rather than the outer test window — executes on the
+	// same connID can reference a setup across test boundaries without
+	// leaking between unrelated connections.
+	//
+	// Lifecycle:
+	//   - Entries are lazily materialised on AddConnectionMock.
+	//   - Entries are torn down by DeleteConnection(connID) on EOF/Close
+	//     from the parser, OR by the idle-retention sweeper when no
+	//     activity has been observed on that connID for
+	//     connectionIdleRetention.
+	//
+	// Lock ordering: swapMu → treesMu → windowMu → connMu. connMu is a
+	// leaf in the existing invariant — never re-acquire any of the
+	// outer locks from under it.
+	connMu           sync.RWMutex
+	connectionTrees  map[string]*TreeDb
+	connectionLastTs map[string]time.Time
+
+	// sweeperStop terminates the per-MockManager idle-sweeper
+	// goroutine. Closed by Close() so long-running agents that spin
+	// up a new MockManager per proxy session (pkg/agent/proxy/proxy.go
+	// Record / Mock paths) don't leak a ticker goroutine every time.
+	// closeOnce guards the close so concurrent Close() callers don't
+	// double-close the channel (which would panic). `closed` is an
+	// atomic flag read by connection-pool / hit-index mutation paths
+	// so a matcher racing with Close() sees a no-op rather than a
+	// spurious write to a torn-down tree. Reads are stale-tolerant
+	// (a matcher that reads just before Close lands will still see
+	// a valid snapshot); writes that arrive after Close are silently
+	// dropped.
+	sweeperStop chan struct{}
+	closeOnce   sync.Once
+	closed      atomic.Bool
+
+	// invalidOrderWarnOnce fires the first-time Info log when
+	// SetMocksWithWindow drops a mock because its response timestamp
+	// precedes its request timestamp. Logging policy disallows Warn
+	// for this; Info is prominent enough that operators see the first
+	// hit. Subsequent drops stay at Debug level (via the per-call
+	// counter) so a pathological recording doesn't flood logs.
+	invalidOrderWarnOnce sync.Once
+
+	// noConnMocks is a negative cache for GetConnectionMocks's
+	// fallback scan. A connID that returned zero connection-scoped
+	// mocks on a full scan gets memoised here so subsequent matches
+	// from the same connection don't pay the O(N) walk again.
+	// Entries live until Close / explicit DeleteConnection (we also
+	// drop them on AddConnectionMock so a later arrival invalidates).
+	noConnMocks sync.Map // map[connID]struct{}
+
+	// hitIdx is a name → *Mock index for O(1) HitCount bumps on the
+	// hot MarkMockAsUsed path. Populated lazily by the indexed tree
+	// walkers used for Set{Filtered,UnFiltered}Mocks; cleared on pool
+	// swaps.
+	hitMu  sync.RWMutex
+	hitIdx map[string]*models.Mock
+}
+
+// defaultConnectionIdleRetention is the baseline for how long a
+// connection-scoped pool survives without activity before the idle-
+// sweeper reclaims it. Generous enough to tolerate HikariCP-style
+// pooled connections that bridge test boundaries without activity;
+// tight enough not to hold leaked recordings between test runs.
+//
+// Overridable via SetConnectionIdleRetention for long-running
+// integration tests that sleep between requests.
+const defaultConnectionIdleRetention = 5 * time.Minute
+
+// connectionIdleRetentionNanos is the current per-process retention
+// stored as nanoseconds in an atomic so the setter and the sweeper
+// goroutine can race-freely read/write it. Initialised at package-
+// load to the default. Callers adjust via SetConnectionIdleRetention;
+// readers go through connectionIdleRetention().
+var connectionIdleRetentionNanos atomic.Int64
+
+func init() {
+	connectionIdleRetentionNanos.Store(int64(defaultConnectionIdleRetention))
+}
+
+// connectionIdleRetention reads the current retention atomically.
+// Used by the idle sweeper; hot path is a single atomic load.
+func connectionIdleRetention() time.Duration {
+	return time.Duration(connectionIdleRetentionNanos.Load())
+}
+
+// SetConnectionIdleRetention overrides the default 5-minute
+// connection-pool retention. Intended for long-running integration
+// tests where a connection may sit idle between requests for more
+// than five minutes.
+//
+// Process-wide. Safe to call concurrently with any running sweeper —
+// the store is atomic, and a sweep already in flight uses the value
+// loaded at its start. Zero or negative reverts to the default.
+func SetConnectionIdleRetention(d time.Duration) {
+	if d <= 0 {
+		d = defaultConnectionIdleRetention
+	}
+	connectionIdleRetentionNanos.Store(int64(d))
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
@@ -54,7 +222,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	if unfiltered == nil {
 		unfiltered = NewTreeDb(customComparator)
 	}
-	return &MockManager{
+	mm := &MockManager{
 		filtered:            filtered,
 		unfiltered:          unfiltered,
 		filteredByKind:      make(map[models.Kind]*TreeDb),
@@ -63,9 +231,78 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:           make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
+		connectionTrees:     make(map[string]*TreeDb),
+		connectionLastTs:    make(map[string]time.Time),
+		sweeperStop:         make(chan struct{}),
+		hitIdx:              make(map[string]*models.Mock),
 		logger:              logger,
 	}
+	// Start the per-connection idle sweeper. Reclaims
+	// connection-scoped pools whose last activity exceeded
+	// connectionIdleRetention so long-running agents don't accumulate
+	// pools for closed connections the parser forgot to call
+	// DeleteConnection on (net.Pipe-based tests, upstream EOF from a
+	// Docker container restart, etc.). Fires on a slow ticker — the
+	// sweep itself is a cheap map scan under connMu. Terminates when
+	// Close() is invoked on the manager (closes sweeperStop).
+	go mm.runIdleSweeper()
+	return mm
 }
+
+// Close terminates background goroutines owned by this MockManager and
+// marks it so connection-pool mutations become no-ops. Idempotent and
+// safe under concurrent calls (sync.Once guards the channel close;
+// atomic bool guards the mutation paths).
+//
+// Callers that rotate MockManager per session (pkg/agent/proxy/proxy.go
+// Record / Mock paths) MUST call this on the outgoing manager before
+// letting it go out of scope, or the idle-sweeper goroutine will leak
+// for the process lifetime.
+//
+// Reads (GetSessionMocks / GetPerTestMocksInWindow / GetConnectionMocks)
+// remain legal after Close — they just return whatever snapshot they
+// can; concurrent access is memory-safe because the underlying trees
+// are still live, they just don't accept new mutations.
+func (m *MockManager) Close() {
+	m.closeOnce.Do(func() {
+		m.closed.Store(true)
+		close(m.sweeperStop)
+	})
+}
+
+// IsClosed returns true once Close has been invoked. Exposed so
+// higher-level callers (e.g. the agent lifecycle) can decide whether
+// to invoke methods that would mutate the manager's state.
+func (m *MockManager) IsClosed() bool {
+	return m.closed.Load()
+}
+
+// runIdleSweeper is the background loop that calls SweepIdleConnections
+// every connectionSweepInterval. Terminates when sweeperStop is
+// closed (by Close()).
+func (m *MockManager) runIdleSweeper() {
+	ticker := time.NewTicker(connectionSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.sweeperStop:
+			return
+		case <-ticker.C:
+			n := m.SweepIdleConnections()
+			if n > 0 && m.logger != nil {
+				m.logger.Debug("reclaimed idle connection-scoped mock pools",
+					zap.Int("count", n),
+					zap.Duration("idle_retention", connectionIdleRetention()))
+			}
+		}
+	}
+}
+
+// connectionSweepInterval is how often runIdleSweeper walks the
+// connection map. Cheap (map scan under connMu) so a minute is fine;
+// longer intervals mean dead pools sit slightly longer before
+// reclamation.
+const connectionSweepInterval = 1 * time.Minute
 
 func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
@@ -148,8 +385,11 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
 	results := make([]*models.Mock, 0, 64)
-	m.filtered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -158,15 +398,632 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	return results, nil
 }
 
+// SetCurrentTestWindow records the outer test's req/res timestamps so that
+// GetFilteredMocksInWindow can enforce Option-1 strict containment. Pass
+// zero values to clear the window (e.g., between test sets).
+//
+// Also resets the per-test droppedOutOfWindow counter so a new test starts
+// with a fresh "this test dropped N" tally.
+//
+// Locking: windowMu serializes the window write, atomic.StoreUint64 is
+// lock-free for the counter reset. No swapMu is needed here — window
+// consistency with the mock pool is only promised by SetMocksWithWindow.
+// A reader using GetFilteredMocksInWindow around a concurrent
+// SetCurrentTestWindow may see the new window against the old pool, but
+// that is a per-field update, not a pool replacement.
+func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
+	m.windowMu.Lock()
+	m.windowStart = start
+	m.windowEnd = end
+	m.windowMu.Unlock()
+	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+}
+
+// GetFilteredMocksInWindow returns non-config filtered mocks whose recorded
+// REQUEST timestamp lies inside the current test window. Response timestamps
+// may legitimately straggle outside the window (downstream async completion)
+// and are not used for window containment — only mocks whose response
+// timestamp is EARLIER than their request timestamp are dropped as a sanity
+// check on inconsistent recordings.
+//
+// Consumers: this method is a PUBLIC extension point on the MockMemDb
+// interface consumed by OUT-OF-REPO protocol parsers (keploy/integrations,
+// keploy/enterprise). Those parsers call it when strict-window matching is
+// enabled to reject cross-test mock bleed at read time. There are no
+// in-repo callers by design: the keploy-core agent only plumbs the window
+// via SetMocksWithWindow/SetCurrentTestWindow; the parser that owns the
+// replayed connection does the read-time filtering. Grepping only this
+// repo will show it unused; that does not mean it is dead code.
+//
+// If no window is set (zero values), behaves exactly like GetFilteredMocks.
+//
+// Mocks lacking either timestamp are kept (defensive: legacy/incomplete
+// recordings should not silently disappear; the agent-level pre-filter
+// already routes them to the filtered tree).
+//
+// Atomicity: takes swapMu.RLock() while sampling both the mock pool and
+// the window so a concurrent SetMocksWithWindow cannot expose a torn
+// (newMocks, oldWindow) view. The mock-list iteration runs OUTSIDE the
+// lock — we own a slice snapshot at that point.
+//
+// Logging: emits ONE summary debug log per call (count of dropped + count
+// of timestamp-missing mocks) rather than one log per mock, to avoid
+// flooding the hot path. Set zap level to Debug to see the summary.
+//
+// Drop count is exposed via DroppedOutOfWindow() for observability.
+func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
+	// Atomicity contract: snapshot the per-test tree POINTER and the
+	// window together under swapMu.RLock so SetMocksWithWindow can't
+	// interleave a (tree, window) swap between our two reads. Once
+	// both snapshots are in hand, release swapMu and let tree
+	// iteration run unlocked — otherwise a long walk over a large
+	// pool would block SetMocksWithWindow writers for its duration.
+	m.swapMu.RLock()
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+	m.windowMu.RLock()
+	start, end := m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	m.swapMu.RUnlock()
+
+	all := make([]*models.Mock, 0, 64)
+	tree.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			all = append(all, mock)
+		}
+		return true
+	})
+
+	if start.IsZero() || end.IsZero() {
+		return all, nil
+	}
+	out := make([]*models.Mock, 0, len(all))
+	var droppedOutOfWindow, droppedInvalidOrder, missingTs uint64
+	for _, mock := range all {
+		if mock == nil {
+			continue
+		}
+		req := mock.Spec.ReqTimestampMock
+		res := mock.Spec.ResTimestampMock
+		if req.IsZero() || res.IsZero() {
+			missingTs++
+			out = append(out, mock)
+			continue
+		}
+		// Defensive sanity check: a mock whose response-timestamp is
+		// BEFORE its request-timestamp is inconsistent (clock skew,
+		// serialisation bug, or corrupted recording). Drop it — keeping
+		// it would just confuse downstream scoring. Counted separately
+		// from the window-containment drops so the per-test counter
+		// and debug log can distinguish the two root causes.
+		if res.Before(req) {
+			droppedInvalidOrder++
+			continue
+		}
+		// Request-timestamp containment. Responses may straggle past
+		// the outer test's response timestamp (async completion on
+		// downstream calls); that's not a bleed signal. The bleed bug
+		// this window protects against manifests as REQUESTS landing
+		// outside the window — those are always from a different test.
+		if !req.Before(start) && !req.After(end) {
+			out = append(out, mock)
+		} else {
+			droppedOutOfWindow++
+		}
+	}
+	if droppedOutOfWindow > 0 {
+		atomic.AddUint64(&m.droppedOutOfWindow, droppedOutOfWindow)
+	}
+	if (droppedOutOfWindow > 0 || droppedInvalidOrder > 0 || missingTs > 0) && m.logger != nil {
+		m.logger.Debug("window filter summary",
+			zap.Uint64("dropped_out_of_window", droppedOutOfWindow),
+			zap.Uint64("dropped_invalid_order", droppedInvalidOrder),
+			zap.Uint64("kept_missing_timestamps", missingTs),
+			zap.Int("kept_total", len(out)),
+			zap.Time("windowStart", start),
+			zap.Time("windowEnd", end))
+	}
+	return out, nil
+}
+
+// DroppedOutOfWindow returns the number of mocks that
+// GetFilteredMocksInWindow has filtered out since the most recent
+// SetMocksWithWindow / SetCurrentTestWindow call — i.e., for the
+// CURRENT test. The counter resets at every test boundary.
+//
+// Useful for surfacing as a metric or in debug dumps when users ask
+// "where did my mock go?".
+func (m *MockManager) DroppedOutOfWindow() uint64 {
+	return atomic.LoadUint64(&m.droppedOutOfWindow)
+}
+
+// SetMocksWithWindow atomically replaces the filtered/unfiltered mock
+// trees AND updates the active test window. Readers using
+// GetFilteredMocksInWindow (which RLocks swapMu) cannot observe a torn
+// (newMocks, oldWindow) view; legacy GetFilteredMocks/GetUnFilteredMocks
+// callers that don't take swapMu can still see partial swaps but they
+// don't depend on window consistency anyway.
+//
+// Phase 3 specialization: when both start and end are non-zero, the
+// per-test (filtered) slice is pre-filtered by request-timestamp
+// containment BEFORE the tree is built. The net effect is that the
+// tree stored in m.filtered only holds mocks the matcher could
+// actually match for THIS test — match time drops from O(log N)
+// across the whole session to O(log M) over the per-test slice, and
+// the old match-loop filter-and-skip dance inside
+// GetFilteredMocksInWindow becomes a no-op fast path. Mocks with a
+// missing timestamp are kept defensively (legacy recordings); mocks
+// whose response is earlier than request are dropped as a sanity
+// check and counted into the per-test drop counter.
+//
+// Connection-scoped mocks landing in `unfiltered` are additionally
+// seeded into their per-connID dedicated trees via AddConnectionMock
+// so subsequent GetConnectionMocks lookups take the O(1) path.
+//
+// Also resets the per-test droppedOutOfWindow counter.
+func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, start, end time.Time) {
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+
+	// Track the earliest window-start we've ever seen on this manager.
+	// Used below to distinguish startup-init mocks (recorded before
+	// any test fired) from stale previous-test mocks. Once set, only
+	// moves earlier — a later test's start can never push it forward
+	// because that would re-categorise genuine startup mocks as stale.
+	//
+	// Skip models.BaseTime (2000-01-01) — Runner/Replayer fire one
+	// initial SetMocksWithWindow with [BaseTime, Now] to stage mocks
+	// before any test runs; that sentinel isn't a real test start
+	// and caching it would defeat the "recorded before test 1"
+	// comparison below (everything is trivially after 2000).
+	if !start.IsZero() && !start.Equal(models.BaseTime) {
+		if m.firstWindowStart.IsZero() || start.Before(m.firstWindowStart) {
+			m.firstWindowStart = start
+		}
+	}
+	firstStart := m.firstWindowStart
+	var promotedToSession []*models.Mock
+
+	// Runner/Replayer's initial SetMocksWithWindow call fires with
+	// start=models.BaseTime before any test runs — to stage mocks for
+	// the app-startup window (Hibernate init, HikariCP pool warm-up,
+	// JDBC driver handshake) that fires AFTER the app launches but
+	// BEFORE the first test request. During this staging window we
+	// don't yet know which mocks are truly per-test vs startup-init
+	// (we'd need the first real test's start to compare), so route
+	// ALL per-test mocks into the session pool too so startup DB
+	// calls can find their matching mock via GetSessionMocks /
+	// GetUnFilteredMocks (which is what integrations-repo matchers
+	// like the Postgres replayer read). The next SetMocksWithWindow
+	// call — the FIRST real test — re-partitions: startup-init mocks
+	// (req < test1.start) get promoted to session explicitly below;
+	// the rest become per-test.
+	isInitialStaging := start.Equal(models.BaseTime)
+
+	// Pre-filter per-test mocks by the outer test window. Zero start or
+	// zero end means "no window" and we preserve the legacy behaviour
+	// (no pre-filtering). Readers of the per-test tree can then skip
+	// any window check at match time because the tree already contains
+	// only in-window mocks.
+	filteredForTree := filtered
+	var droppedInvalid, droppedOutOfWindow uint64
+	if !start.IsZero() && !end.IsZero() {
+		out := make([]*models.Mock, 0, len(filtered))
+		for _, mock := range filtered {
+			if mock == nil {
+				continue
+			}
+			req := mock.Spec.ReqTimestampMock
+			res := mock.Spec.ResTimestampMock
+			// Missing timestamps: keep defensively so legacy/incomplete
+			// recordings still match.
+			if req.IsZero() || res.IsZero() {
+				out = append(out, mock)
+				continue
+			}
+			// Inconsistent recording — response before request.
+			// Info-level one-shot per manager (logging policy
+			// disallows Warn here) so operators with a clock-skewed
+			// recording see a prominent one-line message pointing at
+			// the fix; subsequent drops stay on the per-call counter
+			// + Debug summary below so a pathological recording
+			// doesn't spam logs.
+			if res.Before(req) {
+				droppedInvalid++
+				if m.logger != nil {
+					mockName := mock.Name
+					req := req
+					res := res
+					m.invalidOrderWarnOnce.Do(func() {
+						m.logger.Info(
+							"mock dropped: response timestamp precedes request timestamp (inconsistent recording). "+
+								"This usually indicates clock skew at record time. Mocks with this pattern are "+
+								"dropped to avoid confusing the matcher; re-record with a synchronised clock if "+
+								"these mocks are needed. Further instances will only be counted (see Debug summary).",
+							zap.String("mock", mockName),
+							zap.Time("req", req),
+							zap.Time("res", res))
+					})
+				}
+				continue
+			}
+			// Window containment on request timestamp only. Responses
+			// may legitimately straggle past `end` (async downstream
+			// completion is normal).
+			if !req.Before(start) && !req.After(end) {
+				out = append(out, mock)
+				continue
+			}
+			// Startup-init preservation: a mock whose request
+			// timestamp is strictly BEFORE the earliest test window
+			// this manager has ever seen is app-bootstrap traffic
+			// (Hibernate init, HikariCP connection validation, driver
+			// handshake queries) that fired before any test started.
+			// Dropping it would break replay at pool warm-up; promote
+			// to session instead so it's visible across every test
+			// without reintroducing cross-test bleed from stale
+			// previous-test mocks (those fall in
+			// [firstStart, currentStart) and DO get dropped).
+			if !firstStart.IsZero() && req.Before(firstStart) {
+				mock.TestModeInfo.Lifetime = models.LifetimeSession
+				promotedToSession = append(promotedToSession, mock)
+				continue
+			}
+			droppedOutOfWindow++
+		}
+		filteredForTree = out
+	}
+
+	// Merge startup-init mocks (promoted above) into the session pool
+	// so they're reachable via GetSessionMocks. Append rather than
+	// prepend so caller-provided session mocks keep their original
+	// order; duplicates are impossible because startup-init entries
+	// came out of the per-test slice.
+	unfilteredForTree := unfiltered
+	if len(promotedToSession) > 0 {
+		unfilteredForTree = make([]*models.Mock, 0, len(unfiltered)+len(promotedToSession))
+		unfilteredForTree = append(unfilteredForTree, unfiltered...)
+		unfilteredForTree = append(unfilteredForTree, promotedToSession...)
+		if m.logger != nil {
+			m.logger.Debug("promoted startup-init mocks to session pool",
+				zap.Int("count", len(promotedToSession)),
+				zap.Time("firstTestWindow", firstStart))
+		}
+	}
+
+	// Initial-staging mode: before any test has fired, stage every
+	// per-test mock into the session pool too. This is how matchers
+	// that read only GetSessionMocks / GetUnFilteredMocks (the
+	// integrations Postgres replayer is the load-bearing example)
+	// can serve the app-startup DB traffic. The first real-test
+	// SetMocksWithWindow call will re-populate both pools cleanly;
+	// staging-time session mocks are effectively ephemeral.
+	if isInitialStaging && len(filteredForTree) > 0 {
+		stageMerge := make([]*models.Mock, 0, len(unfilteredForTree)+len(filteredForTree))
+		stageMerge = append(stageMerge, unfilteredForTree...)
+		stageMerge = append(stageMerge, filteredForTree...)
+		unfilteredForTree = stageMerge
+		if m.logger != nil {
+			m.logger.Debug("staged per-test mocks into session pool (pre-first-test)",
+				zap.Int("staged", len(filteredForTree)))
+		}
+	}
+
+	m.SetFilteredMocks(filteredForTree)
+	m.SetUnFilteredMocks(unfilteredForTree)
+	// Rebuild the HitCount name→*Mock index so MarkMockAsUsed takes
+	// the O(1) fast path. Called after the tree swap so the index
+	// always points at the freshest mock pointers.
+	m.rebuildHitIndex(filteredForTree, unfilteredForTree)
+
+	// Seed per-connID trees for connection-scoped mocks so
+	// GetConnectionMocks takes the O(1) path from the first lookup.
+	for _, mk := range unfilteredForTree {
+		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimeConnection {
+			m.AddConnectionMock(mk)
+		}
+	}
+
+	m.windowMu.Lock()
+	m.windowStart = start
+	m.windowEnd = end
+	m.windowMu.Unlock()
+	// Counter reflects pre-filtering drops for THIS test; legacy
+	// match-time filtering in GetFilteredMocksInWindow will add zero
+	// now that the tree is pre-filtered, which keeps the semantic
+	// ("how many mocks did we drop for this test?") intact across the
+	// Phase 3 pre-filter migration.
+	atomic.StoreUint64(&m.droppedOutOfWindow, droppedOutOfWindow)
+	if (droppedOutOfWindow > 0 || droppedInvalid > 0) && m.logger != nil {
+		m.logger.Debug("per-test tree pre-filter summary",
+			zap.Uint64("dropped_out_of_window", droppedOutOfWindow),
+			zap.Uint64("dropped_invalid_order", droppedInvalid),
+			zap.Int("kept_total", len(filteredForTree)),
+			zap.Time("windowStart", start),
+			zap.Time("windowEnd", end))
+	}
+}
+
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.unfiltered
+	m.treesMu.RUnlock()
 	results := make([]*models.Mock, 0, 128)
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
 		return true
 	})
 	return results, nil
+}
+
+// GetSessionMocks is the unification-plan canonical name for the
+// session-scoped pool. Backed by the same underlying `unfiltered` tree
+// during Phase 2 migration — once every parser consumes the new name
+// and Phase 3 introduces an explicit lifetime-keyed tree, this can
+// diverge from GetUnFilteredMocks. For now: byte-for-byte alias.
+//
+// Matcher usage: call before GetPerTestMocksInWindow for auth /
+// handshake / heartbeat / reflection / coordination traffic that
+// should be reusable across every test.
+func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
+	return m.GetUnFilteredMocks()
+}
+
+// GetPerTestMocksInWindow is the unification-plan canonical name for
+// the time-windowed per-test pool. Aliases GetFilteredMocksInWindow
+// during Phase 2 migration. SetMocksWithWindow already pre-filters
+// the per-test slice by request-timestamp containment BEFORE building
+// the tree, so GetFilteredMocksInWindow's "iterate and window-check"
+// is effectively a no-op fast path; the remaining Phase-3 work is to
+// collapse this accessor into a plain tree Snapshot with no iteration
+// overhead at all.
+func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	return m.GetFilteredMocksInWindow()
+}
+
+// GetConnectionMocks returns connection-scoped mocks (Lifetime ==
+// LifetimeConnection) whose Spec.Metadata["connID"] matches the
+// caller-supplied connID. Phase 2.5 plumbing: each connID owns its own
+// TreeDb in m.connectionTrees for O(1) lookup; if the connection has
+// no dedicated tree yet (legacy recordings pre-dating the tag
+// convention, or mocks loaded before AddConnectionMock was wired in)
+// we fall back to a filtered scan of the unfiltered tree so the result
+// stays correct even on not-yet-migrated data.
+//
+// Semantics:
+//   - Empty connID returns nil (callers that lack a connID should go
+//     straight to session / per-test).
+//   - An empty per-connID tree returns nil (not an error); callers
+//     fall through to the session / per-test pools.
+//   - Every successful read touches connectionLastTs so the
+//     idle-sweeper doesn't reclaim an active connection.
+func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	if connID == "" {
+		return nil, nil
+	}
+	// Post-Close no-op: honour the Close() contract so a late reader
+	// (matcher still draining, delayed goroutine) doesn't mutate
+	// connectionTrees / connectionLastTs / noConnMocks after the
+	// manager has been logically released. Returning nil is safe:
+	// matchers interpret an empty slice as "no connection-scoped
+	// mocks for this connID" and fall through to the session/per-test
+	// pools, which is exactly what a shut-down manager should expose.
+	if m.closed.Load() {
+		return nil, nil
+	}
+	// Negative cache: if a prior fallback scan confirmed this connID
+	// has no connection-scoped mocks, skip the O(N) walk. Entries get
+	// cleared by AddConnectionMock so a late arrival still seeds the
+	// tree properly, and by SweepIdleConnections via the shared
+	// connectionLastTs timestamp (touched here so a long-lived but
+	// always-empty connID is still eligible for idle reaping rather
+	// than living forever in the sync.Map).
+	if _, none := m.noConnMocks.Load(connID); none {
+		m.connMu.Lock()
+		m.connectionLastTs[connID] = time.Now()
+		m.connMu.Unlock()
+		return nil, nil
+	}
+	m.connMu.RLock()
+	tree := m.connectionTrees[connID]
+	m.connMu.RUnlock()
+
+	if tree != nil {
+		results := make([]*models.Mock, 0, 8)
+		tree.rangeValues(func(v interface{}) bool {
+			if mock, ok := v.(*models.Mock); ok && mock != nil {
+				results = append(results, mock)
+			}
+			return true
+		})
+		// Touch last-seen so the idle-sweeper leaves this connID alone.
+		m.connMu.Lock()
+		m.connectionLastTs[connID] = time.Now()
+		m.connMu.Unlock()
+		return results, nil
+	}
+
+	// Fallback path for unmigrated recordings — scan the unfiltered
+	// tree and materialise matches on demand. First-time discovery
+	// also seeds the dedicated tree so subsequent lookups for this
+	// connID take the O(1) path.
+	//
+	// Checks the connID tag BEFORE the typed Lifetime so mocks that
+	// somehow reach the pool without DeriveLifetime having set their
+	// Lifetime (inline test constructions, legacy recordings, any
+	// bypass of the standard ingest flow) still surface here as long
+	// as they carry the connID tag. We additionally accept either the
+	// typed Lifetime or the raw "connection" metadata tag as the
+	// connection-scope signal — either alone is sufficient.
+	m.treesMu.RLock()
+	unf := m.unfiltered
+	m.treesMu.RUnlock()
+	results := make([]*models.Mock, 0, 8)
+	unf.rangeValues(func(v interface{}) bool {
+		mock, ok := v.(*models.Mock)
+		if !ok || mock == nil {
+			return true
+		}
+		if mock.Spec.Metadata == nil || mock.Spec.Metadata["connID"] != connID {
+			return true
+		}
+		if mock.TestModeInfo.Lifetime != models.LifetimeConnection &&
+			mock.Spec.Metadata["type"] != "connection" {
+			return true
+		}
+		results = append(results, mock)
+		return true
+	})
+	if len(results) > 0 {
+		m.connMu.Lock()
+		if m.connectionTrees[connID] == nil {
+			seeded := NewTreeDb(customComparator)
+			for _, mk := range results {
+				seeded.insert(mk.TestModeInfo, mk)
+			}
+			m.connectionTrees[connID] = seeded
+			m.connectionLastTs[connID] = time.Now()
+		}
+		m.connMu.Unlock()
+	} else {
+		// Seed the negative cache so a later lookup for the same
+		// connID takes the fast-no-op path instead of walking the
+		// unfiltered tree again. Cleared by AddConnectionMock below,
+		// or reaped by SweepIdleConnections via connectionLastTs age.
+		m.noConnMocks.Store(connID, struct{}{})
+		m.connMu.Lock()
+		m.connectionLastTs[connID] = time.Now()
+		m.connMu.Unlock()
+	}
+	return results, nil
+}
+
+// AddConnectionMock inserts a connection-scoped mock into the dedicated
+// per-connID tree. Parsers that record prepared-statement setup
+// (Postgres Parse, MySQL COM_STMT_PREPARE) call this in addition to
+// whatever normal recording path emits the mock, so replay has an
+// O(1) lookup by connID.
+//
+// connID is derived from mock.Spec.Metadata["connID"]. A mock without
+// a connID or without LifetimeConnection is silently dropped —
+// callers are expected to check before calling.
+func (m *MockManager) AddConnectionMock(mock *models.Mock) {
+	if mock == nil || mock.TestModeInfo.Lifetime != models.LifetimeConnection {
+		return
+	}
+	if m.closed.Load() {
+		// Ignore mutations after Close so a matcher racing with
+		// Proxy session rotation can't silently scribble into a
+		// manager the agent has already retired.
+		return
+	}
+	var connID string
+	if mock.Spec.Metadata != nil {
+		connID = mock.Spec.Metadata["connID"]
+	}
+	if connID == "" {
+		return
+	}
+	m.connMu.Lock()
+	tree := m.connectionTrees[connID]
+	if tree == nil {
+		tree = NewTreeDb(customComparator)
+		m.connectionTrees[connID] = tree
+	}
+	tree.insert(mock.TestModeInfo, mock)
+	m.connectionLastTs[connID] = time.Now()
+	m.connMu.Unlock()
+	// Invalidate the negative cache so a reader that previously
+	// memoised "no connection mocks for this connID" revisits the
+	// dedicated tree on the next GetConnectionMocks call.
+	m.noConnMocks.Delete(connID)
+}
+
+// DeleteConnection tears down the per-connID pool on EOF/Close from
+// the parser. Safe to call with an unknown connID (no-op). Recording
+// anywhere inside the agent is expected to call this when a client
+// closes its connection so the pool doesn't hold mocks for dead
+// connections indefinitely.
+func (m *MockManager) DeleteConnection(connID string) {
+	if connID == "" {
+		return
+	}
+	m.connMu.Lock()
+	delete(m.connectionTrees, connID)
+	delete(m.connectionLastTs, connID)
+	m.connMu.Unlock()
+	// Drop the negative-cache entry too; an identical connID
+	// reassigned later should re-scan rather than stay memoised to
+	// the dead connection's state.
+	m.noConnMocks.Delete(connID)
+}
+
+// SweepIdleConnections reclaims connection-scoped pools whose last
+// activity timestamp exceeded connectionIdleRetention. Intended to be
+// called periodically from the agent main loop (cheap — one map scan
+// under connMu). Returns the number of reclaimed connIDs for logging.
+func (m *MockManager) SweepIdleConnections() int {
+	if m.closed.Load() {
+		// Post-Close the goroutine should already have exited; this
+		// guard covers a paranoid caller that invokes the method
+		// directly while a concurrent Close is in flight.
+		return 0
+	}
+	cutoff := time.Now().Add(-connectionIdleRetention())
+	reclaimed := 0
+	var staleConnIDs []string
+	m.connMu.Lock()
+	for connID, ts := range m.connectionLastTs {
+		if ts.Before(cutoff) {
+			delete(m.connectionTrees, connID)
+			delete(m.connectionLastTs, connID)
+			staleConnIDs = append(staleConnIDs, connID)
+			reclaimed++
+		}
+	}
+	m.connMu.Unlock()
+	// Drop negative-cache entries for reaped connIDs so the sync.Map
+	// does not grow unbounded on long-running agents that see many
+	// short-lived connections without any connection-scoped mocks.
+	// Negative-cache hits touch connectionLastTs above, so this walk
+	// finds every stale entry without requiring a second timestamp
+	// keyed by noConnMocks itself.
+	for _, connID := range staleConnIDs {
+		m.noConnMocks.Delete(connID)
+	}
+	return reclaimed
+}
+
+// SessionMockHitCounts returns a snapshot of HitCount for every
+// session- or connection-scoped mock currently in memory. Keyed by
+// mock.Name; value is the current atomic counter read. Per-test
+// mocks are excluded — their counter is always 0 or 1 (consumed on
+// match) so they add no observability value.
+//
+// Intended for replay-report output and "which reusable mocks
+// actually got reused?" debugging — non-zero values confirm tagging
+// is working; zero values on long-lived session mocks hint at dead
+// recordings worth re-capturing.
+func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
+	out := make(map[string]uint64, 32)
+	m.treesMu.RLock()
+	tree := m.unfiltered
+	m.treesMu.RUnlock()
+	tree.rangeValues(func(v interface{}) bool {
+		mock, ok := v.(*models.Mock)
+		if !ok || mock == nil {
+			return true
+		}
+		if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+			return true
+		}
+		out[mock.Name] = atomic.LoadUint64(&mock.TestModeInfo.HitCount)
+		return true
+	})
+	return out
 }
 
 // NEW: kind-scoped getters used by Redis matcher
@@ -300,8 +1157,12 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	// Snapshot the legacy tree pointer safely
+	m.treesMu.RLock()
+	globalTree := m.unfiltered
+	m.treesMu.RUnlock()
 	// Update legacy/global tree first
-	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
+	updatedGlobal := globalTree.update(old.TestModeInfo, new.TestModeInfo, new)
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
@@ -382,7 +1243,10 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	deletedGlobal := m.filtered.delete(mock.TestModeInfo)
+	m.treesMu.RLock()
+	globalTree := m.filtered
+	m.treesMu.RUnlock()
+	deletedGlobal := globalTree.delete(mock.TestModeInfo)
 
 	// per-kind
 	k := mock.Kind
@@ -417,7 +1281,10 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	deletedGlobal := m.unfiltered.delete(mock.TestModeInfo)
+	m.treesMu.RLock()
+	globalTree := m.unfiltered
+	m.treesMu.RUnlock()
+	deletedGlobal := globalTree.delete(mock.TestModeInfo)
 
 	// per-kind
 	k := mock.Kind
@@ -454,10 +1321,18 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying
 // its sort order or removing it from any tree. This is intended for parsers
 // (e.g. mongo v2) that need to record mock usage without changing mock ordering.
+//
+// Unification observability: also bumps the HitCount on the LIVE mock
+// in the tree (not on the snapshot value passed by the caller, which
+// is a struct copy). For session- and connection-scoped mocks that's
+// the reuse telemetry surfaced by SessionMockHitCounts; for per-test
+// mocks it stays at 0 or 1 since they're consumed on match so the
+// bump has no semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
+	m.bumpHitCount(mock.Name, mock.Kind)
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:             mock.Name,
 		Kind:             mock.Kind,
@@ -474,6 +1349,113 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		return false
 	}
 	return true
+}
+
+// bumpHitCount locates the live *models.Mock by name via the hit
+// index and atomically increments its TestModeInfo.HitCount. O(1) —
+// MarkMockAsUsed sits on the match hot path so a tree scan per call
+// would be a measurable CPU cost on large pools.
+//
+// Race handling: the slow path (hitIdx miss) takes the index write
+// lock for the WHOLE discover-and-seed sequence. A concurrent fast-
+// path bump during the slow-path tree walk can't double-increment
+// because the fast path holds a read lock while the slow path is
+// trying to upgrade — one of them wins the mutex-acquisition order
+// and the loser sees the already-seeded entry on re-check.
+//
+// No error on miss — telemetry is best-effort; the caller's primary
+// action (match / consume) is orthogonal.
+func (m *MockManager) bumpHitCount(name string, kind models.Kind) {
+	if name == "" {
+		return
+	}
+	// Honour the Close contract: post-Close mutations are no-ops so a
+	// late caller (matcher still draining on the way down, delayed
+	// goroutine completion, etc.) doesn't race with teardown by
+	// touching hitIdx / mutating TestModeInfo counters on mocks the
+	// manager has logically released.
+	if m.closed.Load() {
+		return
+	}
+	// Fast path: O(1) index lookup under RLock.
+	m.hitMu.RLock()
+	mk, fastHit := m.hitIdx[name]
+	m.hitMu.RUnlock()
+	if fastHit && mk != nil {
+		atomic.AddUint64(&mk.TestModeInfo.HitCount, 1)
+		return
+	}
+
+	// Slow path: hold the write lock across the discover-and-seed
+	// sequence so a concurrent slow-path caller for the same name
+	// re-checks and sees the seeded entry instead of walking the
+	// tree again (and double-incrementing).
+	m.hitMu.Lock()
+	defer m.hitMu.Unlock()
+	if mk2, ok := m.hitIdx[name]; ok && mk2 != nil {
+		atomic.AddUint64(&mk2.TestModeInfo.HitCount, 1)
+		return
+	}
+
+	m.treesMu.RLock()
+	flt := m.filteredByKind[kind]
+	unf := m.unfilteredByKind[kind]
+	m.treesMu.RUnlock()
+	findFirstByName := func(tree *TreeDb) *models.Mock {
+		if tree == nil {
+			return nil
+		}
+		var found *models.Mock
+		tree.rangeValues(func(v interface{}) bool {
+			mk, ok := v.(*models.Mock)
+			if !ok || mk == nil || mk.Name != name {
+				return true
+			}
+			found = mk
+			return false
+		})
+		return found
+	}
+	var target *models.Mock
+	if target = findFirstByName(unf); target == nil {
+		if target = findFirstByName(flt); target == nil {
+			m.connMu.RLock()
+			for _, tree := range m.connectionTrees {
+				if target = findFirstByName(tree); target != nil {
+					break
+				}
+			}
+			m.connMu.RUnlock()
+		}
+	}
+	if target != nil {
+		atomic.AddUint64(&target.TestModeInfo.HitCount, 1)
+		m.hitIdx[name] = target
+	}
+}
+
+// rebuildHitIndex walks the given mock slices and replaces m.hitIdx
+// with a fresh name → *Mock map. Called from SetFilteredMocks +
+// SetUnFilteredMocks after their tree swap so the fast-path bump
+// sees the new pool. Collisions (duplicate names across pools)
+// resolve to the last inserted pointer — acceptable for a telemetry
+// counter; the reuse metric aggregates by name anyway.
+func (m *MockManager) rebuildHitIndex(slices ...[]*models.Mock) {
+	total := 0
+	for _, s := range slices {
+		total += len(s)
+	}
+	idx := make(map[string]*models.Mock, total)
+	for _, s := range slices {
+		for _, mk := range s {
+			if mk != nil && mk.Name != "" {
+				idx[mk.Name] = mk
+			}
+		}
+	}
+	m.hitMu.Lock()
+	m.hitIdx = idx
+	m.hitMu.Unlock()
 }
 
 // ---------- bookkeeping ----------
@@ -526,7 +1508,15 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 				return true
 			}
 			total++
-			if mock.Spec.Metadata["type"] == "config" {
+			// Read the typed Lifetime with a raw-tag fallback so
+			// mocks that reach the pool without DeriveLifetime
+			// populating Lifetime still classify correctly. Same
+			// semantic as the pre-unification "type == config" read.
+			isSession := mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+				(mock.TestModeInfo.Lifetime == models.LifetimePerTest &&
+					mock.Spec.Metadata != nil &&
+					mock.Spec.Metadata["type"] == "config")
+			if isSession {
 				config++
 			} else {
 				data++
@@ -537,13 +1527,16 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 	}
 
 	// Fallback: legacy scan of the combined tree
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	m.treesMu.RLock()
+	legacyTree := m.unfiltered
+	m.treesMu.RUnlock()
+	legacyTree.rangeValues(func(v interface{}) bool {
 		mock, ok := v.(*models.Mock)
 		if !ok || mock == nil || mock.Kind != models.MySQL {
 			return true
 		}
 		total++
-		if mock.Spec.Metadata["type"] == "config" {
+		if mock.Spec.Metadata != nil && mock.Spec.Metadata["type"] == "config" {
 			config++
 		} else {
 			data++
