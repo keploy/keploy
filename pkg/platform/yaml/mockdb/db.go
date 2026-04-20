@@ -661,15 +661,34 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// existence (not size) is the right signal here: the gob writer
 	// creates mocks.gob before the first flush, so a size check
 	// would race the async writer.
+	//
+	// Stat BOTH files up front rather than short-circuiting on the
+	// gob presence: a testset directory that accidentally contains
+	// both mocks.gob and mocks.yaml (prior-version async-writer race,
+	// a manual edit, or a partial Delete) is ambiguous — the readers
+	// prefer gob, so silently locking to gob would orphan the yaml
+	// mocks. Surface the mixed-on-disk state as a hard error and let
+	// the user intervene instead of picking a side.
 	if _, loaded := ys.testSetFormat.Load(testSetID); !loaded {
-		if _, statErr := os.Stat(gobFile); statErr == nil {
+		_, gobStatErr := os.Stat(gobFile)
+		gobExists := gobStatErr == nil
+		if gobStatErr != nil && !os.IsNotExist(gobStatErr) {
+			return fmt.Errorf("mockdb: failed to verify whether gob mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, gobFile, gobStatErr)
+		}
+
+		_, yamlStatErr := os.Stat(yamlFile)
+		yamlExists := yamlStatErr == nil
+		if yamlStatErr != nil && !os.IsNotExist(yamlStatErr) {
+			return fmt.Errorf("mockdb: failed to verify whether yaml mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, yamlFile, yamlStatErr)
+		}
+
+		if gobExists && yamlExists {
+			return fmt.Errorf("mockdb: found both gob and yaml mock files for testset %q in %s; delete or refresh the testset directory so only one of %s or %s remains, then retry", testSetID, filepath.Dir(gobFile), filepath.Base(gobFile), filepath.Base(yamlFile))
+		}
+		if gobExists {
 			ys.testSetFormat.LoadOrStore(testSetID, true)
-		} else if !os.IsNotExist(statErr) {
-			return fmt.Errorf("mockdb: failed to verify whether gob mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, gobFile, statErr)
-		} else if _, statErr := os.Stat(yamlFile); statErr == nil {
+		} else if yamlExists {
 			ys.testSetFormat.LoadOrStore(testSetID, false)
-		} else if !os.IsNotExist(statErr) {
-			return fmt.Errorf("mockdb: failed to verify whether yaml mocks already exist for testset %q at %s: %w; check file permissions and filesystem accessibility, then retry", testSetID, yamlFile, statErr)
 		}
 	}
 

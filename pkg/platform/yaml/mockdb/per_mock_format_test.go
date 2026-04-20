@@ -623,3 +623,66 @@ func TestInsertMock_RehydrateAfterDelete(t *testing.T) {
 		t.Fatalf("stale mocks.yaml resurfaced after rehydrated insert")
 	}
 }
+
+// TestInsertMock_RehydrateDetectsMixedOnDiskState covers the mixed-
+// on-disk guard in the rehydrate branch of InsertMock. A testset
+// directory that contains both mocks.gob and mocks.yaml is an
+// ambiguous state — prior-version async-writer races, manual edits,
+// or a partial DeleteMocksForSet could leave both files behind.
+// Readers prefer gob by file presence, so silently locking to gob
+// would orphan the yaml mocks at replay. InsertMock must refuse
+// instead and surface an actionable error, leaving the in-memory
+// format lock untouched so the user can clean up the directory and
+// retry without a pre-claimed format side-effect.
+func TestInsertMock_RehydrateDetectsMixedOnDiskState(t *testing.T) {
+	// Guard against pollution from sibling tests.
+	prev := configuredMockFormat
+	t.Cleanup(func() { SetConfiguredMockFormat(prev) })
+	SetConfiguredMockFormat("")
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+
+	dir := t.TempDir()
+	// Seed BOTH mocks.gob and mocks.yaml in the testset directory
+	// directly via os.WriteFile, simulating the stale-directory state
+	// a user might land in. Empty files are enough to trip os.Stat,
+	// which is what the guard keys on.
+	testSetDir := filepath.Join(dir, "set-0")
+	if err := os.MkdirAll(testSetDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	gobPath := filepath.Join(testSetDir, "mocks.gob")
+	yamlPath := filepath.Join(testSetDir, "mocks.yaml")
+	if err := os.WriteFile(gobPath, nil, 0o644); err != nil {
+		t.Fatalf("write mocks.gob: %v", err)
+	}
+	if err := os.WriteFile(yamlPath, nil, 0o644); err != nil {
+		t.Fatalf("write mocks.yaml: %v", err)
+	}
+
+	ys := New(zap.NewNop(), dir, "mocks")
+	t.Cleanup(func() {
+		if err := ys.Close(); err != nil {
+			t.Errorf("deferred Close: %v", err)
+		}
+	})
+
+	// Any format should trigger the rehydrate path on the first
+	// InsertMock for this testSetID and fail loudly. Use "yaml" here
+	// to pin down the schedule — the guard must fire regardless of
+	// the requested format because the rehydrate branch runs before
+	// writeGob is resolved.
+	err := ys.InsertMock(context.Background(), newHTTPMock("yaml"), "set-0")
+	if err == nil {
+		t.Fatalf("expected InsertMock to fail when both mocks.gob and mocks.yaml exist, got nil")
+	}
+	if !strings.Contains(err.Error(), "found both gob and yaml mock files") {
+		t.Fatalf("error message missing mixed-on-disk hint: %v", err)
+	}
+
+	// No in-memory format lock should have been claimed. User
+	// intervention is required; pre-claiming either side would steer
+	// the next InsertMock after cleanup down the wrong path.
+	if _, loaded := ys.testSetFormat.Load("set-0"); loaded {
+		t.Fatalf("testSetFormat should not have an entry after a mixed-on-disk rejection")
+	}
+}
