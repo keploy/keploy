@@ -602,9 +602,23 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 }
 
 // InsertMock persists one mock under "<MockPath>/<testSetID>/<mockFileName>.(yaml|gob)".
-// The on-disk format is picked by resolveMockFormat: a non-empty
-// mock.Format wins, otherwise the process-wide configured format
-// applies.
+// The on-disk format is chosen by a three-step policy, in order of
+// precedence:
+//
+//  1. Recognized per-mock override: mock.Format == "yaml" or "gob"
+//     wins outright, so a caller that explicitly asks for a specific
+//     format gets it (and is subject to the mixed-format guard below
+//     if the testset is already locked to the opposite format).
+//  2. Locked testset: if no recognized override applies and this
+//     testSetID is already bound to a format — either via an earlier
+//     InsertMock in the same process or via the os.Stat rehydrate of
+//     an existing mocks.yaml / mocks.gob — the new mock inherits that
+//     lock. A typo'd or stale value therefore follows the directory
+//     instead of bouncing off the mixed-format guard.
+//  3. Process default: in the remaining case (no override, no lock)
+//     the mock is written in the format chosen by useGobMockFormat
+//     (KEPLOY_MOCK_FORMAT / record.mockFormat), which also becomes the
+//     new testset lock.
 //
 // Mixed-format constraint: read/prune paths (GetFilteredMocks /
 // GetUnFilteredMocks / UpdateMocks) choose mocks.gob over mocks.yaml by
@@ -701,30 +715,49 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// mixed-format guard. Recognised overrides still win — a caller
 	// that explicitly asks for "gob" on a yaml-locked testset gets
 	// the mixed-format error below, which is the intended guard.
+	//
+	// The unknown-format branch is resolved with an atomic
+	// LoadOrStore rather than a read-then-write pair so a racing
+	// goroutine with an explicit opposite format cannot slip its
+	// claim in between our Load and our writeGob decision. The
+	// returned actual value is authoritative: if we lost the
+	// LoadOrStore race we inherit whatever the winner chose, and
+	// the downstream mixed-format guard is skipped because we've
+	// already atomically resolved to the stored value. A small
+	// explicitFormat flag tracks whether we still need that guard
+	// on the recognised-override path.
 	var writeGob bool
+	explicitFormat := true
 	switch mock.Format {
 	case mockFormatGob:
 		writeGob = true
 	case "yaml":
 		writeGob = false
 	default:
-		if locked, ok := ys.testSetFormat.Load(testSetID); ok {
-			writeGob = locked.(bool)
-		} else {
-			writeGob = useGobMockFormat()
-		}
+		// Unknown value — atomically inherit whatever the testset is
+		// already locked to. If no lock yet, LoadOrStore claims the
+		// process default; the returned actual is always the value
+		// that will be visible to subsequent callers.
+		actual, _ := ys.testSetFormat.LoadOrStore(testSetID, useGobMockFormat())
+		writeGob = actual.(bool)
+		explicitFormat = false
 	}
 
 	// Primary guard: atomic claim-or-check on the in-memory map.
 	// This is race-free against a still-in-flight async gob writer
 	// and against another goroutine's concurrent InsertMock for the
 	// same testSetID, because LoadOrStore is documented as atomic.
-	actual, loaded := ys.testSetFormat.LoadOrStore(testSetID, writeGob)
-	if loaded && actual.(bool) != writeGob {
-		if writeGob {
-			return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
+	// Only runs for recognised-override callers — the unknown-format
+	// branch above already consulted LoadOrStore and cannot fail a
+	// mismatch check (it adopted whatever was stored).
+	if explicitFormat {
+		actual, loaded := ys.testSetFormat.LoadOrStore(testSetID, writeGob)
+		if loaded && actual.(bool) != writeGob {
+			if writeGob {
+				return fmt.Errorf("mockdb: cannot write gob-format mock into testset %q that already contains yaml mocks at %s; uniform per-testset format required", testSetID, yamlFile)
+			}
+			return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
 		}
-		return fmt.Errorf("mockdb: cannot write yaml-format mock into testset %q that already contains gob mocks at %s; uniform per-testset format required", testSetID, gobFile)
 	}
 
 	if writeGob {
@@ -1438,6 +1471,16 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 			return err
 		}
 	}
+
+	// Clear the in-memory per-testSetID format lock now that the on-disk
+	// files are gone. Without this drop the lock would survive the
+	// cleanup and reject the next InsertMock whose format differs
+	// from the deleted set's, breaking re-record flows that switch
+	// between yaml and gob between runs. The race-free mixed-format
+	// guard remains intact for concurrent sessions that do NOT route
+	// through this explicit cleanup (the in-memory lock in the
+	// InsertMock path still closes the async-writer race window).
+	ys.testSetFormat.Delete(testSetID)
 
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
 	return nil
