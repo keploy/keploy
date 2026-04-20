@@ -68,17 +68,6 @@ func TestRoundTrip_HTTP(t *testing.T) {
 	})
 }
 
-func TestRoundTrip_Redis(t *testing.T) {
-	roundTrip(t, "Redis", &models.Mock{
-		Version: "api.keploy.io/v1beta1",
-		Kind:    models.REDIS,
-		Spec: models.MockSpec{
-			RedisRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "bin", Data: "cGluZwo="}}}},
-			RedisResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "bin", Data: "UE9OR1xy"}}}},
-		},
-	})
-}
-
 func TestRoundTrip_Generic(t *testing.T) {
 	roundTrip(t, "Generic", &models.Mock{
 		Version: "api.keploy.io/v1beta1",

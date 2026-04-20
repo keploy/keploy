@@ -24,7 +24,6 @@ const (
 	HTTP        Kind = "Http"
 	HTTP2       Kind = "Http2"
 	GENERIC     Kind = "Generic"
-	REDIS       Kind = "Redis"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
@@ -100,8 +99,6 @@ type MockSpec struct {
 	Metadata            map[string]string   `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	GenericRequests     []Payload           `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
 	GenericResponses    []Payload           `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
-	RedisRequests       []Payload           `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
-	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
@@ -217,12 +214,6 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
 	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
-
-	c.Spec.RedisRequests = make([]Payload, len(m.Spec.RedisRequests))
-	copy(c.Spec.RedisRequests, m.Spec.RedisRequests)
-
-	c.Spec.RedisResponses = make([]Payload, len(m.Spec.RedisResponses))
-	copy(c.Spec.RedisResponses, m.Spec.RedisResponses)
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)

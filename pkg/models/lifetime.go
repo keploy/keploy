@@ -174,7 +174,7 @@ func (m *Mock) DeriveLifetime() {
 	}
 	// Kind-based fallback for UN-TAGGED mocks only. Pre-tag recordings
 	// relied on the kind-switch in pkg/platform/yaml/mockdb/db.go to
-	// route everything HTTP/HTTP2/MySQL/Redis/Postgres/PostgresV2/Generic
+	// route everything HTTP/HTTP2/MySQL/Postgres/PostgresV2/Generic
 	// /DNS to the "config" pool. Emulate that here so the Lifetime field
 	// has a defensible value for those recordings.
 	//
@@ -332,7 +332,7 @@ func LegacyKindFallbackFires() uint64 {
 // recordings.
 func kindsWithImplicitSessionLifetime(k Kind) bool {
 	switch k {
-	case HTTP, HTTP2, MySQL, REDIS, Postgres, PostgresV2, GENERIC, DNS:
+	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
 	return false

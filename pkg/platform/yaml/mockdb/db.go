@@ -51,7 +51,7 @@ const gobMockMagic = "keploy-gob-v1\n"
 // semantics is out of scope for this PR.
 func isUnfilteredMockKind(kind models.Kind) bool {
 	switch kind {
-	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "MySQL", "DNS":
 		return true
 	}
 	return false
@@ -992,7 +992,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 			// Shared classifier with GetUnFilteredMocks and with the
 			// YAML read path. Kinds that belong to the unfiltered
-			// bucket (HTTP, Postgres, Redis, ...) are excluded here;
+			// bucket (HTTP, Postgres, ...) are excluded here;
 			// per-testcase kinds (Mongo, gRPC, ...) fall through to
 			// the append. PostgresV2 is a special case: YAML's
 			// GetFilteredMocks keeps it in the tcs bucket while

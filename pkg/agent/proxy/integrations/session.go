@@ -56,4 +56,10 @@ type RecordSession struct {
 	// Opts contains protocol-specific options (bypass rules,
 	// passwords, TLS keys, noise config, etc.).
 	Opts models.OutgoingOptions
+
+	// MockModifier lets wrapper parsers adjust a mock produced by a shared
+	// parser before it is stored. For example, an enterprise parser that
+	// reuses HTTP recording can add protocol-specific metadata without
+	// teaching the OSS HTTP parser about that protocol.
+	MockModifier func(*models.Mock)
 }
