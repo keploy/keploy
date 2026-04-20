@@ -329,7 +329,7 @@ func RemoveDoubleQuotes(tempMap map[string]interface{}) {
 	}
 }
 
-func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
@@ -358,7 +358,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configuration file.
 `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
