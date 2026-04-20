@@ -2426,13 +2426,21 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		return nil
 	}
 
-	// Build filter parameters
+	// Build filter parameters. Default to strict=false when r.config is
+	// nil (unit tests, embedders) — matches the Phase 1 opt-in default
+	// in config.Test.StrictMockWindow. The env override applies at the
+	// agent for users who need strict without touching code.
+	strictMockWindow := false
+	if r.config != nil {
+		strictMockWindow = r.config.Test.StrictMockWindow
+	}
 	params := models.MockFilterParams{
 		AfterTime:          afterTime,
 		BeforeTime:         beforeTime,
 		MockMapping:        expectedMockMapping,
 		UseMappingBased:    useMappingBased,
 		TotalConsumedMocks: totalConsumedMocks,
+		StrictMockWindow:   strictMockWindow,
 	}
 
 	// Send parameters to agent for filtering and mock updates

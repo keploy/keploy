@@ -33,8 +33,18 @@ go build -cover -coverpkg=./... -o ginApp
 send_request(){
     local kp_pid="$1"
 
+    # Bound the readiness loop so a never-starting app (keploy
+    # stuck, mongo stuck, docker stuck, anything) fails the
+    # iteration in 5 minutes instead of hanging the whole job
+    # for hours — see run 24631193918 where this loop was the
+    # suspected entry point into a 140-minute gin-mongo hang.
+    local deadline=$(( $(date +%s) + 300 ))
     app_started=false
     while [ "$app_started" = false ]; do
+        if [ "$(date +%s)" -gt "$deadline" ]; then
+            echo "::error::gin-mongo app did not respond on http://localhost:8080 within 5 minutes; aborting iteration"
+            return 1
+        fi
         if curl --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
@@ -45,7 +55,7 @@ send_request(){
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-    echo "App started"      
+    echo "App started"
     # Start making curl calls to record the testcases and mocks.
     curl --request POST \
       --url http://localhost:8080/url \
@@ -74,16 +84,34 @@ send_request(){
 
     # Wait for keploy to record the tcs and mocks.
     sleep 10
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     if [ -n "$REC_PID" ]; then
         sudo kill -INT "$REC_PID" 2>/dev/null || true
-        # Wait for keploy to flush and exit (up to 30s)
+        # Wait for keploy to flush and exit (up to 30s).
         for i in {1..30}; do
             kill -0 "$REC_PID" 2>/dev/null || break
             sleep 1
         done
+        # SIGINT-then-SIGKILL escalation. On keploy/keploy#4077 run
+        # 24631193918 a single gin-mongo record iteration hung the
+        # entire job for 140+ minutes because keploy didn't respond
+        # to SIGINT and `wait` at the bottom of the loop blocked
+        # forever on its tee'd stdout. Dumping goroutines before
+        # SIGKILL gives us the actual RCA on the next hang instead
+        # of a blank 6-hour timeout. SIGQUIT is Go-runtime-friendly
+        # and prints all goroutine stacks to stderr, which the
+        # tee above captures into ${app_name}.txt.
+        if kill -0 "$REC_PID" 2>/dev/null; then
+            echo "::warning::keploy did not exit within 30s of SIGINT (pid $REC_PID). Dumping goroutines via SIGQUIT, then escalating to SIGKILL."
+            sudo kill -QUIT "$REC_PID" 2>/dev/null || true
+            sleep 3
+            sudo kill -9 "$REC_PID" 2>/dev/null || true
+            # Brief pause so the tee pipe has a chance to drain
+            # before the outer `wait` returns and the loop moves on.
+            sleep 2
+        fi
     else
         echo "No keploy process found to kill."
     fi
