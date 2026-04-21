@@ -438,3 +438,42 @@ func TestGenerateTrustStore_RejectsEmptyBundle(t *testing.T) {
 		t.Fatal("expected generateTrustStore to error on a bundle with no CERTIFICATE blocks")
 	}
 }
+
+// TestGenerateTrustStore_RejectsTruncatedTrailingBlock proves the
+// partial-JKS defense Copilot flagged: a bundle with ONE valid
+// certificate followed by a truncated/corrupted second CERTIFICATE
+// block (missing its -----END----- armour) must fail loudly, not
+// silently drop the truncated block. Previously pem.Decode's
+// nil-on-malformed return would have let the loop exit cleanly with a
+// single-entry JKS, obscuring the fact that a trust anchor is missing.
+func TestGenerateTrustStore_RejectsTruncatedTrailingBlock(t *testing.T) {
+	dir := t.TempDir()
+
+	validPEM := makeSelfSignedPEM(t, "Valid-Root")
+
+	// Synthesise a trailing armour without its END marker. Using a
+	// literal prefix keeps the test readable; the exact bytes after
+	// -----BEGIN don't matter because pem.Decode rejects it before we
+	// can parse anything meaningful.
+	truncated := []byte("\n-----BEGIN CERTIFICATE-----\nMIIBizCCATGgAwIBAgIRAJqOxytruncat\n")
+
+	bundle := append([]byte{}, validPEM...)
+	bundle = append(bundle, truncated...)
+
+	bundlePath := filepath.Join(dir, "truncated-trailer.crt")
+	if err := os.WriteFile(bundlePath, bundle, 0644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+
+	jksPath := filepath.Join(dir, "truncated.jks")
+	err := generateTrustStore(bundlePath, jksPath)
+	if err == nil {
+		t.Fatal("expected generateTrustStore to reject a bundle with a malformed trailing -----BEGIN armour, got nil")
+	}
+	if !strings.Contains(err.Error(), "malformed PEM armour") {
+		t.Fatalf("error should call out the truncated trailer, got %q", err.Error())
+	}
+	if _, statErr := os.Stat(jksPath); statErr == nil {
+		t.Fatal("truststore file should not exist when generateTrustStore errored — leaving a partial JKS would defeat the guard")
+	}
+}

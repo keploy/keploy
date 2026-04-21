@@ -2,6 +2,7 @@
 package tls
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/sha256"
@@ -537,7 +538,10 @@ func extractCertToTemp() (string, error) {
 // Non-CERTIFICATE PEM blocks (keys, CRLs, DH params, ...) that might
 // appear in unusual bundles are skipped; a parse error on any single
 // block returns an error so we fail loudly rather than silently ship a
-// partial trust store.
+// partial trust store. A truncated/malformed -----BEGIN----- armour in
+// the trailing unparsed bytes is likewise treated as a fatal error
+// (otherwise pem.Decode's nil-on-malformed return would let the last
+// certificate in a corrupted bundle disappear from the JKS silently).
 func generateTrustStore(certPath, jksPath string) error {
 	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
@@ -563,6 +567,20 @@ func generateTrustStore(certPath, jksPath string) error {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
+			// pem.Decode returns nil for "no more PEM blocks" AND for
+			// "malformed PEM block" — the two are indistinguishable from
+			// the return. A whitespace-only or comment-only trailer is
+			// the benign case (openssl tools commonly append a trailing
+			// newline, and trust bundles often carry a human-readable
+			// header before the first -----BEGIN----- line). But if the
+			// unparsed tail STILL contains a BEGIN armour, we likely have
+			// a truncated or corrupted CERTIFICATE block at the end of
+			// the file — silently dropping it would produce a partial
+			// JKS where one or more trust anchors are missing at
+			// runtime. Fail loudly instead.
+			if bytes.Contains(rest, []byte("-----BEGIN")) {
+				return fmt.Errorf("generateTrustStore: malformed PEM armour in trailing data of %s (found unparseable -----BEGIN marker after %d successfully-decoded block(s)); trust store would be incomplete", certPath, pemBlockIdx)
+			}
 			break
 		}
 		pemBlockIdx++
