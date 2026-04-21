@@ -471,6 +471,11 @@ jobs:
   # -------------------------------------------------------------------
 
   build-docker-image-amd64:
+    # Fork-guard: linux/amd64 consumers (run_*_docker) all skip on
+    # fork PRs, and the Windows self-hosted leg is gated too. Building
+    # and uploading an image tarball that no downstream job will load
+    # just burns runner minutes.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload]
     runs-on: ubuntu-latest
     steps:
@@ -593,10 +598,18 @@ jobs:
   # (Docker Desktop on Apple Silicon runs linux containers natively).
   # -------------------------------------------------------------------
 
-  pull-docker-image-macos:
+  precheck-macos:
+    # Pre-flight sanity on the self-hosted macOS runner: create the
+    # workflow start lock that clean_up_docker_macos consumes, unlock
+    # the keychain, and confirm Docker Desktop is up. Fails fast
+    # BEFORE the parallel test jobs spin up, so a runner that booted
+    # without Docker Desktop doesn't waste 10 min of downstream time.
+    # The docker image itself is loaded inside each downstream test
+    # job via the download-image composite action — pre-loading here
+    # would duplicate the artifact download + docker load for every
+    # test job.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, macOS, native]
-    needs: [build-docker-image-arm64]
     timeout-minutes: 10
     steps:
       - name: Create workflow start lock
@@ -621,23 +634,14 @@ jobs:
           fi
           echo "Docker Desktop is running."
 
-      - uses: actions/checkout@v4
-
-      - name: Load docker image
-        timeout-minutes: 5
-        uses: ./.github/actions/download-image
-        with:
-          artifact_name: docker-image-linux-arm64
-          version: ${{ github.sha }}
-
   run_python_docker_macos:
-    needs: [build-darwin-arm64, pull-docker-image-macos, build-docker-image-arm64]
+    needs: [build-darwin-arm64, precheck-macos, build-docker-image-arm64]
     uses: ./.github/workflows/python_docker_macos.yml
     secrets:
       MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
   run_golang_docker_macos:
-    needs: [build-darwin-arm64, pull-docker-image-macos, build-docker-image-arm64]
+    needs: [build-darwin-arm64, precheck-macos, build-docker-image-arm64]
     uses: ./.github/workflows/golang_docker_macos.yml
     secrets:
       MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
@@ -742,13 +746,17 @@ jobs:
   # (Docker Desktop on Windows runs linux containers via WSL2).
   # -------------------------------------------------------------------
 
-  pull-docker-image-windows:
-    needs: [build-docker-image-amd64]
+  precheck-windows:
+    # Pre-flight sanity on the self-hosted Windows runner: set up
+    # per-run git isolation and confirm Docker Desktop is up. Fails
+    # fast BEFORE the parallel Windows test jobs spin up. The docker
+    # image itself is loaded inside each downstream test job via the
+    # download-image composite action — pre-loading here would
+    # duplicate the artifact download + docker load for every test.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     # Same rationale as build-windows-amd64: bound the wall-clock so a
     # hung self-hosted Windows runner cannot stall the whole pipeline.
-    # This job is pull-only (docker load); 30 min is generous.
     timeout-minutes: 30
     steps:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
@@ -800,12 +808,6 @@ jobs:
             exit 1
           }
 
-      - name: Load docker image
-        uses: ./.github/actions/download-image
-        with:
-          artifact_name: docker-image-linux-amd64
-          version: ${{ github.sha }}
-
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
@@ -814,7 +816,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   run_golang_docker_windows:
-    needs: [build-windows-amd64, build-docker-image-amd64, pull-docker-image-windows]
+    needs: [build-windows-amd64, build-docker-image-amd64, precheck-windows]
     uses: ./.github/workflows/golang_docker_windows.yml
 
   run_golang_native_windows:
@@ -932,7 +934,7 @@ jobs:
       - build-darwin-arm64
       - build-linux-arm64
       - build-docker-image-arm64
-      - pull-docker-image-macos
+      - precheck-macos
       - run_python_docker_macos
       - run_golang_docker_macos
       - clean_up_docker_macos
@@ -944,7 +946,7 @@ jobs:
             "${{ needs.build-darwin-arm64.result }}" \
             "${{ needs.build-linux-arm64.result }}" \
             "${{ needs.build-docker-image-arm64.result }}" \
-            "${{ needs.pull-docker-image-macos.result }}" \
+            "${{ needs.precheck-macos.result }}" \
             "${{ needs.run_python_docker_macos.result }}" \
             "${{ needs.run_golang_docker_macos.result }}" \
             "${{ needs.clean_up_docker_macos.result }}" \
@@ -963,7 +965,7 @@ jobs:
     needs:
       - build-windows-amd64
       - build-docker-image-amd64
-      - pull-docker-image-windows
+      - precheck-windows
       - run_golang_docker_windows
       - run_golang_native_windows
       - cleanup_windows
@@ -974,7 +976,7 @@ jobs:
           results=( \
             "${{ needs.build-windows-amd64.result }}" \
             "${{ needs.build-docker-image-amd64.result }}" \
-            "${{ needs.pull-docker-image-windows.result }}" \
+            "${{ needs.precheck-windows.result }}" \
             "${{ needs.run_golang_docker_windows.result }}" \
             "${{ needs.run_golang_native_windows.result }}" \
             "${{ needs.cleanup_windows.result }}" \

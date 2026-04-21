@@ -165,6 +165,17 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.10.1
 
+      # Register qemu-user-static binfmt handlers explicitly so the
+      # linux/arm64 leg of the multi-arch build below runs the base
+      # image's RUN steps (apt-get + sed/chmod in Dockerfile.runtime)
+      # under emulation when this job lands on an amd64 runner. The
+      # keploy binary itself is a pre-built native arm64 artifact —
+      # qemu is only doing the debian:trixie-slim bootstrap, not a
+      # go-build cross-compile, so the perf hit is bounded to a
+      # single apt-get layer.
+      - name: Setup QEMU (for linux/arm64 base-image bootstrap)
+        uses: docker/setup-qemu-action@v3
+
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3.12.0
 
