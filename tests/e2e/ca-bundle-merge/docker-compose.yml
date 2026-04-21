@@ -1,0 +1,49 @@
+# docker-compose.yml — end-to-end reproduction of the CA-bundle-merge fix.
+#
+# Two services share a volume at /shared:
+#
+#   1. `ca-writer`: runs the Go harness that exercises setupSharedVolume in a
+#      debian:bookworm-slim container with ca-certificates installed, writing
+#      /shared/ca.crt (system bundle + keploy MITM CA merged) and
+#      /shared/keploy-ca.crt (keploy MITM CA only).
+#
+#   2. `tls-probe`: a python:3.13-slim container that waits for the writer to
+#      finish, then curls https://sts.us-east-1.amazonaws.com/ twice —
+#      first with REQUESTS_CA_BUNDLE pointing at the merged file (must
+#      succeed), then with REQUESTS_CA_BUNDLE pointing at the keploy-only
+#      file (must fail with certificate-verify). The run.sh wrapper
+#      asserts both expectations.
+#
+# The test does NOT depend on the Keploy agent or on the admission webhook —
+# it exercises the exact function-under-change (setupSharedVolume) in the
+# exact distro footprint that the webhook injects env vars into (a
+# container with a system trust store and REQUESTS_CA_BUNDLE overriding it).
+
+services:
+  ca-writer:
+    build:
+      # Build context is repo root so the harness can import the tls package.
+      context: ../../../
+      dockerfile: tests/e2e/ca-bundle-merge/Dockerfile.setup
+    container_name: kpl-ca-merge-writer
+    environment:
+      - EXPORT_PATH=/shared
+    volumes:
+      - ca-shared:/shared
+    # A one-shot — the harness exits 0 after writing the files.
+    restart: "no"
+
+  tls-probe:
+    image: python:3.13-slim
+    container_name: kpl-ca-merge-probe
+    depends_on:
+      ca-writer:
+        condition: service_completed_successfully
+    volumes:
+      - ca-shared:/shared:ro
+    # The probe is driven from run.sh via `docker compose exec` after both
+    # containers are up; keep it alive long enough to poke.
+    command: ["sleep", "600"]
+
+volumes:
+  ca-shared:

@@ -1,0 +1,20 @@
+# Dockerfile.setup — builds the Go harness that runs setupSharedVolume against
+# an EmptyDir mount (simulating the k8s-proxy EmptyDir /tmp/keploy-tls). The
+# runner image is debian:bookworm-slim so a real OS CA bundle is present at
+# /etc/ssl/certs/ca-certificates.crt (provided by the `ca-certificates`
+# package, already in the slim image via tzdata's dependency).
+
+FROM golang:1.26-bookworm AS builder
+WORKDIR /src
+COPY . /src
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -o /out/ca-merge-harness ./tests/e2e/ca-bundle-merge/setup/
+
+FROM debian:bookworm-slim
+# ca-certificates ships /etc/ssl/certs/ca-certificates.crt — the system trust
+# store that the merge code must pick up. curl is for in-container smoke tests.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/ca-merge-harness /usr/local/bin/ca-merge-harness
+ENTRYPOINT ["/usr/local/bin/ca-merge-harness"]
