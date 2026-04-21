@@ -1,0 +1,48 @@
+# e2e-ca-bundle-merge.yml — runs tests/e2e/ca-bundle-merge/run.sh on push and
+# PR. The test brings up two containers via docker compose:
+#   * ca-writer (debian:bookworm-slim + ca-certificates) invokes the Go
+#     harness which calls SetupCA(..., isDocker=true) so setupSharedVolume
+#     runs end-to-end.
+#   * tls-probe (python:3.13-slim) then curls real sts.us-east-1.amazonaws.com
+#     with REQUESTS_CA_BUNDLE pointing at the merged file (must succeed) and
+#     at the keploy-only file (must fail with curl exit 60 — proves the
+#     guard by demonstrating the bug would exist without the merge).
+#
+# Network egress to AWS STS is required; if the runner lacks it, this job
+# will fail the [A] assertion — that is the intended behaviour and mirrors
+# what a real customer would observe.
+
+name: e2e-ca-bundle-merge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pkg/agent/proxy/tls/**
+      - tests/e2e/ca-bundle-merge/**
+      - .github/workflows/e2e-ca-bundle-merge.yml
+  pull_request:
+    paths:
+      - pkg/agent/proxy/tls/**
+      - tests/e2e/ca-bundle-merge/**
+      - .github/workflows/e2e-ca-bundle-merge.yml
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-ca-bundle-merge:
+    name: e2e-ca-bundle-merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show docker/compose versions
+        run: |
+          docker version
+          docker compose version
+
+      - name: Run e2e harness
+        working-directory: tests/e2e/ca-bundle-merge
+        run: bash ./run.sh
