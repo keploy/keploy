@@ -1,13 +1,116 @@
 package models
 
 import (
+	"encoding/base64"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type Method string
+
+// splitBodyForYAML returns the pair that should be written to the yaml
+// document: (body, body_base64). If the body is valid UTF-8 it goes in the
+// first slot and body_base64 is empty. If it contains any non-UTF-8 bytes
+// (e.g. a zip / image / octet-stream response) yaml.v3 rejects it as
+// "yaml: cannot marshal invalid UTF-8 data as !!str", so we base64-encode
+// and leave the plain body empty.
+func splitBodyForYAML(body string) (string, string) {
+	if body == "" || utf8.ValidString(body) {
+		return body, ""
+	}
+	return "", base64.StdEncoding.EncodeToString([]byte(body))
+}
+
+// joinBodyFromYAML is the inverse of splitBodyForYAML. If body_base64 is
+// present it wins and is decoded back into the raw byte-for-byte body.
+func joinBodyFromYAML(body, bodyBase64 string) (string, error) {
+	if bodyBase64 == "" {
+		return body, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(bodyBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode body_base64: %w", err)
+	}
+	return string(decoded), nil
+}
+
+// MarshalYAML serialises an HTTPReq. When the body contains non-UTF-8 bytes
+// (which yaml.v3 refuses to emit as a !!str scalar) it is moved to a
+// sibling body_base64 field. See splitBodyForYAML for the rationale.
+func (h HTTPReq) MarshalYAML() (interface{}, error) {
+	body, bodyB64 := splitBodyForYAML(h.Body)
+	type httpReqYAML struct {
+		Method     Method            `yaml:"method"`
+		ProtoMajor int               `yaml:"proto_major"`
+		ProtoMinor int               `yaml:"proto_minor"`
+		URL        string            `yaml:"url"`
+		URLParams  map[string]string `yaml:"url_params,omitempty"`
+		Header     map[string]string `yaml:"header"`
+		Body       string            `yaml:"body"`
+		BodyBase64 string            `yaml:"body_base64,omitempty"`
+		BodyRef    BodyRef           `yaml:"body_ref,omitempty"`
+		Binary     string            `yaml:"binary,omitempty"`
+		Form       []FormData        `yaml:"form,omitempty"`
+		Timestamp  time.Time         `yaml:"timestamp"`
+	}
+	return httpReqYAML{
+		Method:     h.Method,
+		ProtoMajor: h.ProtoMajor,
+		ProtoMinor: h.ProtoMinor,
+		URL:        h.URL,
+		URLParams:  h.URLParams,
+		Header:     h.Header,
+		Body:       body,
+		BodyBase64: bodyB64,
+		BodyRef:    h.BodyRef,
+		Binary:     h.Binary,
+		Form:       h.Form,
+		Timestamp:  h.Timestamp,
+	}, nil
+}
+
+func (h *HTTPReq) UnmarshalYAML(node *yamlLib.Node) error {
+	type httpReqYAML struct {
+		Method     Method            `yaml:"method"`
+		ProtoMajor int               `yaml:"proto_major"`
+		ProtoMinor int               `yaml:"proto_minor"`
+		URL        string            `yaml:"url"`
+		URLParams  map[string]string `yaml:"url_params,omitempty"`
+		Header     map[string]string `yaml:"header"`
+		Body       string            `yaml:"body"`
+		BodyBase64 string            `yaml:"body_base64,omitempty"`
+		BodyRef    BodyRef           `yaml:"body_ref,omitempty"`
+		Binary     string            `yaml:"binary,omitempty"`
+		Form       []FormData        `yaml:"form,omitempty"`
+		Timestamp  time.Time         `yaml:"timestamp"`
+	}
+	var raw httpReqYAML
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	body, err := joinBodyFromYAML(raw.Body, raw.BodyBase64)
+	if err != nil {
+		return err
+	}
+	*h = HTTPReq{
+		Method:     raw.Method,
+		ProtoMajor: raw.ProtoMajor,
+		ProtoMinor: raw.ProtoMinor,
+		URL:        raw.URL,
+		URLParams:  raw.URLParams,
+		Header:     raw.Header,
+		Body:       body,
+		BodyRef:    raw.BodyRef,
+		Binary:     raw.Binary,
+		Form:       raw.Form,
+		Timestamp:  raw.Timestamp,
+	}
+	return nil
+}
 
 // BodyRef stores a reference to a large request body that has been offloaded
 // to the assets directory (bodies > 1MB). When BodyRef is set, Body will be empty.
