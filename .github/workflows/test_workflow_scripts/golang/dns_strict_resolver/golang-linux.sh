@@ -30,28 +30,10 @@ check_for_errors() {
 # curl.sh responses are appended to this file; we parse it after the run.
 CURL_OUT="curl-output.txt"
 
-dump_keploy_log() {
-  local label="${1:-record.txt}"
-  local path="${2:-record.txt}"
-  if [ ! -s "$path" ]; then
-    echo "::warning::$label is empty or missing"
-    return 0
-  fi
-  echo "::group::$label (tail, filtered)"
-  # Keep output from drowning CI logs: show attach-related lines first,
-  # then the last 200 lines for context.
-  echo "--- attach/hook/dns lines ---"
-  grep -iE "attach|recvmsg|sendmsg|dns|cgroup|bpf|proxy.*info|register.*client|dns_port|EAI_AGAIN" "$path" | tail -80 || true
-  echo "--- last 200 lines ---"
-  tail -200 "$path" || true
-  echo "::endgroup::"
-}
-
 check_curl_output() {
   echo "Checking curl output for source-address mismatches and errors..."
   if [ ! -s "$CURL_OUT" ]; then
     echo "::error::$CURL_OUT is empty — curl.sh produced no output"
-    dump_keploy_log "record.txt (empty curl output)" record.txt
     return 1
   fi
 
@@ -60,7 +42,6 @@ check_curl_output() {
   if grep -Eq '"source_mismatches":[1-9]' "$CURL_OUT"; then
     echo "::error::One or more /resolve calls had source_mismatches > 0 (pre-fix Keploy behaviour). Output:"
     cat "$CURL_OUT"
-    dump_keploy_log "record.txt (source_mismatches > 0)" record.txt
     return 1
   fi
 
@@ -68,7 +49,6 @@ check_curl_output() {
   if grep -q '"error":"no accepted reply' "$CURL_OUT"; then
     echo "::error::/resolve timed out waiting for a source-matching reply. Output:"
     cat "$CURL_OUT"
-    dump_keploy_log "record.txt (no accepted reply)" record.txt
     return 1
   fi
 
@@ -76,7 +56,6 @@ check_curl_output() {
   if ! grep -q '"ips":\["' "$CURL_OUT"; then
     echo "::error::No /resolve call returned any IPs. Output:"
     cat "$CURL_OUT"
-    dump_keploy_log "record.txt (no IPs)" record.txt
     return 1
   fi
 
@@ -147,12 +126,10 @@ endsec
 
 # Record
 section "Start Recording"
-# --debug here so attach failures / BPF-hook lifecycle are visible if the
-# check_curl_output step later fails.
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-strict-resolver" --generateGithubActions=false --debug >record.txt 2>&1 &
+sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-strict-resolver" --generateGithubActions=false >record.txt 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record started with PID: $KEPLOY_PID"
-sleep 8
+sleep 5
 endsec
 
 send_request
