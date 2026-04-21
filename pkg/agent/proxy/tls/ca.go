@@ -234,17 +234,33 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	// Set Env Vars pointing to the installed cert
+	// Set Env Vars pointing to the installed cert.
+	//
+	// finalCAPath is empty when getCaPaths() returned NO recognized CA
+	// store paths (can happen on minimal/custom distros). In that case
+	// the loop at the top of this function wrote nothing to disk, so no
+	// env var points anywhere useful. We still mark the agent ready
+	// (blocking /agent/ready forever would just cascade into a
+	// kubelet/compose restart loop without fixing the root cause) but we
+	// must be loud about it: any HTTPS call the app makes that expects
+	// the Keploy MITM CA to be installed will fail silently downstream.
 	if finalCAPath != "" {
 		if err := SetEnvForPath(logger, finalCAPath); err != nil {
 			return err
 		}
+	} else {
+		logger.Warn(
+			"Native-mode SetupCA completed without finding any OS CA store " +
+				"path — /agent/ready will still signal success but NO " +
+				"Keploy CA is installed on this host. Non-Keploy-proxied " +
+				"TLS will work; Keploy-proxied TLS will fail cert " +
+				"verification. Check getCaPaths() for your distro.")
 	}
 
 	// Native mode completed successfully — the CA is now installed in
 	// the system store (and the Java keystore if Java is present).
 	// Signal readiness so downstream consumers (e.g. /agent/ready) can
-	// unblock.
+	// unblock. See the warn block above for the finalCAPath=="" edge.
 	markCAReady()
 	return nil
 }

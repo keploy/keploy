@@ -18,13 +18,29 @@ services:
     command: ["-addr=:8086", "-ca-delay=5s"]
     expose:
       - "8086"
+    # TCP-connect healthcheck (busybox's `nc -z`) — once the harness binds
+    # port 8086 the listener is ready to accept HTTP requests. This is the
+    # canonical way to gate depends_on without hitting /agent/agent/ready
+    # itself (which is the endpoint under test and deliberately 503s for
+    # the first CA_DELAY seconds).
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8086"]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
     volumes:
       - shared:/shared
 
   client:
     image: alpine:latest
+    # Wait for the agent's HTTP listener to be bound before firing the first
+    # curl. Without this, the first poll-iteration races the Go bootstrap
+    # and records "000" (connection refused) instead of the "503" the test
+    # expects — a flake that has nothing to do with the CA-ready gate.
     depends_on:
-      - agent
+      agent:
+        condition: service_healthy
     volumes:
       - shared:/shared
     command:
