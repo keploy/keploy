@@ -292,6 +292,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -435,6 +436,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
+		"jsonOutput":            "json",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
 		"enableTesting":         "enable-testing",
@@ -497,7 +499,23 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
-	if !IsConfigFileFound {
+	// The "create config file if missing" behavior is meaningful
+	// only for user-facing commands (record/test/etc.) that are
+	// expected to persist keploy.yml for reuse across invocations.
+	// The `agent` subcommand is a worker process spawned by the
+	// parent keploy: it still reads an existing keploy.yml via
+	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// settings the parent resolved, but it has no use for writing
+	// a fresh one if the file is missing — the parent has already
+	// handed it the effective config via CLI flags + env. Running
+	// CreateConfigFile from the agent therefore produces a file
+	// no one reads; worse, on containerised runs the host's
+	// absolute --config-path doesn't resolve inside the agent's
+	// filesystem and the call fails with a misleading ENOENT
+	// "failed to write config file" ERROR (kafka-ecommerce CI
+	// run 2541/10). Skip the create-on-missing branch for the
+	// agent subcommand specifically.
+	if !IsConfigFileFound && cmd.Name() != "agent" {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
@@ -608,9 +626,32 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The --json flag isn't registered on every subcommand (record / agent
+	// don't define it in enterprise builds), so Lookup + fallback avoids
+	// an early-return that would skip every subsequent validation step
+	// below (including the agent-mode wiring that the agent subprocess
+	// needs — without it, the agent starts up with mode="").
+	jsonOutput := false
+	if cmd.Flags().Lookup("json") != nil {
+		if v, err := cmd.Flags().GetBool("json"); err == nil {
+			jsonOutput = v
+		} else {
+			utils.LogError(c.logger, err, "failed to get the json flag")
+		}
+	}
+	c.cfg.JSONOutput = jsonOutput
+
+	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
+	if c.cfg.JSONOutput {
+		logger, err := log.RedirectToStderr()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
+	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
 		PrintLogo(os.Stdout, disableAnsi)
 	}
 	if c.cfg.Debug {

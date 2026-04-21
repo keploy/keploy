@@ -31,14 +31,32 @@ type handshakeRes struct {
 
 // Replay mode
 func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, dstCfg *models.ConditionalDstCfg) (handshakeRes, error) {
-	// Select the initial handshake mock based on destination address.
-	// When mocks contain destAddr metadata (recorded with different MySQL servers),
-	// pick the mock matching the current connection's destination so the client
-	// gets the correct server greeting (capabilities, charset, auth plugin).
-	initialHandshakeMock := mocks[0]
+	// Find a mock whose response bundle actually contains the
+	// server's HandshakeV10 greeting. Before Phase 2 the session
+	// pool only held handshake-bundle mocks (everything else was
+	// per-test via the implicit kind-fallback), so mocks[0] was
+	// guaranteed to be the handshake. Post-Phase-2 / lax kind-
+	// fallback the session pool can also contain lax-promoted data
+	// queries (COM_PING, COM_QUERY, etc.) whose bundles have no
+	// HandshakeV10 packet — picking mocks[0] blindly then crashed
+	// the second connection in a multi-connection replay when the
+	// sort-order happened to put one of those in front.
+	var initialHandshakeMock *models.Mock
+	isHandshakeMock := func(m *models.Mock) bool {
+		if m == nil {
+			return false
+		}
+		for _, r := range m.Spec.MySQLResponses {
+			if _, ok := r.Message.(*mysql.HandshakeV10Packet); ok {
+				return true
+			}
+		}
+		return false
+	}
+	// First pass: match by destAddr AND require a real handshake bundle.
 	if dstCfg != nil && dstCfg.Addr != "" {
 		for _, m := range mocks {
-			if m.Spec.Metadata["destAddr"] == dstCfg.Addr {
+			if m.Spec.Metadata["destAddr"] == dstCfg.Addr && isHandshakeMock(m) {
 				initialHandshakeMock = m
 				logger.Debug("Selected initial handshake mock by destAddr",
 					zap.String("destAddr", dstCfg.Addr),
@@ -46,6 +64,24 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 				break
 			}
 		}
+	}
+	// Second pass: any mock with a HandshakeV10 response. Order
+	// preserved (sorted by ReqTimestampMock ASC upstream), so the
+	// earliest recorded handshake wins.
+	if initialHandshakeMock == nil {
+		for _, m := range mocks {
+			if isHandshakeMock(m) {
+				initialHandshakeMock = m
+				break
+			}
+		}
+	}
+	// Fallback: preserve the legacy behaviour for empty/synthetic
+	// test setups — pick mocks[0] even without a HandshakeV10, so
+	// the existing error path at line 66 still fires with a useful
+	// diagnostic instead of panicking here.
+	if initialHandshakeMock == nil && len(mocks) > 0 {
+		initialHandshakeMock = mocks[0]
 	}
 
 	for i, mock := range mocks {
@@ -146,10 +182,20 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			}
 		}
 
-		// NEW: If no SSL matches at all, fail immediately (as requested).
+		// When no MySQL mock has a recorded SSLRequest entry — which
+		// happens whenever the recording side captured the traffic
+		// without seeing the pre-TLS SSLRequest packet (e.g. TLS-aware
+		// consumers that attach mid-handshake, or recordings done
+		// against a plaintext endpoint then replayed against a
+		// TLS-requesting client) — fall back to matching against all
+		// mocks. We still do the TLS MITM upgrade below, then match the
+		// post-TLS HandshakeResponse41 against the full mock set. The
+		// post-TLS wire format is identical, so a plaintext-recorded
+		// MySQL flow can still serve a TLS-requesting replay client.
 		if len(sslMatchedMocks) == 0 {
-			utils.LogError(logger, nil, "no mysql mocks matched the SSL request")
-			return res, fmt.Errorf("no mysql mocks matched the SSL request")
+			logger.Debug("no MySQL mock has an SSLRequest entry; " +
+				"falling back to plaintext mock candidates for post-TLS matching")
+			sslMatchedMocks = mocks
 		}
 
 		reqIdx++ // matched (logically) with the mock so increment the index
@@ -361,7 +407,8 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 
 		// Since auth switch response data can be different, we should just check the sequence number
-		if authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
+		if authSwitchRespMock.Header != nil && authSwitchRespMock.Header.Header != nil &&
+			authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
 			utils.LogError(logger, nil, "sequence number mismatch for auth switch response", zap.Any("expected", authSwitchRespMock.Header.Header.SequenceID), zap.Any("actual", authSwitchRespPkt.Header.SequenceID))
 			return res, fmt.Errorf("sequence number mismatch for auth switch response")
 		}
@@ -681,7 +728,8 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Since encrypted password can be different, we should just check the sequence number
-	if encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
+	if encryptedPassMock.Header != nil && encryptedPassMock.Header.Header != nil &&
+		encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
 		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
 		return fmt.Errorf("sequence number mismatch for encrypted password")
 	}

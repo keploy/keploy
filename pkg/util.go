@@ -2362,8 +2362,17 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 	return resp.StatusCode == http.StatusOK
 }
 
-func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
-	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+// FilterTcsMocks applies the per-test time-window filter to candidate
+// mocks. Pass strict=true for Option-1 containment (out-of-window
+// non-config mocks are dropped instead of promoted to the cross-test
+// config pool); pass strict=false for legacy Option-2 behaviour. Note
+// that Go has no default parameter values — callers resolve the
+// effective strict value from config.Test.StrictMockWindow (ships
+// false in Phase 1) combined with the KEPLOY_STRICT_MOCK_WINDOW env
+// override, via strictWindowEnabled. This function only sees the
+// resolved strict flag.
+func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
+	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2372,8 +2381,47 @@ func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, a
 	return filteredMocks
 }
 
-func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+// FilterPerTestAndLaxPromoted splits per-test candidate mocks into two
+// slices using filterByTimeStamp:
+//
+//   - perTestInWindow  — mocks whose request-timestamp is inside
+//     [afterTime, beforeTime]. These go into the per-test pool for
+//     the current test.
+//   - promotedToSession — mocks that filterByTimeStamp's lax branch
+//     moved to its "unfiltered" return slice because they are out-of-
+//     window (but neither strict-dropped nor invalid-order dropped).
+//     They represent the pre-Phase-2 kind-fallback's "reuse across
+//     tests" semantic — fixture queries recorded in test 1 that
+//     every subsequent test legitimately re-issues.
+//
+// Under strict mode the second slice is always empty (strict drops
+// rather than promotes). Under lax mode callers should append the
+// promoted slice to the session pool passed to the proxy so cross-
+// test fixture reuse keeps working for suites that relied on the
+// old kind-fallback's implicit promotion.
+//
+// Both slices are sorted by request-timestamp for deterministic
+// matcher ordering.
+func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
+
+	sort.SliceStable(perTestInWindow, func(i, j int) bool {
+		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
+	})
+	sort.SliceStable(promotedToSession, func(i, j int) bool {
+		return promotedToSession[i].Spec.ReqTimestampMock.Before(promotedToSession[j].Spec.ReqTimestampMock)
+	})
+
+	return perTestInWindow, promotedToSession
+}
+
+// FilterConfigMocks applies the per-test time-window filter to the config
+// mock pool. Pass strict=true for Option-1 containment (out-of-window
+// non-config mocks are dropped); pass strict=false for legacy Option-2.
+// See FilterTcsMocks for the env / config precedence that determines
+// the runtime-effective value.
+func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2410,7 +2458,100 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 	return append(filteredMocks, unfilteredMocks...)
 }
 
-func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
+// strictWindowEnvOverride holds the result of one-time env-var parsing
+// at process start. Env var KEPLOY_STRICT_MOCK_WINDOW=1|true|yes|on
+// enables strict containment process-wide, overriding the per-call
+// flag plumbed via MockFilterParams (both routes OR together).
+// KEPLOY_STRICT_MOCK_WINDOW=0|false|no|off explicitly disables it,
+// overriding the per-call flag too — this is the escape hatch for
+// users who need to turn off strict mode after the Phase 2.5 default
+// flip (see config.Test.StrictMockWindow in config.go) without
+// editing keploy.yaml.
+//
+// Evaluated ONCE at package init — changing the env var later in the
+// same process has no effect. Tests that need to exercise the env
+// path must set the variable before the binary starts; in-process
+// tests should drive the per-call bool instead, which is both
+// simpler and deterministic.
+var strictWindowEnvOverride = func() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_STRICT_MOCK_WINDOW")))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
+// strictWindowEnvExplicitOff reports whether the env var was set to a
+// disabling value. Used so KEPLOY_STRICT_MOCK_WINDOW=0 can force
+// strict off even when the per-call flag says true or the config
+// default has flipped.
+var strictWindowEnvExplicitOff = func() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_STRICT_MOCK_WINDOW")))
+	switch v {
+	case "0", "false", "no", "off":
+		return true
+	}
+	return false
+}()
+
+// IsStrictMockWindow reports whether strict mock-window containment is
+// effectively enabled — either via the per-call flag (from
+// config.Test.StrictMockWindow / MockFilterParams.StrictMockWindow) or the
+// process-wide KEPLOY_STRICT_MOCK_WINDOW env override. Exposed so the
+// agent's UpdateMockParams can log the effective state (covering both
+// opt-in routes) without duplicating the env-parsing logic.
+func IsStrictMockWindow(perCall bool) bool {
+	return strictWindowEnabled(perCall)
+}
+
+// strictWindowEnabled returns true when strict containment should apply.
+//
+// Phase 1 ships with strict mode default OFF (config/default.go
+// StrictMockWindow: false). Enabling strictness is opt-in via either
+// config.Test.StrictMockWindow: true or the KEPLOY_STRICT_MOCK_WINDOW
+// env override. A Phase 2+ follow-up will flip the default to true
+// once Lifetime classification coverage is proven in the field.
+//
+// Precedence implemented here (perCall is the already-resolved
+// effective call-site decision — config.Test.StrictMockWindow has
+// already been OR-ed in by the caller):
+//   - If the env var is explicitly set to a disabling value
+//     (KEPLOY_STRICT_MOCK_WINDOW=0), strict is DISABLED unconditionally.
+//     This wins over the per-call/config decision so users who hit
+//     problems with new recordings can opt out instantly without
+//     editing config or redeploying callers.
+//   - Otherwise, strict follows perCall; an enabling env var can also
+//     force it on even if perCall was false.
+//
+// In practice, opting out of strict mode is done either by:
+//   - setting KEPLOY_STRICT_MOCK_WINDOW=0 in env, or
+//   - setting test.strictMockWindow: false in keploy.yaml (which
+//     flows through perCall).
+//
+// When strict:
+//   - per-test (LifetimePerTest) mocks must have their request
+//     timestamp inside the outer test's [req,res] window
+//   - out-of-window per-test mocks are DROPPED instead of promoted to
+//     the cross-test pool (stops the cross-test bleed bug)
+//   - session (LifetimeSession) and connection (LifetimeConnection)
+//     mocks are NEVER dropped — their visibility is bounded by
+//     test-set / connID lifetime rather than the per-test window.
+//
+// Lax (opt-out) preserves pre-unification behaviour: out-of-window
+// per-test mocks remain visible via the unfiltered pool so
+// scoring-based matchers can still pick them up.
+func strictWindowEnabled(perCall bool) bool {
+	// Explicit env-var disable wins over everything else — escape
+	// hatch for users whose recordings predate full Phase 2
+	// classification coverage.
+	if strictWindowEnvExplicitOff {
+		return false
+	}
+	return perCall || strictWindowEnvOverride
+}
+
+func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -2423,7 +2564,9 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 		return m, unfilteredMocks
 	}
 
+	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
+	var droppedOutOfWindow, droppedInvalidOrder int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -2436,24 +2579,94 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			isNonKeploy = true
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
-			logger.Debug("request or response timestamp of mock is missing")
+			logger.Debug("request or response timestamp of mock is missing",
+				zap.String("mock", p.Name), zap.Bool("strict", strict))
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		// Prefer mocks whose request started during the test-case window.
-		// Response timestamps can trail the captured test-case response by a few
-		// microseconds, especially for the last outgoing dependency call in a test.
-		// Using the request-start time keeps those mocks in the filtered set while
-		// still excluding stale mocks from earlier test cases.
-		if !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime) {
+		// Defensive sanity check: if the response-timestamp is BEFORE the
+		// request-timestamp the recording is inconsistent (clock skew,
+		// serialisation bug, or file corruption). Skip it — keeping such
+		// a mock in either pool risks confusing downstream scoring.
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
+			continue
+		}
+
+		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// The response may straggle past beforeTime — DB/HTTP downstream
+		// responses routinely complete a few micro-to-milliseconds after
+		// the outer test response is captured. The cross-test bleed bug
+		// strict mode protects against is caused by out-of-window REQUESTS
+		// (a different test's data mock getting reused here), not by
+		// in-flight responses landing late. Checking req is sufficient
+		// in both modes — the strict-vs-lax difference is solely in the
+		// out-of-window handling below (strict drops, lax promotes to
+		// the cross-test config pool).
+		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		p.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, p)
+
+		// Out-of-window handling differs between modes.
+		if strict {
+			// Only session- or connection-scoped mocks survive out of
+			// window. Connection-scoped (Lifetime == LifetimeConnection,
+			// used by prepared-statement setup) is semantically reusable
+			// across tests as long as the owning connID is alive, so it
+			// must survive window filtering; enforcement happens at
+			// connection-pool lookup time. Per-test mocks are dropped —
+			// this is the bleed prevention.
+			//
+			// DeriveLifetime is called at pool ingest so
+			// TestModeInfo.Lifetime is already populated when we get
+			// here; fall back to reading the tag directly only if the
+			// mock somehow skipped DeriveLifetime (defensive).
+			if p.TestModeInfo.Lifetime == models.LifetimeSession ||
+				p.TestModeInfo.Lifetime == models.LifetimeConnection {
+				p.TestModeInfo.IsFiltered = false
+				unfilteredMocks = append(unfilteredMocks, p)
+			} else if p.Spec.Metadata != nil &&
+				(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
+				// Defensive fallback: mock entered filterByTimeStamp
+				// without DeriveLifetime having run. Set the cached
+				// Lifetime field here too so every downstream consumer
+				// — including matchers that read Lifetime directly —
+				// sees a consistent classification. Without this the
+				// mock would keep passing through with Lifetime =
+				// PerTest even though the tag says otherwise.
+				if p.Spec.Metadata["type"] == "config" {
+					p.TestModeInfo.Lifetime = models.LifetimeSession
+				} else {
+					p.TestModeInfo.Lifetime = models.LifetimeConnection
+				}
+				p.TestModeInfo.IsFiltered = false
+				unfilteredMocks = append(unfilteredMocks, p)
+			} else {
+				droppedOutOfWindow++
+			}
+		} else {
+			// Legacy: anything out-of-window goes to the unfiltered pool
+			// (where parsers may still pick it up as a fallback).
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+		}
+	}
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 {
+		logger.Debug("filterByTimeStamp dropped mocks (see separate counts for reason)",
+			zap.Int("dropped_out_of_window", droppedOutOfWindow),
+			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
+			zap.Bool("strict", strict),
+			zap.Time("after", afterTime),
+			zap.Time("before", beforeTime))
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")

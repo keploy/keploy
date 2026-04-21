@@ -138,7 +138,7 @@ send_requests() {
 
   echo "Triggering the fuzzer to generate traffic..."
 
-  curl -X POST http://localhost:18082/run \
+  curl --max-time 600 -X POST http://localhost:18082/run \
   -H "Content-Type: application/json" \
   -d '{
     "mode": "record",
@@ -167,9 +167,10 @@ send_requests() {
     "connect_timeout_sec": 10,
     "max_conn_idle_time_sec": 30,
     "max_staleness_sec": 90,
-    
+
     "max_diffs": 20
-  }'
+  }' || true
+
 }
 
 # --- Main Execution Logic ---
@@ -214,27 +215,42 @@ endsec
 # --- Recording Phase ---
 section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
-"$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
+GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
 section "Generate Fuzzer Traffic"
-# Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
-# Increased sleep time to capture more of the complex, sharded operations
 sleep 7
 endsec
 
 section "Stop Recording"
-echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+echo "Stopping Keploy record process..."
 
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
+REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
 echo "$REC_PID Keploy PID"
-echo "Killing keploy"
+
+echo "Sending SIGINT to keploy..."
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-sleep 5
+# Wait up to 15 seconds for graceful shutdown
+SHUTDOWN_TIMEOUT=15
+for i in $(seq 1 $SHUTDOWN_TIMEOUT); do
+  if ! kill -0 "$REC_PID" 2>/dev/null; then
+    echo "Keploy exited after ${i}s"
+    break
+  fi
+  sleep 1
+done
+
+# Force kill if still alive
+if kill -0 "$REC_PID" 2>/dev/null; then
+  echo "::error::Keploy did not exit within ${SHUTDOWN_TIMEOUT}s, force killing..."
+  sudo kill -9 "$REC_PID" 2>/dev/null || true
+  sleep 1
+fi
+
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec

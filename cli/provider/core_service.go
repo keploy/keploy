@@ -106,6 +106,11 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
+	// Propagate the config-file mock-format selection into mockdb. The
+	// env var KEPLOY_MOCK_FORMAT still wins if set, so ad-hoc runs can
+	// override without editing keploy.yml.
+	mockdb.SetConfiguredMockFormat(c.Record.MockFormat)
+
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
