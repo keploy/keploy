@@ -27,6 +27,17 @@ const (
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
+
+	// --- PostgresV3: deterministic replay, typed per-concern mocks ---
+	// Each lives in the same mocks.yaml stream but carries a distinct
+	// spec payload. See integrations/pkg/postgres/v3/README.md for the
+	// replay architecture.
+	PostgresV3Session   Kind = "PostgresV3Session"   // startup handshake + ParameterStatus bundle
+	PostgresV3Catalog   Kind = "PostgresV3Catalog"   // pg_catalog snapshot + framework virtual tables
+	PostgresV3Data      Kind = "PostgresV3Data"      // per-table seed rows for the row store
+	PostgresV3Query     Kind = "PostgresV3Query"     // single query invocation (SQL, binds, response, effects)
+	PostgresV3Generator Kind = "PostgresV3Generator" // deterministic volatile value stream
+
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
@@ -118,6 +129,204 @@ type MockSpec struct {
 	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
 	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+
+	// --- PostgresV3 payloads — each nil unless Kind matches ---
+	PostgresV3Session   *PostgresV3SessionSpec   `json:"postgresV3Session,omitempty" bson:"postgres_v3_session,omitempty" yaml:"postgresV3Session,omitempty"`
+	PostgresV3Catalog   *PostgresV3CatalogSpec   `json:"postgresV3Catalog,omitempty" bson:"postgres_v3_catalog,omitempty" yaml:"postgresV3Catalog,omitempty"`
+	PostgresV3Data      *PostgresV3DataSpec      `json:"postgresV3Data,omitempty" bson:"postgres_v3_data,omitempty" yaml:"postgresV3Data,omitempty"`
+	PostgresV3Query     *PostgresV3QuerySpec     `json:"postgresV3Query,omitempty" bson:"postgres_v3_query,omitempty" yaml:"postgresV3Query,omitempty"`
+	PostgresV3Generator *PostgresV3GeneratorSpec `json:"postgresV3Generator,omitempty" bson:"postgres_v3_generator,omitempty" yaml:"postgresV3Generator,omitempty"`
+}
+
+// ============================================================================
+// PostgresV3 specs — deterministic replay payloads.
+//
+// See integrations/pkg/postgres/v3/types/contracts.go for the in-memory
+// type hierarchy these structs serialize from.
+// ============================================================================
+
+// PostgresV3SessionSpec — startup handshake + ParameterStatus bundle.
+// Exactly one per recording; emitted on every replay client connection
+// after a trust-mode AuthOk.
+type PostgresV3SessionSpec struct {
+	ProtocolVersion  string            `json:"protocolVersion,omitempty" yaml:"protocolVersion,omitempty" bson:"protocol_version,omitempty"`
+	SSLResponse      string            `json:"sslResponse,omitempty" yaml:"sslResponse,omitempty" bson:"ssl_response,omitempty"`
+	ServerVersion    string            `json:"serverVersion,omitempty" yaml:"serverVersion,omitempty" bson:"server_version,omitempty"`
+	ParameterStatus  map[string]string `json:"parameterStatus,omitempty" yaml:"parameterStatus,omitempty" bson:"parameter_status,omitempty"`
+	BackendProcessID int32             `json:"backendProcessID,omitempty" yaml:"backendProcessID,omitempty" bson:"backend_process_id,omitempty"`
+	BackendSecretKey int32             `json:"backendSecretKey,omitempty" yaml:"backendSecretKey,omitempty" bson:"backend_secret_key,omitempty"`
+	ObservedAuthMode string            `json:"observedAuthMode,omitempty" yaml:"observedAuthMode,omitempty" bson:"observed_auth_mode,omitempty"`
+}
+
+// PostgresV3CatalogSpec — structured pg_catalog + information_schema
+// snapshot consulted by the replayer's L5 catalog engine for ORM
+// metadata probes.
+type PostgresV3CatalogSpec struct {
+	Schemas        []PostgresV3Schema         `json:"schemas,omitempty" yaml:"schemas,omitempty" bson:"schemas,omitempty"`
+	Types          []PostgresV3PgType         `json:"types,omitempty" yaml:"types,omitempty" bson:"types,omitempty"`
+	Sequences      []PostgresV3Sequence       `json:"sequences,omitempty" yaml:"sequences,omitempty" bson:"sequences,omitempty"`
+	Extensions     []string                   `json:"extensions,omitempty" yaml:"extensions,omitempty" bson:"extensions,omitempty"`
+	MigrationState []PostgresV3MigrationTable `json:"migrationState,omitempty" yaml:"migrationState,omitempty" bson:"migration_state,omitempty"`
+}
+
+type PostgresV3Schema struct {
+	Name   string                  `json:"name" yaml:"name" bson:"name"`
+	Tables []PostgresV3TableDef    `json:"tables,omitempty" yaml:"tables,omitempty" bson:"tables,omitempty"`
+}
+
+type PostgresV3TableDef struct {
+	Name        string                  `json:"name" yaml:"name" bson:"name"`
+	Columns     []PostgresV3Column      `json:"columns,omitempty" yaml:"columns,omitempty" bson:"columns,omitempty"`
+	Indexes     []PostgresV3IndexDef    `json:"indexes,omitempty" yaml:"indexes,omitempty" bson:"indexes,omitempty"`
+	Constraints []PostgresV3Constraint  `json:"constraints,omitempty" yaml:"constraints,omitempty" bson:"constraints,omitempty"`
+}
+
+type PostgresV3Column struct {
+	Name      string `json:"name" yaml:"name" bson:"name"`
+	TypeOID   uint32 `json:"typeOid" yaml:"typeOid" bson:"type_oid"`
+	TypeName  string `json:"typeName" yaml:"typeName" bson:"type_name"`
+	NotNull   bool   `json:"notNull,omitempty" yaml:"notNull,omitempty" bson:"not_null,omitempty"`
+	Default   string `json:"default,omitempty" yaml:"default,omitempty" bson:"default,omitempty"`
+	IsPrimary bool   `json:"isPrimary,omitempty" yaml:"isPrimary,omitempty" bson:"is_primary,omitempty"`
+	AttNum    int16  `json:"attNum" yaml:"attNum" bson:"att_num"`
+}
+
+type PostgresV3IndexDef struct {
+	Name    string   `json:"name" yaml:"name" bson:"name"`
+	Columns []string `json:"columns" yaml:"columns" bson:"columns"`
+	Unique  bool     `json:"unique,omitempty" yaml:"unique,omitempty" bson:"unique,omitempty"`
+}
+
+type PostgresV3Constraint struct {
+	Name    string   `json:"name" yaml:"name" bson:"name"`
+	Type    string   `json:"type" yaml:"type" bson:"type"`
+	Columns []string `json:"columns" yaml:"columns" bson:"columns"`
+}
+
+type PostgresV3PgType struct {
+	Name string `json:"name" yaml:"name" bson:"name"`
+	OID  uint32 `json:"oid" yaml:"oid" bson:"oid"`
+	Size int16  `json:"size" yaml:"size" bson:"size"`
+	Kind string `json:"kind" yaml:"kind" bson:"kind"`
+}
+
+type PostgresV3Sequence struct {
+	Schema    string `json:"schema" yaml:"schema" bson:"schema"`
+	Name      string `json:"name" yaml:"name" bson:"name"`
+	Start     int64  `json:"start" yaml:"start" bson:"start"`
+	Increment int64  `json:"increment" yaml:"increment" bson:"increment"`
+	LastValue int64  `json:"lastValue" yaml:"lastValue" bson:"last_value"`
+}
+
+type PostgresV3MigrationTable struct {
+	Name    string              `json:"name" yaml:"name" bson:"name"`
+	Columns []string            `json:"columns" yaml:"columns" bson:"columns"`
+	Rows    [][]string          `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+}
+
+// PostgresV3DataSpec — one per seeded user table. Carries the row-store
+// seed for L4's transactional engine.
+type PostgresV3DataSpec struct {
+	Schema     string       `json:"schema" yaml:"schema" bson:"schema"`
+	Table      string       `json:"table" yaml:"table" bson:"table"`
+	PrimaryKey []string     `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
+	Columns    []string     `json:"columns" yaml:"columns" bson:"columns"`
+	Rows       [][]string   `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Truncated  bool         `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
+	RowLimit   int          `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
+}
+
+// PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
+// replay-time index by sqlAstHash.
+type PostgresV3QuerySpec struct {
+	// Classification
+	Class        string `json:"class,omitempty" yaml:"class,omitempty" bson:"class,omitempty"`
+	Lifetime     string `json:"lifetime,omitempty" yaml:"lifetime,omitempty" bson:"lifetime,omitempty"`
+	Scope        string `json:"scope,omitempty" yaml:"scope,omitempty" bson:"scope,omitempty"`
+	SQLAstHash   string `json:"sqlAstHash" yaml:"sqlAstHash" bson:"sql_ast_hash"`
+
+	// SQL
+	SQLNormalized     string   `json:"sqlNormalized" yaml:"sqlNormalized" bson:"sql_normalized"`
+	Relations         []string `json:"relations,omitempty" yaml:"relations,omitempty" bson:"relations,omitempty"`
+	ParamOIDs         []uint32 `json:"paramOids,omitempty" yaml:"paramOids,omitempty" bson:"param_oids,omitempty"`
+	VolatilePositions []int    `json:"volatilePositions,omitempty" yaml:"volatilePositions,omitempty" bson:"volatile_positions,omitempty"`
+
+	// Invocation
+	InvocationID     string   `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
+	PrecedingTxState string   `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
+	BindValues       []string `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
+	BindFormats      []int    `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
+
+	// Wire response
+	Response *PostgresV3Response `json:"response,omitempty" yaml:"response,omitempty" bson:"response,omitempty"`
+
+	// State effects
+	SideEffects *PostgresV3SideEffects `json:"sideEffects,omitempty" yaml:"sideEffects,omitempty" bson:"side_effects,omitempty"`
+}
+
+type PostgresV3Response struct {
+	RowDescription  []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
+	// Rows stores each row as a []string. The sentinel value
+	// PostgresV3NullCell ("\x00NULL\x00") indicates SQL NULL — chosen
+	// so it cannot collide with base64-encoded cell data (base64 output
+	// only includes [A-Za-z0-9+/=], never \x00). Non-NULL cells are the
+	// base64-encoded raw wire bytes. The sentinel-based encoding is
+	// deliberately gob-safe: no nil pointers in slice elements (gob's
+	// encodeArray rejects those).
+	Rows            [][]string       `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	CommandComplete string           `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
+	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
+}
+
+// PostgresV3NullCell is the sentinel string stored in
+// PostgresV3Response.Rows for SQL NULL cells. The value starts with a
+// NUL byte that base64 never emits, so it is unambiguous.
+const PostgresV3NullCell = "\x00NULL\x00"
+
+type PostgresV3ColumnDescriptor struct {
+	Name       string `json:"name" yaml:"name" bson:"name"`
+	TableOID   uint32 `json:"tableOid,omitempty" yaml:"tableOid,omitempty" bson:"table_oid,omitempty"`
+	ColAttrNum int16  `json:"colAttrNum,omitempty" yaml:"colAttrNum,omitempty" bson:"col_attr_num,omitempty"`
+	TypeOID    uint32 `json:"typeOid" yaml:"typeOid" bson:"type_oid"`
+	TypeSize   int16  `json:"typeSize,omitempty" yaml:"typeSize,omitempty" bson:"type_size,omitempty"`
+	TypeMod    int32  `json:"typeMod,omitempty" yaml:"typeMod,omitempty" bson:"type_mod,omitempty"`
+	Format     int16  `json:"format,omitempty" yaml:"format,omitempty" bson:"format,omitempty"`
+}
+
+type PostgresV3Error struct {
+	Severity string `json:"severity,omitempty" yaml:"severity,omitempty" bson:"severity,omitempty"`
+	Code     string `json:"code,omitempty" yaml:"code,omitempty" bson:"code,omitempty"`
+	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
+	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
+	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
+}
+
+type PostgresV3SideEffects struct {
+	SequenceEmissions []PostgresV3SeqEmission `json:"sequenceEmissions,omitempty" yaml:"sequenceEmissions,omitempty" bson:"sequence_emissions,omitempty"`
+	RowMutations      []PostgresV3RowMutation `json:"rowMutations,omitempty" yaml:"rowMutations,omitempty" bson:"row_mutations,omitempty"`
+	TxTransition      string                  `json:"txTransition,omitempty" yaml:"txTransition,omitempty" bson:"tx_transition,omitempty"`
+}
+
+type PostgresV3SeqEmission struct {
+	Sequence string `json:"sequence" yaml:"sequence" bson:"sequence"`
+	Value    int64  `json:"value" yaml:"value" bson:"value"`
+}
+
+type PostgresV3RowMutation struct {
+	Op      string            `json:"op" yaml:"op" bson:"op"`
+	Schema  string            `json:"schema" yaml:"schema" bson:"schema"`
+	Table   string            `json:"table" yaml:"table" bson:"table"`
+	PK      []string          `json:"pk,omitempty" yaml:"pk,omitempty" bson:"pk,omitempty"`
+	Columns map[string]string `json:"columns,omitempty" yaml:"columns,omitempty" bson:"columns,omitempty"`
+}
+
+// PostgresV3GeneratorSpec — one deterministic volatile-value stream
+// (sequence, clock, uuid).
+type PostgresV3GeneratorSpec struct {
+	Name           string   `json:"name" yaml:"name" bson:"name"`
+	Type           string   `json:"type" yaml:"type" bson:"type"`
+	RecordedValues []string `json:"recordedValues,omitempty" yaml:"recordedValues,omitempty" bson:"recorded_values,omitempty"`
+	Policy         string   `json:"policy,omitempty" yaml:"policy,omitempty" bson:"policy,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings

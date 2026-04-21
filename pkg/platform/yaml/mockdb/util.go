@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -245,12 +246,109 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
 			return nil, err
 		}
+	case models.PostgresV3Session:
+		// Structured session-profile spec; encode directly — no
+		// request/response packet arrays for this kind.
+		spec := postgresV3SessionYamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			Session:          mock.Spec.PostgresV3Session,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3Session as yaml")
+			return nil, err
+		}
+	case models.PostgresV3Catalog:
+		spec := postgresV3CatalogYamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			Catalog:          mock.Spec.PostgresV3Catalog,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3Catalog as yaml")
+			return nil, err
+		}
+	case models.PostgresV3Data:
+		spec := postgresV3DataYamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			Data:             mock.Spec.PostgresV3Data,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3Data as yaml")
+			return nil, err
+		}
+	case models.PostgresV3Query:
+		spec := postgresV3QueryYamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			Query:            mock.Spec.PostgresV3Query,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3Query as yaml")
+			return nil, err
+		}
+	case models.PostgresV3Generator:
+		spec := postgresV3GeneratorYamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			Generator:        mock.Spec.PostgresV3Generator,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3Generator as yaml")
+			return nil, err
+		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
 	}
 
 	return &yamlDoc, nil
+}
+
+// ---------------------------------------------------------------------------
+// PostgresV3 YAML Spec envelopes — one per Kind. Each carries the
+// metadata + the typed payload + timestamps.
+// ---------------------------------------------------------------------------
+
+type postgresV3SessionYamlSpec struct {
+	Metadata         map[string]string              `yaml:"metadata,omitempty"`
+	Session          *models.PostgresV3SessionSpec  `yaml:"session"`
+	ReqTimestampMock time.Time                      `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                      `yaml:"resTimestampMock,omitempty"`
+}
+
+type postgresV3CatalogYamlSpec struct {
+	Metadata         map[string]string              `yaml:"metadata,omitempty"`
+	Catalog          *models.PostgresV3CatalogSpec  `yaml:"catalog"`
+	ReqTimestampMock time.Time                      `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                      `yaml:"resTimestampMock,omitempty"`
+}
+
+type postgresV3DataYamlSpec struct {
+	Metadata         map[string]string         `yaml:"metadata,omitempty"`
+	Data             *models.PostgresV3DataSpec `yaml:"data"`
+	ReqTimestampMock time.Time                 `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                 `yaml:"resTimestampMock,omitempty"`
+}
+
+type postgresV3QueryYamlSpec struct {
+	Metadata         map[string]string           `yaml:"metadata,omitempty"`
+	Query            *models.PostgresV3QuerySpec `yaml:"query"`
+	ReqTimestampMock time.Time                   `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                   `yaml:"resTimestampMock,omitempty"`
+}
+
+type postgresV3GeneratorYamlSpec struct {
+	Metadata         map[string]string               `yaml:"metadata,omitempty"`
+	Generator        *models.PostgresV3GeneratorSpec `yaml:"generator"`
+	ReqTimestampMock time.Time                       `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                       `yaml:"resTimestampMock,omitempty"`
 }
 
 func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
@@ -403,6 +501,66 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				Created:          http2Spec.Created,
 				ReqTimestampMock: http2Spec.ReqTimestampMock,
 				ResTimestampMock: http2Spec.ResTimestampMock,
+			}
+		case models.PostgresV3Session:
+			var spec postgresV3SessionYamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Session yaml", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            spec.Metadata,
+				PostgresV3Session:   spec.Session,
+				ReqTimestampMock:    spec.ReqTimestampMock,
+				ResTimestampMock:    spec.ResTimestampMock,
+			}
+		case models.PostgresV3Catalog:
+			var spec postgresV3CatalogYamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Catalog yaml", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            spec.Metadata,
+				PostgresV3Catalog:   spec.Catalog,
+				ReqTimestampMock:    spec.ReqTimestampMock,
+				ResTimestampMock:    spec.ResTimestampMock,
+			}
+		case models.PostgresV3Data:
+			var spec postgresV3DataYamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Data yaml", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            spec.Metadata,
+				PostgresV3Data:      spec.Data,
+				ReqTimestampMock:    spec.ReqTimestampMock,
+				ResTimestampMock:    spec.ResTimestampMock,
+			}
+		case models.PostgresV3Query:
+			var spec postgresV3QueryYamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Query yaml", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            spec.Metadata,
+				PostgresV3Query:     spec.Query,
+				ReqTimestampMock:    spec.ReqTimestampMock,
+				ResTimestampMock:    spec.ResTimestampMock,
+			}
+		case models.PostgresV3Generator:
+			var spec postgresV3GeneratorYamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Generator yaml", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            spec.Metadata,
+				PostgresV3Generator: spec.Generator,
+				ReqTimestampMock:    spec.ReqTimestampMock,
+				ResTimestampMock:    spec.ResTimestampMock,
 			}
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
