@@ -3,8 +3,12 @@
 #
 # Brings up the writer + probe compose stack, then asserts:
 #   [A] curl https://sts.us-east-1.amazonaws.com/ with --cacert /shared/ca.crt
-#       (the merged system+Keploy bundle) succeeds (HTTP 200/403 — anything
-#       but a TLS error).
+#       (the merged system+Keploy bundle) succeeds at the TLS layer. Any HTTP
+#       status that requires AWS to have decrypted the request — AWS STS
+#       commonly responds with 200, 301, 302, 400, or 403 depending on
+#       request-method/auth/routing — is proof of a successful handshake; a
+#       curl exit reporting a TLS error is the failure we want to catch.
+#       The assertion downstream mirrors this exact set.
 #   [B] curl https://sts.us-east-1.amazonaws.com/ with --cacert /shared/keploy-ca.crt
 #       and --capath /nonexistent fails with curl exit 60 ("unable to get
 #       local issuer certificate") — this is the bug we are fixing: trusting

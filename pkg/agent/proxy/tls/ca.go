@@ -312,12 +312,15 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	// Build the merged PEM bundle that goes into <exportPath>/ca.crt.
 	//
 	// This is the file the k8s-proxy admission webhook wires into the app
-	// container via REQUESTS_CA_BUNDLE / SSL_CERT_FILE / NODE_EXTRA_CA_CERTS /
-	// CARGO_HTTP_CAINFO. Those env vars REPLACE the default trust store for
-	// their respective runtimes — so if we write only the Keploy MITM CA
-	// (the previous behaviour), every non-proxied HTTPS call (internal
-	// cluster services, public endpoints Keploy isn't proxying, DoH, ...)
-	// fails with CERTIFICATE_VERIFY_FAILED.
+	// container via REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CARGO_HTTP_CAINFO
+	// (which REPLACE their respective runtime's default trust store) and —
+	// with different routing — NODE_EXTRA_CA_CERTS (which is ADDED to
+	// Node.js's default trust store rather than replacing it; see the
+	// separate keploy-ca.crt write below for where Node is sent). So for
+	// the replacement-style consumers, writing only the Keploy MITM CA
+	// (the previous behaviour) makes every non-proxied HTTPS call
+	// (internal cluster services, public endpoints Keploy isn't proxying,
+	// DoH, ...) fail with CERTIFICATE_VERIFY_FAILED.
 	//
 	// Concatenating PEM blocks with a separating newline is the standard way
 	// to merge trust anchors — OpenSSL, BoringSSL, NSS, Go's crypto/x509,
