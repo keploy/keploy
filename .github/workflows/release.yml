@@ -150,9 +150,29 @@ jobs:
           path: out/keploy-linux-arm64/keploy
           retention-days: 1
 
+  # Per-platform docker image build. Each matrix leg runs on a
+  # native runner for its target arch (ubuntu-latest for amd64,
+  # ubuntu-24.04-arm for arm64) so Dockerfile.runtime's RUN steps
+  # (apt-get + sed/chmod) execute natively — no qemu anywhere in
+  # the release pipeline, not even for the base-image bootstrap.
+  # Each leg pushes by digest without a tag; build-docker-manifest
+  # below stitches the per-arch digests into the final multi-arch
+  # manifest list and signs it.
   build-docker:
     needs: build-go
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+            artifact: release-keploy-linux-amd64
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: release-keploy-linux-arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -161,20 +181,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.10.1
-
-      # Register qemu-user-static binfmt handlers explicitly so the
-      # linux/arm64 leg of the multi-arch build below runs the base
-      # image's RUN steps (apt-get + sed/chmod in Dockerfile.runtime)
-      # under emulation when this job lands on an amd64 runner. The
-      # keploy binary itself is a pre-built native arm64 artifact —
-      # qemu is only doing the debian:trixie-slim bootstrap, not a
-      # go-build cross-compile, so the perf hit is bounded to a
-      # single apt-get layer.
-      - name: Setup QEMU (for linux/arm64 base-image bootstrap)
-        uses: docker/setup-qemu-action@v3
 
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3.12.0
@@ -192,43 +198,106 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
-      - name: Set version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-      # Pull the prebuilt binaries staged by build-go into the layout
-      # Dockerfile.runtime expects: dist/keploy-linux-<arch>/keploy.
-      - name: Download linux/amd64 binary
+      - name: Download prebuilt binary
         uses: actions/download-artifact@v4
         with:
-          name: release-keploy-linux-amd64
-          path: dist/keploy-linux-amd64
-      - name: Download linux/arm64 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: release-keploy-linux-arm64
-          path: dist/keploy-linux-arm64
-      - name: Make binaries executable
-        run: chmod +x dist/keploy-linux-amd64/keploy dist/keploy-linux-arm64/keploy
+          name: ${{ matrix.artifact }}
+          path: dist/keploy-linux-${{ matrix.arch }}
 
-      - name: Build and push Docker image
-        id: build-and-push
+      - name: Make binary executable
+        run: chmod +x dist/keploy-linux-${{ matrix.arch }}/keploy
+
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6.19.2
         with:
           context: .
           file: ./Dockerfile.runtime
-          platforms: linux/amd64, linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest for manifest stitch
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine the per-arch digests published by each build-docker leg
+  # into a single multi-arch manifest list under the public
+  # metadata-derived tags, then cosign-sign the resulting manifest
+  # list. Signing at the manifest level covers every arch ref in one
+  # go (cosign walks the manifest). Kept on ubuntu-latest because
+  # only docker/imagetools + cosign run here — no per-arch workload.
+  build-docker-manifest:
+    needs: build-docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3.12.0
+
+      - name: Log into registry ghcr.io
+        uses: docker/login-action@v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Download per-arch digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Inspect and capture manifest digest
+        id: inspect
+        run: |
+          TAG="${{ steps.meta.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository }}:$TAG"
+          docker buildx imagetools inspect "$IMAGE"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::failed to resolve manifest digest for $IMAGE"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Sign the published Docker image
         env:
           COSIGN_EXPERIMENTAL: "true"
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.inspect.outputs.digest }}
 
   mark-latest:
-    needs: [build-go, build-docker]
+    needs: [build-go, build-docker-manifest]
     runs-on: ubuntu-latest
     # Only mark stable releases (no pre-release suffix like -beta1, -rc1) as latest
     if: ${{ !contains(github.ref_name, '-') }}

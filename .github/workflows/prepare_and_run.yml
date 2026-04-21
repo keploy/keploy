@@ -30,8 +30,12 @@ jobs:
   # -------------------------------------------------------------------
 
   build-and-upload:
-    # Linux amd64 binaries (race + non-race). `build` = race, consumed
-    # by most linux docker tests and by the linux/amd64 docker image.
+    # Linux amd64 binaries (race + non-race). `build` = race,
+    # consumed by most linux docker tests via download-binary.
+    # `build-no-race` = non-race, consumed by the linux/amd64
+    # docker image (race runtime's memory baseline trips
+    # go-memory-load's threshold; race coverage is preserved in the
+    # native-linux test path that uses `build`).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
