@@ -15,7 +15,7 @@ type MockDownload struct {
 
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
-	StorageFormat         string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
+	StorageFormat         string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "json" (default) or "yaml"
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
 	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
 	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
