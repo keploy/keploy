@@ -30,10 +30,25 @@ check_for_errors() {
 # curl.sh responses are appended to this file; we parse it after the run.
 CURL_OUT="curl-output.txt"
 
+BPF_TRACE_OUT="bpf-trace.txt"
+
+dump_diagnostics() {
+  echo "::group::keploy record.txt (tail 300)"
+  tail -300 record.txt 2>/dev/null || echo "(record.txt missing)"
+  echo "::endgroup::"
+  echo "::group::bpf trace_pipe (filtered: sendmsg4/recvmsg4/pid_filter)"
+  # The hook we care about emits [sendmsg4-dns] and [recvmsg4]; pid_filter
+  # emits [connect]: ... lines for every match/unmatch decision. Show any
+  # of those, plus plain "dns"/"udp" for broader context.
+  grep -E "recvmsg4|sendmsg4-dns|connect]:|target namespace|Matched|Unmatched" "$BPF_TRACE_OUT" 2>/dev/null | tail -200 || echo "(bpf trace empty)"
+  echo "::endgroup::"
+}
+
 check_curl_output() {
   echo "Checking curl output for source-address mismatches and errors..."
   if [ ! -s "$CURL_OUT" ]; then
     echo "::error::$CURL_OUT is empty — curl.sh produced no output"
+    dump_diagnostics
     return 1
   fi
 
@@ -42,6 +57,7 @@ check_curl_output() {
   if grep -Eq '"source_mismatches":[1-9]' "$CURL_OUT"; then
     echo "::error::One or more /resolve calls had source_mismatches > 0 (pre-fix Keploy behaviour). Output:"
     cat "$CURL_OUT"
+    dump_diagnostics
     return 1
   fi
 
@@ -49,6 +65,7 @@ check_curl_output() {
   if grep -q '"error":"no accepted reply' "$CURL_OUT"; then
     echo "::error::/resolve timed out waiting for a source-matching reply. Output:"
     cat "$CURL_OUT"
+    dump_diagnostics
     return 1
   fi
 
@@ -56,6 +73,7 @@ check_curl_output() {
   if ! grep -q '"ips":\["' "$CURL_OUT"; then
     echo "::error::No /resolve call returned any IPs. Output:"
     cat "$CURL_OUT"
+    dump_diagnostics
     return 1
   fi
 
@@ -116,7 +134,7 @@ send_request() {
 
 # --- Main ---
 
-rm -rf keploy/ record.txt test.txt "$CURL_OUT"
+rm -rf keploy/ record.txt test.txt "$CURL_OUT" "$BPF_TRACE_OUT"
 sudo rm -f /tmp/keploy-logs.txt
 
 section "Build App"
@@ -124,12 +142,20 @@ go mod tidy
 go build -o dns-strict-resolver
 endsec
 
+# Start BPF trace_pipe capture in parallel so we can see bpf_printk output
+# from our cgroup/sendmsg4+recvmsg4 hooks (they currently print when they
+# store orig_dst and when recvmsg4 fires / SNATs). This is scoped to the
+# test window: we kill it right after recording stops.
+sudo sh -c 'echo > /sys/kernel/debug/tracing/trace' 2>/dev/null || true
+sudo sh -c 'cat /sys/kernel/debug/tracing/trace_pipe' >"$BPF_TRACE_OUT" 2>&1 &
+TRACE_PID=$!
+
 # Record
 section "Start Recording"
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-strict-resolver" --generateGithubActions=false >record.txt 2>&1 &
+sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-strict-resolver" --generateGithubActions=false --debug >record.txt 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record started with PID: $KEPLOY_PID"
-sleep 5
+sleep 8
 endsec
 
 send_request
@@ -144,6 +170,11 @@ echo "Killing keploy record (PID: $REC_PID)"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors "record.txt"
+
+# Stop trace_pipe capture.
+sudo kill -INT "$TRACE_PID" 2>/dev/null || true
+wait "$TRACE_PID" 2>/dev/null || true
+
 echo "Recording stopped."
 endsec
 
