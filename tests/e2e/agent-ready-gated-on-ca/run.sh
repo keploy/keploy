@@ -38,7 +38,31 @@ $COMPOSE -p "$PROJECT" build --quiet
 # is idempotent (cached on subsequent runs), so retrying for up to ~1m
 # converts a transient infrastructure flake into a successful run
 # without masking a genuine registry outage.
-CLIENT_IMAGE=$(awk '/^  client:/,/^  [a-z]/' docker-compose.yml | awk '/^[[:space:]]*image:/ {print $2; exit}')
+# Extract the client service image from docker-compose.yml with a
+# state-machine awk (the naive `/client:/,/next-service/` range trick
+# mis-fires because the `client:` line matches *both* delimiters of the
+# range, so it collapses to a single line and the `image:` key is never
+# in range). Sibling services sit at two-space indent while keys inside
+# a service sit at four, so we can detect the service boundary
+# unambiguously. Prefer `docker compose config --format json` when jq is
+# available — it evaluates env interpolation and is immune to YAML
+# indentation changes — and only fall back to the awk path when jq is
+# absent (e.g. minimal runners).
+CLIENT_IMAGE=""
+if command -v jq >/dev/null 2>&1; then
+  CLIENT_IMAGE=$($COMPOSE -p "$PROJECT" config --format json 2>/dev/null | jq -r '.services.client.image // empty' 2>/dev/null)
+fi
+if [ -z "$CLIENT_IMAGE" ]; then
+  CLIENT_IMAGE=$(awk '
+    /^  client:$/ { inside=1; next }
+    inside && /^  [^ ]/ { inside=0 }
+    inside && /^    image:/ { sub(/^    image:[[:space:]]*/, ""); print; exit }
+  ' docker-compose.yml)
+fi
+if [ -z "$CLIENT_IMAGE" ]; then
+  echo "FAIL: could not resolve client service image from docker-compose.yml" >&2
+  exit 7
+fi
 echo ">> pre-pulling client image ($CLIENT_IMAGE) with retries"
 pull_ok=0
 for attempt in 1 2 3 4 5 6; do
