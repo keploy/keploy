@@ -45,6 +45,15 @@ var agentReadyFilePath = kdocker.AgentReadyFile
 // kubelet polls readiness aggressively during boot.
 var firstCARefusalLog sync.Once
 
+// firstCAFailureLog ensures we emit exactly one Error-level line the
+// first time /agent/ready observes a terminal SetupCA failure. The
+// condition is latched for the process lifetime (MarkCAFailed records
+// an error that never clears without an agent restart), so every
+// subsequent readiness poll would re-emit the same Error — which
+// floods operator logs and can dominate aggregators during incident
+// response. After the first emission, repeated polls log at Debug.
+var firstCAFailureLog sync.Once
+
 func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
 		logger: logger,
@@ -438,8 +447,27 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	// Warn would drown real warnings.
 	if ready, setupErr := pTls.CAStatus(); !ready {
 		if setupErr != nil {
-			a.logger.Error(
-				"/agent/ready: CA setup failed; readiness will not recover without agent restart",
+			// MarkCAFailed is a latch — operator-driven restart is the
+			// only way to clear it — so the first Error is the
+			// actionable signal. Emit it at Error (with a next_step
+			// field for operator guidance) exactly once, then degrade
+			// to Debug for repeat polls so readiness-poller churn
+			// doesn't drown the aggregator during incident response.
+			firstCAFailureLog.Do(func() {
+				a.logger.Error(
+					"/agent/ready: CA setup failed; readiness will not recover without agent restart",
+					zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
+					zap.String("next_step",
+						"Restart the agent after fixing the underlying "+
+							"SetupCA failure (see the earlier Error log "+
+							"line from pkg/agent/proxy for the specific "+
+							"next_step — typically write-access to "+
+							"/tmp/keploy-tls or to the host CA trust store)."),
+					zap.Error(setupErr),
+				)
+			})
+			a.logger.Debug(
+				"/agent/ready: CA setup failure still latched",
 				zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
 				zap.Error(setupErr),
 			)
@@ -477,7 +505,7 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 			"failed to create readiness file",
 			zap.String("file", agentReadyFilePath),
 			zap.String("parent_dir", filepath.Dir(agentReadyFilePath)),
-			zap.String("remediation",
+			zap.String("next_step",
 				"ensure the parent directory exists, is writable by the agent "+
 					"user, and that the container filesystem / volume is not "+
 					"read-only or out of space"),

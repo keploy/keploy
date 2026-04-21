@@ -106,16 +106,24 @@ func CAReady() <-chan struct{} { return caReadyCh }
 //     forever for readiness that will never come.
 //
 // CAStatus is safe to call concurrently from any goroutine.
+//
+// Contract: (ready==true, err==nil) is the only "success" shape. If the
+// channel is closed we return nil error unconditionally, even if a
+// previous MarkCAFailed recorded one — a successful markCAReady supersedes
+// any earlier terminal failure (an upstream retry + success for example).
+// That keeps the three documented shapes mutually exclusive so callers
+// can switch on them without chasing a race between the signal fire
+// order and the readiness observation.
 func CAStatus() (ready bool, err error) {
 	select {
 	case <-caReadyCh:
-		ready = true
+		return true, nil
 	default:
 	}
 	if p := caFailure.Load(); p != nil && *p != nil {
 		err = *p
 	}
-	return ready, err
+	return false, err
 }
 
 // MarkCAFailed records a terminal SetupCA failure so future CAStatus
@@ -293,31 +301,25 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 
 	// Set Env Vars pointing to the installed cert.
 	//
-	// finalCAPath is empty when getCaPaths() returned NO recognized CA
-	// store paths (can happen on minimal/custom distros). In that case
-	// the loop at the top of this function wrote nothing to disk, so no
-	// env var points anywhere useful. We still mark the agent ready
-	// (blocking /agent/ready forever would just cascade into a
-	// kubelet/compose restart loop without fixing the root cause) but we
-	// must be loud about it: any HTTPS call the app makes that expects
-	// the Keploy MITM CA to be installed will fail silently downstream.
-	if finalCAPath != "" {
-		if err := SetEnvForPath(logger, finalCAPath); err != nil {
-			return err
-		}
-	} else {
-		logger.Warn(
-			"Native-mode SetupCA completed without finding any OS CA store " +
-				"path — /agent/ready will still signal success but NO " +
-				"Keploy CA is installed on this host. Non-Keploy-proxied " +
-				"TLS will work; Keploy-proxied TLS will fail cert " +
-				"verification. Check getCaPaths() for your distro.")
+	// By construction finalCAPath is non-empty here: getCaPaths() returns
+	// an error (caught above) when it can't find any CA store path, so the
+	// per-path loop that assigns finalCAPath always runs at least once on
+	// this code path. Treating the empty case as a programmer error via a
+	// defensive guard keeps this obvious to future readers who might
+	// otherwise re-introduce the "no CA store found but SetupCA succeeded"
+	// inconsistency, which would silently allow /agent/ready to latch
+	// while apps still distrust the Keploy MITM CA.
+	if finalCAPath == "" {
+		return fmt.Errorf("setupNative: finalCAPath is empty after ranging %d CA store paths — this is a programmer error (getCaPaths should have returned an error)", len(caPaths))
+	}
+	if err := SetEnvForPath(logger, finalCAPath); err != nil {
+		return err
 	}
 
 	// Native mode completed successfully — the CA is now installed in
 	// the system store (and the Java keystore if Java is present).
 	// Signal readiness so downstream consumers (e.g. /agent/ready) can
-	// unblock. See the warn block above for the finalCAPath=="" edge.
+	// unblock.
 	markCAReady()
 	return nil
 }
