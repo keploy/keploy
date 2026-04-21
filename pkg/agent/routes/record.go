@@ -30,6 +30,13 @@ type Agent struct {
 	svc    agent.Service
 }
 
+// agentReadyFilePath is the path MakeAgentReady writes on success. It
+// defaults to kdocker.AgentReadyFile (the canonical /tmp/agent.ready
+// location consumed by the docker-compose healthcheck) and is a var
+// only so unit tests can redirect it into a sandbox without writing
+// into /tmp on the host. Production code MUST NOT mutate it.
+var agentReadyFilePath = kdocker.AgentReadyFile
+
 func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
 		logger: logger,
@@ -425,13 +432,13 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 
 	// Create or overwrite the readiness file with a timestamp
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(kdocker.AgentReadyFile, content, 0644); err != nil {
-		a.logger.Error("failed to create readiness file", zap.String("file", kdocker.AgentReadyFile), zap.Error(err))
+	if err := os.WriteFile(agentReadyFilePath, content, 0644); err != nil {
+		a.logger.Error("failed to create readiness file", zap.String("file", agentReadyFilePath), zap.Error(err))
 		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
 		return
 	}
 
-	a.logger.Debug("Agent marked as ready", zap.String("file", kdocker.AgentReadyFile))
+	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))

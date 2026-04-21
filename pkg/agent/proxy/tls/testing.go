@@ -2,13 +2,12 @@ package tls
 
 import "sync"
 
-// This file is only compiled into the test binary (suffix _test.go). It
-// exposes a controlled way for tests in other packages to reset and
-// close the package-level CAReady signal without widening the public
-// API surface for production callers.
-//
-// Production code MUST NOT depend on these helpers — SetupCA is the
-// only way to legitimately close caReadyCh in a running agent.
+// Testing helpers for the CAReady signal. These are regular package
+// functions (NOT _test.go) so sibling-package tests (e.g.
+// pkg/agent/routes) can reset and close the channel. The "ForTest"
+// suffix signals intent — production code MUST NOT call them;
+// SetupCA is the only legitimate path to close caReadyCh in a
+// running agent.
 
 // ResetCAReadyForTest rebuilds caReadyOnce and caReadyCh so a fresh
 // test can observe the "CA not ready" state regardless of test
