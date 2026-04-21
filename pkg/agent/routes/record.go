@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -401,6 +402,27 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 //	healthcheck:
 //	  test: ["CMD", "cat", "/tmp/agent.ready"]
 func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
+	// The CA bundle at /tmp/keploy-tls/ca.crt MUST exist before the agent
+	// signals ready — Kubernetes postStart hooks and docker-compose
+	// healthchecks gate app-container start on /tmp/agent.ready, and apps
+	// may make HTTPS calls immediately on boot. Refuse readiness until
+	// SetupCA has completed (see pkg/agent/proxy/tls.CAReady).
+	//
+	// Today the ordering is race-free because SetupCA runs synchronously
+	// inside Hook() before the HTTP server starts. This explicit gate
+	// protects against a future refactor that moves SetupCA into a
+	// goroutine — without this check, app containers could boot before
+	// /tmp/keploy-tls/ca.crt exists and silently fail HTTPS egress.
+	select {
+	case <-pTls.CAReady():
+		// CA bundle is on disk — proceed to mark the agent ready.
+	default:
+		a.logger.Warn("/agent/ready called before CA bundle is written; refusing",
+			zap.String("ca_path", "/tmp/keploy-tls/ca.crt"))
+		http.Error(w, "CA bundle not yet written", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Create or overwrite the readiness file with a timestamp
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
 	if err := os.WriteFile(kdocker.AgentReadyFile, content, 0644); err != nil {
