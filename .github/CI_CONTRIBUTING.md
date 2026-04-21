@@ -25,14 +25,14 @@ This document describes the **one‑time build / one‑time download** strategy 
 
 ---
 
-## 2. Why one‑time *build & push Docker image*
+## 2. Why one‑time *build Docker image*
 Some samples (e.g. `gin‑mongo` in Docker‑mode) need a container image. Building it repeatedly inside every matrix row is wasteful, so we:
 
-1. **Build once** in `prepare_and_run.yml` → job `build‑docker‑image`.
-2. **Push** the result to [`ttl.sh`](https://ttl.sh) with a 1‑hour TTL (`ttl.sh/keploy/keploy:1h`).
-3. **Pull & re‑tag** it inside downstream jobs via the composite action `download‑image` so that the image name matches what the samples expect (`ghcr.io/keploy/keploy:v3‑dev`).
+1. **Build once** per architecture in `prepare_and_run.yml` → jobs `build‑docker‑image‑amd64` and `build‑docker‑image‑arm64`. They download the matching prebuilt binary artifact (no in-container `go build`) and run `docker buildx build --output type=docker,dest=image.tar` against `Dockerfile.runtime`.
+2. **Upload** each `image.tar` as a workflow artifact (`docker-image-linux-amd64`, `docker-image-linux-arm64`).
+3. **Load & re‑tag** inside downstream jobs via the composite action `download‑image`, which calls `actions/download-artifact` + `docker load` and renames the image to `ghcr.io/keploy/keploy:v3-dev` so samples find it at the expected name.
 
-Advantages are identical to the binary‑artifact strategy – plus we keep our public registries clean because the image auto‑expires.
+Advantages are identical to the binary‑artifact strategy – and the image never leaves GitHub, so there is no public registry to clean up.
 
 ---
 
@@ -42,7 +42,7 @@ Advantages are identical to the binary‑artifact strategy – plus we keep our 
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `.github/workflows/prepare_and_run.yml`            | The *aggregator* – builds the PR binary, downloads `latest`, uploads both as artifacts **and** builds + pushes the one Docker image. Then it fans‑out to language/sample workflows. |
 | `.github/actions/download-binary/action.yml`       | Composite action – downloads **one** of those two binary artifacts and outputs its absolute path.                                                                                   |
-| `.github/actions/download-image/action.yml`        | Composite action – pulls the temporary image from `ttl.sh`, re‑tags it to `ghcr.io/keploy/keploy:v3-dev`, and makes it available for the sample.                                    |
+| `.github/actions/download-image/action.yml`        | Composite action – downloads the image artifact, `docker load`s it, and re‑tags to `ghcr.io/keploy/keploy:v3-dev` so samples find it at the expected name.                          |
 | `.github/workflows/*_linux.yml`, `*_docker.yml`, … | Language/sample workflows. They declare the 3‑row matrix and obtain the two binaries (and, for Docker flows, the image) via the composite actions.                                  |
 | `.github/workflows/test_workflow_scripts/*.sh`     | Bash helpers that run the sample under record / replay. All scripts use the two env vars **`$RECORD_BIN`** / **`$REPLAY_BIN`** that the workflow passes in.                         |
 
@@ -67,11 +67,13 @@ We set fail-fast: false inside each strategy.matrix to ensure that all matrix pe
      uses: ./.github/actions/download-binary
      with: { src: ${{ matrix.replay_src }} }
    ```
-4. **Docker‑based sample?**  Insert the `download-image` step *before* you start the app:
+4. **Docker‑based sample?**  Insert the `download-image` step *before* you start the app, pointing it at the image artifact for the runner's architecture (`docker-image-linux-amd64` for ubuntu-latest / Windows self-hosted, `docker-image-linux-arm64` for macOS self-hosted):
 
    ```yaml
    - id: image
      uses: ./.github/actions/download-image
+     with:
+       artifact_name: docker-image-linux-amd64
    ```
 5. Pass the paths into your run step:
 
