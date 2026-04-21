@@ -49,8 +49,8 @@ done
 echo "=== verifying files on the shared volume ==="
 "${DC[@]}" exec -T tls-probe ls -la /shared
 
-CA_MERGED=$("${DC[@]}" exec -T tls-probe wc -c </shared/ca.crt)
-CA_KEPLOY=$("${DC[@]}" exec -T tls-probe wc -c </shared/keploy-ca.crt)
+CA_MERGED=$("${DC[@]}" exec -T tls-probe sh -c 'wc -c </shared/ca.crt' | awk '{print $1}')
+CA_KEPLOY=$("${DC[@]}" exec -T tls-probe sh -c 'wc -c </shared/keploy-ca.crt' | awk '{print $1}')
 echo "ca.crt: ${CA_MERGED} bytes    keploy-ca.crt: ${CA_KEPLOY} bytes"
 # Sanity: merged must be strictly larger than keploy-only.
 if [ "${CA_MERGED}" -le "${CA_KEPLOY}" ]; then
