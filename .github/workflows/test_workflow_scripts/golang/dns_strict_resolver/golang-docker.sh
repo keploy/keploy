@@ -109,19 +109,26 @@ check_test_report() {
 
 wait_for_sample() {
   echo "Waiting for $SAMPLE_NAME /health to respond..."
-  for i in {1..30}; do
+  for i in {1..60}; do
     if curl -sf "http://localhost:8086/health" >/dev/null; then
-      echo "sample healthy"; return 0
+      echo "sample healthy after ${i}s"; return 0
     fi
     sleep 1
   done
   echo "::error::$SAMPLE_NAME never became healthy"
+  echo "::group::docker ps"
+  docker ps -a || true
+  echo "::endgroup::"
+  dump_diagnostics
   return 1
 }
 
 send_request() {
   section "Sending Requests"
-  wait_for_sample
+  if ! wait_for_sample; then
+    endsec
+    exit 1
+  fi
   echo "Running curl.sh..."
   chmod +x ./curl.sh
   ./curl.sh 2>&1 | tee "$CURL_OUT" || true
@@ -143,9 +150,10 @@ docker network create --subnet "$SUBNET" "$NETWORK"
 docker run -d --rm --name "$COREDNS_NAME" --net "$NETWORK" --ip "$COREDNS_IP" \
   -v "$PWD/coredns:/etc/coredns:ro" \
   coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
-# Give CoreDNS a moment to bind :53 inside its container.
+# Give CoreDNS a moment to bind :53 inside its container. No sanity
+# probe here — the CoreDNS image has no /bin/sh. We'll see failures
+# (if any) via dump_diagnostics on the check_curl_output path.
 sleep 2
-docker exec "$COREDNS_NAME" sh -c 'nslookup google.com 127.0.0.1 || true' | head -10 || true
 endsec
 
 section "Start Recording"
