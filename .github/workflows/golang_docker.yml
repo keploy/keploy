@@ -1,11 +1,6 @@
 name: Golang On Docker
 on:
   workflow_call:
-    inputs:
-      image_tag:            
-        description: "Docker image tag or digest to pull"
-        required: false
-        type: string
 jobs:
   golang_docker:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -44,7 +39,7 @@ jobs:
       - id: image
         uses: ./.github/actions/download-image
         with:
-          image_tag: ${{ inputs.image_tag }}
+          artifact_name: docker-image-linux-amd64
 
       - id: record
         uses: ./.github/actions/download-binary
