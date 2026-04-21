@@ -179,6 +179,12 @@ func (m *Mock) DeepCopy() *Mock {
 	c.Spec.PulsarResponses = make([]Payload, len(m.Spec.PulsarResponses))
 	copy(c.Spec.PulsarResponses, m.Spec.PulsarResponses)
 
+	c.Spec.AerospikeRequests = make([]Payload, len(m.Spec.AerospikeRequests))
+	copy(c.Spec.AerospikeRequests, m.Spec.AerospikeRequests)
+
+	c.Spec.AerospikeResponses = make([]Payload, len(m.Spec.AerospikeResponses))
+	copy(c.Spec.AerospikeResponses, m.Spec.AerospikeResponses)
+
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
 
