@@ -332,7 +332,7 @@ func LegacyKindFallbackFires() uint64 {
 // recordings.
 func kindsWithImplicitSessionLifetime(k Kind) bool {
 	switch k {
-	case HTTP, HTTP2, MySQL, REDIS, Postgres, PostgresV2, GENERIC, DNS:
+	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
 	return false
