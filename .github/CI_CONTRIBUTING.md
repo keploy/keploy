@@ -30,7 +30,7 @@ Some samples (e.g. `gin‑mongo` in Docker‑mode) need a container image. Build
 
 1. **Build once** per architecture in `prepare_and_run.yml` → jobs `build‑docker‑image‑amd64` and `build‑docker‑image‑arm64`. They download the matching prebuilt binary artifact (no in-container `go build`) and run `docker buildx build --output type=docker,dest=image.tar` against `Dockerfile.runtime`.
 2. **Upload** each `image.tar` as a workflow artifact (`docker-image-linux-amd64`, `docker-image-linux-arm64`).
-3. **Load & re‑tag** inside downstream jobs via the composite action `download‑image`, which calls `actions/download-artifact` + `docker load` and renames the image to `ghcr.io/keploy/keploy:v3-dev` so samples find it at the expected name.
+3. **Load & re‑tag** inside downstream jobs via the composite action `download‑image`, which calls `actions/download-artifact` + `docker load` and renames the image to `ghcr.io/keploy/keploy:v<version>` — the `version` input defaults to `3-dev`, and callers that want a build‑unique tag can pass `version: ${{ github.sha }}` so samples find the image at the expected name.
 
 Advantages are identical to the binary‑artifact strategy – and the image never leaves GitHub, so there is no public registry to clean up.
 
@@ -42,7 +42,7 @@ Advantages are identical to the binary‑artifact strategy – and the image nev
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `.github/workflows/prepare_and_run.yml`            | The *aggregator* – builds the PR binary, downloads `latest`, uploads both as artifacts **and** builds one Docker image per architecture (saved as `image.tar` workflow artifacts, no registry push). Then it fans‑out to language/sample workflows. |
 | `.github/actions/download-binary/action.yml`       | Composite action – downloads **one** of those two binary artifacts and outputs its absolute path.                                                                                   |
-| `.github/actions/download-image/action.yml`        | Composite action – downloads the image artifact, `docker load`s it, and re‑tags to `ghcr.io/keploy/keploy:v3-dev` so samples find it at the expected name.                          |
+| `.github/actions/download-image/action.yml`        | Composite action – downloads the image artifact, `docker load`s it, and re‑tags to `ghcr.io/keploy/keploy:v<version>` (the `version` input defaults to `3-dev`; callers may override to `${{ github.sha }}` or similar). |
 | `.github/workflows/*_linux.yml`, `*_docker.yml`, … | Language/sample workflows. They declare the 3‑row matrix and obtain the two binaries (and, for Docker flows, the image) via the composite actions.                                  |
 | `.github/workflows/test_workflow_scripts/*.sh`     | Bash helpers that run the sample under record / replay. All scripts use the two env vars **`$RECORD_BIN`** / **`$REPLAY_BIN`** that the workflow passes in.                         |
 

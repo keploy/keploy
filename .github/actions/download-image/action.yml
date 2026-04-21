@@ -32,14 +32,26 @@ runs:
           exit 1
         fi
         echo "Loading image from $TAR ..."
+        # Run docker load exactly once: a second invocation for the
+        # diagnostic path would re-import the image and (piped through
+        # `head` under pipefail) risks SIGPIPE aborting the step
+        # before the ::error:: line is emitted. Capture stdout+stderr
+        # in one go and reuse the buffer for both parsing and
+        # diagnostics.
+        if ! LOAD_OUTPUT=$(docker load -i "$TAR" 2>&1); then
+          LOAD_OUTPUT_ONE_LINE=$(printf '%s' "$LOAD_OUTPUT" | tr '\n' '; ')
+          echo "::error::docker load failed for $TAR: $LOAD_OUTPUT_ONE_LINE"
+          exit 1
+        fi
         # Anchor to "Loaded image: " (with the trailing space) so the
         # `Loaded image ID: sha256:…` variant emitted when the tarball
         # has no RepoTags doesn't match and silently yield `sha256` as
-        # the tag target. NR==1 guarantees a single value without
-        # risking SIGPIPE from a downstream `head -n1` under pipefail.
-        LOADED=$(docker load -i "$TAR" | awk -F'Loaded image: ' '/^Loaded image: / && NR==1 {print $2; exit}')
+        # the tag target. NR==1 + exit keeps selection deterministic
+        # without a `head -n1` pipeline.
+        LOADED=$(printf '%s\n' "$LOAD_OUTPUT" | awk -F'Loaded image: ' '/^Loaded image: / && NR==1 {print $2; exit}')
         if [ -z "$LOADED" ]; then
-          echo "::error::docker load did not report a tagged image (got: $(docker load -i "$TAR" 2>&1 | head -n5))"
+          LOAD_OUTPUT_ONE_LINE=$(printf '%s' "$LOAD_OUTPUT" | tr '\n' '; ')
+          echo "::error::docker load completed but did not report a tagged image (tarball may be missing RepoTags): $LOAD_OUTPUT_ONE_LINE"
           exit 1
         fi
         echo "Loaded: $LOADED"
