@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +34,25 @@ type Recorder struct {
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
+
+	// cleanups is run in LIFO order from Start's defer. Downstream
+	// builds and internal subsystems register shutdown work here
+	// rather than each one type-asserting its own io.Closer into the
+	// store interfaces. Register with RegisterCleanup.
+	cleanupMu sync.Mutex
+	cleanups  []func() error
+}
+
+// RegisterCleanup appends a shutdown callback that Recorder.Start's
+// defer will drain in LIFO order. Thread-safe. Callbacks should be
+// idempotent — Recorder may be restarted in some flows (re-record).
+func (r *Recorder) RegisterCleanup(fn func() error) {
+	if fn == nil {
+		return
+	}
+	r.cleanupMu.Lock()
+	r.cleanups = append(r.cleanups, fn)
+	r.cleanupMu.Unlock()
 }
 
 // SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
@@ -73,6 +93,42 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+
+	// Auto-register mockDB.Close if it implements io.Closer. MockYaml
+	// implements Close unconditionally: in gob mode it drains the
+	// async writer and flushes the file; in yaml mode it is a no-op
+	// (gobStop is nil, so Close returns nil immediately). Registered
+	// via RegisterCleanup so it drains in LIFO order alongside any
+	// other subsystems the caller has registered (telemetry flush,
+	// mapping-DB sync, etc.).
+	if closer, ok := r.mockDB.(io.Closer); ok {
+		r.RegisterCleanup(closer.Close)
+	}
+
+	// Drain all registered cleanups in LIFO order on return. Errors
+	// are logged but do not abort subsequent cleanups — each subsystem
+	// gets its flush regardless of what came before.
+	defer func() {
+		r.cleanupMu.Lock()
+		cleanups := r.cleanups
+		r.cleanups = nil
+		r.cleanupMu.Unlock()
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if err := cleanups[i](); err != nil {
+				// A cleanup error usually means a mock-file flush or
+				// telemetry-drain returned non-nil — the session data
+				// is still on disk (the writer buffers drain before
+				// Close returns err on inner failures), but the tail
+				// batch may be incomplete. Log at Error so the
+				// operator sees it on exit summary; include cleanup
+				// index so `record cleanup N failed` is actionable
+				// against the known RegisterCleanup call sites.
+				r.logger.Error("record cleanup returned an error; inspect the mock file for a truncated tail and check disk space/permissions at the recording output directory",
+					zap.Int("cleanupIndex", i),
+					zap.Error(err))
+			}
+		}
+	}()
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)

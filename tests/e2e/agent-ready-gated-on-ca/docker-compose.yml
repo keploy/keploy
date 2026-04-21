@@ -1,0 +1,90 @@
+# End-to-end harness for tests/e2e/agent-ready-gated-on-ca.
+#
+# "agent" runs the e2e-harness built from local source. It mirrors the
+# real pkg/agent/routes endpoints but closes the CAReady signal only
+# after CA_DELAY — so the first /agent/ready call observes the gate
+# returning 503 and subsequent calls (after CA_DELAY) observe 200.
+#
+# "client" is a BusyBox sidecar that POSTs /agent/ready repeatedly and
+# writes each attempt's HTTP status to /shared/status.log — run.sh
+# parses that log plus the agent's stdout to assert both the 503 and
+# 200 phases happen in the right order.
+services:
+  agent:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/agent-ready-gated-on-ca/Dockerfile
+    image: keploy-e2e-agent-ready-harness:latest
+    # ca-delay must comfortably exceed the worst-case time between binary
+    # start and the client's FIRST curl (= healthcheck latency + compose's
+    # "Waiting ... Healthy" bookkeeping + client container startup). On a
+    # cold GitHub Actions runner this totals ~2–3s; 15s leaves ~12s of
+    # pre-CAReady window for the first ~12 of 30 client poll iterations
+    # to observe the refusing 503 before the signal flips.
+    command: ["-addr=:8086", "-ca-delay=15s"]
+    expose:
+      - "8086"
+    # TCP-connect healthcheck (busybox's `nc -z`) — once the harness binds
+    # port 8086 the listener is ready to accept HTTP requests. This is the
+    # canonical way to gate depends_on without hitting /agent/agent/ready
+    # itself (which is the endpoint under test and deliberately 503s for
+    # the first ca-delay seconds).
+    #
+    # Tuned so the check declares Healthy as close as possible to the
+    # moment the listener binds: start_period=0s means we start probing
+    # immediately, interval=500ms + retries=20 gives up to 10s grace
+    # without contributing to steady-state latency, and timeout=1s keeps
+    # each probe cheap. On GHA the transition to Healthy completes in
+    # ~1s after the container goes Running.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8086"]
+      interval: 500ms
+      timeout: 1s
+      retries: 20
+      start_period: 0s
+    volumes:
+      - shared:/shared
+
+  client:
+    # Pinned digest-less but explicit Alpine tag from ECR Public
+    # (Docker Hub mirror) so the e2e is reproducible across CI runs
+    # and immune to Docker Hub rate limits. Bumping requires editing
+    # the tag explicitly — never use `:latest`.
+    image: public.ecr.aws/docker/library/alpine:3.20
+    # Wait for the agent's HTTP listener to be bound before firing the first
+    # curl. Without this, the first poll-iteration races the Go bootstrap
+    # and records "000" (connection refused) instead of the "503" the test
+    # expects — a flake that has nothing to do with the CA-ready gate.
+    depends_on:
+      agent:
+        condition: service_healthy
+    volumes:
+      - shared:/shared
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+        : >/shared/status.log
+        for i in $$(seq 1 30); do
+          # Capture curl's exit status separately so `code` is always
+          # a single token. `curl ... || echo ERR` can produce
+          # multi-line output on failure (curl still writes "000" via
+          # -w before exiting non-zero, then the fallback appends
+          # another line), which corrupts awk parsing downstream.
+          code=$$(curl -s -o /dev/null -w "%{http_code}" -X POST http://agent:8086/agent/agent/ready)
+          curl_rc=$$?
+          if [ "$$curl_rc" -ne 0 ]; then
+            code="ERR"
+          fi
+          # Strip any stray whitespace/newlines just in case the
+          # target is behind a proxy that mangles the response.
+          code=$$(printf "%s" "$$code" | tr -d '[:space:]')
+          printf "%s %s\n" "$$(date -u +%FT%TZ)" "$$code" >> /shared/status.log
+          sleep 1
+        done
+        echo DONE >> /shared/status.log
+        tail -f /dev/null
+
+volumes:
+  shared: {}

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudflare/cfssl/csr"
@@ -53,6 +54,101 @@ var caStoreUpdateCmd = []string{
 	"tools-ca-trust extract",
 	"certctl rehash",
 }
+
+// caReadyOnce guards the single close of caReadyCh so markCAReady is safe to
+// call from multiple goroutines and multiple times during a single agent
+// lifecycle. caReadyCh is closed exactly once, on the first successful
+// SetupCA path, and remains closed for the rest of the process lifetime.
+//
+// caFailure records a terminal SetupCA error so callers (e.g. the
+// /agent/ready handler) can distinguish "CA not yet ready" from "CA
+// setup failed and will never recover without an agent restart". It is
+// written by MarkCAFailed on the error path of SetupCA (via
+// pkg/agent/proxy), and read non-blockingly by CAStatus. It is never
+// reset in production; tests call ResetCAReadyForTest to clear it.
+var (
+	caReadyOnce sync.Once
+	caReadyCh   = make(chan struct{})
+	caFailure   atomic.Pointer[error]
+)
+
+// CAReady returns a channel that is closed once the Keploy CA bundle has
+// been written to disk (either to the shared volume at /tmp/keploy-tls/ca.crt
+// in Docker/k8s mode, or into the system CA store in native mode).
+//
+// Callers that need to guarantee the CA file exists before signalling
+// dependent systems (e.g. Kubernetes pod readiness, docker-compose
+// healthchecks, or the /agent/ready HTTP endpoint) must wait on this
+// channel. A non-blocking select against this channel is the canonical
+// way to refuse readiness until SetupCA has completed.
+//
+// The channel is only closed on the SUCCESS path of SetupCA. If SetupCA
+// fails, the channel stays open and readiness keeps failing; an operator
+// must restart the agent (with fixed config) to recover. This is
+// deliberate — silently writing the readiness marker when the CA bundle
+// is missing would let app containers boot against a broken TLS trust
+// chain and produce silent failures in HTTPS egress.
+func CAReady() <-chan struct{} { return caReadyCh }
+
+// CAStatus reports the current CA-readiness state in a single
+// non-blocking call. It is the preferred check for HTTP handlers and
+// other consumers that need to distinguish three states:
+//
+//   - ready==true,  err==nil  : the CA bundle has been written to disk
+//     (shared volume in docker/k8s mode, or system CA store in native
+//     mode) and downstream consumers can proceed.
+//   - ready==false, err==nil  : SetupCA has not completed yet — the
+//     caller should back off and retry (typical boot-time race).
+//   - ready==false, err!=nil  : SetupCA completed with a terminal
+//     error. The CA will NOT become ready in this process lifetime;
+//     callers should surface a clear "misconfiguration" signal (e.g.
+//     HTTP 503 with the error message) so operators don't wait
+//     forever for readiness that will never come.
+//
+// CAStatus is safe to call concurrently from any goroutine.
+//
+// Contract: (ready==true, err==nil) is the only "success" shape. If the
+// channel is closed we return nil error unconditionally, even if a
+// previous MarkCAFailed recorded one — a successful markCAReady supersedes
+// any earlier terminal failure (an upstream retry + success for example).
+// That keeps the three documented shapes mutually exclusive so callers
+// can switch on them without chasing a race between the signal fire
+// order and the readiness observation.
+func CAStatus() (ready bool, err error) {
+	select {
+	case <-caReadyCh:
+		return true, nil
+	default:
+	}
+	if p := caFailure.Load(); p != nil && *p != nil {
+		err = *p
+	}
+	return false, err
+}
+
+// MarkCAFailed records a terminal SetupCA failure so future CAStatus
+// calls can report it. Only the SetupCA caller in pkg/agent/proxy
+// should invoke this — it is exposed (capitalised) because the error
+// is returned to the caller, not handled inside this package. Calling
+// MarkCAFailed with a non-nil err does NOT close caReadyCh: readiness
+// stays unlatched so health checks keep failing, and the error gives
+// operators a clear diagnostic instead of an open-ended timeout.
+//
+// Passing nil is a no-op (so callers can plumb `MarkCAFailed(err)`
+// unconditionally on the SetupCA return). Subsequent non-nil calls
+// overwrite the previous error — SetupCA is not currently retried,
+// but if a future refactor adds retry this keeps the most recent
+// diagnostic visible.
+func MarkCAFailed(err error) {
+	if err == nil {
+		return
+	}
+	caFailure.Store(&err)
+}
+
+// markCAReady closes the CAReady channel exactly once. Safe to call from
+// multiple goroutines and multiple times.
+func markCAReady() { caReadyOnce.Do(func() { close(caReadyCh) }) }
 
 // SetupCA setups custom certificate authority to handle TLS connections
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
@@ -118,6 +214,12 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	}
 
 	logger.Debug("TLS Certificates successfully exported to shared volume")
+	// Signal CA-bundle readiness to downstream consumers (e.g. the
+	// /agent/ready HTTP handler) only after the ca.crt + truststore
+	// have been written successfully. On the error paths above we
+	// return early without signalling — readiness stays unlatched so
+	// operators can restart the agent with fixed config.
+	markCAReady()
 	return nil
 }
 
@@ -149,7 +251,14 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 
 		// Set environment variables for Node.js and Python to use the custom CA
-		return SetEnvForPath(logger, tempCertPath)
+		if err := SetEnvForPath(logger, tempCertPath); err != nil {
+			return err
+		}
+		// Mirror the shared-volume path: only signal readiness when the
+		// full install chain (cert import + java keystore + env vars)
+		// has succeeded.
+		markCAReady()
+		return nil
 	}
 
 	// Linux/Unix Specific Logic
@@ -190,11 +299,28 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	// Set Env Vars pointing to the installed cert
-	if finalCAPath != "" {
-		return SetEnvForPath(logger, finalCAPath)
+	// Set Env Vars pointing to the installed cert.
+	//
+	// By construction finalCAPath is non-empty here: getCaPaths() returns
+	// an error (caught above) when it can't find any CA store path, so the
+	// per-path loop that assigns finalCAPath always runs at least once on
+	// this code path. Treating the empty case as a programmer error via a
+	// defensive guard keeps this obvious to future readers who might
+	// otherwise re-introduce the "no CA store found but SetupCA succeeded"
+	// inconsistency, which would silently allow /agent/ready to latch
+	// while apps still distrust the Keploy MITM CA.
+	if finalCAPath == "" {
+		return fmt.Errorf("setupNative: finalCAPath is empty after ranging %d CA store paths — this is a programmer error (getCaPaths should have returned an error)", len(caPaths))
+	}
+	if err := SetEnvForPath(logger, finalCAPath); err != nil {
+		return err
 	}
 
+	// Native mode completed successfully — the CA is now installed in
+	// the system store (and the Java keystore if Java is present).
+	// Signal readiness so downstream consumers (e.g. /agent/ready) can
+	// unblock.
+	markCAReady()
 	return nil
 }
 

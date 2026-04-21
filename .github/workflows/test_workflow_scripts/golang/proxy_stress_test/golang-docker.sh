@@ -13,7 +13,7 @@ sudo rm -rf keploy/
 $RECORD_BIN config --generate
 
 container_kill() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
     echo "Keploy record PID: $REC_PID"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
