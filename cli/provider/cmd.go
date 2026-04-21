@@ -292,6 +292,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -435,6 +436,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
+		"jsonOutput":            "json",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
 		"enableTesting":         "enable-testing",
@@ -624,9 +626,32 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The --json flag isn't registered on every subcommand (record / agent
+	// don't define it in enterprise builds), so Lookup + fallback avoids
+	// an early-return that would skip every subsequent validation step
+	// below (including the agent-mode wiring that the agent subprocess
+	// needs — without it, the agent starts up with mode="").
+	jsonOutput := false
+	if cmd.Flags().Lookup("json") != nil {
+		if v, err := cmd.Flags().GetBool("json"); err == nil {
+			jsonOutput = v
+		} else {
+			utils.LogError(c.logger, err, "failed to get the json flag")
+		}
+	}
+	c.cfg.JSONOutput = jsonOutput
+
+	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
+	if c.cfg.JSONOutput {
+		logger, err := log.RedirectToStderr()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
+	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
 		PrintLogo(os.Stdout, disableAnsi)
 	}
 	if c.cfg.Debug {

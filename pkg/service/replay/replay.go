@@ -1594,7 +1594,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 			}
 
-			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks)
+			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
+			upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, consumedMocks, tcReqTime, tcRespTime)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -2024,7 +2025,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					"\033[91m", tc.Name, "\033[0m")
 			}
 
-			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks)
+			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
+			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, consumedMocks, tcReqTimeStream, tcRespTimeStream)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -2317,57 +2319,63 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
-
-		if !r.config.DisableANSI {
-			if testSetStatus == models.TestSetStatusFailed {
-				pp.SetColorScheme(models.GetFailingColorScheme())
-			} else {
-				pp.SetColorScheme(models.GetPassingColorScheme())
+		if r.config.JSONOutput {
+			if err := utils.NewJSONWriter(true).Write(testReport); err != nil {
+				utils.LogError(r.logger, err, "failed to print json testrun summary")
 			}
-
-			summaryFormat := "\n <=========================================> \n" +
-				"  TESTRUN SUMMARY. For test-set: %s\n" +
-				"\tTotal tests:        %s\n" +
-				"\tTotal test passed:  %s\n" +
-				"\tTotal test failed:  %s\n"
-
-			args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
-			if testReport.Obsolete > 0 {
-				summaryFormat += "\tTotal test obsolete: %s\n"
-				args = append(args, testReport.Obsolete)
-			}
-
-			if testReport.Ignored > 0 {
-				summaryFormat += "\tTotal test ignored: %s\n"
-				args = append(args, testReport.Ignored)
-			}
-
-			summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
-			args = append(args, timeTakenStr)
-
-			if _, err := pp.Printf(summaryFormat, args...); err != nil {
-				utils.LogError(r.logger, err, "failed to print testrun summary")
-			}
-
 		} else {
-			var sb strings.Builder
-			sb.WriteString("\n <=========================================> \n")
-			sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
-			sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
-			sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
-			sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
-			if testReport.Obsolete > 0 {
-				sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
+
+			if !r.config.DisableANSI {
+				if testSetStatus == models.TestSetStatusFailed {
+					pp.SetColorScheme(models.GetFailingColorScheme())
+				} else {
+					pp.SetColorScheme(models.GetPassingColorScheme())
+				}
+
+				summaryFormat := "\n <=========================================> \n" +
+					"  TESTRUN SUMMARY. For test-set: %s\n" +
+					"\tTotal tests:        %s\n" +
+					"\tTotal test passed:  %s\n" +
+					"\tTotal test failed:  %s\n"
+
+				args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
+				if testReport.Obsolete > 0 {
+					summaryFormat += "\tTotal test obsolete: %s\n"
+					args = append(args, testReport.Obsolete)
+				}
+
+				if testReport.Ignored > 0 {
+					summaryFormat += "\tTotal test ignored: %s\n"
+					args = append(args, testReport.Ignored)
+				}
+
+				summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
+				args = append(args, timeTakenStr)
+
+				if _, err := pp.Printf(summaryFormat, args...); err != nil {
+					utils.LogError(r.logger, err, "failed to print testrun summary")
+				}
+
+			} else {
+				var sb strings.Builder
+				sb.WriteString("\n <=========================================> \n")
+				sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
+				sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
+				sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
+				sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
+				if testReport.Obsolete > 0 {
+					sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
+				}
+
+				if testReport.Ignored > 0 {
+					sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
+				}
+
+				sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
+				sb.WriteString(" <=========================================> \n\n")
+
+				fmt.Print(sb.String())
 			}
-
-			if testReport.Ignored > 0 {
-				sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
-			}
-
-			sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
-			sb.WriteString(" <=========================================> \n\n")
-
-			fmt.Print(sb.String())
 		}
 	}
 
@@ -2745,6 +2753,10 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
+	if r.config.JSONOutput {
+		return
+	}
+
 	r.completeTestReportMu.RLock()
 	totalTestsSnapshot := r.totalTests
 	totalTestPassedSnapshot := r.totalTestPassed
