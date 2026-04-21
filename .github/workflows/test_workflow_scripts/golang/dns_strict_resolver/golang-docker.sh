@@ -17,7 +17,10 @@
 
 set -Eeuo pipefail
 
-NETWORK=keploy-network
+NETWORK=dns-strict-resolver-net
+SUBNET=172.30.0.0/16
+COREDNS_IP=172.30.0.10
+COREDNS_NAME=dns-strict-resolver-coredns
 SAMPLE_NAME=dns-strict-resolver
 CURL_OUT=curl-output.txt
 
@@ -25,9 +28,8 @@ section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 cleanup() {
-  docker rm -f "$SAMPLE_NAME" 2>/dev/null || true
-  # Leave keploy-network in place — other jobs may be using it in parallel
-  # and `docker network rm` fails if any container is still attached.
+  docker rm -f "$SAMPLE_NAME" "$COREDNS_NAME" 2>/dev/null || true
+  docker network rm "$NETWORK" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -42,6 +44,9 @@ check_for_errors() {
 dump_diagnostics() {
   echo "::group::keploy record.txt (tail 200)"
   tail -200 record.txt 2>/dev/null || echo "(record.txt missing)"
+  echo "::endgroup::"
+  echo "::group::CoreDNS logs"
+  docker logs "$COREDNS_NAME" 2>&1 | tail -40 || true
   echo "::endgroup::"
   echo "::group::sample container logs"
   docker logs "$SAMPLE_NAME" 2>&1 | tail -40 || true
@@ -129,7 +134,11 @@ send_request() {
   fi
   echo "Running curl.sh..."
   chmod +x ./curl.sh
-  ./curl.sh 2>&1 | tee "$CURL_OUT" || true
+  # Aim DNS queries at the fixture CoreDNS container rather than
+  # /etc/resolv.conf (which, under keploy's container-mode netns share,
+  # points at 127.0.0.11 / docker embedded DNS — a special iptables-
+  # managed path that does not reach cgroup/recvmsg4 on GH runners).
+  NAMESERVER="${COREDNS_IP}:53" ./curl.sh 2>&1 | tee "$CURL_OUT" || true
   endsec
 }
 
@@ -143,11 +152,19 @@ section "Build sample image"
 docker build -t "$SAMPLE_NAME:test" .
 endsec
 
-section "Network"
-# keploy-network is the conventional network name keploy looks for
-# in docker mode (see gin_mongo/golang-docker.sh). Idempotent create —
-# a prior matrix job may have left it in place.
-docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK"
+section "Network + CoreDNS"
+# Dedicated network with a known subnet so CoreDNS can pin 172.30.0.10
+# as its IP. The sample queries this IP directly via ?nameserver= on
+# /resolve; this mirrors the Flipkart production shape (client → real
+# DNS container on a real bridge network) where the recvmsg4 SNAT fix
+# has been verified to work, rather than the GH-runner docker embedded
+# DNS path (127.0.0.11) which goes through docker-managed iptables and
+# does NOT trigger cgroup/recvmsg4 reliably.
+docker network create --subnet "$SUBNET" "$NETWORK"
+docker run -d --rm --name "$COREDNS_NAME" --net "$NETWORK" --ip "$COREDNS_IP" \
+  -v "$PWD/coredns:/etc/coredns:ro" \
+  coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
+sleep 2
 endsec
 
 section "Start Recording"
