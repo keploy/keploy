@@ -263,19 +263,82 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 		return fmt.Errorf("failed to create export dir: %w", err)
 	}
 
-	// Write ca.crt
+	// Load the OS-provided CA bundle (best-effort — returns (nil, "") if no
+	// standard path is populated, which is normal on distroless/scratch).
+	systemBundle, sourcePath := loadSystemCABundleFn(logger)
+
+	// Build the merged PEM bundle that goes into <exportPath>/ca.crt.
+	//
+	// This is the file the k8s-proxy admission webhook wires into the app
+	// container via REQUESTS_CA_BUNDLE / SSL_CERT_FILE / NODE_EXTRA_CA_CERTS /
+	// CARGO_HTTP_CAINFO. Those env vars REPLACE the default trust store for
+	// their respective runtimes — so if we write only the Keploy MITM CA
+	// (the previous behaviour), every non-proxied HTTPS call (internal
+	// cluster services, public endpoints Keploy isn't proxying, DoH, ...)
+	// fails with CERTIFICATE_VERIFY_FAILED.
+	//
+	// Concatenating PEM blocks with a separating newline is the standard way
+	// to merge trust anchors — OpenSSL, BoringSSL, NSS, Go's crypto/x509,
+	// and every language runtime that honours these env vars parses
+	// multi-cert PEM bundles by walking successive BEGIN/END blocks.
+	merged := make([]byte, 0, len(systemBundle)+len(caCrt)+1)
+	merged = append(merged, systemBundle...)
+	if len(systemBundle) > 0 && systemBundle[len(systemBundle)-1] != '\n' {
+		merged = append(merged, '\n')
+	}
+	merged = append(merged, caCrt...)
+
 	crtPath := filepath.Join(exportPath, "ca.crt")
-	if err := os.WriteFile(crtPath, caCrt, 0644); err != nil {
+	if err := os.WriteFile(crtPath, merged, 0644); err != nil {
 		return fmt.Errorf("failed to write ca.crt to shared volume: %w", err)
+	}
+
+	// Also write the Keploy MITM CA alone to keploy-ca.crt. This file is for
+	// consumers that ADD to the system trust store rather than REPLACE it —
+	// notably Node.js's NODE_EXTRA_CA_CERTS, which is merged with the default
+	// bundle at startup. Pointing NODE_EXTRA_CA_CERTS at the merged file
+	// would double-trust the system roots (harmless but wasteful); pointing
+	// it at keploy-ca.crt is the minimal correct input.
+	keployOnlyPath := filepath.Join(exportPath, "keploy-ca.crt")
+	if err := os.WriteFile(keployOnlyPath, caCrt, 0644); err != nil {
+		return fmt.Errorf("failed to write keploy-ca.crt to shared volume: %w", err)
+	}
+
+	if len(systemBundle) > 0 {
+		logger.Info("Merged system CA bundle with Keploy MITM CA",
+			zap.Int("system_bytes", len(systemBundle)),
+			zap.Int("keploy_bytes", len(caCrt)),
+			zap.String("source_path", sourcePath),
+			zap.String("output", crtPath),
+			zap.String("keploy_only_output", keployOnlyPath),
+		)
+	} else {
+		logger.Warn("Wrote Keploy MITM CA only — no system CA bundle was found to merge",
+			zap.Int("keploy_bytes", len(caCrt)),
+			zap.String("output", crtPath),
+		)
 	}
 
 	if err := SetEnvForPath(logger, crtPath); err != nil {
 		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 
-	// Generate Java Truststore
+	// Generate Java Truststore from the Keploy CA only.
+	//
+	// Unlike the PEM env vars, Java's -Djavax.net.ssl.trustStore= REPLACES
+	// the default $JAVA_HOME/lib/security/cacerts keystore wholesale, so in
+	// theory we should merge every PEM in the system bundle into this JKS
+	// too. In practice, merging O(150) PEM-encoded roots into a JKS on every
+	// agent start is a noticeable cold-start cost, and the sharp edge
+	// (Java apps fail on non-proxied HTTPS) is orthogonal to the PEM fix
+	// shipped in this change.
+	//
+	// TODO(tls): follow-up — merge the system trust anchors into
+	// truststore.jks as well, either by importing each PEM via keystore-go
+	// or by copying cacerts from JAVA_HOME (when present) and overlaying
+	// the Keploy root on top.
 	jksPath := filepath.Join(exportPath, "truststore.jks")
-	if err := generateTrustStore(crtPath, jksPath); err != nil {
+	if err := generateTrustStore(keployOnlyPath, jksPath); err != nil {
 		logger.Error("Failed to generate Java truststore", zap.Error(err))
 		return err
 	}
