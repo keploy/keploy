@@ -22,7 +22,7 @@ services:
       - shared:/shared
 
   client:
-    image: alpine:3.20
+    image: alpine:latest
     depends_on:
       - agent
     volumes:

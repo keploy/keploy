@@ -61,9 +61,14 @@ if ! awk '{print $2}' "$LOG" | grep -qx "200"; then
 fi
 
 # After the first 200, every subsequent status must stay 200.
+# Lines without an HTTP status in $2 (e.g. the trailing "DONE" sentinel
+# or any blank line) are skipped.
 if ! awk '
-  $2=="200" { seen=1; next }
-  seen && $2!="200" && $2!="DONE" { exit 1 }
+  NF < 2 { next }
+  $1 == "DONE" { next }
+  $2 !~ /^[0-9]+$/ { next }
+  $2 == "200" { seen = 1; next }
+  seen { exit 1 }
 ' "$LOG"; then
   echo "FAIL: observed non-200 status after the CAReady transition" >&2
   exit 4

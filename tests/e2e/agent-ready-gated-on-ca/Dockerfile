@@ -2,7 +2,7 @@
 # tests/e2e/agent-ready-gated-on-ca. The harness mounts the real
 # pkg/agent/routes handlers but sidesteps the full agent (eBPF,
 # proxy, memoryguard) so the container doesn't need privileged mode.
-FROM golang:1.26 AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 
 # Copy the full keploy module so the harness build picks up the
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -o /out/e2e-harness \
       ./tests/e2e/agent-ready-gated-on-ca/harness
 
-FROM alpine:3.20
+FROM alpine:latest
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/e2e-harness /usr/local/bin/e2e-harness
 EXPOSE 8086
