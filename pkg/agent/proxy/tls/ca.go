@@ -537,6 +537,17 @@ func generateTrustStore(certPath, jksPath string) error {
 
 	ks := keystore.New()
 	rest := pemBytes
+	// pemBlockIdx counts every PEM block we encountered in the input — both
+	// CERTIFICATE blocks that end up in the keystore AND non-CERTIFICATE
+	// blocks (keys, CRLs, DH params, …) we skip. It's what we report in
+	// diagnostic error messages so the offset in the error matches what a
+	// human counts when eyeballing the file.
+	//
+	// added counts only the CERTIFICATE blocks that parsed cleanly AND
+	// landed in the keystore. We use it at the end to distinguish "input
+	// contained only non-CERTIFICATE noise" from "input contained at least
+	// one valid certificate".
+	pemBlockIdx := 0
 	added := 0
 	keployFingerprint := sha256.Sum256(embeddedKeployCADER())
 	for {
@@ -545,12 +556,13 @@ func generateTrustStore(certPath, jksPath string) error {
 		if block == nil {
 			break
 		}
+		pemBlockIdx++
 		if block.Type != "CERTIFICATE" {
 			continue
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return fmt.Errorf("failed to parse x509 certificate (block %d): %w", added, err)
+			return fmt.Errorf("failed to parse x509 certificate at PEM block #%d (type=%q): %w", pemBlockIdx, block.Type, err)
 		}
 
 		alias := ""
@@ -586,19 +598,38 @@ func generateTrustStore(certPath, jksPath string) error {
 	return nil
 }
 
+// keployCADEROnce caches the DER encoding of the embedded Keploy MITM CA
+// so generateTrustStore doesn't re-parse the same in-memory PEM on every
+// call. The parse is O(cert-size) — trivial individually, but every agent
+// restart hits generateTrustStore once per startup and every unit test
+// that exercises generateTrustStore would re-parse too.
+//
+// keployCADERErr holds a nil result when the embedded PEM is malformed
+// or not a CERTIFICATE block. Consumers treat nil DER as "can't identify
+// the Keploy root" and fall back to the generic "system-<sha>" alias.
+var (
+	keployCADEROnce  sync.Once
+	keployCADERBytes []byte
+)
+
 // embeddedKeployCADER returns the DER encoding of the embedded Keploy MITM
 // CA. Used by generateTrustStore to identify which block in a merged
 // PEM bundle is the Keploy root (so it gets the stable "keploy-root"
-// alias). Parsing happens once on first call and errors are coerced to
-// an empty slice — a caller that can't find the Keploy CA by fingerprint
-// simply falls back to the generic "system-<sha>" alias for every entry.
-// That is a degraded but non-broken trust-store.
+// alias). Parsing happens once per process via sync.Once; subsequent
+// calls return the cached DER. If the embedded PEM is malformed or not
+// a CERTIFICATE block, the cached value is nil — callers treat that as
+// "can't identify the Keploy root" and fall back to the generic
+// "system-<sha>" alias for every entry. That is a degraded but
+// non-broken trust-store.
 func embeddedKeployCADER() []byte {
-	block, _ := pem.Decode(caCrt)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil
-	}
-	return block.Bytes
+	keployCADEROnce.Do(func() {
+		block, _ := pem.Decode(caCrt)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return
+		}
+		keployCADERBytes = block.Bytes
+	})
+	return keployCADERBytes
 }
 
 func commandExists(cmd string) bool {

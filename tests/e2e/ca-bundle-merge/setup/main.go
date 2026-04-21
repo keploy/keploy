@@ -3,9 +3,12 @@
 // /tmp/keploy-tls/ca.crt (the same path the k8s-proxy admission webhook
 // injects into application containers) and then exits. The e2e test then
 // copies that path into a shared volume and has a second container curl a
-// real TLS endpoint with REQUESTS_CA_BUNDLE=/shared/ca.crt — proving that
-// the merge fix gives apps simultaneous trust of both system anchors and
-// the Keploy MITM CA.
+// real TLS endpoint with `curl --cacert /shared/ca.crt` — proving that the
+// merge fix gives apps simultaneous trust of both system anchors and the
+// Keploy MITM CA. (`--cacert` is the curl-CLI equivalent of the
+// REQUESTS_CA_BUNDLE env var the real webhook wires into application
+// containers; using it directly avoids a stray env-var dance in the
+// container command.)
 package main
 
 import (
