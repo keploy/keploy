@@ -153,7 +153,7 @@ section "Start Recording"
 # the sample's cgroup and attach the eBPF programs there (unlike
 # golang_linux.yml where non-docker loopback UDP doesn't reach
 # cgroup/recvmsg4).
-sudo -E env PATH=$PATH "$RECORD_BIN" record \
+"$RECORD_BIN" record\
   -c "docker run -p 8086:8086 --rm --net $NETWORK --dns=$COREDNS_IP --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
   --generateGithubActions=false \
@@ -179,7 +179,7 @@ echo "Recording stopped."
 endsec
 
 section "Start Replay"
-sudo -E env PATH=$PATH "$REPLAY_BIN" test \
+"$REPLAY_BIN" test \
   -c "docker run -p 8086:8086 --rm --net $NETWORK --dns=$COREDNS_IP --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
   --delay 15 \
