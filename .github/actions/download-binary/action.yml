@@ -4,7 +4,7 @@ description: "Download build or latest Keploy and expose its absolute path"
 inputs:
   src:
     required: true
-    description: "build | latest"
+    description: "Name of the binary artifact to download (e.g. build, build-no-race, build-darwin, latest)."
 
 outputs:
   path:

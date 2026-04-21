@@ -119,10 +119,25 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p out/keploy-linux-amd64 out/keploy-linux-arm64
-          amd64_src=$(ls -d dist/keploy-docker_linux_amd64*/keploy | head -n1)
-          arm64_src=$(ls -d dist/keploy-docker_linux_arm64*/keploy | head -n1)
-          cp "$amd64_src" out/keploy-linux-amd64/keploy
-          cp "$arm64_src" out/keploy-linux-arm64/keploy
+          # Resolve globs explicitly and fail loud if goreleaser's
+          # dist layout changes — `ls | head` would swallow a
+          # missing directory under `set -e` because `head` exits 0.
+          shopt -s nullglob
+          amd64_candidates=(dist/keploy-docker_linux_amd64*/keploy)
+          arm64_candidates=(dist/keploy-docker_linux_arm64*/keploy)
+          shopt -u nullglob
+          if [ ${#amd64_candidates[@]} -eq 0 ]; then
+            echo "::error::no dist/keploy-docker_linux_amd64*/keploy produced by goreleaser"
+            ls -la dist/ || true
+            exit 1
+          fi
+          if [ ${#arm64_candidates[@]} -eq 0 ]; then
+            echo "::error::no dist/keploy-docker_linux_arm64*/keploy produced by goreleaser"
+            ls -la dist/ || true
+            exit 1
+          fi
+          cp "${amd64_candidates[0]}" out/keploy-linux-amd64/keploy
+          cp "${arm64_candidates[0]}" out/keploy-linux-arm64/keploy
           chmod +x out/keploy-linux-amd64/keploy out/keploy-linux-arm64/keploy
       - uses: actions/upload-artifact@v4
         with:

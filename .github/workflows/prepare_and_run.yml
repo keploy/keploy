@@ -6,6 +6,17 @@ on:
     branches: [main]
 
 concurrency:
+  # One group per PR / branch spanning all three platform legs. A new
+  # push cancels in-progress Linux, macOS, and Windows jobs together,
+  # which means a concurrency-cancel also aborts `cleanup_windows` /
+  # `clean_up_docker_macos` mid-run and can leak the run's
+  # workflow-lock file or long-running containers on self-hosted
+  # runners. The subsequent push schedules fresh cleanup jobs with
+  # their own `if: always()`, so state converges within one extra
+  # push. Splitting into per-OS sub-groups would avoid the
+  # blast-radius, but self-hosted queueing already serialises the
+  # macOS / Windows runners in practice; keeping one group keeps the
+  # workflow simple.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
@@ -480,7 +491,9 @@ jobs:
         with:
           name: docker-image-linux-amd64
           path: image.tar
-          retention-days: 1
+          # 7 days so re-running a failed downstream gate within a
+          # week still finds the image. Two tarballs per run is cheap.
+          retention-days: 7
 
   build-docker-image-arm64:
     needs: [build-linux-arm64]
@@ -513,7 +526,9 @@ jobs:
         with:
           name: docker-image-linux-arm64
           path: image.tar
-          retention-days: 1
+          # 7 days so re-running a failed downstream gate within a
+          # week still finds the image. Two tarballs per run is cheap.
+          retention-days: 7
 
   # -------------------------------------------------------------------
   # Linux test jobs

@@ -32,9 +32,14 @@ runs:
           exit 1
         fi
         echo "Loading image from $TAR ..."
-        LOADED=$(docker load -i "$TAR" | awk -F': ' '/Loaded image:/ {print $2}' | head -n1)
+        # Anchor to "Loaded image: " (with the trailing space) so the
+        # `Loaded image ID: sha256:…` variant emitted when the tarball
+        # has no RepoTags doesn't match and silently yield `sha256` as
+        # the tag target. NR==1 guarantees a single value without
+        # risking SIGPIPE from a downstream `head -n1` under pipefail.
+        LOADED=$(docker load -i "$TAR" | awk -F'Loaded image: ' '/^Loaded image: / && NR==1 {print $2; exit}')
         if [ -z "$LOADED" ]; then
-          echo "::error::docker load did not report a loaded image"
+          echo "::error::docker load did not report a tagged image (got: $(docker load -i "$TAR" 2>&1 | head -n5))"
           exit 1
         fi
         echo "Loaded: $LOADED"
@@ -56,9 +61,19 @@ runs:
         }
         Write-Host "Loading image from $tar ..."
         $loadOutput = docker load -i $tar
-        $loaded = ($loadOutput | Select-String -Pattern 'Loaded image:\s*(.+)$' | Select-Object -First 1).Matches.Groups[1].Value
+        # Anchor at line start and trim the capture — docker CLI on
+        # Windows emits CRLF, which `(.+)$` would swallow into the
+        # capture group, yielding a trailing \r that makes
+        # `docker tag` reject the reference. Trim() strips both CR
+        # and any trailing whitespace.
+        $match = $loadOutput | Select-String -Pattern '^Loaded image:\s+(.+)$' | Select-Object -First 1
+        if ($null -eq $match) {
+          Write-Error "docker load did not report a tagged image. Output: $($loadOutput -join [Environment]::NewLine)"
+          exit 1
+        }
+        $loaded = $match.Matches.Groups[1].Value.Trim()
         if ([string]::IsNullOrWhiteSpace($loaded)) {
-          Write-Error "docker load did not report a loaded image"
+          Write-Error "docker load reported an empty image reference. Output: $($loadOutput -join [Environment]::NewLine)"
           exit 1
         }
         Write-Host "Loaded: $loaded"
