@@ -191,6 +191,73 @@ func SetEnvForPath(logger *zap.Logger, path string) error {
 	return nil
 }
 
+// systemCABundleSearchPaths is the ranked list of well-known locations where
+// Linux/Unix distributions (and busybox/Alpine-derived images) place the OS
+// trust store. The first readable, non-empty file wins.
+//
+// Ordering mirrors Go's crypto/x509 certFiles but is duplicated here because
+// we need the file BYTES (not the parsed roots) — the shared volume is
+// consumed by non-Go clients (curl, python/requests, node.js, rust/reqwest,
+// ...) that each parse PEM directly.
+var systemCABundleSearchPaths = []string{
+	"/etc/ssl/certs/ca-certificates.crt",     // Debian, Ubuntu, Alpine
+	"/etc/pki/tls/certs/ca-bundle.crt",       // RHEL, Fedora, CentOS
+	"/etc/ssl/ca-bundle.pem",                 // openSUSE
+	"/etc/pki/tls/cacert.pem",                // older RHEL
+	"/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+	"/etc/ssl/cert.pem",                      // Alpine alternate, macOS
+}
+
+// loadSystemCABundleFn is an indirection seam for tests — production code uses
+// the default loadSystemCABundle implementation. Tests replace this with a
+// stub that reads from a tempdir-backed search list.
+var loadSystemCABundleFn = loadSystemCABundle
+
+// loadSystemCABundle returns the contents of the first readable, non-empty OS
+// CA bundle file from systemCABundleSearchPaths (plus the path used). On
+// failure (no readable non-empty file found) it logs a warning and returns
+// (nil, "") — the caller should proceed with the Keploy CA alone rather than
+// erroring.
+//
+// We intentionally DO NOT return an error: the shared-volume CA file is a
+// best-effort merge. In the worst case (minimal distroless/scratch image with
+// no OS bundle) the application falls back to the prior behaviour of trusting
+// only the Keploy MITM CA — not worse than the status quo.
+func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
+	return loadSystemCABundleFromPaths(logger, systemCABundleSearchPaths)
+}
+
+// loadSystemCABundleFromPaths is the testable core of loadSystemCABundle —
+// it scans the given ranked list instead of the production constant.
+func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, string) {
+	tried := make([]string, 0, len(paths))
+	for _, p := range paths {
+		tried = append(tried, p)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			// ENOENT / EACCES / etc. — most hosts only have one of these
+			// candidates; silently try the next.
+			continue
+		}
+		if len(data) == 0 {
+			// Present-but-empty is almost always a broken image build; fall
+			// through rather than silently producing a zero-trust bundle.
+			continue
+		}
+		return data, p
+	}
+	logger.Warn(
+		"No system CA bundle found on any known path — the shared "+
+			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
+			"Non-proxied HTTPS calls from the application (internal services, "+
+			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
+			"CERTIFICATE_VERIFY_FAILED. Ensure the application image ships an OS "+
+			"trust store (e.g. the `ca-certificates` package on Debian/Ubuntu).",
+		zap.Strings("searched_paths", tried),
+	)
+	return nil, ""
+}
+
 func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string) error {
 	if err := os.MkdirAll(exportPath, 0755); err != nil {
 		return fmt.Errorf("failed to create export dir: %w", err)
