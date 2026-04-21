@@ -15,20 +15,33 @@ services:
       context: ../../..
       dockerfile: tests/e2e/agent-ready-gated-on-ca/Dockerfile
     image: keploy-e2e-agent-ready-harness:latest
-    command: ["-addr=:8086", "-ca-delay=5s"]
+    # ca-delay must comfortably exceed the worst-case time between binary
+    # start and the client's FIRST curl (= healthcheck latency + compose's
+    # "Waiting ... Healthy" bookkeeping + client container startup). On a
+    # cold GitHub Actions runner this totals ~2–3s; 15s leaves ~12s of
+    # pre-CAReady window for the first ~12 of 30 client poll iterations
+    # to observe the refusing 503 before the signal flips.
+    command: ["-addr=:8086", "-ca-delay=15s"]
     expose:
       - "8086"
     # TCP-connect healthcheck (busybox's `nc -z`) — once the harness binds
     # port 8086 the listener is ready to accept HTTP requests. This is the
     # canonical way to gate depends_on without hitting /agent/agent/ready
     # itself (which is the endpoint under test and deliberately 503s for
-    # the first CA_DELAY seconds).
+    # the first ca-delay seconds).
+    #
+    # Tuned so the check declares Healthy as close as possible to the
+    # moment the listener binds: start_period=0s means we start probing
+    # immediately, interval=500ms + retries=20 gives up to 10s grace
+    # without contributing to steady-state latency, and timeout=1s keeps
+    # each probe cheap. On GHA the transition to Healthy completes in
+    # ~1s after the container goes Running.
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8086"]
-      interval: 1s
-      timeout: 2s
-      retries: 10
-      start_period: 2s
+      interval: 500ms
+      timeout: 1s
+      retries: 20
+      start_period: 0s
     volumes:
       - shared:/shared
 
