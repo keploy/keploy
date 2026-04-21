@@ -33,13 +33,34 @@ echo ">> starting stack"
 $COMPOSE -p "$PROJECT" up -d
 
 # Wait long enough for: boot + ~3s of pre-CAReady 503s + CAReady + ~5s of 200s.
+#
+# The client container writes a literal "DONE" sentinel line to
+# /shared/status.log after its 30-iteration poll finishes. We wait up
+# to 60s for that sentinel; if it never appears, the client is wedged
+# (e.g. agent container crashed, volume mount busted, apk-add curl
+# failed) and continuing would just produce a confusing parse error
+# downstream. Fail loudly here with the client+agent logs so the
+# regression is easy to diagnose.
 echo ">> waiting for client to finish 30 poll iterations"
+saw_done=0
 for _ in $(seq 1 60); do
   if $COMPOSE -p "$PROJECT" exec -T client sh -c 'grep -q "^DONE$" /shared/status.log 2>/dev/null'; then
+    saw_done=1
     break
   fi
   sleep 1
 done
+
+if [[ "$saw_done" -ne 1 ]]; then
+  echo "FAIL: timed out after 60s waiting for client DONE sentinel" >&2
+  echo "--- status.log (partial) ---" >&2
+  $COMPOSE -p "$PROJECT" exec -T client sh -c 'cat /shared/status.log 2>/dev/null || echo "<unavailable>"' >&2 || true
+  echo "--- client logs ---" >&2
+  $COMPOSE -p "$PROJECT" logs client >&2 || true
+  echo "--- agent logs ---" >&2
+  $COMPOSE -p "$PROJECT" logs agent >&2 || true
+  exit 10
+fi
 
 LOG=$(mktemp)
 $COMPOSE -p "$PROJECT" exec -T client sh -c 'cat /shared/status.log' > "$LOG"

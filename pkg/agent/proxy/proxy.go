@@ -398,11 +398,18 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// This must happen before any connections are handled.
 	p.StartErrorDrain(ctx)
 
-	// set up the CA for tls connections
+	// set up the CA for tls connections.
+	//
+	// On failure we record the terminal error via MarkCAFailed so the
+	// /agent/ready handler can return a clear "CA setup failed"
+	// diagnostic instead of an indefinite "not yet ready". We still
+	// continue starting the proxy — the proxy can serve non-TLS
+	// traffic and surfacing the error to readiness probes is a better
+	// signal to operators than hard-aborting the agent here.
 	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
 	if err != nil {
-		// log the error and continue
 		p.logger.Warn("failed to setup CA", zap.Error(err))
+		pTls.MarkCAFailed(err)
 	}
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {

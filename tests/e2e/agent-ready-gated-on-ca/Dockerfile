@@ -2,7 +2,12 @@
 # tests/e2e/agent-ready-gated-on-ca. The harness mounts the real
 # pkg/agent/routes handlers but sidesteps the full agent (eBPF,
 # proxy, memoryguard) so the container doesn't need privileged mode.
-FROM golang:1.26-bookworm AS build
+#
+# Both base images are pulled from ECR Public's Docker Hub mirror so
+# this build is immune to Docker Hub unauth rate limits (HTTP 429) on
+# shared GitHub Actions runners. Tags are pinned — `:latest` would
+# make the e2e non-reproducible across CI runs.
+FROM public.ecr.aws/docker/library/golang:1.26-bookworm AS build
 WORKDIR /src
 
 # Copy the full keploy module so the harness build picks up the
@@ -17,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -o /out/e2e-harness \
       ./tests/e2e/agent-ready-gated-on-ca/harness
 
-FROM alpine:latest
+FROM public.ecr.aws/docker/library/alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/e2e-harness /usr/local/bin/e2e-harness
 EXPOSE 8086

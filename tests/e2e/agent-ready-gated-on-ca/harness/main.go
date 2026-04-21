@@ -16,7 +16,6 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,8 +55,11 @@ func main() {
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// logger.Fatal calls os.Exit(1) internally after flushing, so no
+	// explicit exit is needed here. http.ErrServerClosed is only
+	// returned after a graceful Shutdown (not in this harness) — any
+	// error reaching this branch is fatal for the test run.
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatal("listen", zap.Error(err))
-		os.Exit(1)
 	}
 }

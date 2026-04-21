@@ -9,13 +9,16 @@ import "sync"
 // SetupCA is the only legitimate path to close caReadyCh in a
 // running agent.
 
-// ResetCAReadyForTest rebuilds caReadyOnce and caReadyCh so a fresh
-// test can observe the "CA not ready" state regardless of test
-// ordering. Tests that need a closed channel should follow this with
-// CloseCAReadyForTest.
+// ResetCAReadyForTest rebuilds caReadyOnce and caReadyCh and clears any
+// recorded CA-setup failure so a fresh test can observe the "CA not
+// ready, no error" baseline regardless of test ordering. Tests that
+// need a closed channel should follow this with CloseCAReadyForTest;
+// tests exercising the failure path should call MarkCAFailed after
+// reset.
 func ResetCAReadyForTest() {
 	caReadyOnce = sync.Once{}
 	caReadyCh = make(chan struct{})
+	caFailure.Store(nil)
 }
 
 // CloseCAReadyForTest closes the CAReady channel via the same

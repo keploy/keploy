@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudflare/cfssl/csr"
@@ -58,9 +59,17 @@ var caStoreUpdateCmd = []string{
 // call from multiple goroutines and multiple times during a single agent
 // lifecycle. caReadyCh is closed exactly once, on the first successful
 // SetupCA path, and remains closed for the rest of the process lifetime.
+//
+// caFailure records a terminal SetupCA error so callers (e.g. the
+// /agent/ready handler) can distinguish "CA not yet ready" from "CA
+// setup failed and will never recover without an agent restart". It is
+// written by MarkCAFailed on the error path of SetupCA (via
+// pkg/agent/proxy), and read non-blockingly by CAStatus. It is never
+// reset in production; tests call ResetCAReadyForTest to clear it.
 var (
 	caReadyOnce sync.Once
 	caReadyCh   = make(chan struct{})
+	caFailure   atomic.Pointer[error]
 )
 
 // CAReady returns a channel that is closed once the Keploy CA bundle has
@@ -80,6 +89,54 @@ var (
 // is missing would let app containers boot against a broken TLS trust
 // chain and produce silent failures in HTTPS egress.
 func CAReady() <-chan struct{} { return caReadyCh }
+
+// CAStatus reports the current CA-readiness state in a single
+// non-blocking call. It is the preferred check for HTTP handlers and
+// other consumers that need to distinguish three states:
+//
+//   - ready==true,  err==nil  : the CA bundle has been written to disk
+//     (shared volume in docker/k8s mode, or system CA store in native
+//     mode) and downstream consumers can proceed.
+//   - ready==false, err==nil  : SetupCA has not completed yet — the
+//     caller should back off and retry (typical boot-time race).
+//   - ready==false, err!=nil  : SetupCA completed with a terminal
+//     error. The CA will NOT become ready in this process lifetime;
+//     callers should surface a clear "misconfiguration" signal (e.g.
+//     HTTP 503 with the error message) so operators don't wait
+//     forever for readiness that will never come.
+//
+// CAStatus is safe to call concurrently from any goroutine.
+func CAStatus() (ready bool, err error) {
+	select {
+	case <-caReadyCh:
+		ready = true
+	default:
+	}
+	if p := caFailure.Load(); p != nil && *p != nil {
+		err = *p
+	}
+	return ready, err
+}
+
+// MarkCAFailed records a terminal SetupCA failure so future CAStatus
+// calls can report it. Only the SetupCA caller in pkg/agent/proxy
+// should invoke this — it is exposed (capitalised) because the error
+// is returned to the caller, not handled inside this package. Calling
+// MarkCAFailed with a non-nil err does NOT close caReadyCh: readiness
+// stays unlatched so health checks keep failing, and the error gives
+// operators a clear diagnostic instead of an open-ended timeout.
+//
+// Passing nil is a no-op (so callers can plumb `MarkCAFailed(err)`
+// unconditionally on the SetupCA return). Subsequent non-nil calls
+// overwrite the previous error — SetupCA is not currently retried,
+// but if a future refactor adds retry this keeps the most recent
+// diagnostic visible.
+func MarkCAFailed(err error) {
+	if err == nil {
+		return
+	}
+	caFailure.Store(&err)
+}
 
 // markCAReady closes the CAReady channel exactly once. Safe to call from
 // multiple goroutines and multiple times.

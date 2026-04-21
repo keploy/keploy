@@ -1,10 +1,12 @@
 package routes
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -75,6 +77,40 @@ func TestMakeAgentReady_SucceedsWhenCAReady(t *testing.T) {
 	if _, err := os.Stat(readyFile); err != nil {
 		t.Fatalf("agent.ready must be written on 200: %v", err)
 	}
+}
+
+// TestMakeAgentReady_SurfacesCASetupFailure verifies that a terminal
+// SetupCA error recorded via MarkCAFailed is reflected in the 503
+// body instead of the generic "not yet written" message, and that
+// the readiness file is NOT created. This is the failure-mode
+// Copilot raised: without this path, operators see endless 503s with
+// no diagnostic when SetupCA errored out at boot.
+func TestMakeAgentReady_SurfacesCASetupFailure(t *testing.T) {
+	pTls.ResetCAReadyForTest()
+	pTls.MarkCAFailed(errors.New("synthetic: no writable CA store"))
+
+	readyFile := redirectAgentReadyFile(t)
+	a := newTestAgent(t)
+
+	rr := httptest.NewRecorder()
+	a.MakeAgentReady(rr, httptest.NewRequest(http.MethodPost, "/agent/agent/ready", nil))
+
+	if got, want := rr.Code, http.StatusServiceUnavailable; got != want {
+		t.Fatalf("status: got %d, want %d; body=%q", got, want, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "CA setup failed") {
+		t.Fatalf("body should surface setup error, got %q", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "synthetic: no writable CA store") {
+		t.Fatalf("body should echo the underlying error, got %q", rr.Body.String())
+	}
+	if _, err := os.Stat(readyFile); !os.IsNotExist(err) {
+		t.Fatalf("agent.ready must not be created on CA-setup-failure 503; stat err=%v", err)
+	}
+
+	// Clear the failure so subsequent tests in the binary see a
+	// clean baseline regardless of ordering.
+	pTls.ResetCAReadyForTest()
 }
 
 // TestMakeAgentReady_NoReadinessFileOn503 is a tight regression guard

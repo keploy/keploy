@@ -46,7 +46,11 @@ services:
       - shared:/shared
 
   client:
-    image: alpine:latest
+    # Pinned digest-less but explicit Alpine tag from ECR Public
+    # (Docker Hub mirror) so the e2e is reproducible across CI runs
+    # and immune to Docker Hub rate limits. Bumping requires editing
+    # the tag explicitly — never use `:latest`.
+    image: public.ecr.aws/docker/library/alpine:3.20
     # Wait for the agent's HTTP listener to be bound before firing the first
     # curl. Without this, the first poll-iteration races the Go bootstrap
     # and records "000" (connection refused) instead of the "503" the test
@@ -63,7 +67,19 @@ services:
         apk add --no-cache curl >/dev/null 2>&1
         : >/shared/status.log
         for i in $$(seq 1 30); do
-          code=$$(curl -s -o /dev/null -w "%{http_code}" -X POST http://agent:8086/agent/agent/ready || echo "ERR")
+          # Capture curl's exit status separately so `code` is always
+          # a single token. `curl ... || echo ERR` can produce
+          # multi-line output on failure (curl still writes "000" via
+          # -w before exiting non-zero, then the fallback appends
+          # another line), which corrupts awk parsing downstream.
+          code=$$(curl -s -o /dev/null -w "%{http_code}" -X POST http://agent:8086/agent/agent/ready)
+          curl_rc=$$?
+          if [ "$$curl_rc" -ne 0 ]; then
+            code="ERR"
+          fi
+          # Strip any stray whitespace/newlines just in case the
+          # target is behind a proxy that mangles the response.
+          code=$$(printf "%s" "$$code" | tr -d '[:space:]')
           printf "%s %s\n" "$$(date -u +%FT%TZ)" "$$code" >> /shared/status.log
           sleep 1
         done
