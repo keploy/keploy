@@ -2,11 +2,22 @@ package tls
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -171,8 +182,10 @@ func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
 		t.Fatalf("keploy-ca.crt must be keploy CA alone; len(got)=%d len(caCrt)=%d", len(keployOnly), len(caCrt))
 	}
 
-	// truststore.jks is generated from keploy-ca.crt — just confirm it was
-	// created (full JKS decode is covered by generateTrustStore's own tests).
+	// truststore.jks is generated from the MERGED bundle (system + keploy).
+	// Full JKS-contents assertions live in TestGenerateTrustStore_MergesAllCerts
+	// (which uses a real self-signed cert rather than the fake PEM blocks used
+	// here). This test just confirms the file is produced and non-empty.
 	jksInfo, err := os.Stat(filepath.Join(exportDir, "truststore.jks"))
 	if err != nil {
 		t.Fatalf("stat truststore.jks: %v", err)
@@ -234,5 +247,138 @@ func TestSetupSharedVolume_FallsBackWhenSystemBundleMissing(t *testing.T) {
 	}
 	if !bytes.Equal(got, caCrt) {
 		t.Fatalf("fallback output should equal keploy CA alone; len(got)=%d len(caCrt)=%d", len(got), len(caCrt))
+	}
+}
+
+// makeSelfSignedPEM returns a newly-generated, throwaway self-signed CA
+// certificate encoded as a single PEM block. It's used by tests that
+// exercise the real x509 parse path in generateTrustStore — unlike the
+// fake-PEM constants at the top of this file, the output of this helper
+// survives pem.Decode + x509.ParseCertificate.
+func makeSelfSignedPEM(t *testing.T, cn string) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("rand.Int: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// TestGenerateTrustStore_MergesAllCerts is the real principal-review
+// regression for the Java-JKS fix: it builds a bundle that contains a
+// freshly-minted "system" CA PLUS the embedded Keploy MITM CA, runs
+// generateTrustStore against that bundle, loads the resulting JKS back
+// via keystore-go (so the test stresses the whole round-trip), and
+// asserts that:
+//   - both certificates are present as trusted entries;
+//   - the Keploy CA is aliased "keploy-root" (stable alias);
+//   - the system CA is aliased "system-<sha256-hex>" and matches the
+//     DER of the synthetic cert we generated.
+//
+// Before this PR the function decoded only the FIRST PEM block, so a
+// merged bundle silently lost the system roots — exactly the Java edge
+// case principal review flagged.
+func TestGenerateTrustStore_MergesAllCerts(t *testing.T) {
+	dir := t.TempDir()
+
+	systemCAPEM := makeSelfSignedPEM(t, "Test-System-Root")
+
+	// Compose a merged bundle: <system CA>\n<keploy CA>.
+	merged := append([]byte{}, systemCAPEM...)
+	merged = append(merged, caCrt...)
+
+	bundlePath := filepath.Join(dir, "merged.crt")
+	if err := os.WriteFile(bundlePath, merged, 0644); err != nil {
+		t.Fatalf("write merged: %v", err)
+	}
+	jksPath := filepath.Join(dir, "truststore.jks")
+
+	if err := generateTrustStore(bundlePath, jksPath); err != nil {
+		t.Fatalf("generateTrustStore: %v", err)
+	}
+
+	// Load the JKS back and inspect its entries.
+	f, err := os.Open(jksPath)
+	if err != nil {
+		t.Fatalf("open jks: %v", err)
+	}
+	defer f.Close()
+
+	ks := keystore.New()
+	if err := ks.Load(f, []byte("changeit")); err != nil {
+		t.Fatalf("ks.Load: %v", err)
+	}
+
+	aliases := ks.Aliases()
+	if len(aliases) < 2 {
+		t.Fatalf("expected >=2 aliases, got %d: %v", len(aliases), aliases)
+	}
+
+	// Derive the expected system alias from the synthetic cert's DER.
+	sysBlock, _ := pem.Decode(systemCAPEM)
+	if sysBlock == nil {
+		t.Fatal("could not re-decode synthetic system PEM")
+	}
+	sysSHA := sha256.Sum256(sysBlock.Bytes)
+	expectedSysAlias := fmt.Sprintf("system-%x", sysSHA)
+
+	// The JKS aliases are normalised to lowercase by keystore-go.
+	// We already produce lowercase hex via %x; the "keploy-root"
+	// literal is ASCII lowercase. So a direct set-containment check
+	// is safe.
+	have := map[string]bool{}
+	for _, a := range aliases {
+		have[a] = true
+	}
+
+	if !have["keploy-root"] {
+		t.Fatalf("JKS missing 'keploy-root' alias; have=%v", aliases)
+	}
+	if !have[expectedSysAlias] {
+		t.Fatalf("JKS missing synthetic system-root alias %q; have=%v", expectedSysAlias, aliases)
+	}
+
+	// Spot-check the system entry round-trips byte-for-byte so a
+	// future refactor can't regress to "writes the entry but with
+	// wrong DER".
+	entry, err := ks.GetTrustedCertificateEntry(expectedSysAlias)
+	if err != nil {
+		t.Fatalf("GetTrustedCertificateEntry(%s): %v", expectedSysAlias, err)
+	}
+	if !bytes.Equal(entry.Certificate.Content, sysBlock.Bytes) {
+		t.Fatalf("system entry DER mismatch: len(got)=%d len(want)=%d",
+			len(entry.Certificate.Content), len(sysBlock.Bytes))
+	}
+}
+
+// TestGenerateTrustStore_RejectsEmptyBundle guards against a silently-empty
+// JKS: if no CERTIFICATE block was parseable the function MUST error rather
+// than write a zero-entry keystore.
+func TestGenerateTrustStore_RejectsEmptyBundle(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.crt")
+	if err := os.WriteFile(empty, []byte("no PEM here\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	jks := filepath.Join(dir, "out.jks")
+	if err := generateTrustStore(empty, jks); err == nil {
+		t.Fatal("expected generateTrustStore to error on a bundle with no CERTIFICATE blocks")
 	}
 }

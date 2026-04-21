@@ -12,7 +12,17 @@ ARG DEBIAN_IMAGE=debian:trixie-slim
 
 FROM ${GOLANG_IMAGE} AS builder
 WORKDIR /src
-COPY . /src
+# Narrow the build context copy so CI doesn't ship .git/, docs/, other
+# tests/e2e/* scenarios, etc. into the builder layer. The build context is
+# still the repo root (see compose `context: ../../../`), but we only need
+# go.mod/go.sum, the tls package (which the harness imports), the utils
+# package it transitively depends on, and the harness source itself. A
+# bare `COPY . /src` here had bloated this stage past the keploy-ci step
+# budget on Woodpecker DinD.
+COPY go.mod go.sum /src/
+COPY pkg /src/pkg
+COPY utils /src/utils
+COPY tests/e2e/ca-bundle-merge /src/tests/e2e/ca-bundle-merge
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -o /out/ca-merge-harness ./tests/e2e/ca-bundle-merge/setup/
 

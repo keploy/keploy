@@ -4,6 +4,7 @@ package tls
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
@@ -323,22 +324,18 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 
-	// Generate Java Truststore from the Keploy CA only.
-	//
-	// Unlike the PEM env vars, Java's -Djavax.net.ssl.trustStore= REPLACES
-	// the default $JAVA_HOME/lib/security/cacerts keystore wholesale, so in
-	// theory we should merge every PEM in the system bundle into this JKS
-	// too. In practice, merging O(150) PEM-encoded roots into a JKS on every
-	// agent start is a noticeable cold-start cost, and the sharp edge
-	// (Java apps fail on non-proxied HTTPS) is orthogonal to the PEM fix
-	// shipped in this change.
-	//
-	// TODO(tls): follow-up — merge the system trust anchors into
-	// truststore.jks as well, either by importing each PEM via keystore-go
-	// or by copying cacerts from JAVA_HOME (when present) and overlaying
-	// the Keploy root on top.
+	// Generate Java Truststore from the MERGED bundle (system roots +
+	// Keploy MITM CA). Java's -Djavax.net.ssl.trustStore= REPLACES the
+	// default $JAVA_HOME/lib/security/cacerts keystore wholesale, so
+	// building the JKS from the Keploy CA alone would leave Java apps
+	// unable to validate any non-Keploy-proxied HTTPS (AWS STS,
+	// Snowflake, Maven Central, …). generateTrustStore iterates every
+	// CERTIFICATE PEM block in crtPath and adds each as a trusted entry
+	// — the Keploy root keeps its stable "keploy-root" alias, every
+	// system root gets a "system-<sha>" alias so the bundle survives
+	// rebuilds deterministically.
 	jksPath := filepath.Join(exportPath, "truststore.jks")
-	if err := generateTrustStore(keployOnlyPath, jksPath); err != nil {
+	if err := generateTrustStore(crtPath, jksPath); err != nil {
 		logger.Error("Failed to generate Java truststore", zap.Error(err))
 		return err
 	}
@@ -474,39 +471,73 @@ func extractCertToTemp() (string, error) {
 	return tempFile.Name(), nil
 }
 
-// generateTrustStoreNative creates a JKS file using pure Go, avoiding 'keytool' dependency
+// generateTrustStore creates a JKS file from every CERTIFICATE PEM block
+// found in certPath, using pure Go (no 'keytool' dependency).
+//
+// The input file MAY contain multiple concatenated PEM blocks — e.g. the
+// merged system-CA-bundle + Keploy MITM CA that setupSharedVolume writes
+// to /tmp/keploy-tls/ca.crt. Every CERTIFICATE block is parsed and added
+// as a trusted entry so Java apps pointed at this keystore via
+// -Djavax.net.ssl.trustStore= can validate both public TLS endpoints
+// (e.g. AWS STS, Snowflake) and Keploy-proxied endpoints.
+//
+// Alias scheme:
+//   - "keploy-root" for the Keploy MITM CA (matched by comparison
+//     against the embedded caCrt bytes — robust to Subject-name
+//     renaming between releases). This alias remains the same as the
+//     legacy single-cert implementation so external callers that
+//     keytool-list for it continue to work.
+//   - "system-<sha256-hex>" for every other cert (the SHA-256 of the
+//     DER bytes, lowercase hex, 64 chars — guaranteed unique, survives
+//     re-runs deterministically).
+//
+// Non-CERTIFICATE PEM blocks (keys, CRLs, DH params, ...) that might
+// appear in unusual bundles are skipped; a parse error on any single
+// block returns an error so we fail loudly rather than silently ship a
+// partial trust store.
 func generateTrustStore(certPath, jksPath string) error {
-	// Read and Parse the PEM Certificate
-	certPEM, err := os.ReadFile(certPath)
+	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return fmt.Errorf("failed to read cert pem: %w", err)
 	}
 
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("failed to decode PEM block containing certificate")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse x509 certificate: %w", err)
-	}
-
-	// Create the KeyStore
 	ks := keystore.New()
+	rest := pemBytes
+	added := 0
+	keployFingerprint := sha256.Sum256(embeddedKeployCADER())
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse x509 certificate (block %d): %w", added, err)
+		}
 
-	// Create a Trusted Certificate Entry
-	entry := keystore.TrustedCertificateEntry{
-		Certificate: keystore.Certificate{
-			Type:    "X.509",
-			Content: cert.Raw,
-		},
+		alias := ""
+		if sha256.Sum256(cert.Raw) == keployFingerprint {
+			alias = "keploy-root"
+		} else {
+			alias = fmt.Sprintf("system-%x", sha256.Sum256(cert.Raw))
+		}
+
+		ks.SetTrustedCertificateEntry(alias, keystore.TrustedCertificateEntry{
+			Certificate: keystore.Certificate{
+				Type:    "X.509",
+				Content: cert.Raw,
+			},
+		})
+		added++
+	}
+	if added == 0 {
+		return fmt.Errorf("no CERTIFICATE PEM blocks found in %s", certPath)
 	}
 
-	// Add to KeyStore with alias "keploy-root"
-	ks.SetTrustedCertificateEntry("keploy-root", entry)
-
-	// Write to file
 	f, err := os.Create(jksPath)
 	if err != nil {
 		return fmt.Errorf("failed to create jks file: %w", err)
@@ -519,6 +550,21 @@ func generateTrustStore(certPath, jksPath string) error {
 	}
 
 	return nil
+}
+
+// embeddedKeployCADER returns the DER encoding of the embedded Keploy MITM
+// CA. Used by generateTrustStore to identify which block in a merged
+// PEM bundle is the Keploy root (so it gets the stable "keploy-root"
+// alias). Parsing happens once on first call and errors are coerced to
+// an empty slice — a caller that can't find the Keploy CA by fingerprint
+// simply falls back to the generic "system-<sha>" alias for every entry.
+// That is a degraded but non-broken trust-store.
+func embeddedKeployCADER() []byte {
+	block, _ := pem.Decode(caCrt)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	return block.Bytes
 }
 
 func commandExists(cmd string) bool {
