@@ -32,6 +32,11 @@ const (
 	// The path inside the container where certs are mounted
 	KeployTLSMountPath = "/tmp/keploy-tls"
 
+	// AgentReadyFile is the readiness marker file written by the agent once
+	// setup is complete. Used by the Docker Compose healthcheck and cleared
+	// on agent startup to prevent stale state from passing the healthcheck.
+	AgentReadyFile = "/tmp/agent.ready"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
@@ -591,6 +596,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if opts.MemoryLimit > 0 {
+		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
+	}
 	if models.IsAnsiDisabled {
 		command = append(command, "--disable-ansi")
 	}
@@ -740,7 +748,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "test"},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
-				{Kind: yaml.ScalarNode, Value: "cat /tmp/agent.ready"},
+				{Kind: yaml.ScalarNode, Value: "cat " + AgentReadyFile},
 			}},
 
 			// interval

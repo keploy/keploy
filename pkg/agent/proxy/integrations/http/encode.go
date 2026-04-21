@@ -11,25 +11,23 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-// encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml ...*pUtil.MemoryLimiter) error {
-
-	// Extract optional MemoryLimiter.
-	var memLimiter *pUtil.MemoryLimiter
-	if len(ml) > 0 {
-		memLimiter = ml[0]
-	}
-
+// encodeHTTP records outgoing HTTP traffic. The read/forward/chunked-handling
+// logic is identical to the original synchronous implementation. The only
+// difference is that parseFinalHTTP (HTTP parsing, body decompression, mock
+// creation) is offloaded to a background goroutine so it never blocks the
+// forwarding path.
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
-	//Writing the request to the server.
+	// Forward initial request to server.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		h.Logger.Error("failed to write request message to the destination server", zap.Error(err))
@@ -46,19 +44,59 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 
 	finalReq = append(finalReq, reqBuf...)
 
-	//get the error group from the context
+	// Get the error group from the context.
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
 	}
 
-	//for keeping conn alive
+	// Async mock recorder: parseFinalHTTP runs here off the forwarding path.
+	// The channel is buffered so the forwarding goroutine never blocks on send.
+	mockDataCh := make(chan *FinalHTTP, 256)
+	recorderDone := make(chan struct{})
+	recordCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+		defer close(recorderDone)
+		for m := range mockDataCh {
+			err := h.parseFinalHTTP(recordCtx, m, destPort, mocks, opts)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to parse the final http request and response")
+			}
+		}
+	}()
+
+	// enqueueMock sends a paired request/response for async mock creation.
+	// Non-blocking: if the recorder can't keep up, the mock is dropped
+	// (same pattern as postgres/mongo).
+	enqueueMock := func(req, resp []byte, reqTs, resTs time.Time) {
+		m := &FinalHTTP{
+			Req:              req,
+			Resp:             resp,
+			ReqTimestampMock: reqTs,
+			ResTimestampMock: resTs,
+		}
+		select {
+		case mockDataCh <- m:
+		default:
+			h.Logger.Debug("HTTP mock channel full, dropping mock")
+		}
+	}
+
+	// Main forwarding goroutine — logic is identical to the original
+	// synchronous implementation. Only parseFinalHTTP calls are replaced
+	// with enqueueMock sends.
 	g.Go(func() error {
 		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
+		defer func() {
+			close(mockDataCh)
+			<-recorderDone
+		}()
+
 		for {
-			if memLimiter != nil && memLimiter.IsExceeded() {
-				h.Logger.Debug("memory limit exceeded, stopping HTTP recording and falling back to passthrough")
+			if memoryguard.IsRecordingPaused() {
+				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
 				done := make(chan struct{}, 2)
 				cp := func(dst, src net.Conn) {
 					_, _ = io.Copy(dst, src)
@@ -71,7 +109,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			//check if expect : 100-continue header is present
+			// Check if expect: 100-continue header is present.
 			lines := strings.Split(string(finalReq), "\n")
 			var expectHeader string
 			for _, line := range lines {
@@ -81,7 +119,6 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				}
 			}
 			if expectHeader == "100-continue" {
-				//Read if the response from the server is 100-continue
 				resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to read the response message from the server after 100-continue request")
@@ -89,7 +126,6 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					return nil
 				}
 
-				// write the response message to the client
 				_, err = clientConn.Write(resp)
 				if err != nil {
 					if ctx.Err() != nil {
@@ -107,14 +143,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- err
 					return nil
 				}
-				//Reading the request buffer again
 				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to read the request buffer from the user client")
 					errCh <- err
 					return nil
 				}
-				// write the request message to the actual destination server
 				_, err = destConn.Write(reqBuf)
 				if err != nil {
 					if ctx.Err() != nil {
@@ -127,7 +161,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				finalReq = append(finalReq, reqBuf...)
 			}
 
-			// Capture the request timestamp
+			// Capture the request timestamp.
 			reqTimestampMock := time.Now()
 
 			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
@@ -138,16 +172,14 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			}
 
 			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
-			// read the response from the actual server
+
+			// Read the response from the actual server.
 			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("Response complete, exiting the loop.")
-					// if there is any buffer left before EOF, we must send it to the client and save this as mock
 					if len(resp) != 0 {
-						// Capturing the response timestamp
 						resTimestampMock := time.Now()
-						// write the response message to the user client
 						_, err = clientConn.Write(resp)
 						if err != nil {
 							if ctx.Err() != nil {
@@ -157,20 +189,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 							errCh <- err
 							return nil
 						}
-
-						// saving last request/response on this conn.
-						m := &FinalHTTP{
-							Req:              finalReq,
-							Resp:             resp,
-							ReqTimestampMock: reqTimestampMock,
-							ResTimestampMock: resTimestampMock,
-						}
-						err := h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
-						if err != nil {
-							utils.LogError(h.Logger, err, "failed to parse the final http request and response")
-							errCh <- err
-							return nil
-						}
+						enqueueMock(finalReq, resp, reqTimestampMock, resTimestampMock)
 					}
 					break
 				}
@@ -179,10 +198,9 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			// Capturing the response timestamp
 			resTimestampMock := time.Now()
 
-			// write the response message to the user client
+			// Forward response to client.
 			_, err = clientConn.Write(resp)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -200,18 +218,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))
-					//check if before EOF complete response came, and try to parse it.
-					m := &FinalHTTP{
-						Req:              finalReq,
-						Resp:             finalResp,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-					}
-					parseErr := h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
-					if parseErr != nil {
-						utils.LogError(h.Logger, parseErr, "failed to parse the final http request and response")
-						errCh <- parseErr
-					}
+					enqueueMock(finalReq, finalResp, reqTimestampMock, resTimestampMock)
 					errCh <- nil
 					return nil
 				}
@@ -222,25 +229,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 
 			h.Logger.Debug("This is the final response: " + string(finalResp))
 
-			m := &FinalHTTP{
-				Req:              finalReq,
-				Resp:             finalResp,
-				ReqTimestampMock: reqTimestampMock,
-				ResTimestampMock: resTimestampMock,
-			}
+			// Offload mock creation to async recorder.
+			enqueueMock(finalReq, finalResp, reqTimestampMock, resTimestampMock)
 
-			err = h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
-			if err != nil {
-				utils.LogError(h.Logger, err, "failed to parse the final http request and response")
-				errCh <- err
-				return nil
-			}
-
-			//resetting for the new request and response.
+			// Reset for the next request and response.
 			finalReq = []byte("")
-			finalResp = []byte("")
 
-			// read the request from the same connection
+			// Read the next request from the client.
 			h.Logger.Debug("Reading the request from the user client again from the same connection")
 
 			finalReq, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
@@ -254,7 +249,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				errCh <- err
 				return nil
 			}
-			// write the request message to the actual destination server
+			// Forward the next request to server.
 			_, err = destConn.Write(finalReq)
 			if err != nil {
 				if ctx.Err() != nil {

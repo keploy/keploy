@@ -971,6 +971,18 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 
 // TestFilterMocks_678 validates the filtering and sorting of mocks in Test and Config modes.
 func TestFilterMocks_678(t *testing.T) {
+	// All subtests in TestFilterMocks_678 assert LAX-mode behaviour
+	// (out-of-window non-config mocks promoted to the unfiltered pool
+	// rather than dropped). The env var KEPLOY_STRICT_MOCK_WINDOW is
+	// parsed once at init and cached in strictWindowEnvOverride; an
+	// enabling value makes filterByTimeStamp behave strict regardless
+	// of the perCall flag, so our strict=false arguments no longer
+	// produce the expected lax output. Skip the whole test — every
+	// subtest is affected. Strict-mode behaviour is covered by
+	// TestFilterByTimeStamp_StrictMode below (which runs unconditionally).
+	if strictWindowEnvOverride {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW set to enabling value — lax assertions unreachable; strict coverage runs elsewhere")
+	}
 	logger := zap.NewNop()
 	ctx := context.Background()
 
@@ -984,7 +996,9 @@ func TestFilterMocks_678(t *testing.T) {
 	allMocks := []*models.Mock{mock3, mock1, mock2, mockNoTime, mockNonKeploy}
 
 	t.Run("filterByTimeStamp_NoFilters", func(t *testing.T) {
-		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, time.Time{}, time.Time{})
+		// strict=false (default lax) — subject under test here is the
+		// no-window shortcut, not the containment rule.
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, time.Time{}, time.Time{}, false)
 		assert.Len(t, filtered, 5)
 		assert.Len(t, unfiltered, 0)
 	})
@@ -992,7 +1006,11 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("filterByTimeStamp_ValidRange", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before)
+		// Existing assertions were written under lax Option-2 semantics
+		// (req-only inside window, out-of-window mocks kept as unfiltered).
+		// Pass strict=false to preserve that contract; strict mode is
+		// exercised separately by TestFilterByTimeStamp_StrictMode.
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before, false)
 
 		// Check filtered mocks
 		require.Len(t, filtered, 3)
@@ -1016,7 +1034,9 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("FilterTcsMocks", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		result := FilterTcsMocks(ctx, logger, allMocks, after, before)
+		// strict=false preserves the original lax expectations of this test
+		// (written before Option-1 strict containment existed).
+		result := FilterTcsMocks(ctx, logger, allMocks, after, before, false)
 		require.Len(t, result, 3)
 		assert.Equal(t, "mockNoTime", result[0].Name) // Zero time comes first
 		assert.Equal(t, "mock2", result[1].Name)
@@ -1026,7 +1046,8 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("FilterConfigMocks", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		result := FilterConfigMocks(ctx, logger, allMocks, after, before)
+		// strict=false — see FilterTcsMocks note above.
+		result := FilterConfigMocks(ctx, logger, allMocks, after, before, false)
 		require.Len(t, result, 5)
 		// Sorted filtered part
 		assert.Equal(t, "mockNoTime", result[0].Name)
@@ -1039,6 +1060,12 @@ func TestFilterMocks_678(t *testing.T) {
 }
 
 func TestFilterConfigMocks_PrioritizesLateMockByRequestTime_3738(t *testing.T) {
+	// Reproducer asserts lax-mode behaviour for out-of-window mocks;
+	// skip when KEPLOY_STRICT_MOCK_WINDOW forces strict on. See
+	// TestFilterMocks_678's guard for the same reason.
+	if strictWindowEnvOverride {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW is set — unset it to run lax-mode assertions")
+	}
 	logger := zap.NewNop()
 	ctx := context.Background()
 
@@ -1070,17 +1097,162 @@ func TestFilterConfigMocks_PrioritizesLateMockByRequestTime_3738(t *testing.T) {
 		},
 	}
 
-	filtered, unfiltered := filterByTimeStamp(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	// strict=false — reproducer test validates legacy Option-2 behaviour
+	// (trailing response kept in filtered even though it landed a
+	// microsecond past beforeTime).
+	filtered, unfiltered := filterByTimeStamp(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime, false)
 	require.Len(t, filtered, 2)
 	assert.ElementsMatch(t, []string{"mock-137", "mock-138"}, []string{filtered[0].Name, filtered[1].Name})
 	require.Len(t, unfiltered, 1)
 	assert.Equal(t, "mock-62", unfiltered[0].Name)
 
-	result := FilterConfigMocks(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	result := FilterConfigMocks(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime, false)
 	require.Len(t, result, 3)
 	assert.Equal(t, "mock-137", result[0].Name)
 	assert.Equal(t, "mock-138", result[1].Name)
 	assert.Equal(t, "mock-62", result[2].Name)
+}
+
+// TestFilterByTimeStamp_StrictMode validates the strict-window opt-in.
+// The in-window predicate is REQUEST-timestamp only (responses may
+// legitimately straggle past beforeTime), so strict and lax both keep
+// mocks whose req is inside [after,before]. The behavioural difference
+// is SOLELY out-of-window handling: strict DROPS non-config mocks that
+// would leak into the unfiltered pool, while lax preserves the legacy
+// cross-test config pool promotion. Config-tagged mocks survive in
+// both modes.
+func TestFilterByTimeStamp_StrictMode(t *testing.T) {
+	// The process-wide env value (strictWindowEnvOverride /
+	// strictWindowEnvExplicitOff) is parsed once at init and then
+	// cached — we can't os.Setenv() it mid-test. Per-subtest skips
+	// below keep each assertion running when its mode is reachable
+	// and skip only the ones that can't.
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	inWindow := &models.Mock{
+		Name: "in-window-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now, ResTimestampMock: now.Add(time.Second)},
+	}
+	straggler := &models.Mock{
+		// Req inside window but Res past beforeTime — under the req-only
+		// containment rule, BOTH lax and strict keep it in the filtered
+		// set (response straggle is normal async completion, not bleed).
+		Name: "straggler-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now, ResTimestampMock: now.Add(2 * time.Hour)},
+	}
+	stale := &models.Mock{
+		// Both endpoints before window — both modes drop from filteredMocks
+		// (lax pushes to unfiltered, strict drops entirely).
+		Name: "stale-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now.Add(-3 * time.Hour), ResTimestampMock: now.Add(-3 * time.Hour)},
+	}
+	staleConfig := &models.Mock{
+		// Stale but type=config — strict keeps in unfiltered pool, lax also keeps.
+		Name: "stale-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now.Add(-3 * time.Hour),
+			ResTimestampMock: now.Add(-3 * time.Hour),
+			Metadata:         map[string]string{"type": "config"},
+		},
+	}
+	all := []*models.Mock{inWindow, straggler, stale, staleConfig}
+
+	t.Run("default lax promotes stale-data to unfiltered (legacy leak)", func(t *testing.T) {
+		// strict=false (default). Req-in-window rule for the filtered
+		// partition; out-of-window non-config mocks get promoted to the
+		// unfiltered pool (the legacy bleed). Env forcing strict on
+		// defeats the lax path — skip this subtest only.
+		if strictWindowEnvOverride {
+			t.Skip("KEPLOY_STRICT_MOCK_WINDOW forces strict on — lax semantics not reachable")
+		}
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, false)
+		filteredNames := mockNames(filtered)
+		unfilteredNames := mockNames(unfiltered)
+		assert.ElementsMatch(t, []string{"in-window-data", "straggler-data"}, filteredNames)
+		assert.ElementsMatch(t, []string{"stale-data", "stale-config"}, unfilteredNames)
+	})
+
+	t.Run("opt-in strict keeps straggler (req in window); drops stale-data; keeps stale-config", func(t *testing.T) {
+		// strict=true — opt into Option-1 containment. Env forcing
+		// strict OFF defeats the strict path — skip this subtest only.
+		if strictWindowEnvExplicitOff {
+			t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict semantics not reachable")
+		}
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, true)
+		filteredNames := mockNames(filtered)
+		unfilteredNames := mockNames(unfiltered)
+		assert.ElementsMatch(t, []string{"in-window-data", "straggler-data"}, filteredNames)
+		assert.ElementsMatch(t, []string{"stale-config"}, unfilteredNames)
+	})
+}
+
+// Locks in the contract that a mock whose response timestamp precedes
+// its request timestamp is DROPPED from both filtered and unfiltered
+// partitions, in BOTH strict and lax modes — the response-before-
+// request state is always an inconsistent recording (clock skew,
+// serialisation bug, or file corruption) and keeping it in either pool
+// risks confusing the matcher's scoring. See filterByTimeStamp's
+// "defensive sanity check" in pkg/util.go.
+func TestFilterByTimeStamp_DropsInvalidTimestampOrder(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	// Req inside window, but Res BEFORE Req by 1s — invalid order.
+	invalid := &models.Mock{
+		Name: "invalid-order", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(-time.Second),
+		},
+	}
+	// Same shape but type=config — still dropped; invalid-order check
+	// fires before the config-vs-data partition.
+	invalidConfig := &models.Mock{
+		Name: "invalid-order-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(-time.Second),
+			Metadata:         map[string]string{"type": "config"},
+		},
+	}
+	// Sanity: a well-ordered in-window mock survives alongside drops.
+	valid := &models.Mock{
+		Name: "valid-in-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(time.Second),
+		},
+	}
+	all := []*models.Mock{invalid, invalidConfig, valid}
+
+	t.Run("lax mode drops invalid-order from BOTH partitions", func(t *testing.T) {
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, false)
+		assert.ElementsMatch(t, []string{"valid-in-window"}, mockNames(filtered))
+		assert.Empty(t, mockNames(unfiltered))
+	})
+
+	t.Run("strict mode drops invalid-order from BOTH partitions", func(t *testing.T) {
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, true)
+		assert.ElementsMatch(t, []string{"valid-in-window"}, mockNames(filtered))
+		assert.Empty(t, mockNames(unfiltered))
+	})
+}
+
+func mockNames(ms []*models.Mock) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.Name)
+	}
+	return out
 }
 
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,

@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
@@ -291,6 +292,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -316,6 +318,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
@@ -334,6 +337,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 	case "test", "rerecord":
@@ -426,11 +430,13 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"containerName":         "container-name",
 		"networkName":           "network-name",
 		"passThroughPorts":      "pass-through-ports",
+		"memoryLimit":           "memory-limit",
 		"appId":                 "app-id",
 		"appName":               "app-name",
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
+		"jsonOutput":            "json",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
 		"enableTesting":         "enable-testing",
@@ -493,7 +499,23 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
-	if !IsConfigFileFound {
+	// The "create config file if missing" behavior is meaningful
+	// only for user-facing commands (record/test/etc.) that are
+	// expected to persist keploy.yml for reuse across invocations.
+	// The `agent` subcommand is a worker process spawned by the
+	// parent keploy: it still reads an existing keploy.yml via
+	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// settings the parent resolved, but it has no use for writing
+	// a fresh one if the file is missing — the parent has already
+	// handed it the effective config via CLI flags + env. Running
+	// CreateConfigFile from the agent therefore produces a file
+	// no one reads; worse, on containerised runs the host's
+	// absolute --config-path doesn't resolve inside the agent's
+	// filesystem and the call fails with a misleading ENOENT
+	// "failed to write config file" ERROR (kafka-ecommerce CI
+	// run 2541/10). Skip the create-on-missing branch for the
+	// agent subcommand specifically.
+	if !IsConfigFileFound && cmd.Name() != "agent" {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
@@ -604,9 +626,32 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The --json flag isn't registered on every subcommand (record / agent
+	// don't define it in enterprise builds), so Lookup + fallback avoids
+	// an early-return that would skip every subsequent validation step
+	// below (including the agent-mode wiring that the agent subprocess
+	// needs — without it, the agent starts up with mode="").
+	jsonOutput := false
+	if cmd.Flags().Lookup("json") != nil {
+		if v, err := cmd.Flags().GetBool("json"); err == nil {
+			jsonOutput = v
+		} else {
+			utils.LogError(c.logger, err, "failed to get the json flag")
+		}
+	}
+	c.cfg.JSONOutput = jsonOutput
+
+	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
+	if c.cfg.JSONOutput {
+		logger, err := log.RedirectToStderr()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
+	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
 		PrintLogo(os.Stdout, disableAnsi)
 	}
 	if c.cfg.Debug {
@@ -967,6 +1012,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
+		// memory-limit non-Docker gate is applied after flag parsing below
 
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
@@ -1062,6 +1108,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			if cmd.Flags().Changed("memory-limit") {
+				memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get the memory-limit flag")
+					return fmt.Errorf("failed to get memory-limit flag: %w", err)
+				}
+				c.cfg.Record.MemoryLimit = memoryLimit
+			}
+			if _, err := memoryguard.LimitBytes(c.cfg.Record.MemoryLimit); err != nil {
+				utils.LogError(c.logger, err, "invalid memory limit for keploy agent")
+				return err
+			}
+			if c.cfg.Record.MemoryLimit > 0 {
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType != utils.DockerRun && cmdType != utils.DockerCompose {
+					c.logger.Info("memory-limit is only supported for docker run and docker compose recording; ignoring it for this command type",
+						zap.String("cmd-type", c.cfg.CommandType))
+					c.cfg.Record.MemoryLimit = 0
+				}
+			}
 
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 			if err != nil {
@@ -1362,8 +1429,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get dnsPort flag")
-			return nil
+			utils.LogError(c.logger, err, "failed to get dns-port flag; verify the --dns-port value and try again")
+			return fmt.Errorf("failed to get dns-port flag: %w", err)
 		}
 		c.cfg.Agent.DnsPort = dnsPort
 
@@ -1385,17 +1452,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get build-delay flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get build-delay flag; verify the --build-delay value and try again")
+			return fmt.Errorf("failed to get build-delay flag: %w", err)
 		}
 		c.cfg.Agent.BuildDelay = buildDelay
 
 		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
 		if err != nil {
-			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
-			return nil // Or return an error
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag; verify the --pass-through-ports value and try again")
+			return fmt.Errorf("failed to get pass-through-ports flag: %w", err)
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		if cmd.Flags().Changed("memory-limit") {
+			memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
+			if err != nil {
+				errMsg := "failed to get memory-limit flag; verify the --memory-limit value and try again"
+				utils.LogError(c.logger, err, errMsg)
+				return fmt.Errorf("failed to get memory-limit flag: %w", err)
+			}
+			c.cfg.Agent.MemoryLimit = memoryLimit
+		}
+		if _, err := memoryguard.LimitBytes(c.cfg.Agent.MemoryLimit); err != nil {
+			utils.LogError(c.logger, err, "invalid memory limit for keploy agent; use a positive MB value within int64 range or set --memory-limit=0 to disable")
+			return err
+		}
+		if c.cfg.Agent.MemoryLimit > 0 && !c.cfg.Agent.IsDocker {
+			c.logger.Info("--memory-limit is only effective in Docker mode; ignoring",
+				zap.Uint64("memory_limit_mb", c.cfg.Agent.MemoryLimit))
+			c.cfg.Agent.MemoryLimit = 0
+		}
 
 	}
 
