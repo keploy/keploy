@@ -6,9 +6,17 @@
 #
 # DEBIAN_IMAGE / GOLANG_IMAGE can be overridden at build time for runners
 # that already have a specific tag cached (CI rate-limit friendly).
+#
+# Default to ECR Public mirrors of the official Docker Hub images: they expose
+# the same `library/<name>:<tag>` tags but are hosted behind AWS CloudFront
+# rather than Docker Hub, so CI runs aren't subject to Docker Hub's
+# unauthenticated pull-rate-limits. Callers can still override with
+# `--build-arg GOLANG_IMAGE=…` (the docker-compose.yml forwards the
+# $GOLANG_IMAGE / $DEBIAN_IMAGE environment variables through, so CI runners
+# with a locally cached `golang:1.26-bookworm` can use the cache directly).
 
-ARG GOLANG_IMAGE=golang:1.26-bookworm
-ARG DEBIAN_IMAGE=debian:trixie-slim
+ARG GOLANG_IMAGE=public.ecr.aws/docker/library/golang:1.26-bookworm
+ARG DEBIAN_IMAGE=public.ecr.aws/docker/library/debian:trixie-slim
 
 FROM ${GOLANG_IMAGE} AS builder
 WORKDIR /src

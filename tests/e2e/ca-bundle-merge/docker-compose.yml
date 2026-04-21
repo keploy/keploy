@@ -25,9 +25,13 @@ services:
       context: ../../../
       dockerfile: tests/e2e/ca-bundle-merge/Dockerfile.setup
       args:
-        # Overridable for CI runners with specific images cached.
-        GOLANG_IMAGE: ${GOLANG_IMAGE:-golang:1.26-bookworm}
-        DEBIAN_IMAGE: ${DEBIAN_IMAGE:-debian:trixie-slim}
+        # Overridable for CI runners with specific images cached. The
+        # defaults point at the ECR Public mirrors (see Dockerfile.setup) so
+        # GHA runners aren't subject to Docker Hub's unauthenticated
+        # pull-rate-limits; runners with a local `golang:1.26-bookworm` layer
+        # cache can export GOLANG_IMAGE=golang:1.26-bookworm to reuse it.
+        GOLANG_IMAGE: ${GOLANG_IMAGE:-public.ecr.aws/docker/library/golang:1.26-bookworm}
+        DEBIAN_IMAGE: ${DEBIAN_IMAGE:-public.ecr.aws/docker/library/debian:trixie-slim}
     image: kpl-ca-merge:local
     container_name: kpl-ca-merge-writer
     environment:

@@ -34,17 +34,53 @@ echo "=== pruning any prior state ==="
 
 echo "=== bringing up ca-writer + tls-probe ==="
 "${DC[@]}" up -d --build
-# Wait for the writer to finish (depends_on: service_completed_successfully
-# on the probe already gates, but on older compose versions that's ignored —
-# be explicit).
+# Wait for the writer to finish. depends_on: service_completed_successfully on
+# the probe gates on newer compose, but older docker-compose versions (which
+# this script explicitly supports via the DC fallback above) ignore that
+# condition, so be explicit.
+#
+# The portable way to query container state works on both docker-compose v1
+# and docker compose v2:
+#   1. resolve the service name to a container ID with `ps -q`;
+#   2. ask the engine directly via `docker inspect`.
+# This avoids `--format json`, which v1 doesn't support, and avoids grepping
+# a specific JSON field name which has varied between compose versions.
+#
+# We MUST fail the script if the writer has not reached an exited state
+# within the timeout — falling through and running probes against a
+# still-writing shared volume would produce confusing race failures.
 echo "=== waiting for ca-writer to finish writing ==="
+writer_container_id=""
+writer_exit_code=""
+writer_done=0
 for _ in $(seq 1 60); do
-    status=$("${DC[@]}" ps --format json ca-writer 2>/dev/null | grep -oE '"State":"[a-zA-Z]+"' | head -1 || true)
-    case "${status}" in
-        *exited*) break ;;
-        *) sleep 1 ;;
-    esac
+    writer_container_id=$("${DC[@]}" ps -q ca-writer 2>/dev/null || true)
+    if [ -n "${writer_container_id}" ]; then
+        state=$(docker inspect -f '{{.State.Status}}' "${writer_container_id}" 2>/dev/null || true)
+        if [ "${state}" = "exited" ]; then
+            writer_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${writer_container_id}" 2>/dev/null || echo "?")
+            writer_done=1
+            break
+        fi
+    fi
+    sleep 1
 done
+if [ "${writer_done}" -ne 1 ]; then
+    echo "[ASSERT][FAIL] ca-writer did not reach 'exited' state within 60s"
+    if [ -n "${writer_container_id}" ]; then
+        echo "--- ca-writer last state ---"
+        docker inspect -f '{{.State.Status}} exitCode={{.State.ExitCode}} error={{.State.Error}}' "${writer_container_id}" || true
+        echo "--- ca-writer logs (tail) ---"
+        docker logs --tail 200 "${writer_container_id}" || true
+    fi
+    exit 1
+fi
+if [ "${writer_exit_code}" != "0" ]; then
+    echo "[ASSERT][FAIL] ca-writer exited with non-zero status: ${writer_exit_code}"
+    docker logs --tail 200 "${writer_container_id}" || true
+    exit 1
+fi
+echo "ca-writer exited cleanly (exit=${writer_exit_code})"
 
 echo "=== verifying files on the shared volume ==="
 "${DC[@]}" exec -T tls-probe ls -la /shared

@@ -41,7 +41,16 @@ func main() {
 	if exportPath != "/tmp/keploy-tls" {
 		// Point the conventional path at our chosen export dir so the
 		// production call writes into a tempdir the test owns.
-		_ = os.Remove("/tmp/keploy-tls")
+		//
+		// Use RemoveAll (not Remove): if /tmp/keploy-tls already exists as a
+		// non-empty directory from a prior run, Remove returns ENOTEMPTY and
+		// the subsequent Symlink would then error with "file exists" and mask
+		// the real cleanup failure. RemoveAll tolerates both files and
+		// populated directories; a legitimate error here (permission denied,
+		// read-only FS, ...) must be surfaced, not ignored.
+		if err := os.RemoveAll("/tmp/keploy-tls"); err != nil {
+			log.Fatalf("cleanup /tmp/keploy-tls before creating symlink: %v", err)
+		}
 		if err := os.Symlink(exportPath, "/tmp/keploy-tls"); err != nil {
 			log.Fatalf("symlink: %v", err)
 		}

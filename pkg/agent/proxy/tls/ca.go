@@ -175,14 +175,45 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 }
 
 // SetEnvForPath sets the environment variables to point to a SPECIFIC path.
+//
+// Callers that have separate merged / keploy-only bundles (the shared-volume
+// / k8s-proxy code path) should use setEnvForSharedVolume instead so that
+// NODE_EXTRA_CA_CERTS — which Node.js ADDS to the default trust store rather
+// than replacing it — receives the Keploy-only file and avoids double-trusting
+// system roots. This function applies the SAME path to every variable, which
+// is correct for the native / single-file install paths where there is no
+// distinct Keploy-only bundle on disk.
 func SetEnvForPath(logger *zap.Logger, path string) error {
-	envVars := map[string]string{
+	return setEnvVars(logger, map[string]string{
 		"NODE_EXTRA_CA_CERTS": path,
 		"REQUESTS_CA_BUNDLE":  path,
 		"SSL_CERT_FILE":       path,
 		"CARGO_HTTP_CAINFO":   path,
-	}
+	})
+}
 
+// setEnvForSharedVolume wires the language-runtime trust-store env vars for the
+// docker/k8s shared-volume install path.
+//
+// Most runtimes (Python/requests, OpenSSL/libcurl, Cargo) treat their
+// respective env var as a FULL REPLACEMENT for the default trust store —
+// they must see the MERGED bundle (system roots + Keploy MITM CA) or
+// non-proxied HTTPS calls fail CERTIFICATE_VERIFY_FAILED.
+//
+// Node.js is the exception: NODE_EXTRA_CA_CERTS is ADDED to the default
+// bundle at startup, so the minimal correct input is the Keploy-only file.
+// Pointing it at the merged bundle works (Node is happy to see system roots
+// listed twice) but wastes memory and obscures intent.
+func setEnvForSharedVolume(logger *zap.Logger, mergedPath, keployOnlyPath string) error {
+	return setEnvVars(logger, map[string]string{
+		"NODE_EXTRA_CA_CERTS": keployOnlyPath,
+		"REQUESTS_CA_BUNDLE":  mergedPath,
+		"SSL_CERT_FILE":       mergedPath,
+		"CARGO_HTTP_CAINFO":   mergedPath,
+	})
+}
+
+func setEnvVars(logger *zap.Logger, envVars map[string]string) error {
 	for key, val := range envVars {
 		if err := os.Setenv(key, val); err != nil {
 			utils.LogError(logger, err, "Failed to set environment variable", zap.String("key", key))
@@ -216,14 +247,17 @@ var loadSystemCABundleFn = loadSystemCABundle
 
 // loadSystemCABundle returns the contents of the first readable, non-empty OS
 // CA bundle file from systemCABundleSearchPaths (plus the path used). On
-// failure (no readable non-empty file found) it logs a warning and returns
-// (nil, "") — the caller should proceed with the Keploy CA alone rather than
-// erroring.
+// failure (no readable non-empty file found) it logs at Info level and
+// returns (nil, "") — the caller should proceed with the Keploy CA alone
+// rather than erroring.
 //
 // We intentionally DO NOT return an error: the shared-volume CA file is a
 // best-effort merge. In the worst case (minimal distroless/scratch image with
 // no OS bundle) the application falls back to the prior behaviour of trusting
-// only the Keploy MITM CA — not worse than the status quo.
+// only the Keploy MITM CA — not worse than the status quo. The absence of a
+// system bundle is expected in distroless/scratch deployments, so we log at
+// Info rather than Warn to avoid alarming operators whose images intentionally
+// ship without a trust store.
 func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
 	return loadSystemCABundleFromPaths(logger, systemCABundleSearchPaths)
 }
@@ -247,13 +281,14 @@ func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, st
 		}
 		return data, p
 	}
-	logger.Warn(
+	logger.Info(
 		"No system CA bundle found on any known path — the shared "+
 			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
 			"Non-proxied HTTPS calls from the application (internal services, "+
 			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
-			"CERTIFICATE_VERIFY_FAILED. Ensure the application image ships an OS "+
-			"trust store (e.g. the `ca-certificates` package on Debian/Ubuntu).",
+			"CERTIFICATE_VERIFY_FAILED. To fix, install an OS trust store in "+
+			"the application image (e.g. `apt-get install -y ca-certificates` "+
+			"on Debian/Ubuntu or `apk add ca-certificates` on Alpine).",
 		zap.Strings("searched_paths", tried),
 	)
 	return nil, ""
@@ -313,14 +348,13 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 			zap.String("output", crtPath),
 			zap.String("keploy_only_output", keployOnlyPath),
 		)
-	} else {
-		logger.Warn("Wrote Keploy MITM CA only — no system CA bundle was found to merge",
-			zap.Int("keploy_bytes", len(caCrt)),
-			zap.String("output", crtPath),
-		)
 	}
+	// When len(systemBundle) == 0 we deliberately emit NO log here:
+	// loadSystemCABundleFromPaths already logged an Info entry with the full
+	// list of searched paths and actionable remediation steps, so a second
+	// "Wrote Keploy MITM CA only" message would be redundant noise.
 
-	if err := SetEnvForPath(logger, crtPath); err != nil {
+	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
 		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 

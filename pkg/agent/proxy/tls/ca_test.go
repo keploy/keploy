@@ -30,10 +30,12 @@ const (
 )
 
 // newObservedLogger returns a zap logger backed by an observer so tests can
-// assert on emitted log lines.
+// assert on emitted log lines. The observer captures Info and above so tests
+// can distinguish Info-level "no system bundle found" notices from higher-
+// severity output.
 func newObservedLogger(t *testing.T) (*zap.Logger, *observer.ObservedLogs) {
 	t.Helper()
-	core, logs := observer.New(zap.WarnLevel)
+	core, logs := observer.New(zap.InfoLevel)
 	return zap.New(core), logs
 }
 
@@ -104,7 +106,10 @@ func TestLoadSystemCABundle_FallbackOnEmpty(t *testing.T) {
 }
 
 // TestLoadSystemCABundle_NoSources verifies that when no path is readable the
-// function logs a warning and returns (nil, "") — no error.
+// function logs at Info level and returns (nil, "") — no error, no warning.
+// Info (rather than Warn) is deliberate: distroless/scratch images routinely
+// ship without a system trust store and emitting a Warn in that configuration
+// would be alarmist noise.
 func TestLoadSystemCABundle_NoSources(t *testing.T) {
 	dir := t.TempDir()
 	missing1 := filepath.Join(dir, "a.crt")
@@ -119,14 +124,14 @@ func TestLoadSystemCABundle_NoSources(t *testing.T) {
 		t.Fatalf("expected empty source, got %q", source)
 	}
 	if logs.Len() != 1 {
-		t.Fatalf("expected exactly 1 warning log, got %d", logs.Len())
+		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
 	}
 	entry := logs.All()[0]
-	if entry.Level != zap.WarnLevel {
-		t.Fatalf("expected warn level, got %s", entry.Level)
+	if entry.Level != zap.InfoLevel {
+		t.Fatalf("expected info level (not warn), got %s", entry.Level)
 	}
 	if !strings.Contains(entry.Message, "No system CA bundle found") {
-		t.Fatalf("unexpected warn message: %q", entry.Message)
+		t.Fatalf("unexpected log message: %q", entry.Message)
 	}
 }
 
@@ -365,6 +370,55 @@ func TestGenerateTrustStore_MergesAllCerts(t *testing.T) {
 	if !bytes.Equal(entry.Certificate.Content, sysBlock.Bytes) {
 		t.Fatalf("system entry DER mismatch: len(got)=%d len(want)=%d",
 			len(entry.Certificate.Content), len(sysBlock.Bytes))
+	}
+}
+
+// TestSetEnvForSharedVolume_SplitsNodeFromReplaceVars locks in the contract
+// that NODE_EXTRA_CA_CERTS gets the Keploy-only bundle (it is ADDED to the
+// default Node trust store) while the REPLACE-style env vars
+// (REQUESTS_CA_BUNDLE / SSL_CERT_FILE / CARGO_HTTP_CAINFO) get the MERGED
+// bundle so system roots stay trusted.
+//
+// A regression here would manifest as: Node workloads double-trust system
+// roots (harmless but wasteful) OR Python/libcurl/Rust workloads lose trust
+// in public roots (broken).
+func TestSetEnvForSharedVolume_SplitsNodeFromReplaceVars(t *testing.T) {
+	const (
+		merged = "/tmp/keploy-tls/ca.crt"
+		keploy = "/tmp/keploy-tls/keploy-ca.crt"
+	)
+
+	// Snapshot + restore the env vars this test mutates so parallel / follow-up
+	// tests in the same binary don't see leaked state.
+	keys := []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"}
+	prev := make(map[string]string, len(keys))
+	prevSet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		v, ok := os.LookupEnv(k)
+		prev[k] = v
+		prevSet[k] = ok
+		_ = os.Unsetenv(k)
+	}
+	defer func() {
+		for _, k := range keys {
+			if prevSet[k] {
+				_ = os.Setenv(k, prev[k])
+			} else {
+				_ = os.Unsetenv(k)
+			}
+		}
+	}()
+
+	if err := setEnvForSharedVolume(zap.NewNop(), merged, keploy); err != nil {
+		t.Fatalf("setEnvForSharedVolume: %v", err)
+	}
+	if got := os.Getenv("NODE_EXTRA_CA_CERTS"); got != keploy {
+		t.Fatalf("NODE_EXTRA_CA_CERTS: got %q, want %q (keploy-only)", got, keploy)
+	}
+	for _, k := range []string{"REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"} {
+		if got := os.Getenv(k); got != merged {
+			t.Fatalf("%s: got %q, want %q (merged bundle)", k, got, merged)
+		}
 	}
 }
 
