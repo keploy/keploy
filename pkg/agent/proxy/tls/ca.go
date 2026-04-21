@@ -2,8 +2,10 @@
 package tls
 
 import (
+	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
@@ -174,14 +176,51 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 }
 
 // SetEnvForPath sets the environment variables to point to a SPECIFIC path.
+//
+// This exported entrypoint applies the SAME path to every language-runtime
+// CA variable, which is correct for the native / single-file install paths
+// (SetupCA on Linux/macOS without the shared volume, and the Windows temp-
+// file path) where there is no distinct Keploy-only bundle on disk.
+//
+// Callers wiring the shared-volume / k8s-proxy flow — where the merged
+// system+Keploy bundle and the Keploy-only bundle live in separate files —
+// should invoke SetupCA with the isDocker flag instead of calling this
+// helper directly. SetupCA internally routes NODE_EXTRA_CA_CERTS (which
+// Node.js ADDS to, rather than replaces, the default trust store) at the
+// Keploy-only file while pointing the other variables at the merged
+// bundle; that split is the whole reason the shared-volume path exists
+// and cannot be replicated by any sequence of SetEnvForPath calls.
 func SetEnvForPath(logger *zap.Logger, path string) error {
-	envVars := map[string]string{
+	return setEnvVars(logger, map[string]string{
 		"NODE_EXTRA_CA_CERTS": path,
 		"REQUESTS_CA_BUNDLE":  path,
 		"SSL_CERT_FILE":       path,
 		"CARGO_HTTP_CAINFO":   path,
-	}
+	})
+}
 
+// setEnvForSharedVolume wires the language-runtime trust-store env vars for the
+// docker/k8s shared-volume install path.
+//
+// Most runtimes (Python/requests, OpenSSL/libcurl, Cargo) treat their
+// respective env var as a FULL REPLACEMENT for the default trust store —
+// they must see the MERGED bundle (system roots + Keploy MITM CA) or
+// non-proxied HTTPS calls fail CERTIFICATE_VERIFY_FAILED.
+//
+// Node.js is the exception: NODE_EXTRA_CA_CERTS is ADDED to the default
+// bundle at startup, so the minimal correct input is the Keploy-only file.
+// Pointing it at the merged bundle works (Node is happy to see system roots
+// listed twice) but wastes memory and obscures intent.
+func setEnvForSharedVolume(logger *zap.Logger, mergedPath, keployOnlyPath string) error {
+	return setEnvVars(logger, map[string]string{
+		"NODE_EXTRA_CA_CERTS": keployOnlyPath,
+		"REQUESTS_CA_BUNDLE":  mergedPath,
+		"SSL_CERT_FILE":       mergedPath,
+		"CARGO_HTTP_CAINFO":   mergedPath,
+	})
+}
+
+func setEnvVars(logger *zap.Logger, envVars map[string]string) error {
 	for key, val := range envVars {
 		if err := os.Setenv(key, val); err != nil {
 			utils.LogError(logger, err, "Failed to set environment variable", zap.String("key", key))
@@ -191,22 +230,162 @@ func SetEnvForPath(logger *zap.Logger, path string) error {
 	return nil
 }
 
+// systemCABundleSearchPaths is the ranked list of well-known locations where
+// Linux/Unix distributions (and busybox/Alpine-derived images) place the OS
+// trust store. The first readable, non-empty file wins.
+//
+// Ordering mirrors Go's crypto/x509 certFiles but is duplicated here because
+// we need the file BYTES (not the parsed roots) — the shared volume is
+// consumed by non-Go clients (curl, python/requests, node.js, rust/reqwest,
+// ...) that each parse PEM directly.
+var systemCABundleSearchPaths = []string{
+	"/etc/ssl/certs/ca-certificates.crt",     // Debian, Ubuntu, Alpine
+	"/etc/pki/tls/certs/ca-bundle.crt",       // RHEL, Fedora, CentOS
+	"/etc/ssl/ca-bundle.pem",                 // openSUSE
+	"/etc/pki/tls/cacert.pem",                // older RHEL
+	"/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+	"/etc/ssl/cert.pem",                      // Alpine alternate, macOS
+}
+
+// loadSystemCABundleFn is an indirection seam for tests — production code uses
+// the default loadSystemCABundle implementation. Tests replace this with a
+// stub that reads from a tempdir-backed search list.
+var loadSystemCABundleFn = loadSystemCABundle
+
+// loadSystemCABundle returns the contents of the first readable, non-empty OS
+// CA bundle file from systemCABundleSearchPaths (plus the path used). On
+// failure (no readable non-empty file found) it logs at Info level and
+// returns (nil, "") — the caller should proceed with the Keploy CA alone
+// rather than erroring.
+//
+// We intentionally DO NOT return an error: the shared-volume CA file is a
+// best-effort merge. In the worst case (minimal distroless/scratch image with
+// no OS bundle) the application falls back to the prior behaviour of trusting
+// only the Keploy MITM CA — not worse than the status quo. The absence of a
+// system bundle is expected in distroless/scratch deployments, so we log at
+// Info rather than Warn to avoid alarming operators whose images intentionally
+// ship without a trust store.
+func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
+	return loadSystemCABundleFromPaths(logger, systemCABundleSearchPaths)
+}
+
+// loadSystemCABundleFromPaths is the testable core of loadSystemCABundle —
+// it scans the given ranked list instead of the production constant.
+func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, string) {
+	tried := make([]string, 0, len(paths))
+	for _, p := range paths {
+		tried = append(tried, p)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			// ENOENT / EACCES / etc. — most hosts only have one of these
+			// candidates; silently try the next.
+			continue
+		}
+		if len(data) == 0 {
+			// Present-but-empty is almost always a broken image build; fall
+			// through rather than silently producing a zero-trust bundle.
+			continue
+		}
+		return data, p
+	}
+	logger.Info(
+		"No system CA bundle found on any known path — the shared "+
+			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
+			"Non-proxied HTTPS calls from the application (internal services, "+
+			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
+			"CERTIFICATE_VERIFY_FAILED. To fix, ensure the Keploy AGENT "+
+			"container (the writer of this shared volume — not the app "+
+			"container) has access to an OS trust bundle at one of the "+
+			"searched paths: install `ca-certificates` in the agent image "+
+			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, "+
+			"`apk add ca-certificates` on Alpine), mount the host's bundle "+
+			"into the agent pod, or rebuild from a base image that ships "+
+			"trust roots. Fixing this in the app image does NOT help: "+
+			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this "+
+			"shared file, so they replace whatever the app image already "+
+			"trusts.",
+		zap.Strings("searched_paths", tried),
+	)
+	return nil, ""
+}
+
 func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string) error {
 	if err := os.MkdirAll(exportPath, 0755); err != nil {
 		return fmt.Errorf("failed to create export dir: %w", err)
 	}
 
-	// Write ca.crt
+	// Load the OS-provided CA bundle (best-effort — returns (nil, "") if no
+	// standard path is populated, which is normal on distroless/scratch).
+	systemBundle, sourcePath := loadSystemCABundleFn(logger)
+
+	// Build the merged PEM bundle that goes into <exportPath>/ca.crt.
+	//
+	// This is the file the k8s-proxy admission webhook wires into the app
+	// container via REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CARGO_HTTP_CAINFO
+	// (which REPLACE their respective runtime's default trust store) and —
+	// with different routing — NODE_EXTRA_CA_CERTS (which is ADDED to
+	// Node.js's default trust store rather than replacing it; see the
+	// separate keploy-ca.crt write below for where Node is sent). So for
+	// the replacement-style consumers, writing only the Keploy MITM CA
+	// (the previous behaviour) makes every non-proxied HTTPS call
+	// (internal cluster services, public endpoints Keploy isn't proxying,
+	// DoH, ...) fail with CERTIFICATE_VERIFY_FAILED.
+	//
+	// Concatenating PEM blocks with a separating newline is the standard way
+	// to merge trust anchors — OpenSSL, BoringSSL, NSS, Go's crypto/x509,
+	// and every language runtime that honours these env vars parses
+	// multi-cert PEM bundles by walking successive BEGIN/END blocks.
+	merged := make([]byte, 0, len(systemBundle)+len(caCrt)+1)
+	merged = append(merged, systemBundle...)
+	if len(systemBundle) > 0 && systemBundle[len(systemBundle)-1] != '\n' {
+		merged = append(merged, '\n')
+	}
+	merged = append(merged, caCrt...)
+
 	crtPath := filepath.Join(exportPath, "ca.crt")
-	if err := os.WriteFile(crtPath, caCrt, 0644); err != nil {
+	if err := os.WriteFile(crtPath, merged, 0644); err != nil {
 		return fmt.Errorf("failed to write ca.crt to shared volume: %w", err)
 	}
 
-	if err := SetEnvForPath(logger, crtPath); err != nil {
+	// Also write the Keploy MITM CA alone to keploy-ca.crt. This file is for
+	// consumers that ADD to the system trust store rather than REPLACE it —
+	// notably Node.js's NODE_EXTRA_CA_CERTS, which is merged with the default
+	// bundle at startup. Pointing NODE_EXTRA_CA_CERTS at the merged file
+	// would double-trust the system roots (harmless but wasteful); pointing
+	// it at keploy-ca.crt is the minimal correct input.
+	keployOnlyPath := filepath.Join(exportPath, "keploy-ca.crt")
+	if err := os.WriteFile(keployOnlyPath, caCrt, 0644); err != nil {
+		return fmt.Errorf("failed to write keploy-ca.crt to shared volume: %w", err)
+	}
+
+	if len(systemBundle) > 0 {
+		logger.Info("Merged system CA bundle with Keploy MITM CA",
+			zap.Int("system_bytes", len(systemBundle)),
+			zap.Int("keploy_bytes", len(caCrt)),
+			zap.String("source_path", sourcePath),
+			zap.String("output", crtPath),
+			zap.String("keploy_only_output", keployOnlyPath),
+		)
+	}
+	// When len(systemBundle) == 0 we deliberately emit NO log here:
+	// loadSystemCABundleFromPaths already logged an Info entry with the full
+	// list of searched paths and actionable remediation steps, so a second
+	// "Wrote Keploy MITM CA only" message would be redundant noise.
+
+	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
 		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 
-	// Generate Java Truststore
+	// Generate Java Truststore from the MERGED bundle (system roots +
+	// Keploy MITM CA). Java's -Djavax.net.ssl.trustStore= REPLACES the
+	// default $JAVA_HOME/lib/security/cacerts keystore wholesale, so
+	// building the JKS from the Keploy CA alone would leave Java apps
+	// unable to validate any non-Keploy-proxied HTTPS (AWS STS,
+	// Snowflake, Maven Central, …). generateTrustStore iterates every
+	// CERTIFICATE PEM block in crtPath and adds each as a trusted entry
+	// — the Keploy root keeps its stable "keploy-root" alias, every
+	// system root gets a "system-<sha>" alias so the bundle survives
+	// rebuilds deterministically.
 	jksPath := filepath.Join(exportPath, "truststore.jks")
 	if err := generateTrustStore(crtPath, jksPath); err != nil {
 		logger.Error("Failed to generate Java truststore", zap.Error(err))
@@ -344,39 +523,106 @@ func extractCertToTemp() (string, error) {
 	return tempFile.Name(), nil
 }
 
-// generateTrustStoreNative creates a JKS file using pure Go, avoiding 'keytool' dependency
+// generateTrustStore creates a JKS file from every CERTIFICATE PEM block
+// found in certPath, using pure Go (no 'keytool' dependency).
+//
+// The input file MAY contain multiple concatenated PEM blocks — e.g. the
+// merged system-CA-bundle + Keploy MITM CA that setupSharedVolume writes
+// to /tmp/keploy-tls/ca.crt. Every CERTIFICATE block is parsed and added
+// as a trusted entry so Java apps pointed at this keystore via
+// -Djavax.net.ssl.trustStore= can validate both public TLS endpoints
+// (e.g. AWS STS, Snowflake) and Keploy-proxied endpoints.
+//
+// Alias scheme:
+//   - "keploy-root" for the Keploy MITM CA (matched by comparing the
+//     SHA-256 fingerprint of the embedded Keploy CA DER — returned by
+//     embeddedKeployCADER() and cached in-process — against
+//     sha256.Sum256(cert.Raw). Using the fingerprint rather than raw
+//     byte equality is robust to Subject-name renaming between
+//     releases and survives any cosmetic PEM encoding differences.)
+//     This alias remains the same as the
+//     legacy single-cert implementation so external callers that
+//     keytool-list for it continue to work.
+//   - "system-<sha256-hex>" for every other cert (the SHA-256 of the
+//     DER bytes, lowercase hex, 64 chars — guaranteed unique, survives
+//     re-runs deterministically).
+//
+// Non-CERTIFICATE PEM blocks (keys, CRLs, DH params, ...) that might
+// appear in unusual bundles are skipped; a parse error on any single
+// block returns an error so we fail loudly rather than silently ship a
+// partial trust store. A truncated/malformed -----BEGIN----- armour in
+// the trailing unparsed bytes is likewise treated as a fatal error
+// (otherwise pem.Decode's nil-on-malformed return would let the last
+// certificate in a corrupted bundle disappear from the JKS silently).
 func generateTrustStore(certPath, jksPath string) error {
-	// Read and Parse the PEM Certificate
-	certPEM, err := os.ReadFile(certPath)
+	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return fmt.Errorf("failed to read cert pem: %w", err)
 	}
 
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("failed to decode PEM block containing certificate")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse x509 certificate: %w", err)
-	}
-
-	// Create the KeyStore
 	ks := keystore.New()
+	rest := pemBytes
+	// pemBlockIdx counts every PEM block we encountered in the input — both
+	// CERTIFICATE blocks that end up in the keystore AND non-CERTIFICATE
+	// blocks (keys, CRLs, DH params, …) we skip. It's what we report in
+	// diagnostic error messages so the offset in the error matches what a
+	// human counts when eyeballing the file.
+	//
+	// added counts only the CERTIFICATE blocks that parsed cleanly AND
+	// landed in the keystore. We use it at the end to distinguish "input
+	// contained only non-CERTIFICATE noise" from "input contained at least
+	// one valid certificate".
+	pemBlockIdx := 0
+	added := 0
+	keployFingerprint := sha256.Sum256(embeddedKeployCADER())
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			// pem.Decode returns nil for "no more PEM blocks" AND for
+			// "malformed PEM block" — the two are indistinguishable from
+			// the return. A whitespace-only or comment-only trailer is
+			// the benign case (openssl tools commonly append a trailing
+			// newline, and trust bundles often carry a human-readable
+			// header before the first -----BEGIN----- line). But if the
+			// unparsed tail STILL contains a BEGIN armour, we likely have
+			// a truncated or corrupted CERTIFICATE block at the end of
+			// the file — silently dropping it would produce a partial
+			// JKS where one or more trust anchors are missing at
+			// runtime. Fail loudly instead.
+			if bytes.Contains(rest, []byte("-----BEGIN")) {
+				return fmt.Errorf("generateTrustStore: malformed PEM armour in trailing data of %s (found unparseable -----BEGIN marker after %d successfully-decoded block(s)); trust store would be incomplete", certPath, pemBlockIdx)
+			}
+			break
+		}
+		pemBlockIdx++
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse x509 certificate at PEM block #%d (type=%q): %w", pemBlockIdx, block.Type, err)
+		}
 
-	// Create a Trusted Certificate Entry
-	entry := keystore.TrustedCertificateEntry{
-		Certificate: keystore.Certificate{
-			Type:    "X.509",
-			Content: cert.Raw,
-		},
+		alias := ""
+		if sha256.Sum256(cert.Raw) == keployFingerprint {
+			alias = "keploy-root"
+		} else {
+			alias = fmt.Sprintf("system-%x", sha256.Sum256(cert.Raw))
+		}
+
+		ks.SetTrustedCertificateEntry(alias, keystore.TrustedCertificateEntry{
+			Certificate: keystore.Certificate{
+				Type:    "X.509",
+				Content: cert.Raw,
+			},
+		})
+		added++
+	}
+	if added == 0 {
+		return fmt.Errorf("no CERTIFICATE PEM blocks found in %s", certPath)
 	}
 
-	// Add to KeyStore with alias "keploy-root"
-	ks.SetTrustedCertificateEntry("keploy-root", entry)
-
-	// Write to file
 	f, err := os.Create(jksPath)
 	if err != nil {
 		return fmt.Errorf("failed to create jks file: %w", err)
@@ -389,6 +635,43 @@ func generateTrustStore(certPath, jksPath string) error {
 	}
 
 	return nil
+}
+
+// keployCADEROnce caches the DER encoding of the embedded Keploy MITM CA
+// so generateTrustStore doesn't re-parse the same in-memory PEM on every
+// call. The parse is O(cert-size) — trivial individually, but every agent
+// restart hits generateTrustStore once per startup and every unit test
+// that exercises generateTrustStore would re-parse too.
+//
+// If the embedded PEM is malformed or not a CERTIFICATE block,
+// keployCADERBytes remains nil. Consumers (generateTrustStore) treat a
+// nil DER as "can't identify the Keploy root" and fall back to the
+// generic "system-<sha>" alias for every entry. That degrades the
+// human-readable alias naming but keeps the trust-store functionally
+// correct — so we don't surface the decode failure as an error here.
+var (
+	keployCADEROnce  sync.Once
+	keployCADERBytes []byte
+)
+
+// embeddedKeployCADER returns the DER encoding of the embedded Keploy MITM
+// CA. Used by generateTrustStore to identify which block in a merged
+// PEM bundle is the Keploy root (so it gets the stable "keploy-root"
+// alias). Parsing happens once per process via sync.Once; subsequent
+// calls return the cached DER. If the embedded PEM is malformed or not
+// a CERTIFICATE block, the cached value is nil — callers treat that as
+// "can't identify the Keploy root" and fall back to the generic
+// "system-<sha>" alias for every entry. That is a degraded but
+// non-broken trust-store.
+func embeddedKeployCADER() []byte {
+	keployCADEROnce.Do(func() {
+		block, _ := pem.Decode(caCrt)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return
+		}
+		keployCADERBytes = block.Bytes
+	})
+	return keployCADERBytes
 }
 
 func commandExists(cmd string) bool {
