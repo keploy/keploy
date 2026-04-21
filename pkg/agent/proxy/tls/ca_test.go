@@ -236,4 +236,3 @@ func TestSetupSharedVolume_FallsBackWhenSystemBundleMissing(t *testing.T) {
 		t.Fatalf("fallback output should equal keploy CA alone; len(got)=%d len(caCrt)=%d", len(got), len(caCrt))
 	}
 }
-
