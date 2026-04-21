@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -56,12 +56,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
-      image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -116,7 +115,7 @@ jobs:
       image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
     uses: ./.github/workflows/golang_docker.yml
   run_fuzzer_linux:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:

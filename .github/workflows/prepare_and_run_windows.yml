@@ -15,7 +15,7 @@ env:
 
 jobs:
   build-and-upload:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     # Bound wall-clock so a hung cgo link step (historically: a
     # deadlock inside libwindows_redirector.a's shutdown path) cannot
@@ -378,7 +378,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   docker-image-build:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
@@ -418,7 +418,7 @@ jobs:
 
   pull-docker-image:
     needs: [docker-image-build]
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     # Same rationale as build-and-upload: bound the wall-clock so a
     # hung self-hosted Windows runner cannot stall the whole pipeline.
@@ -500,7 +500,7 @@ jobs:
     uses: ./.github/workflows/golang_native_windows.yml
 
   cleanup:
-    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:

@@ -9,7 +9,7 @@ on:
         default: 'ubuntu-latest'
 jobs:
   grpc_linux:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -69,7 +69,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/grpc-linux.sh ${{ matrix.mode }}
         
   grpc_linux_protoscope:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.repository == 'keploy/keploy' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
