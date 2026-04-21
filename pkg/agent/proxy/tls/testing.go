@@ -10,10 +10,15 @@ import "sync"
 // running agent.
 //
 // These helpers mutate package-global state (caReadyOnce, caReadyCh,
-// caFailure). `go test ./...` runs packages in parallel, so without
-// serialization a test in pkg/agent/proxy/tls calling ResetCAReadyForTest
-// can clobber the signal while a concurrent test in pkg/agent/routes is
-// asserting on it — producing flakes and data races under `-race`.
+// caFailure). Go compiles one test binary per package and runs
+// different packages in separate processes, so cross-package parallel
+// runs do NOT share these globals. Serialization is needed within a
+// single test binary — most concretely, when multiple tests inside
+// pkg/agent/routes (which imports this package) reset/close the signal
+// and may run in parallel via t.Parallel() or stress-run with -count.
+// Tests in pkg/agent/proxy/tls itself likewise serialize on the same
+// mutex so a future contributor who adds t.Parallel() there doesn't
+// introduce a race on caReadyCh.
 //
 // CAReadyTestMu is the single serializer every test that touches the
 // signal must hold. The canonical pattern is:
@@ -27,9 +32,10 @@ import "sync"
 // wraps the Lock/defer Unlock idiom so callers can't forget to unlock.
 
 // CAReadyTestMu serializes access to the CAReady package-global state
-// (caReadyOnce, caReadyCh, caFailure) across tests. All test helpers
-// below acquire it; external callers (sibling-package tests) must hold
-// it for the duration of any read-then-write sequence on the signal.
+// (caReadyOnce, caReadyCh, caFailure) within a single test binary.
+// All test helpers below acquire it; external callers (tests in
+// packages that import this one) must hold it for the duration of any
+// read-then-write sequence on the signal.
 var CAReadyTestMu sync.Mutex
 
 // ResetCAReadyForTest rebuilds caReadyOnce and caReadyCh and clears any

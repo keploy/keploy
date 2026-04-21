@@ -3,8 +3,9 @@
 #
 # What this asserts:
 #   1. Immediately on startup, POST /agent/ready returns 503 (CA not
-#      yet written) and the agent stdout contains the "refusing"
-#      warning with ca_path=/tmp/keploy-tls/ca.crt.
+#      yet installed) and the agent stdout contains the "refusing"
+#      warning (message is mode-agnostic — the install path lives in
+#      the upstream SetupCA log line, not in this handler).
 #   2. After the harness flips the CAReady signal, subsequent POST
 #      /agent/ready return 200 and /tmp/agent.ready exists inside the
 #      agent container.
@@ -28,6 +29,35 @@ trap cleanup EXIT
 
 echo ">> building stack"
 $COMPOSE -p "$PROJECT" build --quiet
+
+# Pre-pull the `client` service base image with retries. ECR Public is
+# the Docker Hub mirror we use (see docker-compose.yml), but shared-IP
+# CI runners (GitHub Actions, Woodpecker) occasionally hit its
+# unauthenticated rate limit and `docker compose up` has no native
+# retry — it fails fast with "toomanyrequests: Rate exceeded". The pull
+# is idempotent (cached on subsequent runs), so retrying for up to ~1m
+# converts a transient infrastructure flake into a successful run
+# without masking a genuine registry outage.
+CLIENT_IMAGE=$(awk '/^  client:/,/^  [a-z]/' docker-compose.yml | awk '/^[[:space:]]*image:/ {print $2; exit}')
+echo ">> pre-pulling client image ($CLIENT_IMAGE) with retries"
+pull_ok=0
+for attempt in 1 2 3 4 5 6; do
+  if docker pull "$CLIENT_IMAGE"; then
+    pull_ok=1
+    break
+  fi
+  # Exponential-ish backoff (2,4,8,16,16,16s) — first three cover
+  # brief ratelimit windows, the remaining hold steady rather than
+  # stretching the test's wall clock indefinitely.
+  delay=$((attempt*attempt*2))
+  if [ "$delay" -gt 16 ]; then delay=16; fi
+  echo ">> pull attempt $attempt failed; retrying in ${delay}s" >&2
+  sleep "$delay"
+done
+if [ "$pull_ok" -ne 1 ]; then
+  echo "FAIL: unable to pull $CLIENT_IMAGE after 6 attempts — registry may be down" >&2
+  exit 7
+fi
 
 echo ">> starting stack"
 $COMPOSE -p "$PROJECT" up -d
@@ -98,7 +128,7 @@ fi
 # Agent stdout must contain the "refusing" warning (zap JSON output).
 AGENT_LOG=$(mktemp)
 $COMPOSE -p "$PROJECT" logs agent > "$AGENT_LOG" 2>&1 || true
-if ! grep -q "CA bundle is written; refusing" "$AGENT_LOG"; then
+if ! grep -q "CA bundle is installed; refusing" "$AGENT_LOG"; then
   echo "FAIL: agent log missing 'refusing' warning" >&2
   echo "--- agent log ---" >&2
   cat "$AGENT_LOG" >&2

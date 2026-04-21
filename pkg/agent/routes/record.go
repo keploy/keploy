@@ -426,17 +426,26 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 //	healthcheck:
 //	  test: ["CMD", "cat", "/tmp/agent.ready"]
 func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
-	// The CA bundle at /tmp/keploy-tls/ca.crt MUST exist before the agent
-	// signals ready — Kubernetes postStart hooks and docker-compose
-	// healthchecks gate app-container start on /tmp/agent.ready, and apps
-	// may make HTTPS calls immediately on boot. Refuse readiness until
-	// SetupCA has completed (see pkg/agent/proxy/tls.CAStatus).
+	// The Keploy CA bundle MUST be installed before the agent signals
+	// ready — Kubernetes postStart hooks and docker-compose healthchecks
+	// gate app-container start on /tmp/agent.ready, and apps may make
+	// HTTPS calls immediately on boot. Refuse readiness until SetupCA
+	// has completed (see pkg/agent/proxy/tls.CAStatus).
+	//
+	// The install location is mode-dependent: the shared volume at
+	// /tmp/keploy-tls/ca.crt in Docker/k8s mode, the system trust store
+	// (distro-specific path under /etc or /usr/local) in native Linux
+	// mode, or a Windows temp file that is removed on shutdown. We
+	// deliberately do NOT log a ca_path here because no single value is
+	// correct in all modes; operators investigating a 503 should
+	// cross-reference the earlier Error log from pkg/agent/proxy (which
+	// names the actual path that failed).
 	//
 	// Today the ordering is race-free because SetupCA runs synchronously
 	// inside Hook() before the HTTP server starts. This explicit gate
 	// protects against a future refactor that moves SetupCA into a
 	// goroutine — without this check, app containers could boot before
-	// /tmp/keploy-tls/ca.crt exists and silently fail HTTPS egress.
+	// the CA bundle exists and silently fail HTTPS egress.
 	//
 	// CAStatus distinguishes three states: ready, not-yet-ready, and
 	// terminal setup failure. On failure we surface the underlying
@@ -456,19 +465,19 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 			firstCAFailureLog.Do(func() {
 				a.logger.Error(
 					"/agent/ready: CA setup failed; readiness will not recover without agent restart",
-					zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
 					zap.String("next_step",
 						"Restart the agent after fixing the underlying "+
 							"SetupCA failure (see the earlier Error log "+
 							"line from pkg/agent/proxy for the specific "+
-							"next_step — typically write-access to "+
-							"/tmp/keploy-tls or to the host CA trust store)."),
+							"install path and next_step — typically "+
+							"write-access to /tmp/keploy-tls in shared-"+
+							"volume mode or to the host CA trust store "+
+							"in native mode)."),
 					zap.Error(setupErr),
 				)
 			})
 			a.logger.Debug(
 				"/agent/ready: CA setup failure still latched",
-				zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
 				zap.Error(setupErr),
 			)
 			http.Error(
@@ -483,15 +492,13 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 		// boot window go to Debug to avoid flooding.
 		firstCARefusalLog.Do(func() {
 			a.logger.Info(
-				"/agent/ready called before CA bundle is written; refusing",
-				zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
+				"/agent/ready called before CA bundle is installed; refusing",
 			)
 		})
 		a.logger.Debug(
-			"/agent/ready still refusing: CA bundle not yet written",
-			zap.String("ca_path", "/tmp/keploy-tls/ca.crt"),
+			"/agent/ready still refusing: CA bundle not yet installed",
 		)
-		http.Error(w, "CA bundle not yet written", http.StatusServiceUnavailable)
+		http.Error(w, "CA bundle not yet installed", http.StatusServiceUnavailable)
 		return
 	}
 
