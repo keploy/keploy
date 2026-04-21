@@ -64,9 +64,20 @@ jobs:
           path: out/build/keploy
 
   build-linux-arm64:
-    # Native arm64 race-enabled linux build — consumed only by the
+    # Non-race native arm64 linux build — consumed only by the
     # linux/arm64 docker image (which the macOS self-hosted runner
     # loads). Native build avoids qemu emulation on amd64 runners.
+    #
+    # We deliberately drop -race for docker images: the race
+    # runtime roughly doubles binary size and inflates baseline
+    # memory (enough to trip go-memory-load's 250 MiB in-container
+    # threshold), and any genuine data-race should be caught by
+    # the native linux job's race-enabled `build` artifact —
+    # docker-replay coverage is about integration semantics, not
+    # race detection. This mirrors the effective historic
+    # behaviour where update-docker.sh's add_race_flag regex
+    # silently failed to match, so the previous linux docker image
+    # was also non-race despite the CI script's intent.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04-arm
     steps:
@@ -78,16 +89,14 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
 
-      - name: Build Keploy (race, linux/arm64)
-        env:
-          CGO_ENABLED: "1"
+      - name: Build Keploy (non-race, linux/arm64)
         run: |
-          mkdir -p out/build-linux-arm64
-          go build -race -tags=viper_bind_struct -o out/build-linux-arm64/keploy
+          mkdir -p out/build-no-race-linux-arm64
+          go build -tags=viper_bind_struct -o out/build-no-race-linux-arm64/keploy
       - uses: actions/upload-artifact@v4
         with:
-          name: build-linux-arm64
-          path: out/build-linux-arm64/keploy
+          name: build-no-race-linux-arm64
+          path: out/build-no-race-linux-arm64/keploy
 
   build-darwin-arm64:
     # darwin/arm64 binary for the macOS self-hosted native tests.
@@ -467,10 +476,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Use the non-race amd64 binary: see build-linux-arm64's
+      # header comment for the rationale. go-memory-load and
+      # proxy-stress-test both rely on docker binaries not carrying
+      # race-runtime overhead (memory baseline / data-race noise).
       - name: Download linux/amd64 binary
         uses: actions/download-artifact@v4
         with:
-          name: build
+          name: build-no-race
           path: dist/keploy-linux-amd64
 
       - name: Set up Docker Buildx
@@ -505,7 +518,7 @@ jobs:
       - name: Download linux/arm64 binary
         uses: actions/download-artifact@v4
         with:
-          name: build-linux-arm64
+          name: build-no-race-linux-arm64
           path: dist/keploy-linux-arm64
 
       - name: Set up Docker Buildx

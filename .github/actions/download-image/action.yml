@@ -50,7 +50,19 @@ runs:
 
     - name: Load image (Windows)
       if: runner.os == 'Windows'
-      shell: pwsh
+      # Use Windows PowerShell 5.1 (always preinstalled on Windows
+      # runners) rather than pwsh (PowerShell 7, which not every
+      # self-hosted runner in the fleet ships — see the Bootstrap
+      # PowerShell environment step in prepare_and_run.yml's
+      # build-windows-amd64 job, which repairs *that* job but does
+      # not run in the pull-docker-image-windows job that invokes
+      # this action). Every cmdlet used below (Join-Path, Test-Path,
+      # Get-ChildItem, Select-String, [Environment]::NewLine,
+      # string .Trim(), [string]::IsNullOrWhiteSpace) is 5.1-
+      # compatible, so keeping the floor at 5.1 is free and avoids
+      # a 'pwsh: command not found' step failure on unrepaired
+      # runners.
+      shell: powershell
       run: |
         $ErrorActionPreference = 'Stop'
         $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
