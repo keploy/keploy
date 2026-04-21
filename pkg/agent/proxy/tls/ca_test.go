@@ -297,9 +297,11 @@ func makeSelfSignedPEM(t *testing.T, cn string) []byte {
 //   - the system CA is aliased "system-<sha256-hex>" and matches the
 //     DER of the synthetic cert we generated.
 //
-// Before this PR the function decoded only the FIRST PEM block, so a
-// merged bundle silently lost the system roots — exactly the Java edge
-// case principal review flagged.
+// Before this PR the function decoded only the FIRST PEM block, so on a
+// merged bundle structured as `<system CA>\n<keploy CA>` every
+// subsequent CERTIFICATE block (notably the Keploy MITM root itself)
+// was silently dropped from the JKS — exactly the Java edge case
+// principal review flagged.
 func TestGenerateTrustStore_MergesAllCerts(t *testing.T) {
 	dir := t.TempDir()
 

@@ -176,13 +176,19 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 
 // SetEnvForPath sets the environment variables to point to a SPECIFIC path.
 //
-// Callers that have separate merged / keploy-only bundles (the shared-volume
-// / k8s-proxy code path) should use setEnvForSharedVolume instead so that
-// NODE_EXTRA_CA_CERTS — which Node.js ADDS to the default trust store rather
-// than replacing it — receives the Keploy-only file and avoids double-trusting
-// system roots. This function applies the SAME path to every variable, which
-// is correct for the native / single-file install paths where there is no
-// distinct Keploy-only bundle on disk.
+// This exported entrypoint applies the SAME path to every language-runtime
+// CA variable, which is correct for the native / single-file install paths
+// (SetupCA on Linux/macOS without the shared volume, and the Windows temp-
+// file path) where there is no distinct Keploy-only bundle on disk.
+//
+// Callers wiring the shared-volume / k8s-proxy flow — where the merged
+// system+Keploy bundle and the Keploy-only bundle live in separate files —
+// should invoke SetupCA with the isDocker flag instead of calling this
+// helper directly. SetupCA internally routes NODE_EXTRA_CA_CERTS (which
+// Node.js ADDS to, rather than replaces, the default trust store) at the
+// Keploy-only file while pointing the other variables at the merged
+// bundle; that split is the whole reason the shared-volume path exists
+// and cannot be replicated by any sequence of SetEnvForPath calls.
 func SetEnvForPath(logger *zap.Logger, path string) error {
 	return setEnvVars(logger, map[string]string{
 		"NODE_EXTRA_CA_CERTS": path,
