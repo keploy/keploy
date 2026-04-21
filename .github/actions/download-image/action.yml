@@ -1,46 +1,66 @@
 name: pull-image
-description: "Pull Image"
+description: "Download a docker image tarball from a workflow artifact and load it into the local docker daemon."
+
 inputs:
-  image_tag:
-    description: "Docker image tag or digest to pull"
+  artifact_name:
+    description: "Name of the workflow artifact that holds image.tar (e.g. docker-image-linux-amd64)."
     required: false
-    default: ttl.sh/keploy/keploy:1h
+    default: docker-image-linux-amd64
   version:
-    description: "Version string to tag the pulled image with"
+    description: "Version string to tag the loaded image with (ghcr.io/keploy/keploy:v<version>)."
     required: false
     default: 3-dev
+
 runs:
   using: composite
   steps:
-    - name: Pull Image (Unix)
+    - name: Download image artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ runner.temp }}/keploy-image
+
+    - name: Load image (Unix)
       if: runner.os != 'Windows'
       shell: bash
       run: |
         set -euo pipefail
-        IMAGE_REF="${{ inputs.image_tag }}"
-        echo "Pulling ${IMAGE_REF} ..."
-        docker pull "${IMAGE_REF}"
-
-        # Retag to the name your stack expects
-        # Works for both tag refs and digest refs
-        docker tag "${IMAGE_REF}" ghcr.io/keploy/keploy:v${{ inputs.version }}
+        TAR="${{ runner.temp }}/keploy-image/image.tar"
+        if [ ! -f "$TAR" ]; then
+          echo "::error::expected image tarball at $TAR"
+          ls -la "${{ runner.temp }}/keploy-image" || true
+          exit 1
+        fi
+        echo "Loading image from $TAR ..."
+        LOADED=$(docker load -i "$TAR" | awk -F': ' '/Loaded image:/ {print $2}' | head -n1)
+        if [ -z "$LOADED" ]; then
+          echo "::error::docker load did not report a loaded image"
+          exit 1
+        fi
+        echo "Loaded: $LOADED"
+        docker tag "$LOADED" "ghcr.io/keploy/keploy:v${{ inputs.version }}"
         docker images | awk 'NR==1 || /keploy\/keploy/ {print}'
-
-        # Verify the image architecture matches the host
         echo "Image architecture:"
-        docker image inspect "${IMAGE_REF}" --format '{{.Os}}/{{.Architecture}}' || true
-        echo "Docker server architecture:"
-        docker version --format '{{.Server.Os}}/{{.Server.Arch}}' || true
+        docker image inspect "$LOADED" --format '{{.Os}}/{{.Architecture}}' || true
 
-    - name: Pull Image (Windows)
+    - name: Load image (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $IMAGE_REF = "${{ inputs.image_tag }}"
-        Write-Host "Pulling $IMAGE_REF ..."
-        docker pull $IMAGE_REF
-
-        # Retag to the name your stack expects (works for tags and digests)
-        docker tag $IMAGE_REF ghcr.io/keploy/keploy:v${{ inputs.version }}
+        $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
+        if (-not (Test-Path $tar)) {
+          Write-Error "expected image tarball at $tar"
+          Get-ChildItem (Join-Path "${{ runner.temp }}" "keploy-image") -Force -ErrorAction SilentlyContinue
+          exit 1
+        }
+        Write-Host "Loading image from $tar ..."
+        $loadOutput = docker load -i $tar
+        $loaded = ($loadOutput | Select-String -Pattern 'Loaded image:\s*(.+)$' | Select-Object -First 1).Matches.Groups[1].Value
+        if ([string]::IsNullOrWhiteSpace($loaded)) {
+          Write-Error "docker load did not report a loaded image"
+          exit 1
+        }
+        Write-Host "Loaded: $loaded"
+        docker tag $loaded "ghcr.io/keploy/keploy:v${{ inputs.version }}"
         docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "keploy/keploy" -SimpleMatch
