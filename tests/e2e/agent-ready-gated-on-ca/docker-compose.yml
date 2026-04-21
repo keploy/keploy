@@ -1,0 +1,45 @@
+# End-to-end harness for tests/e2e/agent-ready-gated-on-ca.
+#
+# "agent" runs the e2e-harness built from local source. It mirrors the
+# real pkg/agent/routes endpoints but closes the CAReady signal only
+# after CA_DELAY — so the first /agent/ready call observes the gate
+# returning 503 and subsequent calls (after CA_DELAY) observe 200.
+#
+# "client" is a BusyBox sidecar that POSTs /agent/ready repeatedly and
+# writes each attempt's HTTP status to /shared/status.log — run.sh
+# parses that log plus the agent's stdout to assert both the 503 and
+# 200 phases happen in the right order.
+services:
+  agent:
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/agent-ready-gated-on-ca/Dockerfile
+    image: keploy-e2e-agent-ready-harness:latest
+    command: ["-addr=:8086", "-ca-delay=5s"]
+    expose:
+      - "8086"
+    volumes:
+      - shared:/shared
+
+  client:
+    image: alpine:3.20
+    depends_on:
+      - agent
+    volumes:
+      - shared:/shared
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+        : >/shared/status.log
+        for i in $$(seq 1 30); do
+          code=$$(curl -s -o /dev/null -w "%{http_code}" -X POST http://agent:8086/agent/agent/ready || echo "ERR")
+          printf "%s %s\n" "$$(date -u +%FT%TZ)" "$$code" >> /shared/status.log
+          sleep 1
+        done
+        echo DONE >> /shared/status.log
+        tail -f /dev/null
+
+volumes:
+  shared: {}
