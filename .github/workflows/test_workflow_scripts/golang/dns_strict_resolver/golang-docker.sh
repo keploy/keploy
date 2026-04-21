@@ -17,19 +17,17 @@
 
 set -Eeuo pipefail
 
-NETWORK=dns-strict-resolver-net
-SUBNET=172.30.0.0/16
-COREDNS_IP=172.30.0.10
+NETWORK=keploy-network
 SAMPLE_NAME=dns-strict-resolver
-COREDNS_NAME=dns-strict-resolver-coredns
 CURL_OUT=curl-output.txt
 
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 cleanup() {
-  docker rm -f "$SAMPLE_NAME" "$COREDNS_NAME" 2>/dev/null || true
-  docker network rm "$NETWORK" 2>/dev/null || true
+  docker rm -f "$SAMPLE_NAME" 2>/dev/null || true
+  # Leave keploy-network in place — other jobs may be using it in parallel
+  # and `docker network rm` fails if any container is still attached.
 }
 trap cleanup EXIT
 
@@ -45,11 +43,11 @@ dump_diagnostics() {
   echo "::group::keploy record.txt (tail 200)"
   tail -200 record.txt 2>/dev/null || echo "(record.txt missing)"
   echo "::endgroup::"
-  echo "::group::CoreDNS logs"
-  docker logs "$COREDNS_NAME" 2>&1 | tail -40 || true
-  echo "::endgroup::"
   echo "::group::sample container logs"
   docker logs "$SAMPLE_NAME" 2>&1 | tail -40 || true
+  echo "::endgroup::"
+  echo "::group::docker ps -a"
+  docker ps -a || true
   echo "::endgroup::"
 }
 
@@ -145,15 +143,11 @@ section "Build sample image"
 docker build -t "$SAMPLE_NAME:test" .
 endsec
 
-section "Network + CoreDNS"
-docker network create --subnet "$SUBNET" "$NETWORK"
-docker run -d --rm --name "$COREDNS_NAME" --net "$NETWORK" --ip "$COREDNS_IP" \
-  -v "$PWD/coredns:/etc/coredns:ro" \
-  coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
-# Give CoreDNS a moment to bind :53 inside its container. No sanity
-# probe here — the CoreDNS image has no /bin/sh. We'll see failures
-# (if any) via dump_diagnostics on the check_curl_output path.
-sleep 2
+section "Network"
+# keploy-network is the conventional network name keploy looks for
+# in docker mode (see gin_mongo/golang-docker.sh). Idempotent create —
+# a prior matrix job may have left it in place.
+docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK"
 endsec
 
 section "Start Recording"
@@ -162,7 +156,7 @@ section "Start Recording"
 # golang_linux.yml where non-docker loopback UDP doesn't reach
 # cgroup/recvmsg4).
 "$RECORD_BIN" record\
-  -c "docker run -p 8086:8086 --rm --net $NETWORK --dns=$COREDNS_IP --name $SAMPLE_NAME $SAMPLE_NAME:test" \
+  -c "docker run -p 8086:8086 --rm --net $NETWORK --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
   --generateGithubActions=false \
   >record.txt 2>&1 &
@@ -188,7 +182,7 @@ endsec
 
 section "Start Replay"
 "$REPLAY_BIN" test \
-  -c "docker run -p 8086:8086 --rm --net $NETWORK --dns=$COREDNS_IP --name $SAMPLE_NAME $SAMPLE_NAME:test" \
+  -c "docker run -p 8086:8086 --rm --net $NETWORK --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
   --delay 15 \
   --generateGithubActions=false 2>&1 | tee test.txt || true
