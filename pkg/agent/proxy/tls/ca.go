@@ -604,9 +604,12 @@ func generateTrustStore(certPath, jksPath string) error {
 // restart hits generateTrustStore once per startup and every unit test
 // that exercises generateTrustStore would re-parse too.
 //
-// keployCADERErr holds a nil result when the embedded PEM is malformed
-// or not a CERTIFICATE block. Consumers treat nil DER as "can't identify
-// the Keploy root" and fall back to the generic "system-<sha>" alias.
+// If the embedded PEM is malformed or not a CERTIFICATE block,
+// keployCADERBytes remains nil. Consumers (generateTrustStore) treat a
+// nil DER as "can't identify the Keploy root" and fall back to the
+// generic "system-<sha>" alias for every entry. That degrades the
+// human-readable alias naming but keeps the trust-store functionally
+// correct — so we don't surface the decode failure as an error here.
 var (
 	keployCADEROnce  sync.Once
 	keployCADERBytes []byte
