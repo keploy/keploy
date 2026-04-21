@@ -41,7 +41,9 @@ echo "=== bringing up ca-writer + tls-probe ==="
 #
 # The portable way to query container state works on both docker-compose v1
 # and docker compose v2:
-#   1. resolve the service name to a container ID with `ps -q`;
+#   1. resolve the service name to a container ID with `ps -aq` (the `-a`
+#      is load-bearing: once the writer exits, the default `ps -q` excludes
+#      it and returns empty, which would mask a clean exit as a timeout);
 #   2. ask the engine directly via `docker inspect`.
 # This avoids `--format json`, which v1 doesn't support, and avoids grepping
 # a specific JSON field name which has varied between compose versions.
@@ -54,7 +56,10 @@ writer_container_id=""
 writer_exit_code=""
 writer_done=0
 for _ in $(seq 1 60); do
-    writer_container_id=$("${DC[@]}" ps -q ca-writer 2>/dev/null || true)
+    # `-a` includes stopped/exited containers; omitting it would drop the
+    # writer from output the instant it finishes (seen on GHA where the
+    # writer exits in <1s) and cause a spurious 60s timeout.
+    writer_container_id=$("${DC[@]}" ps -aq ca-writer 2>/dev/null || true)
     if [ -n "${writer_container_id}" ]; then
         state=$(docker inspect -f '{{.State.Status}}' "${writer_container_id}" 2>/dev/null || true)
         if [ "${state}" = "exited" ]; then
