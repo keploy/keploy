@@ -122,6 +122,24 @@ type MockYaml struct {
 	gobFlushErr error
 }
 
+// prunedMockInfo is the structured per-mock entry logged when
+// UpdateMocks drops a mock. Collected into a single slice and emitted
+// once per prune call so operators can see exactly which mocks were
+// dropped without flooding the log with one line per mock.
+type prunedMockInfo struct {
+	Name     string            `json:"name"`
+	Kind     string            `json:"kind"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// maxPrunedMocksLogged caps how many per-mock entries get attached to
+// the "pruned mocks successfully" debug log. Replays on large test
+// sets can prune ~10^5 mocks; logging every entry would produce a
+// single multi-MB log line that slows down encoding and overwhelms
+// ingestion. Above the cap we set prunedMocksTruncated=true and rely
+// on the pruned-count total for the overall picture.
+const maxPrunedMocksLogged = 100
+
 type gobWriteJob struct {
 	mock *models.Mock
 	// testSetPath is the full directory path — "<MockPath>/<testSetID>"
@@ -347,8 +365,17 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		return err
 	}
 
+	// Only build the per-mock log slice when debug logging is enabled
+	// — on large test sets the allocation and reflection cost of
+	// collecting names/kinds/metadata is a significant overhead if
+	// the emitted log will be dropped by the logger anyway.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
 	newMocks := make([]*models.Mock, 0, len(mocks))
 	prunedCount := 0
+	var prunedMocks []prunedMockInfo
+	if debugEnabled {
+		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+	}
 	for _, mock := range mocks {
 		if mock.Spec.Metadata["type"] == "config" {
 			newMocks = append(newMocks, mock)
@@ -374,6 +401,13 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			continue
 		}
 		prunedCount++
+		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
+			prunedMocks = append(prunedMocks, prunedMockInfo{
+				Name:     mock.Name,
+				Kind:     string(mock.Kind),
+				Metadata: mock.Spec.Metadata,
+			})
+		}
 	}
 
 	if err := ys.writeMocksAtomically(path, mockFileName, newMocks); err != nil {
@@ -385,6 +419,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
 		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 
 	return nil
@@ -432,8 +468,17 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
+	// See the YAML path above for why per-mock collection is gated on
+	// debug level — the gob path is the one most likely to hit
+	// ~10^5-mock test sets, so skipping the allocation when the log
+	// is a no-op matters more here.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
 	newMocks := make([]*models.Mock, 0, len(mocks))
 	prunedCount := 0
+	var prunedMocks []prunedMockInfo
+	if debugEnabled {
+		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+	}
 	for i, mock := range mocks {
 		// Check ctx every 1024 entries so a very large filter loop
 		// still responds to cancellation without paying the syscall
@@ -461,6 +506,13 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			continue
 		}
 		prunedCount++
+		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
+			prunedMocks = append(prunedMocks, prunedMockInfo{
+				Name:     mock.Name,
+				Kind:     string(mock.Kind),
+				Metadata: mock.Spec.Metadata,
+			})
+		}
 	}
 
 	// Atomic rewrite: write to a sibling tmp file under the same
@@ -544,6 +596,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
 		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 	return nil
 }
