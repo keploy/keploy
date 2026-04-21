@@ -122,6 +122,16 @@ type MockYaml struct {
 	gobFlushErr error
 }
 
+// prunedMockInfo is the structured per-mock entry logged when
+// UpdateMocks drops a mock. Collected into a single slice and emitted
+// once per prune call so operators can see exactly which mocks were
+// dropped without flooding the log with one line per mock.
+type prunedMockInfo struct {
+	Name     string            `json:"name"`
+	Kind     string            `json:"kind"`
+	Metadata map[string]string `json:"metadata"`
+}
+
 type gobWriteJob struct {
 	mock *models.Mock
 	// testSetPath is the full directory path — "<MockPath>/<testSetID>"
@@ -348,7 +358,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	}
 
 	newMocks := make([]*models.Mock, 0, len(mocks))
-	prunedCount := 0
+	prunedMocks := make([]prunedMockInfo, 0)
 	for _, mock := range mocks {
 		if mock.Spec.Metadata["type"] == "config" {
 			newMocks = append(newMocks, mock)
@@ -373,7 +383,11 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		prunedCount++
+		prunedMocks = append(prunedMocks, prunedMockInfo{
+			Name:     mock.Name,
+			Kind:     string(mock.Kind),
+			Metadata: mock.Spec.Metadata,
+		})
 	}
 
 	if err := ys.writeMocksAtomically(path, mockFileName, newMocks); err != nil {
@@ -384,7 +398,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.String("testSetID", testSetID),
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
-		zap.Int("pruned", prunedCount),
+		zap.Int("pruned", len(prunedMocks)),
+		zap.Any("prunedMocks", prunedMocks),
 		zap.Time("pruneBefore", pruneBefore))
 
 	return nil
@@ -433,7 +448,7 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	}
 
 	newMocks := make([]*models.Mock, 0, len(mocks))
-	prunedCount := 0
+	prunedMocks := make([]prunedMockInfo, 0)
 	for i, mock := range mocks {
 		// Check ctx every 1024 entries so a very large filter loop
 		// still responds to cancellation without paying the syscall
@@ -460,7 +475,11 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		prunedCount++
+		prunedMocks = append(prunedMocks, prunedMockInfo{
+			Name:     mock.Name,
+			Kind:     string(mock.Kind),
+			Metadata: mock.Spec.Metadata,
+		})
 	}
 
 	// Atomic rewrite: write to a sibling tmp file under the same
@@ -543,7 +562,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.String("testSetID", testSetID),
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
-		zap.Int("pruned", prunedCount),
+		zap.Int("pruned", len(prunedMocks)),
+		zap.Any("prunedMocks", prunedMocks),
 		zap.Time("pruneBefore", pruneBefore))
 	return nil
 }
