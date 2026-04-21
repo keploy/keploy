@@ -293,9 +293,17 @@ func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, st
 			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
 			"Non-proxied HTTPS calls from the application (internal services, "+
 			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
-			"CERTIFICATE_VERIFY_FAILED. To fix, install an OS trust store in "+
-			"the application image (e.g. `apt-get install -y ca-certificates` "+
-			"on Debian/Ubuntu or `apk add ca-certificates` on Alpine).",
+			"CERTIFICATE_VERIFY_FAILED. To fix, ensure the Keploy AGENT "+
+			"container (the writer of this shared volume — not the app "+
+			"container) has access to an OS trust bundle at one of the "+
+			"searched paths: install `ca-certificates` in the agent image "+
+			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, "+
+			"`apk add ca-certificates` on Alpine), mount the host's bundle "+
+			"into the agent pod, or rebuild from a base image that ships "+
+			"trust roots. Fixing this in the app image does NOT help: "+
+			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this "+
+			"shared file, so they replace whatever the app image already "+
+			"trusts.",
 		zap.Strings("searched_paths", tried),
 	)
 	return nil, ""
@@ -526,9 +534,13 @@ func extractCertToTemp() (string, error) {
 // (e.g. AWS STS, Snowflake) and Keploy-proxied endpoints.
 //
 // Alias scheme:
-//   - "keploy-root" for the Keploy MITM CA (matched by comparison
-//     against the embedded caCrt bytes — robust to Subject-name
-//     renaming between releases). This alias remains the same as the
+//   - "keploy-root" for the Keploy MITM CA (matched by comparing the
+//     SHA-256 fingerprint of the embedded Keploy CA DER — returned by
+//     embeddedKeployCADER() and cached in-process — against
+//     sha256.Sum256(cert.Raw). Using the fingerprint rather than raw
+//     byte equality is robust to Subject-name renaming between
+//     releases and survives any cosmetic PEM encoding differences.)
+//     This alias remains the same as the
 //     legacy single-cert implementation so external callers that
 //     keytool-list for it continue to work.
 //   - "system-<sha256-hex>" for every other cert (the SHA-256 of the
