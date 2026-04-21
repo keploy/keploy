@@ -12,7 +12,11 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
-    default: 'main'
+    # TODO(postgres-v3): revert to 'main' once keploy/integrations#130
+    # merges. The v3 package is on the feature branch until then, and
+    # every workflow that runs `go get github.com/keploy/integrations@REF`
+    # needs a REF that points at a commit containing it.
+    default: 'feat/postgres-v3-parser'
 
 runs:
   using: composite
