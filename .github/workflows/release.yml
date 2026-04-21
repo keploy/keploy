@@ -103,8 +103,37 @@ jobs:
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
+          SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
           SERVER_URL: https://api.keploy.io
+
+      # Re-publish the docker-tagged linux binaries produced by the
+      # `keploy-docker` goreleaser build (ldflags bake in
+      # SENTRY_DSN_DOCKER instead of SENTRY_DSN_BINARY). build-docker
+      # consumes these directly via Dockerfile.runtime — no
+      # in-container go build, no qemu arm64 cross-compile.
+      # Paths match goreleaser's default
+      # `dist/<id>_<os>_<arch>[_<goamd64>]/keploy` layout with globs
+      # to absorb the GOAMD64 suffix variant.
+      - name: Stage docker linux binaries for docker build
+        run: |
+          set -euxo pipefail
+          mkdir -p out/keploy-linux-amd64 out/keploy-linux-arm64
+          amd64_src=$(ls -d dist/keploy-docker_linux_amd64*/keploy | head -n1)
+          arm64_src=$(ls -d dist/keploy-docker_linux_arm64*/keploy | head -n1)
+          cp "$amd64_src" out/keploy-linux-amd64/keploy
+          cp "$arm64_src" out/keploy-linux-arm64/keploy
+          chmod +x out/keploy-linux-amd64/keploy out/keploy-linux-arm64/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-keploy-linux-amd64
+          path: out/keploy-linux-amd64/keploy
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-keploy-linux-arm64
+          path: out/keploy-linux-arm64/keploy
+          retention-days: 1
 
   build-docker:
     needs: build-go
@@ -117,11 +146,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.10.1
@@ -146,31 +170,31 @@ jobs:
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Prepare Dockerfile for Release Build
-        run: |
-          cp Dockerfile Dockerfile.release
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
-          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
-          sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
+      # Pull the prebuilt binaries staged by build-go into the layout
+      # Dockerfile.runtime expects: dist/keploy-linux-<arch>/keploy.
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: release-keploy-linux-amd64
+          path: dist/keploy-linux-amd64
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: release-keploy-linux-arm64
+          path: dist/keploy-linux-arm64
+      - name: Make binaries executable
+        run: chmod +x dist/keploy-linux-amd64/keploy dist/keploy-linux-arm64/keploy
 
       - name: Build and push Docker image
         id: build-and-push
         uses: docker/build-push-action@v6.19.2
         with:
           context: .
-          file: ./Dockerfile.release
-          ssh: default
+          file: ./Dockerfile.runtime
           platforms: linux/amd64, linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
-            VERSION=${{ env.VERSION }}
-            SERVER_URL=https://api.keploy.io
-            GITHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
 
       - name: Sign the published Docker image
         env:
