@@ -1984,17 +1984,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			// Update consumed mocks map.
-			if r.instrument {
-				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
-				}
-				for _, m := range consumedMocks {
-					totalConsumedMocks[m.Name] = m
-				}
-			}
-
 			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
 			// Override testPass if streaming comparison failed
 			// (HTTP matcher skips body comparison for non-JSON bodies by default)
