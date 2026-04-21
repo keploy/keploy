@@ -54,6 +54,37 @@ var caStoreUpdateCmd = []string{
 	"certctl rehash",
 }
 
+// caReadyOnce guards the single close of caReadyCh so markCAReady is safe to
+// call from multiple goroutines and multiple times during a single agent
+// lifecycle. caReadyCh is closed exactly once, on the first successful
+// SetupCA path, and remains closed for the rest of the process lifetime.
+var (
+	caReadyOnce sync.Once
+	caReadyCh   = make(chan struct{})
+)
+
+// CAReady returns a channel that is closed once the Keploy CA bundle has
+// been written to disk (either to the shared volume at /tmp/keploy-tls/ca.crt
+// in Docker/k8s mode, or into the system CA store in native mode).
+//
+// Callers that need to guarantee the CA file exists before signalling
+// dependent systems (e.g. Kubernetes pod readiness, docker-compose
+// healthchecks, or the /agent/ready HTTP endpoint) must wait on this
+// channel. A non-blocking select against this channel is the canonical
+// way to refuse readiness until SetupCA has completed.
+//
+// The channel is only closed on the SUCCESS path of SetupCA. If SetupCA
+// fails, the channel stays open and readiness keeps failing; an operator
+// must restart the agent (with fixed config) to recover. This is
+// deliberate — silently writing the readiness marker when the CA bundle
+// is missing would let app containers boot against a broken TLS trust
+// chain and produce silent failures in HTTPS egress.
+func CAReady() <-chan struct{} { return caReadyCh }
+
+// markCAReady closes the CAReady channel exactly once. Safe to call from
+// multiple goroutines and multiple times.
+func markCAReady() { caReadyOnce.Do(func() { close(caReadyCh) }) }
+
 // SetupCA setups custom certificate authority to handle TLS connections
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
@@ -118,6 +149,12 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	}
 
 	logger.Debug("TLS Certificates successfully exported to shared volume")
+	// Signal CA-bundle readiness to downstream consumers (e.g. the
+	// /agent/ready HTTP handler) only after the ca.crt + truststore
+	// have been written successfully. On the error paths above we
+	// return early without signalling — readiness stays unlatched so
+	// operators can restart the agent with fixed config.
+	markCAReady()
 	return nil
 }
 
@@ -149,7 +186,14 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 
 		// Set environment variables for Node.js and Python to use the custom CA
-		return SetEnvForPath(logger, tempCertPath)
+		if err := SetEnvForPath(logger, tempCertPath); err != nil {
+			return err
+		}
+		// Mirror the shared-volume path: only signal readiness when the
+		// full install chain (cert import + java keystore + env vars)
+		// has succeeded.
+		markCAReady()
+		return nil
 	}
 
 	// Linux/Unix Specific Logic
@@ -192,9 +236,16 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 
 	// Set Env Vars pointing to the installed cert
 	if finalCAPath != "" {
-		return SetEnvForPath(logger, finalCAPath)
+		if err := SetEnvForPath(logger, finalCAPath); err != nil {
+			return err
+		}
 	}
 
+	// Native mode completed successfully — the CA is now installed in
+	// the system store (and the Java keystore if Java is present).
+	// Signal readiness so downstream consumers (e.g. /agent/ready) can
+	// unblock.
+	markCAReady()
 	return nil
 }
 
