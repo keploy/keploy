@@ -315,8 +315,17 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
-		utils.LogError(t.logger, err, "failed to write config file")
-		return nil
+		// Return the error so callers (cli/config.go handler,
+		// CmdConfigurator.CreateConfigFile) don't falsely claim
+		// "Config file generated successfully" — they each check
+		// the error already. Prior behavior of returning nil
+		// here was a latent lie that let CI scripts see a
+		// "success" line plus an ERROR line for the same op.
+		utils.LogError(t.logger, err, "failed to write config file",
+			zap.String("path", filePath),
+			zap.String("next_step", "verify the directory exists and the user running keploy has write permission; remove any read-only keploy.yml left over from a prior run (e.g. via sudo chown or rm) before re-invoking `keploy config --generate`"),
+		)
+		return err
 	}
 
 	err = os.Chmod(filePath, 0777) // Set permissions to 777

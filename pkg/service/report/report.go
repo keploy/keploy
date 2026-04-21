@@ -20,6 +20,7 @@ import (
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -397,6 +398,38 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return r.generateJUnit(reports)
 	}
 
+	if r.config.JSONOutput {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for json output: %w", err)
+		}
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			for name, rep := range reports {
+				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				// Recompute all counters to match filtered tests
+				rep.Total = len(rep.Tests)
+				rep.Success = 0
+				rep.Failure = 0
+				rep.Ignored = 0
+				rep.Obsolete = 0
+				for _, t := range rep.Tests {
+					switch t.Status {
+					case models.TestStatusPassed:
+						rep.Success++
+					case models.TestStatusFailed:
+						rep.Failure++
+					case models.TestStatusIgnored:
+						rep.Ignored++
+					case models.TestStatusObsolete:
+						rep.Obsolete++
+					}
+				}
+				reports[name] = rep
+			}
+		}
+		return utils.NewJSONWriter(true).Write(reports)
+	}
+
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
@@ -454,6 +487,9 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 	var tr models.TestReport
 	err = dec.Decode(&tr)
 	if err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
+		if r.config.JSONOutput {
+			return utils.NewJSONWriter(true).Write(tr)
+		}
 		// Summary-only
 		if r.config.Report.Summary {
 			m := map[string]*models.TestReport{tr.Name: &tr}
@@ -505,6 +541,10 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 	if err != nil {
 		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
 		return err
+	}
+
+	if r.config.JSONOutput {
+		return utils.NewJSONWriter(true).Write(lg)
 	}
 
 	// Handle summary request for legacy format

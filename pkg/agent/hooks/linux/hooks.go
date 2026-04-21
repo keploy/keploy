@@ -58,7 +58,7 @@ type Hooks struct {
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
-	agentRegistartionMap  *ebpf.Map
+	agentRegistrationMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -158,7 +158,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
-	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.agentRegistrationMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -188,6 +188,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		utils.LogError(h.logger, err, "failed to detect the cgroup path")
 		return err
 	}
+
+	// Detect and clean orphaned BPF programs from crashed previous
+	// runs. This must happen BEFORE attaching our new programs to
+	// avoid "program already attached" failures. Safety is enforced
+	// inside the helper: it name-matches keployBPFProgNames and
+	// gates on HasOtherKeployProcesses(os.Getpid()) so it cannot
+	// detach programs belonging to a live keploy sibling. The helper
+	// also emits its own Info log when it cleans anything, so no
+	// log is needed here.
+	DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath)
+
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
@@ -350,6 +361,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
 		}
+	}
+
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&agentInfo)
 	}
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
