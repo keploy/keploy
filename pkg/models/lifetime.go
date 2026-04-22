@@ -3,7 +3,6 @@ package models
 import (
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 )
 
@@ -319,18 +318,24 @@ func LegacyKindFallbackFires() uint64 {
 // have always been implicitly session-reusable. The fallback here
 // preserves that semantic explicitly.
 //
-// The built-in switch enumerates only OSS-owned kinds. Out-of-tree
-// parser packages (Enterprise Redis/Kafka/HBase, downstream third
-// parties) extend this set at init time via
-// RegisterImplicitSessionKind so pre-tag recordings made by earlier
-// recorders that used those kinds keep replaying in the session pool
-// rather than being reassigned to per-test windows.
-//
-// Additions to the built-in switch need per-protocol justification:
-// "un-tagged mocks of this kind should always be session"; the right
-// fix for a newly-observed per-test use case of a listed kind is to
-// tag at record time (via a protocol-specific classifier like
+// The set matches the pre-unification disk-layer kind-switch
+// byte-for-byte so every pre-tag recording replays identically.
+// Additions need per-protocol justification: "un-tagged mocks of
+// this kind should always be session"; the right fix for a
+// newly-observed per-test use case of a listed kind is to tag at
+// record time (via a protocol-specific classifier like
 // recordMock's type=mocks/config/connection branches).
+//
+// Out-of-tree parsers (Enterprise Redis / Kafka / HBase) do NOT get
+// added here. Their recorders already stamp type=config / mocks /
+// connection at record time, so DeriveLifetime's tag-based switch
+// routes them correctly without a kind-fallback. Listing them here
+// would additionally fire the lax-mode promotion below for their
+// explicitly-tagged "mocks" captures and wrongly route those to
+// the session pool — which breaks the per-test consumption the
+// matcher depends on (observed in the kafka-ecommerce e2e as
+// dataMocksConsumed=0 when tagged Kafka Produce mocks were force-
+// promoted to session).
 //
 // The LegacyKindFallbackFires counter still tracks uses for
 // observability, but non-zero fires are EXPECTED for HTTP/Generic
@@ -340,48 +345,7 @@ func kindsWithImplicitSessionLifetime(k Kind) bool {
 	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
-	return IsImplicitSessionKind(k)
-}
-
-// implicitSessionKinds is the runtime-extensible registry that backs
-// kindsWithImplicitSessionLifetime. Keeping it separate from the
-// built-in switch is deliberate: OSS enumerates only the kinds it
-// owns, and parser packages that live outside OSS opt in here instead
-// of editing the switch. That keeps OSS free of protocol-specific
-// branches while still preserving the "un-tagged => session" contract
-// for legacy recordings made by those parsers.
-var implicitSessionKinds sync.Map // map[Kind]struct{}
-
-// RegisterImplicitSessionKind marks a Kind whose un-tagged mocks
-// should default to session-lifetime in DeriveLifetime. This is the
-// extension point for out-of-tree parsers — for example Enterprise
-// Redis/Kafka/HBase — that produced pre-tag recordings treated as
-// session-reusable by the old disk-layer kind-switch. Registering
-// here re-creates that behavior for legacy mocks without requiring
-// OSS to know the parser exists.
-//
-// Call from the parser package's init() (typically alongside
-// mockdb.RegisterMockYAMLMapper). Empty Kind is a no-op; duplicate
-// registrations are harmless. There is intentionally no Unregister:
-// registration is process-lifetime, matching Go init semantics.
-func RegisterImplicitSessionKind(k Kind) {
-	if k == "" {
-		return
-	}
-	implicitSessionKinds.Store(k, struct{}{})
-}
-
-// IsImplicitSessionKind reports whether k was registered via
-// RegisterImplicitSessionKind. Exported so other OSS packages that
-// need the same classification (for example the yaml mockdb layer
-// when it decides which bucket an un-tagged mock belongs to) read
-// from one source of truth instead of duplicating the set.
-func IsImplicitSessionKind(k Kind) bool {
-	if k == "" {
-		return false
-	}
-	_, ok := implicitSessionKinds.Load(k)
-	return ok
+	return false
 }
 
 // mysqlIsSessionReusableCommand returns true when a MySQL mock

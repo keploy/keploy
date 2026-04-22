@@ -45,13 +45,16 @@ const gobMockMagic = "keploy-gob-v1\n"
 // gob read paths must share this classification verbatim so replay
 // behavior does not diverge based on on-disk format.
 //
-// The switch enumerates only OSS-owned kinds. Out-of-tree parser
-// packages (Enterprise Redis/Kafka/HBase, downstream third parties)
-// that want their un-tagged pre-lifetime recordings to land in the
-// unfiltered/config pool opt in via
-// models.RegisterImplicitSessionKind — the same registry backs
-// DeriveLifetime's kind-fallback, so both paths stay consistent and
-// OSS stays free of protocol-specific branches.
+// The switch enumerates only OSS-owned kinds whose recorders do not
+// tag lifetime at record time, so mocks need a kind-level fallback
+// to land in the config pool. Out-of-tree parsers (Enterprise Redis
+// / Kafka / HBase, downstream third parties) are NOT listed here:
+// their recorders stamp type=config / mocks / connection, so the
+// explicit `mock.Spec.Metadata["type"] == "config"` check at the
+// caller already routes their config mocks correctly. Adding them
+// would wrongly send every type=mocks data mock to the config pool
+// as well, which breaks the per-test consumption contract the
+// replayer's DeleteFilteredMock path depends on.
 //
 // PostgresV2 is intentionally listed here even though it also passes
 // the GetFilteredMocks path (matches YAML's current behavior — both
@@ -62,7 +65,7 @@ func isUnfilteredMockKind(kind models.Kind) bool {
 	case models.GENERIC, models.Postgres, models.PostgresV2, models.HTTP, models.HTTP2, models.MySQL, models.DNS:
 		return true
 	}
-	return models.IsImplicitSessionKind(kind)
+	return false
 }
 
 // configuredMockFormat holds the mock format selected via config file
