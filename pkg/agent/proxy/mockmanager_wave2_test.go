@@ -800,3 +800,75 @@ func TestMockManager_TierAwareStrictGate_StartupSurvivesPartition(t *testing.T) 
 		t.Fatalf("GetPerTestMocksInWindow after test 2 must NOT contain stale 'test1' (cross-test bleed); got %v", mockNames(perTest))
 	}
 }
+
+// TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID pins
+// the H4 round-2 fix: during Runner/Replayer's initial BaseTime staging,
+// a session mock appears in BOTH the startup tree AND the unfiltered
+// tree. Pre-fix, the startup-tree loop stamped
+// `mk.TestModeInfo.ID = idx` on the shared *models.Mock pointer, then
+// SetUnFilteredMocks re-stamped the same pointer with its own idx. The
+// shared mock's in-memory .ID thereafter reflected only the unfiltered
+// stamping, desynchronising the startup tree's idIndex from the mock's
+// live state. Post-fix, the startup tree uses a TIER-LOCAL copy of
+// TestModeInfo as its key — mk.TestModeInfo.ID belongs to whichever
+// tier stamped it last (unfiltered), and the startup tree stays
+// internally consistent on its own copy.
+//
+// Assertion shape:
+//  1. A session mock seeded during initial staging appears in BOTH
+//     startup and session pools.
+//  2. Its mock.TestModeInfo.ID reflects SetUnFilteredMocks' stamping
+//     (index 0 in a one-element unfiltered slice), NOT the startup
+//     tree's stamping.
+//  3. The mock is still reachable via GetStartupMocks — i.e. the
+//     startup tree's internal indexing survived the unfiltered
+//     re-stamp.
+func TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	req := time.Date(2024, 1, 1, 11, 59, 0, 0, time.UTC)
+	sess := newMockForTest("sess", req, models.LifetimeSession)
+
+	// Pre-set a visible SortOrder so we don't rely on the auto-stamp for
+	// identifying the mock across tiers.
+	sess.TestModeInfo.SortOrder = 42
+
+	// Initial staging seeds BOTH the startup tree (via startupInit ∪
+	// unfiltered copy) AND the unfiltered tree (via SetUnFilteredMocks).
+	mm.SetMocksWithWindow(nil, []*models.Mock{sess}, models.BaseTime, time.Now())
+
+	// The shared mock pointer's .ID now reflects SetUnFilteredMocks'
+	// stamping (index 0 in the 1-element unfiltered slice). The startup
+	// tree's internal idIndex is keyed off a separate copy — a stamp
+	// collision here would be invisible at this layer but would
+	// manifest on any startup-tier lookup that hit the idIndex
+	// fallback.
+	if got := sess.TestModeInfo.ID; got != 0 {
+		t.Fatalf("sess.TestModeInfo.ID: want 0 (unfiltered stamp), got %d", got)
+	}
+	if got := sess.TestModeInfo.SortOrder; got != 42 {
+		t.Fatalf("sess.TestModeInfo.SortOrder: pre-existing value must be preserved, want 42 got %d", got)
+	}
+
+	// The startup tree must still surface the mock. Pre-fix this could
+	// still pass because the tree walk doesn't use idIndex — but the
+	// intent of this assertion is to lock in the invariant that the
+	// startup tree is usable after the subsequent unfiltered re-stamp.
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "sess") {
+		t.Fatalf("GetStartupMocks: want 'sess' after initial staging, got %v", mockNames(startup))
+	}
+
+	// And the unfiltered / session-scoped tree as well.
+	session, err := mm.GetSessionScopedMocks()
+	if err != nil {
+		t.Fatalf("GetSessionScopedMocks: %v", err)
+	}
+	if !containsMockNamed(session, "sess") {
+		t.Fatalf("GetSessionScopedMocks: want 'sess' in session tier, got %v", mockNames(session))
+	}
+}

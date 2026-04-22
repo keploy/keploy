@@ -775,17 +775,42 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
 	newStartup := NewTreeDb(customComparator)
+	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
+	// key rather than mutating mk.TestModeInfo.ID in place. The same
+	// *models.Mock pointer can appear in BOTH startupInit and
+	// unfilteredForTree during initial staging (see the BaseTime branch
+	// above that copies unfiltered→startupInit); a subsequent
+	// SetUnFilteredMocks call at L~812 re-stamps mk.TestModeInfo.ID to
+	// its index in the unfiltered slice, invalidating any startup-tier
+	// reference that relied on the original stamp. A mock pointer's
+	// .ID then no longer matches the startup tree's idIndex, so a later
+	// (currently hypothetical but structurally reachable — e.g. future
+	// UpdateStartupMock / DeleteStartupMock paths, or any parser that
+	// indexes startup mocks by mock.TestModeInfo.ID for its own cache)
+	// lookup that derives the key from the live mock's state would
+	// miss. By keying the startup tree off a local copy of
+	// TestModeInfo, we keep the startup tree internally consistent
+	// (idIndex matches the inserted key) while leaving the shared
+	// mock's .ID free to be re-stamped by SetUnFilteredMocks without
+	// corrupting the startup index.
 	for idx, mk := range startupInit {
 		if mk == nil {
 			continue
 		}
-		// Stamp a SortOrder for tree insert if missing so
-		// comparator ordering stays deterministic.
+		// Stamp a SortOrder on the shared mock if missing so the mock
+		// has a deterministic comparator field in every tier it lives
+		// in. SortOrder is derived from the recording and doesn't
+		// collide across re-stampings the way ID does.
 		if mk.TestModeInfo.SortOrder == 0 {
 			mk.TestModeInfo.SortOrder = int64(idx) + 1
 		}
-		mk.TestModeInfo.ID = idx
-		newStartup.insert(mk.TestModeInfo, mk)
+		// Tier-local key: copy TestModeInfo and stamp the startup-tree
+		// ID on the copy. mk.TestModeInfo.ID is left untouched so a
+		// later SetUnFilteredMocks re-stamp does not corrupt the
+		// startup tree's idIndex.
+		startupKey := mk.TestModeInfo
+		startupKey.ID = idx
+		newStartup.insert(startupKey, mk)
 	}
 	m.treesMu.Lock()
 	m.startup = newStartup
