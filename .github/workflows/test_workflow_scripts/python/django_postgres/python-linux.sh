@@ -2,17 +2,13 @@
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Checkout to the specified branch
-git fetch origin
-git checkout native-linux
-
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # Start the postgres database
 docker compose up -d
 
 # Install dependencies
-pip3 install -r requirements.txt
+python -m pip install -r requirements.txt
 
 # Setup environment
 export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
@@ -28,44 +24,24 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
-send_request(){
-    sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://127.0.0.1:8000/; then
-            app_started=true
-        fi
-        sleep 3 # wait for 3 seconds before checking again.
-    done
-    echo "App started"
-    # Start making curl calls to record the testcases and mocks.
-    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
-        "name": "Jane Smith",
-        "email": "jane.smith@example.com",
-        "password": "smith567",
-        "website": "www.janesmith.com"
-    }'
-    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
-        "name": "John Doe",
-        "email": "john.doe@example.com",
-        "password": "john567",
-        "website": "www.johndoe.com"
-    }'
-    curl --location 'http://127.0.0.1:8000/user/'
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    sleep 10
+stop_recording() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    if [ -n "$REC_PID" ]; then
+        echo "$REC_PID Keploy PID"
+        echo "Killing keploy"
+        sudo kill -INT "$REC_PID" 2>/dev/null || true
+    else
+        echo "No keploy recorder process found"
+    fi
+}
 
-    # DEBUG: if keploy doesn't exit within 15 seconds, dump goroutine stacks
-    # for BOTH the CLI process AND the keploy agent subprocess
+dump_and_force_kill_if_stuck() {
+    local record_pid="$1"
     (
         sleep 15
-        if kill -0 "$REC_PID" 2>/dev/null; then
+        if [ -n "$record_pid" ] && kill -0 "$record_pid" 2>/dev/null; then
             # Find the keploy agent subprocess (child of the CLI)
-            AGENT_PID="$(pgrep -P "$REC_PID" -f 'keploy' 2>/dev/null || true)"
+            AGENT_PID="$(pgrep -P "$record_pid" -f 'keploy' 2>/dev/null || true)"
 
             if [ -n "$AGENT_PID" ]; then
                 echo "===== KEPLOY AGENT SUBPROCESS HUNG (PID=$AGENT_PID) — DUMPING GOROUTINE STACKS ====="
@@ -73,26 +49,66 @@ send_request(){
                 sleep 3
             fi
 
-            echo "===== KEPLOY CLI HUNG (PID=$REC_PID) — DUMPING GOROUTINE STACKS ====="
-            sudo kill -QUIT "$REC_PID" 2>/dev/null || true
+            echo "===== KEPLOY CLI HUNG (PID=$record_pid) — DUMPING GOROUTINE STACKS ====="
+            sudo kill -QUIT "$record_pid" 2>/dev/null || true
             sleep 3
 
             # Force kill both if still alive
             if [ -n "$AGENT_PID" ] && kill -0 "$AGENT_PID" 2>/dev/null; then
                 sudo kill -9 "$AGENT_PID" 2>/dev/null || true
             fi
-            if kill -0 "$REC_PID" 2>/dev/null; then
+            if kill -0 "$record_pid" 2>/dev/null; then
                 echo "===== FORCE KILLING KEPLOY ====="
-                sudo kill -9 "$REC_PID" 2>/dev/null || true
+                sudo kill -9 "$record_pid" 2>/dev/null || true
             fi
         fi
     ) &
+}
+
+wait_for_app() {
+    for attempt in {1..40}; do
+        if curl -fsS --max-time 5 http://127.0.0.1:8000/ >/dev/null; then
+            echo "App started"
+            return 0
+        fi
+        echo "Waiting for app on 127.0.0.1:8000 (attempt $attempt/40)"
+        sleep 3
+    done
+
+    echo "::error::App did not become ready on 127.0.0.1:8000 within 120 seconds"
+    stop_recording
+    dump_and_force_kill_if_stuck "$REC_PID"
+    return 1
+}
+
+send_request(){
+    sleep 10
+    wait_for_app || return 1
+    # Start making curl calls to record the testcases and mocks.
+    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+        "name": "Jane Smith",
+        "email": "jane.smith@example.com",
+        "password": "smith567",
+        "website": "www.janesmith.com"
+    }' || return 1
+    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+        "name": "John Doe",
+        "email": "john.doe@example.com",
+        "password": "john567",
+        "website": "www.johndoe.com"
+    }' || return 1
+    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' || return 1
+    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    sleep 10
+    stop_recording
+    dump_and_force_kill_if_stuck "$REC_PID"
 }
 
 # Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
+    request_pid=$!
     $RECORD_BIN record -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
@@ -105,7 +121,10 @@ for i in {1..2}; do
         exit 1
     fi
     sleep 5
-    wait
+    if ! wait "$request_pid"; then
+        echo "::error::Request driver failed while recording iteration ${i}"
+        exit 1
+    fi
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
