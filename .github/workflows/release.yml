@@ -67,7 +67,7 @@ jobs:
           # parser, so release builds stay reproducible even if the
           # branch is renamed or deleted. Revert to `main` (drop this
           # key) once keploy/integrations#130 merges.
-          integration-ref: ff186820bc9a11700953a3242518aa1445e1cc46
+          integration-ref: e279bd0651b89eae27faf24c1d5957b069db8d7f
 
 #      - name: Checkout UI
 #        uses: actions/checkout@v4
