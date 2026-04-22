@@ -54,6 +54,14 @@ jobs:
           integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
 
       - name: Build Keploy (non-race)
+        # CGO_ENABLED=1 explicit so the pg_query_go (libpg_query) cgo
+        # link succeeds. ubuntu-latest ships gcc out-of-the-box; on
+        # native linux Go already defaults CGO_ENABLED to 1, but we
+        # pin it so a cross-compile slipping in here fails loud
+        # instead of silently producing a non-cgo binary that
+        # panics on first pg_query.Parse call.
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p out/build-no-race
           go build -tags=viper_bind_struct -o out/build-no-race/keploy
@@ -106,6 +114,11 @@ jobs:
           integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
 
       - name: Build Keploy (non-race, linux/arm64)
+        # CGO_ENABLED=1 explicit — see the build-and-upload job
+        # comment. ubuntu-24.04-arm ships gcc; the aarch64 default
+        # CGO_ENABLED matches the amd64 one.
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p out/build-no-race-linux-arm64
           go build -tags=viper_bind_struct -o out/build-no-race-linux-arm64/keploy
@@ -116,9 +129,16 @@ jobs:
 
   build-darwin-arm64:
     # darwin/arm64 binary for the macOS self-hosted native tests.
-    # Cross-compiled from linux — no CGO / race, matches prior flow.
+    #
+    # Session P: moved from ubuntu-latest (linux→darwin/arm64
+    # cross-compile, CGO_ENABLED=0) to macos-latest (native arm64
+    # build, CGO_ENABLED=1). pg_query_go links libpg_query via cgo
+    # and a linux runner cannot cross-compile darwin cgo without an
+    # osxcross toolchain, which is heavy to maintain for a single
+    # build leg. macos-latest is already arm64 on the GitHub-hosted
+    # fleet so the build is native (no cross-compile).
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -135,8 +155,12 @@ jobs:
           integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
 
       - name: Build Keploy (darwin/arm64)
+        # Native arm64 build — macos-latest GHA runners are
+        # Apple-silicon as of 2024. GOOS/GOARCH left unset so the
+        # build uses the host arch (darwin/arm64); CGO_ENABLED
+        # defaults to 1 on native builds.
         run: |
-          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with:
           name: build-darwin
