@@ -1394,7 +1394,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Create TLSUpgrader in handleConnection scope so it holds pointers to
 			// the real srcConn/dstConn variables (not copies in buildRecordSession).
 			var upgrader models.TLSUpgrader
-			if parserType == integrations.MYSQL || parserType == integrations.POSTGRES_V2 {
+			if parserType == integrations.MYSQL ||
+				parserType == integrations.POSTGRES_V2 ||
+				parserType == integrations.POSTGRES_V3 {
 				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
