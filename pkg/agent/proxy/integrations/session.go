@@ -76,10 +76,10 @@ type RecordSession struct {
 // by an outer parser, which is the usual chaining contract.
 type PostRecordHook func(*models.Mock)
 
-// AddPostRecordHook appends h to the session's post-record chain. If a
-// previous hook is already installed, it runs AFTER h — so each wrapper
-// parser sees the mock already annotated by its inner parser (if any) and
-// can layer its own annotations on top without clobbering them.
+// AddPostRecordHook adds h to the front of the session's post-record chain
+// so h runs before any previously-installed hook. The previously-installed
+// hook (if any) then observes the mock already annotated by h and can layer
+// its own annotations on top without clobbering them.
 //
 // Calling with a nil hook, or on a nil *RecordSession, is a no-op. Making
 // the nil-receiver case safe lets defensive call sites drop their own nil
