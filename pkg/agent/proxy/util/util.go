@@ -416,10 +416,17 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
+//
+// Previously this loop retried an EOF (with n==0) up to five times with a
+// 100 ms sleep between attempts. The retry originated from a since-fixed
+// bug where a spurious short EOF could race real data, but under current
+// invariants a zero-byte EOF is authoritative: the peer has closed the
+// stream and no additional bytes will arrive. On the record hot path
+// against slow remotes this retry added up to 500 ms of pure wait per
+// connection close. The retry and its sleep have been removed; EOF now
+// returns immediately with whatever bytes were already read.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
 
 	// Channel to communicate read results
 	readResult := make(chan struct {
@@ -462,18 +469,11 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 		case result := <-readResult:
 			if result.n > 0 {
 				buffer = append(buffer, result.buf[:result.n]...)
-				emptyReads = 0 // Reset the counter because we got some data
 			}
 
 			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
-				}
+				// EOF (or any other error) is authoritative; return
+				// immediately without the historical 100ms×5 retry loop.
 				return buffer, result.err
 			}
 			if result.n < len(result.buf) {
