@@ -336,7 +336,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 // the switch use identical guidance and operators get a consistent
 // signal in logs.
 const (
-	nextStepPostgresV3Encode = "The mock could not be serialised to yaml — inspect mock_name + mock_kind for the offending record, then check the PostgresV3*Spec struct for non-serialisable data (nil slice elements, invalid UTF-8, or gob-unsafe pointers). Re-record the affected test-set if the on-disk record is corrupt."
+	nextStepPostgresV3Encode = "The mock could not be serialised to yaml — inspect mock_name + mock_kind for the offending record, then check the PostgresV3*Spec struct for YAML-specific failure modes: embedded NUL bytes or other control characters (yaml.v3 rejects them outright), invalid UTF-8 in any string field (e.g. raw binary leaking into an un-base64'd column cell), or anchor/alias cycles in map-typed fields. Re-record the affected test-set if the source data is corrupt. (Gob-path issues like nil slice elements are tracked separately — this remediation covers the yaml marshal path only.)"
 	nextStepPostgresV3Decode = "The stored PostgresV3 yaml block could not be parsed — compare the mock_kind against the expected envelope (PostgresV3Session / Catalog / Data / Query / Generator) and verify the file was written by a compatible keploy version. If the file was edited by hand, restore from source-of-truth or re-record; otherwise upgrade keploy so the running binary matches the on-disk schema."
 )
 
