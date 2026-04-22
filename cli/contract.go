@@ -47,6 +47,8 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger.Warn("`keploy contract generate` is a community-maintained OpenAPI spec generator; a fully managed, production-grade version is available as part of Keploy Enterprise")
+
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
