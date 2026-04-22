@@ -17,6 +17,7 @@ jobs:
   golang_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
