@@ -51,7 +51,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 6ba1153e54bdd969aa8fb14501bc0747fbfe65a2
+          integration-ref: fadc3a4ac657fb39ba72ac30e299f79588115a41
 
       - name: Build Keploy (non-race)
         run: |
@@ -103,7 +103,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 6ba1153e54bdd969aa8fb14501bc0747fbfe65a2
+          integration-ref: fadc3a4ac657fb39ba72ac30e299f79588115a41
 
       - name: Build Keploy (non-race, linux/arm64)
         run: |
@@ -132,7 +132,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 6ba1153e54bdd969aa8fb14501bc0747fbfe65a2
+          integration-ref: fadc3a4ac657fb39ba72ac30e299f79588115a41
 
       - name: Build Keploy (darwin/arm64)
         run: |
@@ -403,7 +403,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 6ba1153e54bdd969aa8fb14501bc0747fbfe65a2
+          integration-ref: fadc3a4ac657fb39ba72ac30e299f79588115a41
 
       - name: Add MinGW gcc to PATH
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
