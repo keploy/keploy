@@ -13,6 +13,7 @@
 package mockdb
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -213,6 +214,73 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Spec.PostgresV3Query, in.Spec.PostgresV3Query) {
 		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Query, got.Spec.PostgresV3Query)
+	}
+}
+
+// TestYAMLRoundTrip_PostgresV3_NilPayloadEncodeRejected pins the
+// encode-side nil-payload guard for every PostgresV3 Kind. Writing
+// `<field>: null` to disk silently corrupts downstream replay (the
+// loader dereferences the typed payload unconditionally), so the
+// encoder has to fail fast with the typed sentinel error.
+func TestYAMLRoundTrip_PostgresV3_NilPayloadEncodeRejected(t *testing.T) {
+	kinds := []models.Kind{
+		models.PostgresV3Session,
+		models.PostgresV3Catalog,
+		models.PostgresV3Data,
+		models.PostgresV3Query,
+		models.PostgresV3Generator,
+	}
+	for _, k := range kinds {
+		t.Run(string(k), func(t *testing.T) {
+			// All payload pointers left nil on purpose.
+			in := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: k}
+			_, err := EncodeMock(in, zap.NewNop())
+			if err == nil {
+				t.Fatalf("%s: EncodeMock unexpectedly succeeded on nil payload", k)
+			}
+			if !errors.Is(err, errPostgresV3NilPayload) {
+				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", k, err)
+			}
+		})
+	}
+}
+
+// TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected pins the
+// decode-side guard. A hand-edited mocks.yaml with `session: null`
+// (or any other kind's payload field explicitly null) must not load
+// silently — downstream engines assume non-nil payloads and would
+// NPE at replay time. The decode helper must surface the typed
+// sentinel so operators see the actionable next_step in logs.
+func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
+	cases := []struct {
+		kind models.Kind
+		body string
+	}{
+		{models.PostgresV3Session, "metadata: {}\nsession: null\n"},
+		{models.PostgresV3Catalog, "metadata: {}\ncatalog: null\n"},
+		{models.PostgresV3Data, "metadata: {}\ndata: null\n"},
+		{models.PostgresV3Query, "metadata: {}\nquery: null\n"},
+		{models.PostgresV3Generator, "metadata: {}\ngenerator: null\n"},
+	}
+	for _, c := range cases {
+		t.Run(string(c.kind), func(t *testing.T) {
+			var spec yamlLib.Node
+			if err := yamlLib.Unmarshal([]byte(c.body), &spec); err != nil {
+				t.Fatalf("%s: yaml.Unmarshal fixture: %v", c.kind, err)
+			}
+			doc := &pyaml.NetworkTrafficDoc{
+				Version: "api.keploy.io/v1beta1",
+				Kind:    c.kind,
+				Spec:    spec,
+			}
+			_, err := DecodeMocks([]*pyaml.NetworkTrafficDoc{doc}, zap.NewNop())
+			if err == nil {
+				t.Fatalf("%s: DecodeMocks unexpectedly accepted null payload", c.kind)
+			}
+			if !errors.Is(err, errPostgresV3NilPayload) {
+				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", c.kind, err)
+			}
+		})
 	}
 }
 

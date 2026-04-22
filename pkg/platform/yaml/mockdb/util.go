@@ -249,6 +249,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	case models.PostgresV3Session:
 		// Structured session-profile spec; encode directly — no
 		// request/response packet arrays for this kind.
+		if mock.Spec.PostgresV3Session == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3Session with nil payload",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
 		spec := postgresV3SessionYamlSpec{
 			Metadata:         mock.Spec.Metadata,
 			Session:          mock.Spec.PostgresV3Session,
@@ -263,6 +270,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.PostgresV3Catalog:
+		if mock.Spec.PostgresV3Catalog == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3Catalog with nil payload",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
 		spec := postgresV3CatalogYamlSpec{
 			Metadata:         mock.Spec.Metadata,
 			Catalog:          mock.Spec.PostgresV3Catalog,
@@ -277,6 +291,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.PostgresV3Data:
+		if mock.Spec.PostgresV3Data == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3Data with nil payload",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
 		spec := postgresV3DataYamlSpec{
 			Metadata:         mock.Spec.Metadata,
 			Data:             mock.Spec.PostgresV3Data,
@@ -291,6 +312,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.PostgresV3Query:
+		if mock.Spec.PostgresV3Query == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3Query with nil payload",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
 		spec := postgresV3QueryYamlSpec{
 			Metadata:         mock.Spec.Metadata,
 			Query:            mock.Spec.PostgresV3Query,
@@ -305,6 +333,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.PostgresV3Generator:
+		if mock.Spec.PostgresV3Generator == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3Generator with nil payload",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
 		spec := postgresV3GeneratorYamlSpec{
 			Metadata:         mock.Spec.Metadata,
 			Generator:        mock.Spec.PostgresV3Generator,
@@ -338,7 +373,23 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 const (
 	nextStepPostgresV3Encode = "The mock could not be serialised to yaml — inspect mock_name + mock_kind for the offending record, then check the PostgresV3*Spec struct for YAML-specific failure modes: embedded NUL bytes or other control characters (yaml.v3 rejects them outright), invalid UTF-8 in any string field (e.g. raw binary leaking into an un-base64'd column cell), or anchor/alias cycles in map-typed fields. Re-record the affected test-set if the source data is corrupt. (Gob-path issues like nil slice elements are tracked separately — this remediation covers the yaml marshal path only.)"
 	nextStepPostgresV3Decode = "The stored PostgresV3 yaml block could not be parsed — compare the mock_kind against the expected envelope (PostgresV3Session / Catalog / Data / Query / Generator) and verify the file was written by a compatible keploy version. If the file was edited by hand, restore from source-of-truth or re-record; otherwise upgrade keploy so the running binary matches the on-disk schema."
+	// nextStepPostgresV3NilPayload — emitted when the kind-specific
+	// payload pointer is nil on either side of the yaml cycle.
+	// Accepting a nil pointer would either write `<field>: null` to
+	// disk (breaking downstream replay code which dereferences the
+	// payload unconditionally), or silently load an invalid mock into
+	// memory. Fail fast and tell the caller what to check.
+	nextStepPostgresV3NilPayload = "The PostgresV3 mock is missing its typed payload — for each Kind the matching payload pointer must be non-nil (PostgresV3Session requires mock.Spec.PostgresV3Session, PostgresV3Catalog requires PostgresV3Catalog, etc.). Check the call site that constructed the mock (recorder encode path or unit-test fixture) and ensure the correct *Spec is populated before persistence; if this surfaced during a load, the on-disk record is corrupt and the test-set should be re-recorded."
 )
+
+// errPostgresV3NilPayload is returned from EncodeMock / DecodeMocks
+// when a PostgresV3* mock arrives without its kind-specific payload.
+// Kept as a typed error so callers can match on it if they want to
+// skip/repair instead of aborting the whole file — the default mock
+// pipeline surfaces it all the way up and aborts record/replay,
+// which is the right behaviour because a null payload silently
+// corrupts replay.
+var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
 
 type postgresV3SessionYamlSpec struct {
 	Metadata         map[string]string             `yaml:"metadata,omitempty"`
@@ -535,6 +586,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
+			if spec.Session == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3Session yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
 			mock.Spec = models.MockSpec{
 				Metadata:          spec.Metadata,
 				PostgresV3Session: spec.Session,
@@ -549,6 +607,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 					zap.String("mock_kind", string(m.Kind)),
 					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
+			}
+			if spec.Catalog == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3Catalog yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:          spec.Metadata,
@@ -565,6 +630,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
+			if spec.Data == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3Data yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
 			mock.Spec = models.MockSpec{
 				Metadata:         spec.Metadata,
 				PostgresV3Data:   spec.Data,
@@ -580,6 +652,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
+			if spec.Query == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3Query yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
 			mock.Spec = models.MockSpec{
 				Metadata:         spec.Metadata,
 				PostgresV3Query:  spec.Query,
@@ -594,6 +673,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 					zap.String("mock_kind", string(m.Kind)),
 					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
+			}
+			if spec.Generator == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3Generator yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
 			}
 			mock.Spec = models.MockSpec{
 				Metadata:            spec.Metadata,
