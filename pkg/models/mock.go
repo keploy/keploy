@@ -41,6 +41,23 @@ const (
 	DNS         Kind = "DNS"
 )
 
+// MockName constants for the PostgresV3 parser. The integrations-side
+// recorder currently hardcodes these values as string literals when
+// stamping Mock.Name; exposing them on the keploy side lets a future
+// integrations-repo commit migrate to the shared constants without
+// drifting the spelling (a typo in the recorder would silently split
+// the pool into two effectively unrelated subsets).
+//
+// Mock.Name values are identifiers, not display text — they participate
+// in hit-count indexing, dedup, and by-name lookups in MockManager.
+// Keep these exact strings stable across releases; if the spelling ever
+// needs to change it must be coordinated with the integrations repo and
+// with any recorded YAML artefacts that reference the old names.
+const (
+	MockNamePostgresV3Query   = "PostgresV3Query"
+	MockNamePostgresV3Session = "PostgresV3Session"
+)
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
