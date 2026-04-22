@@ -398,11 +398,35 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// This must happen before any connections are handled.
 	p.StartErrorDrain(ctx)
 
-	// set up the CA for tls connections
+	// set up the CA for tls connections.
+	//
+	// On failure we record the terminal error via MarkCAFailed so the
+	// /agent/ready handler can return a clear "CA setup failed"
+	// diagnostic instead of an indefinite "not yet ready". We still
+	// continue starting the proxy — the proxy can serve non-TLS
+	// traffic and surfacing the error to readiness probes is a better
+	// signal to operators than hard-aborting the agent here.
 	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
 	if err != nil {
-		// log the error and continue
-		p.logger.Warn("failed to setup CA", zap.Error(err))
+		// Terminal: the CA cannot be installed in this process and
+		// Keploy-proxied TLS will fail cert-verify for every workload
+		// that gets routed through the proxy. Log at Error (not Warn)
+		// to match the severity, and include a next_step so operators
+		// see the likely fix without grepping source.
+		p.logger.Error(
+			"SetupCA failed — Keploy-proxied TLS will fail cert-verify. "+
+				"The /agent/ready endpoint will return 503 with this error "+
+				"so dependents don't wait forever for a readiness that "+
+				"will never come.",
+			zap.Error(err),
+			zap.String("next_step",
+				"Verify the agent container has write access to the "+
+					"shared /tmp/keploy-tls volume (docker/k8s mode) or "+
+					"to the host's CA trust store under /usr/local/share/"+
+					"ca-certificates or /etc/pki/ca-trust/source/anchors "+
+					"(native mode). Restart the agent after fixing."),
+		)
+		pTls.MarkCAFailed(err)
 	}
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {

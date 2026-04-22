@@ -2428,11 +2428,12 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		return nil
 	}
 
-	// Build filter parameters. Default to strict=false when r.config is
-	// nil (unit tests, embedders) — matches the Phase 1 opt-in default
-	// in config.Test.StrictMockWindow. The env override applies at the
-	// agent for users who need strict without touching code.
-	strictMockWindow := false
+	// Build filter parameters. Default to strict=true when r.config is
+	// nil (unit tests, embedders) — matches the shipped default in
+	// config.Test.StrictMockWindow. The env override applies at the
+	// agent so KEPLOY_STRICT_MOCK_WINDOW=0 still opts out without
+	// touching code.
+	strictMockWindow := true
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
