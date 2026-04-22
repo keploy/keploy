@@ -39,6 +39,20 @@ type MockManager struct {
 	filtered   *TreeDb
 	unfiltered *TreeDb
 
+	// startup tier (Wave 2) holds app-bootstrap traffic recorded BEFORE
+	// the first test window fires — Flyway migrations, Hibernate
+	// metadata-boot queries, HikariCP pool validation, driver-handshake
+	// SQL. It is strictly disjoint from the session tier (`unfiltered`)
+	// and from the per-test tier (`filtered`): every mock lives in
+	// exactly one of the three trees.
+	//
+	// Populated by SetMocksWithWindow when a mock's ReqTimestampMock
+	// predates firstWindowStart; queried via GetStartupMocks. The
+	// deprecated GetSessionMocks union shim concatenates the startup
+	// walk + the session walk so legacy parsers keep seeing startup
+	// mocks in their "session" snapshot until they migrate.
+	startup *TreeDb
+
 	// global revision (legacy)
 	rev uint64
 
@@ -86,14 +100,16 @@ type MockManager struct {
 	// (req < firstWindowStart — app bootstrapped before the first test
 	// fired, e.g. Hibernate/HikariCP pool init on Spring apps) from
 	// STALE PREVIOUS-TEST mocks (firstWindowStart <= req < currentStart).
-	// Startup-init mocks are preserved in the session pool because
-	// their absence breaks replay (pool warm-up can't find the
-	// recorded SELECT 1 / COM_PING); previous-test mocks continue to
-	// be dropped to prevent cross-test bleed.
+	// Wave 2: startup-init mocks are routed to the dedicated `startup`
+	// tree (disjoint from session / perTest); legacy GetSessionMocks
+	// surfaces them via a union shim so pre-wave-2 parsers stay working.
+	// Previous-test mocks continue to be dropped to prevent cross-test
+	// bleed.
 	//
 	// Zero until the first SetMocksWithWindow call with a non-zero
 	// start arrives; after that it's sticky (only goes earlier, never
-	// later — see updateFirstWindowStart).
+	// later — see updateFirstWindowStart). HasFirstTestFired reads
+	// this field under swapMu.RLock.
 	firstWindowStart time.Time
 
 	// swapMu guards the {filtered, unfiltered, window} swap performed by
@@ -225,6 +241,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	mm := &MockManager{
 		filtered:            filtered,
 		unfiltered:          unfiltered,
+		startup:             NewTreeDb(customComparator),
 		filteredByKind:      make(map[models.Kind]*TreeDb),
 		unfilteredByKind:    make(map[models.Kind]*TreeDb),
 		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
@@ -600,7 +617,14 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		}
 	}
 	firstStart := m.firstWindowStart
-	var promotedToSession []*models.Mock
+	// Wave 2: startup-init mocks (req < firstStart) are routed into a
+	// dedicated `startup` tree instead of being promoted into the
+	// session pool with a Lifetime mutation. The recorder's tag is
+	// preserved intact — strict-accessor callers (v3 parser) see
+	// startup/session/perTest as disjoint tiers. The legacy union shim
+	// GetSessionMocks returns startup+session so pre-wave-2 parsers
+	// don't notice the split.
+	var startupInit []*models.Mock
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -672,19 +696,23 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 				out = append(out, mock)
 				continue
 			}
-			// Startup-init preservation: a mock whose request
+			// Wave 2: startup-init preservation. A mock whose request
 			// timestamp is strictly BEFORE the earliest test window
 			// this manager has ever seen is app-bootstrap traffic
-			// (Hibernate init, HikariCP connection validation, driver
-			// handshake queries) that fired before any test started.
-			// Dropping it would break replay at pool warm-up; promote
-			// to session instead so it's visible across every test
-			// without reintroducing cross-test bleed from stale
-			// previous-test mocks (those fall in
-			// [firstStart, currentStart) and DO get dropped).
+			// (Flyway migrations, Hibernate init, HikariCP connection
+			// validation, driver handshake queries) that fired before
+			// any test started. It's routed to the dedicated startup
+			// tree (NOT the session tree, NOT with a Lifetime mutation)
+			// so tier-aware parsers can see startup/session/perTest as
+			// a strict three-way partition. Legacy parsers that call
+			// GetSessionMocks still observe startup entries via the
+			// union shim below.
+			//
+			// Stale previous-test mocks (firstStart <= req < start)
+			// continue to be dropped — that's the bleed case this
+			// whole machinery exists to protect against.
 			if !firstStart.IsZero() && req.Before(firstStart) {
-				mock.TestModeInfo.Lifetime = models.LifetimeSession
-				promotedToSession = append(promotedToSession, mock)
+				startupInit = append(startupInit, mock)
 				continue
 			}
 			droppedOutOfWindow++
@@ -692,19 +720,39 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		filteredForTree = out
 	}
 
-	// Merge startup-init mocks (promoted above) into the session pool
-	// so they're reachable via GetSessionMocks. Append rather than
-	// prepend so caller-provided session mocks keep their original
-	// order; duplicates are impossible because startup-init entries
-	// came out of the per-test slice.
+	// Wave 2: rebuild the dedicated startup tree from the startupInit
+	// slice extracted above. The legacy GetSessionMocks shim will
+	// concatenate a walk of this tree with the session walk so
+	// pre-wave-2 parsers keep observing startup entries in their
+	// session snapshot. Strict-accessor callers (v3 parser) go through
+	// GetStartupMocks / GetSessionScopedMocks and see the partition.
+	//
+	// Rebuild rather than merge so a subsequent SetMocksWithWindow with
+	// a smaller startupInit set doesn't leak the previous tree's
+	// leftovers. Lock-wise we're already inside swapMu.Lock(), so the
+	// pointer swap is safe; readers of startup go through a treesMu
+	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
-	if len(promotedToSession) > 0 {
-		unfilteredForTree = make([]*models.Mock, 0, len(unfiltered)+len(promotedToSession))
-		unfilteredForTree = append(unfilteredForTree, unfiltered...)
-		unfilteredForTree = append(unfilteredForTree, promotedToSession...)
-		if m.logger != nil {
-			m.logger.Debug("promoted startup-init mocks to session pool",
-				zap.Int("count", len(promotedToSession)),
+	if len(startupInit) > 0 || m.startup != nil {
+		newStartup := NewTreeDb(customComparator)
+		for idx, mk := range startupInit {
+			if mk == nil {
+				continue
+			}
+			// Stamp a SortOrder for tree insert if missing so
+			// comparator ordering stays deterministic.
+			if mk.TestModeInfo.SortOrder == 0 {
+				mk.TestModeInfo.SortOrder = int64(idx) + 1
+			}
+			mk.TestModeInfo.ID = idx
+			newStartup.insert(mk.TestModeInfo, mk)
+		}
+		m.treesMu.Lock()
+		m.startup = newStartup
+		m.treesMu.Unlock()
+		if m.logger != nil && len(startupInit) > 0 {
+			m.logger.Debug("routed startup-init mocks into startup tree",
+				zap.Int("count", len(startupInit)),
 				zap.Time("firstTestWindow", firstStart))
 		}
 	}
@@ -776,17 +824,98 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	return results, nil
 }
 
-// GetSessionMocks is the unification-plan canonical name for the
-// session-scoped pool. Backed by the same underlying `unfiltered` tree
-// during Phase 2 migration — once every parser consumes the new name
-// and Phase 3 introduces an explicit lifetime-keyed tree, this can
-// diverge from GetUnFilteredMocks. For now: byte-for-byte alias.
+// GetSessionMocks returns the UNION of startup-tier and session-tier
+// mocks. Wave 2 split the old "session pool" into two disjoint tiers
+// (startup: recorded before the first test window fired; session:
+// reusable across tests) but most parsers still call this accessor, so
+// the method stays as a backward-compat shim.
 //
-// Matcher usage: call before GetPerTestMocksInWindow for auth /
-// handshake / heartbeat / reflection / coordination traffic that
-// should be reusable across every test.
+// Deprecated: v3 and any new tier-aware parser should call
+// GetStartupMocks + GetSessionScopedMocks directly. This method returns
+// the union (startup + session) exclusively for parsers that have not
+// yet migrated. The order is startup-first so matchers that iterate in
+// order still see bootstrap traffic before regular session mocks, which
+// matches pre-wave-2 behaviour.
 func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
+	startup, err := m.GetStartupMocks()
+	if err != nil {
+		return nil, err
+	}
+	session, err := m.GetSessionScopedMocks()
+	if err != nil {
+		return nil, err
+	}
+	if len(startup) == 0 {
+		return session, nil
+	}
+	out := make([]*models.Mock, 0, len(startup)+len(session))
+	out = append(out, startup...)
+	out = append(out, session...)
+	return out, nil
+}
+
+// GetStartupMocks returns the startup-tier mocks — exactly the set
+// whose ReqTimestampMock predates the earliest test window this manager
+// has seen (firstWindowStart). Strictly disjoint from
+// GetSessionScopedMocks, GetConnectionMocks, and
+// GetPerTestMocksInWindow: every mock lives in exactly one tree.
+//
+// Tier-aware parsers (the Wave 2 Postgres v3 replayer is the first and
+// currently only in-tree caller) consult this pool to serve
+// app-bootstrap traffic — Flyway migrations, ORM metadata boot,
+// HikariCP/JDBC pool warm-up queries. Pool is rebuilt by every
+// SetMocksWithWindow call using the latest firstWindowStart.
+func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.startup
+	m.treesMu.RUnlock()
+	if tree == nil {
+		return nil, nil
+	}
+	results := make([]*models.Mock, 0, 32)
+	tree.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+// GetSessionScopedMocks returns session-tier + connection-tagged mocks
+// strictly — startup-tier mocks are NOT included. Parsers opting into
+// tier-aware routing (Wave 2 Postgres v3) call this in preference to
+// the legacy GetSessionMocks union shim.
+//
+// Backed by the existing `unfiltered` tree (session + connection live
+// there together; connection-tagged mocks are additionally indexed in
+// per-connID trees for O(1) lookup). Startup entries are in `m.startup`
+// and deliberately excluded here.
+func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 	return m.GetUnFilteredMocks()
+}
+
+// HasFirstTestFired reports whether at least one real test window has
+// been set on this manager — i.e. some SetMocksWithWindow call arrived
+// with a non-zero start that was NOT the models.BaseTime sentinel used
+// for pre-test staging. Sticky: once true, stays true for the manager's
+// lifetime.
+//
+// Parsers use this to distinguish "app bootstrap" from "between tests"
+// when IsTestWindowActive() returns false. Before the first test fires
+// all non-test traffic is bootstrap; after it, the same signal means
+// the runner is in the idle gap between tests (or post-last-test
+// teardown).
+//
+// Concurrency: firstWindowStart is updated only under swapMu.Lock()
+// inside SetMocksWithWindow. A reader here uses swapMu.RLock to avoid
+// a torn read on the time.Time. An inherently-racy pre-check is
+// tolerable — a caller that needs strict window/pool atomicity
+// consults GetPerTestMocksInWindow, which snapshots both under swapMu.
+func (m *MockManager) HasFirstTestFired() bool {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	return !m.firstWindowStart.IsZero()
 }
 
 // GetPerTestMocksInWindow is the unification-plan canonical name for

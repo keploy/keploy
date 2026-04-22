@@ -51,6 +51,9 @@ func (m *mockMemDb) IsTestWindowActive() bool                            { retur
 func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error)   { return nil, m.err }
 func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)    { return nil, m.err }
 func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)            { return m.mocks, m.err }
+func (m *mockMemDb) GetStartupMocks() ([]*models.Mock, error)            { return nil, nil }
+func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { return m.mocks, m.err }
+func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 

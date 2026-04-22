@@ -141,12 +141,53 @@ type MockMemDb interface {
 	// Canonical name; GetFilteredMocksInWindow aliases this.
 	GetPerTestMocksInWindow() ([]*models.Mock, error)
 
-	// GetSessionMocks returns the session-scoped mock pool snapshot
-	// (Lifetime == LifetimeSession). Session mocks are reusable across
-	// every test — never window-filtered, never consumed on match.
+	// Deprecated: Wave 2 split startup-tier traffic out of the session
+	// pool into its own storage tier. GetSessionMocks now returns the
+	// UNION of startup + session so pre-wave-2 parsers keep working; new
+	// parsers that want strict tier separation should call
+	// GetStartupMocks and GetSessionScopedMocks directly.
 	//
-	// Canonical name; GetUnFilteredMocks aliases this during migration.
+	// GetSessionMocks returns the session-scoped mock pool snapshot
+	// (Lifetime == LifetimeSession) plus any startup-tier mocks (those
+	// whose Spec.ReqTimestampMock predated the first test window).
+	// Session mocks are reusable across every test — never
+	// window-filtered, never consumed on match.
 	GetSessionMocks() ([]*models.Mock, error)
+
+	// GetStartupMocks returns the startup-tier mock pool snapshot —
+	// app-bootstrap recordings whose Spec.ReqTimestampMock predates the
+	// first HTTP test window (Flyway migrations, Hibernate metadata
+	// boot, HikariCP pool warm-up). Strictly disjoint from
+	// GetSessionScopedMocks, GetPerTestMocksInWindow, and
+	// GetConnectionMocks; a mock lives in exactly one of the four
+	// tiers.
+	//
+	// Wave 2 addition: tier-aware parsers build a dedicated startup
+	// index from this pool to serve bootstrap traffic, then switch to
+	// the session / per-test tiers as the runner advances into real
+	// test windows.
+	GetStartupMocks() ([]*models.Mock, error)
+
+	// GetSessionScopedMocks returns the session-tier + connection-tagged
+	// mocks strictly — startup-tier entries are NOT included (those are
+	// in GetStartupMocks). Parsers opting into the Wave 2 tier-aware
+	// routing call this in preference to the legacy GetSessionMocks
+	// union shim.
+	GetSessionScopedMocks() ([]*models.Mock, error)
+
+	// HasFirstTestFired reports whether at least one real test window
+	// has been set on the underlying MockManager via SetMocksWithWindow
+	// (non-zero start that is not the BaseTime staging sentinel).
+	// Sticky — once true, stays true.
+	//
+	// Parsers use this alongside IsTestWindowActive to distinguish
+	// "app bootstrap" (before first test) from "between tests" (after
+	// the first test fired but no test currently active):
+	//
+	//   IsTestWindowActive() == true                  → perTest tier
+	//   !IsTestWindowActive() &&  HasFirstTestFired() → session tier
+	//   !IsTestWindowActive() && !HasFirstTestFired() → startup tier
+	HasFirstTestFired() bool
 
 	// GetConnectionMocks returns connection-scoped mock pool entries
 	// (Lifetime == LifetimeConnection) associated with the given
