@@ -2368,7 +2368,7 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 // config pool); pass strict=false for legacy Option-2 behaviour. Note
 // that Go has no default parameter values — callers resolve the
 // effective strict value from config.Test.StrictMockWindow (ships
-// false in Phase 1) combined with the KEPLOY_STRICT_MOCK_WINDOW env
+// true by default) combined with the KEPLOY_STRICT_MOCK_WINDOW env
 // override, via strictWindowEnabled. This function only sees the
 // resolved strict flag.
 func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
@@ -2507,11 +2507,13 @@ func IsStrictMockWindow(perCall bool) bool {
 
 // strictWindowEnabled returns true when strict containment should apply.
 //
-// Phase 1 ships with strict mode default OFF (config/default.go
-// StrictMockWindow: false). Enabling strictness is opt-in via either
-// config.Test.StrictMockWindow: true or the KEPLOY_STRICT_MOCK_WINDOW
-// env override. A Phase 2+ follow-up will flip the default to true
-// once Lifetime classification coverage is proven in the field.
+// Strict mode ships ON by default (config/default.go
+// StrictMockWindow: true) now that every stateful-protocol recorder
+// classifies mocks finely enough for legitimate cross-test sharing
+// to be encoded as session/connection lifetime. Opting out is
+// available via config.Test.StrictMockWindow: false or the
+// KEPLOY_STRICT_MOCK_WINDOW=0 env override for older recordings
+// that still rely on the legacy lax behaviour.
 //
 // Precedence implemented here (perCall is the already-resolved
 // effective call-site decision — config.Test.StrictMockWindow has

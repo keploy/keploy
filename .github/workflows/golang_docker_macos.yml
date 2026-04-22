@@ -1,11 +1,6 @@
 name: Golang On Docker (macOS)
 on:
   workflow_call:
-    inputs:
-      image_tag:
-        description: "Docker image tag or digest to pull"
-        required: false
-        type: string
     secrets:
       MAC_RUNNER_USER_PASSWORD:
         description: "Keychain password for macOS runner"
@@ -28,8 +23,8 @@ jobs:
             script_dir: gin_mongo
         config:
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-darwin
+            replay_src: build-darwin
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (macOS)
 
     steps:
@@ -65,7 +60,7 @@ jobs:
       - id: image
         uses: ./.github/actions/download-image
         with:
-          image_tag: ${{ inputs.image_tag }}
+          artifact_name: docker-image-linux-arm64
           version: ${{ github.sha }}
 
       - id: record

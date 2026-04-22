@@ -227,11 +227,10 @@ func (m *Mock) DeriveLifetime() {
 
 // laxKindFallbackDisabled reports whether strict mode is forcing the
 // DeriveLifetime kind-fallback to stay narrow (tag=="" only). When
-// this returns false (the Phase 1 default, matching
-// config.Test.StrictMockWindow default), any non-canonical tag on a
-// kind in kindsWithImplicitSessionLifetime also falls through to
-// session — preserving pre-Phase-2 byte-for-byte behaviour under lax
-// mode.
+// this returns false (no KEPLOY_STRICT_MOCK_WINDOW env override set),
+// any non-canonical tag on a kind in kindsWithImplicitSessionLifetime
+// also falls through to session — preserving pre-Phase-2 byte-for-
+// byte behaviour for older recordings.
 //
 // Scope: this env-only gate controls ONE specific behaviour — the
 // lax-mode promotion of explicitly-tagged non-canonical mocks (e.g.

@@ -44,6 +44,30 @@ builds:
     tags:
       - viper_bind_struct
 
+  # Docker image binaries. Separate from the public linux binaries
+  # above because the docker image reports crashes to a distinct
+  # Sentry project (SENTRY_DSN_DOCKER) so telemetry from containerised
+  # and self-hosted users stays disentangled. Not added to any
+  # archive — the binaries live in dist/ for the docker-release job
+  # to consume via `Dockerfile.runtime`.
+  - binary: keploy
+    id: keploy-docker
+    main: ./main.go
+    ldflags:
+      - -s -w -X main.dsn={{.Env.SENTRY_DSN_DOCKER}}
+      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+      - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    tags:
+      - viper_bind_struct
+
   - binary: keploy
     id: keploy-windows
     main: ./main.go
