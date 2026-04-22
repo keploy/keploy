@@ -176,6 +176,176 @@ func TestMockManager_Wave2_BaseTimeStagingDoesNotFireFirstTest(t *testing.T) {
 	}
 }
 
+// TestSetMocksWithWindow_InitialStaging_SeedsStartupTree covers the
+// Wave-3 C1/C3 fix: during Runner/Replayer's initial BaseTime staging
+// call, every per-test input mock is bootstrap traffic (no real test
+// has fired yet) and must be routed into the startup tree — not into
+// the session / unfiltered pool. The strict session tier must remain
+// unpolluted; the legacy GetSessionMocks union shim keeps returning
+// startup+session so pre-wave-2 parsers observe bootstrap mocks via
+// that path.
+func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Two per-test mocks seen during the BaseTime staging sweep, plus
+	// one session mock in the unfiltered slice.
+	ptReq := time.Date(2024, 1, 1, 11, 59, 0, 0, time.UTC)
+	pt1 := newMockForTest("pt1", ptReq, models.LifetimePerTest)
+	pt2 := newMockForTest("pt2", ptReq.Add(time.Second), models.LifetimePerTest)
+	sess := newMockForTest("sess", ptReq.Add(2*time.Second), models.LifetimeSession)
+
+	mm.SetMocksWithWindow(
+		[]*models.Mock{pt1, pt2},
+		[]*models.Mock{sess},
+		models.BaseTime, time.Now(),
+	)
+
+	// GetStartupMocks returns all per-test mocks (pt1, pt2).
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if len(startup) != 2 || !containsMockNamed(startup, "pt1") || !containsMockNamed(startup, "pt2") {
+		t.Fatalf("GetStartupMocks: want [pt1 pt2], got %v", mockNames(startup))
+	}
+
+	// GetPerTestMocksInWindow returns nothing — no real window active.
+	pt, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if len(pt) != 0 {
+		t.Fatalf("GetPerTestMocksInWindow: want empty, got %v", mockNames(pt))
+	}
+
+	// GetSessionScopedMocks returns only sess — no pollution from pt1/pt2.
+	session, err := mm.GetSessionScopedMocks()
+	if err != nil {
+		t.Fatalf("GetSessionScopedMocks: %v", err)
+	}
+	if len(session) != 1 || !containsMockNamed(session, "sess") {
+		t.Fatalf("GetSessionScopedMocks: want [sess] only, got %v", mockNames(session))
+	}
+	if containsMockNamed(session, "pt1") || containsMockNamed(session, "pt2") {
+		t.Fatalf("session tier polluted with per-test mocks: %v", mockNames(session))
+	}
+
+	// GetSessionMocks (legacy union shim) returns sess + pt1 + pt2
+	// because startup ∪ session is what pre-wave-2 parsers see.
+	union, err := mm.GetSessionMocks()
+	if err != nil {
+		t.Fatalf("GetSessionMocks: %v", err)
+	}
+	if len(union) != 3 {
+		t.Fatalf("GetSessionMocks: want 3 (sess+pt1+pt2), got %d: %v", len(union), mockNames(union))
+	}
+	for _, want := range []string{"sess", "pt1", "pt2"} {
+		if !containsMockNamed(union, want) {
+			t.Fatalf("GetSessionMocks: missing %q, got %v", want, mockNames(union))
+		}
+	}
+
+	// HasFirstTestFired must still be false — BaseTime doesn't count.
+	if mm.HasFirstTestFired() {
+		t.Fatalf("HasFirstTestFired: BaseTime staging must not register as first test")
+	}
+}
+
+// TestSetMocksWithWindow_FirstRealWindow_RepartitionsStartup verifies
+// that after initial staging, the first real test window re-partitions
+// the per-test input: req < start stays in startup; req ∈ [start, end]
+// moves to filtered; stale previous-test bleed drops.
+func TestSetMocksWithWindow_FirstRealWindow_RepartitionsStartup(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Second)
+
+	// Initial staging to seed firstWindowStart later. Leave the startup
+	// tree empty so we can see it populate from the real-window call.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+
+	// Build three per-test mocks spanning the three partitions:
+	//   bootstrap: req = start - 1s    → routed to startup
+	//   inWindow:  req = start + 2s    → kept in filtered
+	//   strayFuture: req = end + 5s    → dropped out-of-window
+	bootstrap := newMockForTest("bootstrap", start.Add(-1*time.Second), models.LifetimePerTest)
+	inWindow := newMockForTest("inWindow", start.Add(2*time.Second), models.LifetimePerTest)
+	strayFuture := newMockForTest("strayFuture", end.Add(5*time.Second), models.LifetimePerTest)
+
+	mm.SetMocksWithWindow(
+		[]*models.Mock{bootstrap, inWindow, strayFuture},
+		nil,
+		start, end,
+	)
+
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if len(startup) != 1 || !containsMockNamed(startup, "bootstrap") {
+		t.Fatalf("GetStartupMocks: want [bootstrap], got %v", mockNames(startup))
+	}
+
+	pt, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if len(pt) != 1 || !containsMockNamed(pt, "inWindow") {
+		t.Fatalf("GetPerTestMocksInWindow: want [inWindow], got %v", mockNames(pt))
+	}
+
+	// strayFuture is neither in startup nor in per-test → dropped.
+	if containsMockNamed(startup, "strayFuture") || containsMockNamed(pt, "strayFuture") {
+		t.Fatalf("strayFuture leaked into a pool: startup=%v pt=%v",
+			mockNames(startup), mockNames(pt))
+	}
+}
+
+// TestSetMocksWithWindow_StartupTreeRebuildsOnNewTestSet verifies the
+// Wave-3 C3 fix: the startup tree rebuilds unconditionally on every
+// SetMocksWithWindow call, so a subsequent test-set run with an empty
+// per-test slice cannot leak the previous run's startup entries.
+func TestSetMocksWithWindow_StartupTreeRebuildsOnNewTestSet(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	start1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	end1 := start1.Add(10 * time.Second)
+	bootstrap := newMockForTest("bootstrap_run1", start1.Add(-1*time.Second), models.LifetimePerTest)
+
+	// First test-set: seed startup with a bootstrap mock.
+	mm.SetMocksWithWindow(
+		[]*models.Mock{bootstrap},
+		nil,
+		start1, end1,
+	)
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks (run1): %v", err)
+	}
+	if len(startup) != 1 || !containsMockNamed(startup, "bootstrap_run1") {
+		t.Fatalf("GetStartupMocks (run1): want [bootstrap_run1], got %v", mockNames(startup))
+	}
+
+	// Second test-set: fresh window, empty per-test slice. The previous
+	// bootstrap entry must NOT leak — rebuild on an empty input clears it.
+	start2 := start1.Add(1 * time.Hour)
+	end2 := start2.Add(10 * time.Second)
+	mm.SetMocksWithWindow(nil, nil, start2, end2)
+
+	startup, err = mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks (run2): %v", err)
+	}
+	if len(startup) != 0 {
+		t.Fatalf("GetStartupMocks (run2): stale startup tree bled across test-sets, got %v",
+			mockNames(startup))
+	}
+}
+
 // mockNames returns a slice of mock Names, for readable test failure
 // diagnostics.
 func mockNames(list []*models.Mock) []string {

@@ -630,17 +630,24 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// start=models.BaseTime before any test runs — to stage mocks for
 	// the app-startup window (Hibernate init, HikariCP pool warm-up,
 	// JDBC driver handshake) that fires AFTER the app launches but
-	// BEFORE the first test request. During this staging window we
-	// don't yet know which mocks are truly per-test vs startup-init
-	// (we'd need the first real test's start to compare), so route
-	// ALL per-test mocks into the session pool too so startup DB
-	// calls can find their matching mock via GetSessionMocks /
-	// GetUnFilteredMocks (which is what integrations-repo matchers
-	// like the Postgres replayer read). The next SetMocksWithWindow
-	// call — the FIRST real test — re-partitions: startup-init mocks
-	// (req < test1.start) get promoted to session explicitly below;
-	// the rest become per-test.
+	// BEFORE the first test request. Wave-3 C1/C3 fix: every per-test
+	// mock seen DURING this staging window is, by definition, bootstrap
+	// traffic — no real test has fired yet, so there is no "per-test"
+	// tier to populate. Route the whole `filtered` slice straight into
+	// the startup tree. The next SetMocksWithWindow call — the first
+	// real test — re-partitions: mocks with req ∈ [start, end] move
+	// to filtered; mocks with req < firstWindowStart stay in startup;
+	// mocks with firstWindowStart <= req < start are stale previous-
+	// test bleed and get dropped.
 	isInitialStaging := start.Equal(models.BaseTime)
+	if isInitialStaging {
+		for _, mk := range filtered {
+			if mk == nil {
+				continue
+			}
+			startupInit = append(startupInit, mk)
+		}
+	}
 
 	// Pre-filter per-test mocks by the outer test window. Zero start or
 	// zero end means "no window" and we preserve the legacy behaviour
@@ -649,7 +656,12 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// only in-window mocks.
 	filteredForTree := filtered
 	var droppedInvalid, droppedOutOfWindow uint64
-	if !start.IsZero() && !end.IsZero() {
+	// Initial-staging skips the per-test partition entirely — everything
+	// was already routed into startupInit above.
+	if isInitialStaging {
+		filteredForTree = nil
+	}
+	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
 		out := make([]*models.Mock, 0, len(filtered))
 		for _, mock := range filtered {
 			if mock == nil {
@@ -720,60 +732,56 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		filteredForTree = out
 	}
 
-	// Wave 2: rebuild the dedicated startup tree from the startupInit
+	// Wave 2/3: rebuild the dedicated startup tree from the startupInit
 	// slice extracted above. The legacy GetSessionMocks shim will
 	// concatenate a walk of this tree with the session walk so
 	// pre-wave-2 parsers keep observing startup entries in their
 	// session snapshot. Strict-accessor callers (v3 parser) go through
 	// GetStartupMocks / GetSessionScopedMocks and see the partition.
 	//
-	// Rebuild rather than merge so a subsequent SetMocksWithWindow with
-	// a smaller startupInit set doesn't leak the previous tree's
-	// leftovers. Lock-wise we're already inside swapMu.Lock(), so the
+	// Wave-3 C3 fix: rebuild UNCONDITIONALLY with a fresh empty tree,
+	// every SetMocksWithWindow call. Previously the rebuild was gated
+	// on `len(startupInit) > 0 || m.startup != nil`, which meant a
+	// subsequent test-set whose startupInit was empty and whose prior
+	// run had left m.startup == nil would silently leak a stale pool.
+	// A fresh tree here means cross-test-set bleed is structurally
+	// impossible. Lock-wise we're already inside swapMu.Lock(), so the
 	// pointer swap is safe; readers of startup go through a treesMu
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
-	if len(startupInit) > 0 || m.startup != nil {
-		newStartup := NewTreeDb(customComparator)
-		for idx, mk := range startupInit {
-			if mk == nil {
-				continue
-			}
-			// Stamp a SortOrder for tree insert if missing so
-			// comparator ordering stays deterministic.
-			if mk.TestModeInfo.SortOrder == 0 {
-				mk.TestModeInfo.SortOrder = int64(idx) + 1
-			}
-			mk.TestModeInfo.ID = idx
-			newStartup.insert(mk.TestModeInfo, mk)
+	newStartup := NewTreeDb(customComparator)
+	for idx, mk := range startupInit {
+		if mk == nil {
+			continue
 		}
-		m.treesMu.Lock()
-		m.startup = newStartup
-		m.treesMu.Unlock()
-		if m.logger != nil && len(startupInit) > 0 {
-			m.logger.Debug("routed startup-init mocks into startup tree",
-				zap.Int("count", len(startupInit)),
-				zap.Time("firstTestWindow", firstStart))
+		// Stamp a SortOrder for tree insert if missing so
+		// comparator ordering stays deterministic.
+		if mk.TestModeInfo.SortOrder == 0 {
+			mk.TestModeInfo.SortOrder = int64(idx) + 1
 		}
+		mk.TestModeInfo.ID = idx
+		newStartup.insert(mk.TestModeInfo, mk)
+	}
+	m.treesMu.Lock()
+	m.startup = newStartup
+	m.treesMu.Unlock()
+	if m.logger != nil && len(startupInit) > 0 {
+		m.logger.Debug("routed startup-init mocks into startup tree",
+			zap.Int("count", len(startupInit)),
+			zap.Time("firstTestWindow", firstStart),
+			zap.Bool("initialStaging", isInitialStaging))
 	}
 
-	// Initial-staging mode: before any test has fired, stage every
-	// per-test mock into the session pool too. This is how matchers
-	// that read only GetSessionMocks / GetUnFilteredMocks (the
-	// integrations Postgres replayer is the load-bearing example)
-	// can serve the app-startup DB traffic. The first real-test
-	// SetMocksWithWindow call will re-populate both pools cleanly;
-	// staging-time session mocks are effectively ephemeral.
-	if isInitialStaging && len(filteredForTree) > 0 {
-		stageMerge := make([]*models.Mock, 0, len(unfilteredForTree)+len(filteredForTree))
-		stageMerge = append(stageMerge, unfilteredForTree...)
-		stageMerge = append(stageMerge, filteredForTree...)
-		unfilteredForTree = stageMerge
-		if m.logger != nil {
-			m.logger.Debug("staged per-test mocks into session pool (pre-first-test)",
-				zap.Int("staged", len(filteredForTree)))
-		}
-	}
+	// Wave-3 C1 fix: per-test input slice NEVER leaks into unfiltered.
+	// The previous "initial staging" branch used to append filteredForTree
+	// into unfilteredForTree so legacy matchers reading only
+	// GetSessionMocks / GetUnFilteredMocks could serve bootstrap DB
+	// traffic; with the startup tree now rebuilt unconditionally and the
+	// GetSessionMocks union shim walking (startup ∪ session), legacy
+	// matchers already see the bootstrap mocks via the startup path.
+	// Routing per-test into unfiltered on top of that double-counted
+	// bootstrap traffic and polluted the strict session tier seen by
+	// tier-aware parsers.
 
 	m.SetFilteredMocks(filteredForTree)
 	m.SetUnFilteredMocks(unfilteredForTree)
