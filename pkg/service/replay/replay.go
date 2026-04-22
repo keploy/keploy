@@ -1984,6 +1984,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// Drain mocks consumed during stream body transmission and union
+			// with the pre-stream mocks captured earlier. GetConsumedMocks
+			// drains on read, so if any mocks land between the pre-stream
+			// drain and here (e.g., one backend call per SSE frame, consumed
+			// while CompareHTTPStream was still reading frames above), they
+			// would otherwise be dropped from mappings.yaml.
+			if r.instrument {
+				additionalMocks, drainErr := r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if drainErr != nil {
+					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
+				}
+				for _, m := range additionalMocks {
+					totalConsumedMocks[m.Name] = m
+					mockNames = append(mockNames, m.Name)
+				}
+				consumedMocks = append(consumedMocks, additionalMocks...)
+			}
+
 			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
 			// Override testPass if streaming comparison failed
 			// (HTTP matcher skips body comparison for non-JSON bodies by default)
