@@ -103,12 +103,76 @@ jobs:
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
+          SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
           SERVER_URL: https://api.keploy.io
 
+      # Re-publish the docker-tagged linux binaries produced by the
+      # `keploy-docker` goreleaser build (ldflags bake in
+      # SENTRY_DSN_DOCKER instead of SENTRY_DSN_BINARY). build-docker
+      # consumes these directly via Dockerfile.runtime — no
+      # in-container go build, no qemu arm64 cross-compile.
+      # Paths match goreleaser's default
+      # `dist/<id>_<os>_<arch>[_<goamd64>]/keploy` layout with globs
+      # to absorb the GOAMD64 suffix variant.
+      - name: Stage docker linux binaries for docker build
+        run: |
+          set -euxo pipefail
+          mkdir -p out/keploy-linux-amd64 out/keploy-linux-arm64
+          # Resolve globs explicitly and fail loud if goreleaser's
+          # dist layout changes — `ls | head` would swallow a
+          # missing directory under `set -e` because `head` exits 0.
+          shopt -s nullglob
+          amd64_candidates=(dist/keploy-docker_linux_amd64*/keploy)
+          arm64_candidates=(dist/keploy-docker_linux_arm64*/keploy)
+          shopt -u nullglob
+          if [ ${#amd64_candidates[@]} -eq 0 ]; then
+            echo "::error::no dist/keploy-docker_linux_amd64*/keploy produced by goreleaser"
+            ls -la dist/ || true
+            exit 1
+          fi
+          if [ ${#arm64_candidates[@]} -eq 0 ]; then
+            echo "::error::no dist/keploy-docker_linux_arm64*/keploy produced by goreleaser"
+            ls -la dist/ || true
+            exit 1
+          fi
+          cp "${amd64_candidates[0]}" out/keploy-linux-amd64/keploy
+          cp "${arm64_candidates[0]}" out/keploy-linux-arm64/keploy
+          chmod +x out/keploy-linux-amd64/keploy out/keploy-linux-arm64/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-keploy-linux-amd64
+          path: out/keploy-linux-amd64/keploy
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-keploy-linux-arm64
+          path: out/keploy-linux-arm64/keploy
+          retention-days: 1
+
+  # Per-platform docker image build. Each matrix leg runs on a
+  # native runner for its target arch (ubuntu-latest for amd64,
+  # ubuntu-24.04-arm for arm64) so Dockerfile.runtime's RUN steps
+  # (apt-get + sed/chmod) execute natively — no qemu anywhere in
+  # the release pipeline, not even for the base-image bootstrap.
+  # Each leg pushes by digest without a tag; build-docker-manifest
+  # below stitches the per-arch digests into the final multi-arch
+  # manifest list and signs it.
   build-docker:
     needs: build-go
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+            artifact: release-keploy-linux-amd64
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: release-keploy-linux-arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -118,11 +182,69 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3.12.0
 
+      - name: Log into registry ghcr.io
+        uses: docker/login-action@v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Download prebuilt binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/keploy-linux-${{ matrix.arch }}
+
+      - name: Make binary executable
+        run: chmod +x dist/keploy-linux-${{ matrix.arch }}/keploy
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile.runtime
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest for manifest stitch
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine the per-arch digests published by each build-docker leg
+  # into a single multi-arch manifest list under the public
+  # metadata-derived tags, then cosign-sign the resulting manifest
+  # list. Signing at the manifest level covers every arch ref in one
+  # go (cosign walks the manifest). Kept on ubuntu-latest because
+  # only docker/imagetools + cosign run here — no per-arch workload.
+  build-docker-manifest:
+    needs: build-docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.10.1
 
@@ -142,43 +264,40 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
-      - name: Set version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-      - name: Prepare Dockerfile for Release Build
-        run: |
-          cp Dockerfile Dockerfile.release
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
-          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
-          sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
-
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@v6.19.2
+      - name: Download per-arch digests
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          file: ./Dockerfile.release
-          ssh: default
-          platforms: linux/amd64, linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
-            VERSION=${{ env.VERSION }}
-            SERVER_URL=https://api.keploy.io
-            GITHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Inspect and capture manifest digest
+        id: inspect
+        run: |
+          TAG="${{ steps.meta.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository }}:$TAG"
+          docker buildx imagetools inspect "$IMAGE"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::failed to resolve manifest digest for $IMAGE"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Sign the published Docker image
         env:
           COSIGN_EXPERIMENTAL: "true"
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.inspect.outputs.digest }}
 
   mark-latest:
-    needs: [build-go, build-docker]
+    needs: [build-go, build-docker-manifest]
     runs-on: ubuntu-latest
     # Only mark stable releases (no pre-release suffix like -beta1, -rc1) as latest
     if: ${{ !contains(github.ref_name, '-') }}
