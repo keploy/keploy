@@ -34,16 +34,25 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
 
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          repository: keploy/samples-python
+          path: samples-python
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: samples-python/${{ matrix.app.path }}/requirements.txt
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -54,11 +63,6 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.replay_src }}
-      - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
-        with:
-          repository: keploy/samples-python
-          path: samples-python
       - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -88,16 +92,26 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-      
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          repository: keploy/samples-python
+          path: samples-python
+          ref: native-linux
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: samples-python/${{ matrix.app.path }}/requirements.txt
 
       - name: Setup docker-compose
         run: |
@@ -120,11 +134,6 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.replay_src }}
-      - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
-        with:
-          repository: keploy/samples-python
-          path: samples-python
       - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
