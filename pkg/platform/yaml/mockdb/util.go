@@ -317,24 +317,24 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 // ---------------------------------------------------------------------------
 
 type postgresV3SessionYamlSpec struct {
-	Metadata         map[string]string              `yaml:"metadata,omitempty"`
-	Session          *models.PostgresV3SessionSpec  `yaml:"session"`
-	ReqTimestampMock time.Time                      `yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time                      `yaml:"resTimestampMock,omitempty"`
+	Metadata         map[string]string             `yaml:"metadata,omitempty"`
+	Session          *models.PostgresV3SessionSpec `yaml:"session"`
+	ReqTimestampMock time.Time                     `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                     `yaml:"resTimestampMock,omitempty"`
 }
 
 type postgresV3CatalogYamlSpec struct {
-	Metadata         map[string]string              `yaml:"metadata,omitempty"`
-	Catalog          *models.PostgresV3CatalogSpec  `yaml:"catalog"`
-	ReqTimestampMock time.Time                      `yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time                      `yaml:"resTimestampMock,omitempty"`
+	Metadata         map[string]string             `yaml:"metadata,omitempty"`
+	Catalog          *models.PostgresV3CatalogSpec `yaml:"catalog"`
+	ReqTimestampMock time.Time                     `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                     `yaml:"resTimestampMock,omitempty"`
 }
 
 type postgresV3DataYamlSpec struct {
-	Metadata         map[string]string         `yaml:"metadata,omitempty"`
+	Metadata         map[string]string          `yaml:"metadata,omitempty"`
 	Data             *models.PostgresV3DataSpec `yaml:"data"`
-	ReqTimestampMock time.Time                 `yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time                 `yaml:"resTimestampMock,omitempty"`
+	ReqTimestampMock time.Time                  `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                  `yaml:"resTimestampMock,omitempty"`
 }
 
 type postgresV3QueryYamlSpec struct {
@@ -509,10 +509,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:            spec.Metadata,
-				PostgresV3Session:   spec.Session,
-				ReqTimestampMock:    spec.ReqTimestampMock,
-				ResTimestampMock:    spec.ResTimestampMock,
+				Metadata:          spec.Metadata,
+				PostgresV3Session: spec.Session,
+				ReqTimestampMock:  spec.ReqTimestampMock,
+				ResTimestampMock:  spec.ResTimestampMock,
 			}
 		case models.PostgresV3Catalog:
 			var spec postgresV3CatalogYamlSpec
@@ -521,10 +521,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:            spec.Metadata,
-				PostgresV3Catalog:   spec.Catalog,
-				ReqTimestampMock:    spec.ReqTimestampMock,
-				ResTimestampMock:    spec.ResTimestampMock,
+				Metadata:          spec.Metadata,
+				PostgresV3Catalog: spec.Catalog,
+				ReqTimestampMock:  spec.ReqTimestampMock,
+				ResTimestampMock:  spec.ResTimestampMock,
 			}
 		case models.PostgresV3Data:
 			var spec postgresV3DataYamlSpec
@@ -533,10 +533,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:            spec.Metadata,
-				PostgresV3Data:      spec.Data,
-				ReqTimestampMock:    spec.ReqTimestampMock,
-				ResTimestampMock:    spec.ResTimestampMock,
+				Metadata:         spec.Metadata,
+				PostgresV3Data:   spec.Data,
+				ReqTimestampMock: spec.ReqTimestampMock,
+				ResTimestampMock: spec.ResTimestampMock,
 			}
 		case models.PostgresV3Query:
 			var spec postgresV3QueryYamlSpec
@@ -545,10 +545,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:            spec.Metadata,
-				PostgresV3Query:     spec.Query,
-				ReqTimestampMock:    spec.ReqTimestampMock,
-				ResTimestampMock:    spec.ResTimestampMock,
+				Metadata:         spec.Metadata,
+				PostgresV3Query:  spec.Query,
+				ReqTimestampMock: spec.ReqTimestampMock,
+				ResTimestampMock: spec.ResTimestampMock,
 			}
 		case models.PostgresV3Generator:
 			var spec postgresV3GeneratorYamlSpec
