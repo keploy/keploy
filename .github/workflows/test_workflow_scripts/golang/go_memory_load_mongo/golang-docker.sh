@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
-APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
+APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-mongo-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
@@ -116,7 +116,7 @@ final_cleanup() {
     fi
 
     if [ "$rc" -ne 0 ]; then
-        echo "go-memory-load workflow failed (exit code=$rc)"
+        echo "go-memory-load-mongo workflow failed (exit code=$rc)"
         dump_logs
     fi
     stop_keploy_record
@@ -188,7 +188,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/test-*.yaml' -print -quit 2>/dev/null | grep -q .; then
         echo "No recorded test cases were generated."
         return 1
     fi
@@ -471,4 +471,4 @@ wait "$replay_pid" || true
 check_for_errors test.txt
 check_test_report
 
-echo "go-memory-load workflow completed successfully."
+echo "go-memory-load-mongo workflow completed successfully."

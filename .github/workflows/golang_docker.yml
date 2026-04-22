@@ -18,6 +18,15 @@ jobs:
           - name: go-memory-load
             path: go-memory-load
             script_dir: go_memory_load
+          - name: go-memory-load-mysql
+            path: go-memory-load-mysql
+            script_dir: go_memory_load_mysql
+          - name: go-memory-load-mongo
+            path: go-memory-load-mongo
+            script_dir: go_memory_load_mongo
+          - name: go-memory-load-grpc
+            path: go-memory-load-grpc
+            script_dir: go_memory_load_grpc
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
@@ -55,7 +64,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
-          ref: main
+          ref: feat/all-memory-load-apps
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:
