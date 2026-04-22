@@ -32,7 +32,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 }
 
 func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
-	//Returning false here because sql parser is using the ports to check if the packet is mysql or not.
+	// MySQL is a server-speaks-first protocol — the server sends a
+	// HandshakeV10 greeting before the client sends any data. Protocol
+	// detection from client bytes is therefore impossible. MySQL is
+	// detected in the proxy via server greeting inspection (record mode)
+	// or mock metadata (test mode) before the generic MatchType loop runs.
 	return false
 }
 

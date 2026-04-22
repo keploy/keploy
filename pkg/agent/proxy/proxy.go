@@ -639,72 +639,125 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 || destInfo.Port == 4000{
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-			dstCfg := &models.ConditionalDstCfg{
-				Addr: dstAddr,
-				Port: uint(destInfo.Port),
-			}
-			outgoingOpts.DstCfg = dstCfg
-
-			mysqlLogger := p.logger.With(
-				zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
-				zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
-				zap.String("Destination Address", dstAddr),
-			)
-			mysqlSession := &integrations.RecordSession{
-				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
-				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
-				Mocks:        rule.MC,
-				ErrGroup:     parserErrGrp,
-				TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
-				Logger:       mysqlLogger,
-				ClientConnID: fmt.Sprint(clientConnID),
-				DestConnID:   fmt.Sprint(destConnID),
-				Opts:         outgoingOpts,
-			}
-
-			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, mysqlSession)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to record the outgoing message")
-				return err
-			}
-			return nil
-		}
-
-		m := p.getMockManager()
-		if m == nil {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
-			return err
-		}
-
-		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-			p.sendMockNotFoundError(err)
-			return err
-		}
-		return nil
-	}
+	// ── Server-speaks-first protocol detection (MySQL) ──
+	//
+	// MySQL uses a server-speaks-first protocol: the server sends a
+	// HandshakeV10 greeting before the client sends anything. The generic
+	// detection path below peeks from the client, which would deadlock for
+	// MySQL. We detect this by checking whether the client is silent within
+	// a short window and then verifying the server greeting (record mode)
+	// or consulting mock metadata (test mode).
 
 	reader := bufio.NewReader(srcConn)
 	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
+
+	if rule.Mode != models.MODE_TEST {
+		// Record mode: probe for server-speaks-first MySQL connections.
+		_ = srcConn.SetReadDeadline(time.Now().Add(serverSpeaksFirstTimeout))
+		_, clientPeekErr := reader.Peek(len(initialData))
+		_ = srcConn.SetReadDeadline(time.Time{})
+
+		if isNetTimeout(clientPeekErr) {
+			p.logger.Debug("Client silent within timeout — probing destination for server-speaks-first protocol",
+				zap.String("dstAddr", dstAddr))
+
+			dstConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to dial destination for server-speaks-first detection",
+					zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return err
+			}
+
+			dstReader := bufio.NewReader(dstConn)
+			_ = dstConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			serverPeek, serverPeekErr := dstReader.Peek(6)
+			_ = dstConn.SetReadDeadline(time.Time{})
+
+			if serverPeekErr == nil && isMySQLServerGreeting(serverPeek) {
+				p.logger.Debug("Detected MySQL via server HandshakeV10 greeting",
+					zap.String("dstAddr", dstAddr), zap.Uint32("dstPort", destInfo.Port))
+
+				wrappedDst := &util.Conn{Conn: dstConn, Reader: dstReader, Logger: p.logger}
+				dstCfg := &models.ConditionalDstCfg{
+					Addr: dstAddr,
+					Port: uint(destInfo.Port),
+				}
+				outgoingOpts.DstCfg = dstCfg
+
+				mysqlLogger := p.logger.With(
+					zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
+					zap.String("Destination ConnectionID", fmt.Sprint(destConnID)),
+					zap.String("Destination Address", dstAddr),
+				)
+				mysqlSession := &integrations.RecordSession{
+					Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
+					Egress:       util.NewSafeConn(wrappedDst, mysqlLogger),
+					Mocks:        rule.MC,
+					ErrGroup:     parserErrGrp,
+					TLSUpgrader:  util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection),
+					Logger:       mysqlLogger,
+					ClientConnID: fmt.Sprint(clientConnID),
+					DestConnID:   fmt.Sprint(destConnID),
+					Opts:         outgoingOpts,
+				}
+
+				err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, mysqlSession)
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to record the MySQL outgoing message")
+					return err
+				}
+				return nil
+			}
+
+			// Not a MySQL greeting. Preserve any bytes read from the server
+			// so downstream parsers receive the complete stream.
+			if len(serverPeek) > 0 {
+				dstConn = &util.Conn{Conn: dstConn, Reader: dstReader, Logger: p.logger}
+			}
+			p.logger.Debug("Server-speaks-first but not MySQL, falling through to generic detection",
+				zap.String("dstAddr", dstAddr))
+		}
+		// If the client DID speak (no timeout), fall through to the normal
+		// peek below. The bufio.Reader still holds the buffered bytes.
+	} else {
+		// Test mode: check mock store for MySQL mocks. If present, use a
+		// short client-silence probe to confirm this is a MySQL connection
+		// (the app is waiting for a server greeting, not sending data).
+		if m := p.getMockManager(); m != nil {
+			total, _, _ := m.GetMySQLCounts()
+			if total > 0 {
+				_ = srcConn.SetReadDeadline(time.Now().Add(serverSpeaksFirstTimeout))
+				_, clientPeekErr := reader.Peek(1)
+				_ = srcConn.SetReadDeadline(time.Time{})
+
+				if isNetTimeout(clientPeekErr) {
+					p.logger.Debug("Detected MySQL via mock store + client silence (test mode)",
+						zap.String("dstAddr", dstAddr))
+
+					err := p.Integrations[integrations.MYSQL].MockOutgoing(
+						parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
+					if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+						p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
+						p.sendMockNotFoundError(err)
+						return err
+					}
+					return nil
+				}
+				// Client spoke → not a MySQL connection, fall through.
+			}
+		}
+	}
+
+	// Peek from the client to determine the protocol (TLS, HTTP, etc.).
+	// For client-speaks-first protocols the data is already in the reader
+	// buffer from the probe above; for server-speaks-first non-MySQL
+	// protocols this may block until the app gives up or sends data.
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		// Network closed errors are expected when client closes connection (e.g., app shutdown)
 		if isShutdownError(err) || isNetworkClosedErr(err) {
 			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
 		} else {
@@ -1411,6 +1464,48 @@ func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMappi
 	if mgr != nil {
 		mgr.SetMappingChannel(mappingCh)
 	}
+}
+
+// serverSpeaksFirstTimeout is the duration to wait for the client to send
+// data before concluding this is a server-speaks-first protocol (e.g. MySQL).
+// Must be short enough to avoid noticeable latency on client-speaks-first
+// protocols (HTTP, gRPC), yet long enough to avoid false positives on slow
+// clients. 200ms is safe: client-speaks-first drivers send data within a
+// few milliseconds; MySQL drivers never send before the server greeting.
+const serverSpeaksFirstTimeout = 200 * time.Millisecond
+
+// isMySQLServerGreeting returns true if buf looks like a MySQL HandshakeV10
+// server greeting. The check verifies:
+//   - byte 3 (sequence ID) == 0x00  (first packet in a new sequence)
+//   - byte 4 (protocol version) == 0x0A  (HandshakeV10)
+//   - payload length >= 40 bytes  (realistic minimum for a server greeting)
+//   - byte 5 is printable ASCII  (start of the server version string)
+func isMySQLServerGreeting(buf []byte) bool {
+	if len(buf) < 6 {
+		return false
+	}
+	seqID := buf[3]
+	protoVersion := buf[4]
+	payloadLen := int(buf[0]) | int(buf[1])<<8 | int(buf[2])<<16
+	if seqID != 0x00 || protoVersion != 0x0A {
+		return false
+	}
+	if payloadLen < 40 {
+		return false
+	}
+	if buf[5] < 0x20 || buf[5] > 0x7E {
+		return false
+	}
+	return true
+}
+
+// isNetTimeout returns true when err is a net.Error timeout.
+func isNetTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	netErr, ok := err.(net.Error)
+	return ok && netErr.Timeout()
 }
 
 func isShutdownError(err error) bool {
