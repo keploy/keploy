@@ -27,7 +27,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
 		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
-		utils.LogError(logger, wrapped, "failed to marshal the registered mock kind as yaml", zap.String("kind", string(mock.Kind)))
+		utils.LogError(logger, wrapped, "registered MockYAMLMapper.Encode returned an error; check the mapper for this kind", zap.String("kind", string(mock.Kind)))
 		return nil, wrapped
 	}
 	if mapped {
@@ -267,7 +267,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
 			wrapped := fmt.Errorf("mockdb: decode mapper for mock %q kind %q: %w", m.Name, m.Kind, err)
-			utils.LogError(logger, wrapped, "failed to unmarshal a registered mock yaml doc", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
+			utils.LogError(logger, wrapped, "registered MockYAMLMapper.Decode returned an error; check the mapper for this kind and that the on-disk yaml matches its schema", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
 			return nil, wrapped
 		}
 		if mapped {
