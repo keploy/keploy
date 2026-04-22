@@ -259,6 +259,19 @@ type PostgresV3QuerySpec struct {
 	BindValues       []string `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats      []int    `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
+	// ResultFormats — per-column format codes the client requested at
+	// Bind time (via the Bind packet's ResultFormatCodes field).
+	// Semantics match PG wire: len=0 means "all text", len=1 means
+	// "broadcast f[0] to every result column", len=N means per-column.
+	// Required at replay so the dispatcher can synthesise a
+	// RowDescription with correct Format fields when the client did
+	// not issue Describe before Execute (INSERT…RETURNING-style flow
+	// under lib/pq / database/sql). Without this field, the replayer
+	// has no way to know whether the recorded DataRow bytes are text
+	// or binary, and drivers that expect binary int4 will fail text-
+	// parsing on "\x00\x00\x00\x01" with "invalid syntax".
+	ResultFormats []int `json:"resultFormats,omitempty" yaml:"resultFormats,omitempty" bson:"result_formats,omitempty"`
+
 	// Wire response
 	Response *PostgresV3Response `json:"response,omitempty" yaml:"response,omitempty" bson:"response,omitempty"`
 
