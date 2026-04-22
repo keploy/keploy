@@ -322,6 +322,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// --ca-java-home is the manual override for the app-aware Java
+		// truststore install. When the auto-detector in
+		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
+		// (exotic launcher, containerised re-exec), operators can point
+		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
+		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
+		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
 
 	default:
 		return errors.New("unknown command name")
@@ -1404,6 +1411,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
+
+		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get ca-java-home flag")
+			return nil
+		}
+		// Trim whitespace so accidental `--ca-java-home=" "` doesn't
+		// short-circuit auto-detection with a junk path that will
+		// stat-fail in installJavaCAForHome and fall back to PATH
+		// keytool anyway (but logged at Debug as a spurious override).
+		c.cfg.Agent.CAJavaHome = strings.TrimSpace(caJavaHome)
 
 		mode, err := cmd.Flags().GetString("mode")
 		if err != nil {

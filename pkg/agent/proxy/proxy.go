@@ -86,6 +86,16 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
+	// appPID and caJavaHome are captured at proxy-construction time from
+	// config.Agent (ClientNSPID + CAJavaHome) and passed to
+	// pTls.SetupCAForApp so the Java keystore import targets the JDK the
+	// instrumented application is actually running with — not the
+	// arbitrary JDK first on PATH. On non-Java, Windows, or shared-volume
+	// paths these are ignored. See pkg/agent/proxy/tls/java_detect.go for
+	// the resolution order and rationale.
+	appPID      uint32
+	caJavaHome  string
+
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
@@ -240,6 +250,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
+		appPID:            opts.Agent.ClientNSPID,
+		caJavaHome:        opts.Agent.CAJavaHome,
 		dnsCache:          newDNSCache(),
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
@@ -406,7 +418,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// continue starting the proxy — the proxy can serve non-TLS
 	// traffic and surfacing the error to readiness probes is a better
 	// signal to operators than hard-aborting the agent here.
-	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
+	// Use the PID-aware SetupCAForApp so the Java truststore import
+	// (installJavaCAForHome) targets the JDK the instrumented app is
+	// actually running with. On non-Java workloads / shared-volume
+	// mode / appPID==0 these extra args are harmless — SetupCAForApp
+	// falls back to the legacy PATH-keytool behaviour. See
+	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
+	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and
 		// Keploy-proxied TLS will fail cert-verify for every workload
