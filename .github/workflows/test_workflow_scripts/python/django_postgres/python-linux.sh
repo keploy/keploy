@@ -24,6 +24,10 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
+APP_HOST="127.0.0.1"
+APP_PORT="8000"
+APP_URL="http://${APP_HOST}:${APP_PORT}"
+
 stop_recording() {
     REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
     if [ -n "$REC_PID" ]; then
@@ -44,12 +48,12 @@ dump_and_force_kill_if_stuck() {
             AGENT_PID="$(pgrep -P "$record_pid" -f 'keploy' 2>/dev/null || true)"
 
             if [ -n "$AGENT_PID" ]; then
-                echo "===== KEPLOY AGENT SUBPROCESS HUNG (PID=$AGENT_PID) — DUMPING GOROUTINE STACKS ====="
+                echo "===== KEPLOY AGENT SUBPROCESS HUNG (PID=$AGENT_PID) - DUMPING GOROUTINE STACKS ====="
                 sudo kill -QUIT "$AGENT_PID" 2>/dev/null || true
                 sleep 3
             fi
 
-            echo "===== KEPLOY CLI HUNG (PID=$record_pid) — DUMPING GOROUTINE STACKS ====="
+            echo "===== KEPLOY CLI HUNG (PID=$record_pid) - DUMPING GOROUTINE STACKS ====="
             sudo kill -QUIT "$record_pid" 2>/dev/null || true
             sleep 3
 
@@ -67,15 +71,15 @@ dump_and_force_kill_if_stuck() {
 
 wait_for_app() {
     for attempt in {1..40}; do
-        if curl -fsS --max-time 5 http://127.0.0.1:8000/ >/dev/null; then
-            echo "App started"
+        if (exec 3<>"/dev/tcp/${APP_HOST}/${APP_PORT}") 2>/dev/null; then
+            echo "App proxy is accepting connections on ${APP_HOST}:${APP_PORT}"
             return 0
         fi
-        echo "Waiting for app on 127.0.0.1:8000 (attempt $attempt/40)"
+        echo "Waiting for app proxy on ${APP_HOST}:${APP_PORT} (attempt $attempt/40)"
         sleep 3
     done
 
-    echo "::error::App did not become ready on 127.0.0.1:8000 within 120 seconds"
+    echo "::error::App proxy did not become ready on ${APP_HOST}:${APP_PORT} within 120 seconds"
     stop_recording
     dump_and_force_kill_if_stuck "$REC_PID"
     return 1
@@ -85,19 +89,19 @@ send_request(){
     sleep 10
     wait_for_app || return 1
     # Start making curl calls to record the testcases and mocks.
-    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+    curl -fsS --max-time 10 --location "${APP_URL}/user/" --header 'Content-Type: application/json' --data-raw '{
         "name": "Jane Smith",
         "email": "jane.smith@example.com",
         "password": "smith567",
         "website": "www.janesmith.com"
     }' || return 1
-    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+    curl -fsS --max-time 10 --location "${APP_URL}/user/" --header 'Content-Type: application/json' --data-raw '{
         "name": "John Doe",
         "email": "john.doe@example.com",
         "password": "john567",
         "website": "www.johndoe.com"
     }' || return 1
-    curl -fsS --max-time 10 --location 'http://127.0.0.1:8000/user/' || return 1
+    curl -fsS --max-time 10 --location "${APP_URL}/user/" || return 1
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     stop_recording
