@@ -17,6 +17,7 @@ jobs:
   golang_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +101,7 @@ jobs:
   golang_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +146,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: native-linux
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -253,6 +256,29 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-go/${{ matrix.app.path }}
+          download_go_modules() {
+            local attempt=1
+            local max_attempts=4
+            local sleep_sec=5
+            local go_proxy="https://proxy.golang.org,direct"
+            while [ "$attempt" -le "$max_attempts" ]; do
+              if GOPROXY="$go_proxy" go mod download; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::error::go mod download failed after ${max_attempts} attempts"
+                return 1
+              fi
+              if [ "$attempt" -eq 2 ]; then
+                go_proxy="direct"
+              fi
+              echo "go mod download attempt ${attempt} failed; retrying in ${sleep_sec}s"
+              sleep "$sleep_sec"
+              sleep_sec=$((sleep_sec * 2))
+              attempt=$((attempt + 1))
+            done
+          }
+          download_go_modules
           $REPLAY_BIN test --port 8000 --sse-port 8047 --api-timeout 200 --delay 30
 
       - name: Test port mapping (http-sse only)

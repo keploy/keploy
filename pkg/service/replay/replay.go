@@ -1864,7 +1864,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
 
-			// Execute: Call SimulateRequest synchronously (blocks until stream is done).
+			// Execute: SimulateRequest returns once response headers arrive;
+			// for streaming cases the body reader is drained later by
+			// CompareHTTPStream below, so in-stream mock consumption can
+			// continue after this call returns.
 			started := time.Now().UTC()
 			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
 
@@ -1888,7 +1891,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var hadStreamingMismatch bool              // Track if streaming comparison failed
 			var streamMismatch *pkg.StreamMismatchInfo // Detailed mismatch info for body result
 
-			// Calculate mock mismatch early so we can use emitFailureLogs in streaming comparison
+			// Pre-stream drain + mismatch snapshot: needed to decide whether
+			// CompareHTTPStream below should emit failure logs. The mismatch
+			// is re-evaluated after the post-stream drain so extra mocks
+			// consumed while reading the stream body are counted too.
 			mockNames := make([]string, 0)
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
@@ -1984,14 +1990,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			// Update consumed mocks map.
+			// Drain mocks consumed during stream body transmission and union
+			// with the pre-stream mocks captured earlier. GetConsumedMocks
+			// drains on read, so if any mocks land between the pre-stream
+			// drain and here (e.g., one backend call per SSE frame, consumed
+			// while CompareHTTPStream was still reading frames above), they
+			// would otherwise be dropped from mappings.yaml.
 			if r.instrument {
-				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				additionalMocks, drainErr := r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if drainErr != nil {
+					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
 				}
-				for _, m := range consumedMocks {
+				for _, m := range additionalMocks {
 					totalConsumedMocks[m.Name] = m
+					mockNames = append(mockNames, m.Name)
+				}
+				consumedMocks = append(consumedMocks, additionalMocks...)
+			}
+
+			// Re-evaluate mismatch now that consumedMocks covers the full
+			// test case (pre-stream + in-stream). If CompareHTTPStream
+			// already forced emitFailureLogs=false on a streaming body
+			// mismatch, keep it suppressed — don't un-suppress just because
+			// the mock set still looks like a subset.
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+				if !hadStreamingMismatch {
+					emitFailureLogs = !mockSetMismatch
 				}
 			}
 
