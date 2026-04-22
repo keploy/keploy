@@ -41,6 +41,17 @@ type Recorder struct {
 	// store interfaces. Register with RegisterCleanup.
 	cleanupMu sync.Mutex
 	cleanups  []func() error
+
+	// disableProcessStop opts out of the global utils.Stop() calls in
+	// Start's defer and in the record-timer goroutine. Intended for
+	// library embedders (e.g. k8s-proxy) that host many concurrent
+	// Recorder instances in one process: one session's failure must
+	// not cancel the shared root context and tear down peer sessions.
+	// Session-local contexts are still cancelled in the defer, so this
+	// session unwinds cleanly; the embedder observes the returned error
+	// from Start() and decides whether to stop anything else. Default
+	// false preserves CLI behaviour where Start() is the sole session.
+	disableProcessStop bool
 }
 
 // RegisterCleanup appends a shutdown callback that Recorder.Start's
@@ -76,6 +87,16 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 		config:          config,
 		hooks:           hooks,
 	}
+}
+
+// SetDisableProcessStop toggles whether Start's defer and the
+// record-timer goroutine call utils.Stop() on exit. Embedders that
+// run multiple Recorders in one process should set this to true so a
+// single session's failure does not cancel the shared root context.
+// When true, Start still cancels its own runApp/req/setup contexts
+// and returns the error so the caller can react per-session.
+func (r *Recorder) SetDisableProcessStop(disabled bool) {
+	r.disableProcessStop = disabled
 }
 
 // SetRecordHooks replaces the current hooks. Mirrors SetTestHooks on the Replayer.
@@ -172,7 +193,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecordCfg.Rerecord {
+			// Library embedders (r.disableProcessStop) own the root
+			// context and handle per-session failure themselves, so
+			// skipping this global cancel keeps peer sessions alive.
+			if !reRecordCfg.Rerecord && !r.disableProcessStop {
 
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
@@ -519,6 +543,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			select {
 			case <-timer:
 				r.logger.Warn("Time up! Stopping keploy")
+				// When embedded, fall back to cancelling only this
+				// session via ctx rather than the global root context.
+				if r.disableProcessStop {
+					return errors.New("record timer expired")
+				}
 				err := utils.Stop(r.logger, "Time up! Stopping keploy")
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
