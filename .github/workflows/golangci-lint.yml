@@ -50,7 +50,7 @@ jobs:
           # still resolves the `github.com/keploy/integrations/pkg/postgres/v3`
           # import added to extraparsers.go by this action. Revert to
           # `main` (drop this key) once keploy/integrations#130 merges.
-          integration-ref: 6ba1153e54bdd969aa8fb14501bc0747fbfe65a2
+          integration-ref: fadc3a4ac657fb39ba72ac30e299f79588115a41
 
       - name: Configure Git to use SSH
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
