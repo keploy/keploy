@@ -46,9 +46,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          # TEMPORARY override — remove once keploy/integrations#130 merges
-          # to main; the Postgres v3 parser package lives on that branch until then.
-          integration-ref: feat/postgres-v3-parser
+          # TEMPORARY override — pinned to the exact commit SHA on the
+          # integrations feature branch that contains the Postgres v3
+          # parser, so CI stays reproducible even if the branch is
+          # renamed or deleted. Revert to `main` (drop this key) once
+          # keploy/integrations#130 merges.
+          integration-ref: ff186820bc9a11700953a3242518aa1445e1cc46
 
       - name: Build Keploy (non-race)
         run: |
@@ -95,9 +98,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          # TEMPORARY override — remove once keploy/integrations#130 merges
-          # to main; the Postgres v3 parser package lives on that branch until then.
-          integration-ref: feat/postgres-v3-parser
+          # TEMPORARY override — pinned to the exact commit SHA on the
+          # integrations feature branch that contains the Postgres v3
+          # parser, so CI stays reproducible even if the branch is
+          # renamed or deleted. Revert to `main` (drop this key) once
+          # keploy/integrations#130 merges.
+          integration-ref: ff186820bc9a11700953a3242518aa1445e1cc46
 
       - name: Build Keploy (non-race, linux/arm64)
         run: |
@@ -121,9 +127,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          # TEMPORARY override — remove once keploy/integrations#130 merges
-          # to main; the Postgres v3 parser package lives on that branch until then.
-          integration-ref: feat/postgres-v3-parser
+          # TEMPORARY override — pinned to the exact commit SHA on the
+          # integrations feature branch that contains the Postgres v3
+          # parser, so CI stays reproducible even if the branch is
+          # renamed or deleted. Revert to `main` (drop this key) once
+          # keploy/integrations#130 merges.
+          integration-ref: ff186820bc9a11700953a3242518aa1445e1cc46
 
       - name: Build Keploy (darwin/arm64)
         run: |
@@ -389,9 +398,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: false
-          # TEMPORARY override — remove once keploy/integrations#130 merges
-          # to main; the Postgres v3 parser package lives on that branch until then.
-          integration-ref: feat/postgres-v3-parser
+          # TEMPORARY override — pinned to the exact commit SHA on the
+          # integrations feature branch that contains the Postgres v3
+          # parser, so CI stays reproducible even if the branch is
+          # renamed or deleted. Revert to `main` (drop this key) once
+          # keploy/integrations#130 merges.
+          integration-ref: ff186820bc9a11700953a3242518aa1445e1cc46
 
       - name: Add MinGW gcc to PATH
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
