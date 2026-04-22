@@ -2,6 +2,25 @@
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
+dump_gin_mongo_ci_diagnostics() {
+    echo "===== docker ps -a ====="
+    docker ps -a || true
+
+    echo "===== mongoDb logs (last 200 lines) ====="
+    if docker ps -a --format '{{.Names}}' | grep -qx 'mongoDb'; then
+        docker logs --tail 200 mongoDb || true
+    else
+        echo "mongoDb container not found"
+    fi
+
+    echo "===== candidate Keploy/app log files under $(pwd) ====="
+    if find . -type f \( -iname '*keploy*.log' -o -iname '*app*.log' -o -name '*.txt' \) -print | sed 's|^\./||' | grep -q '.'; then
+        find . -type f \( -iname '*keploy*.log' -o -iname '*app*.log' -o -name '*.txt' \) -print | sed 's|^\./||'
+    else
+        echo "No Keploy/app log files matching '*keploy*.log', '*app*.log', or '*.txt' were found in the workspace"
+    fi
+}
+
 # Start mongo before starting keploy.
 docker rm -f mongoDb >/dev/null 2>&1 || true
 docker run --rm -d -p27017:27017 --name mongoDb mongo
@@ -17,8 +36,8 @@ for mongo_attempt in {1..30}; do
 done
 
 if [ "$mongo_ready" != true ]; then
-    echo "::error::MongoDB did not become ready within 60 seconds"
-    docker logs mongoDb || true
+    echo "::error::MongoDB did not become ready within 60 seconds. Next steps: verify the Docker daemon is available, check for image pull or container startup errors, and inspect the mongoDb logs printed below."
+    dump_gin_mongo_ci_diagnostics
     exit 1
 fi
 
@@ -66,13 +85,14 @@ stop_recording(){
         # and prints all goroutine stacks to stderr, which the
         # tee above captures into ${app_name}.txt.
         if kill -0 "$rec_pid" 2>/dev/null; then
-            echo "::warning::keploy did not exit within 30s of SIGINT (pid $rec_pid). Dumping goroutines via SIGQUIT, then escalating to SIGKILL."
+            echo "::error::keploy did not exit within 30s of SIGINT (pid $rec_pid). Dumping goroutines via SIGQUIT, then escalating to SIGKILL."
             sudo kill -QUIT "$rec_pid" 2>/dev/null || true
             sleep 3
             sudo kill -9 "$rec_pid" 2>/dev/null || true
             # Brief pause so the tee pipe has a chance to drain
             # before the outer `wait` returns and the loop moves on.
             sleep 2
+            return 1
         fi
     elif [ -n "$kp_pid" ]; then
         sudo kill -INT "$kp_pid" 2>/dev/null || true
@@ -93,7 +113,8 @@ send_request(){
     app_started=false
     while [ "$app_started" = false ]; do
         if [ "$(date +%s)" -gt "$deadline" ]; then
-            echo "::error::gin-mongo app did not respond on http://localhost:8080 within 5 minutes; aborting iteration"
+            echo "::error::gin-mongo app did not respond on http://localhost:8080 within 5 minutes. Next steps: review 'docker ps -a' and the mongoDb logs printed below, then inspect any Keploy/app log files listed for this workspace."
+            dump_gin_mongo_ci_diagnostics
             stop_recording "$kp_pid"
             return 1
         fi
@@ -136,7 +157,7 @@ send_request(){
 
     # Wait for keploy to record the tcs and mocks.
     sleep 10
-    stop_recording "$kp_pid"
+    stop_recording "$kp_pid" || return 1
 }
 
 has_unexpected_errors() {
@@ -146,7 +167,7 @@ has_unexpected_errors() {
 
 
 for record_iteration in {1..2}; do
-    app_name="javaApp_${record_iteration}"
+    app_name="ginMongo_${record_iteration}"
     "$RECORD_BIN" record -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
     
     KEPLOY_PID=$!
