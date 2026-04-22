@@ -66,6 +66,42 @@ type RecordSession struct {
 }
 
 // PostRecordHook is invoked after a shared parser produces a mock and before
-// the mock is handed off for storage. Parsers chain hooks by capturing any
-// existing hook and calling it after their own adjustments.
+// the mock is handed off for storage. Wrapper parsers that layer on top of a
+// shared parser (for example the Enterprise SQS parser which delegates
+// recording to the OSS HTTP parser) use this hook to annotate or reshape the
+// mock without teaching the shared parser about downstream protocols.
+//
+// Call RecordSession.AddPostRecordHook rather than assigning to
+// OnMockRecorded directly — the helper preserves any hook already installed
+// by an outer parser, which is the usual chaining contract.
 type PostRecordHook func(*models.Mock)
+
+// AddPostRecordHook appends h to the session's post-record chain. If a
+// previous hook is already installed, it runs AFTER h — so each wrapper
+// parser sees the mock already annotated by its inner parser (if any) and
+// can layer its own annotations on top without clobbering them.
+//
+// Calling with a nil hook, or on a nil *RecordSession, is a no-op. Making
+// the nil-receiver case safe lets defensive call sites drop their own nil
+// guard before invoking AddPostRecordHook.
+//
+// This helper exists to turn the "capture prev, call prev after" pattern
+// into one call. Direct assignment to OnMockRecorded is still legal for
+// cases that deliberately replace the chain (e.g. tests), but parser code
+// should use the helper so future third-party parsers composing with the
+// same shared recorder do not have to reimplement the chain contract and
+// risk silently dropping prior annotations.
+func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
+	if s == nil || h == nil {
+		return
+	}
+	prev := s.OnMockRecorded
+	if prev == nil {
+		s.OnMockRecorded = h
+		return
+	}
+	s.OnMockRecorded = func(m *models.Mock) {
+		h(m)
+		prev(m)
+	}
+}

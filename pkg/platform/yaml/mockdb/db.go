@@ -45,6 +45,14 @@ const gobMockMagic = "keploy-gob-v1\n"
 // gob read paths must share this classification verbatim so replay
 // behavior does not diverge based on on-disk format.
 //
+// The switch enumerates only OSS-owned kinds. Out-of-tree parser
+// packages (Enterprise Redis/Kafka/HBase, downstream third parties)
+// that want their un-tagged pre-lifetime recordings to land in the
+// unfiltered/config pool opt in via
+// models.RegisterImplicitSessionKind — the same registry backs
+// DeriveLifetime's kind-fallback, so both paths stay consistent and
+// OSS stays free of protocol-specific branches.
+//
 // PostgresV2 is intentionally listed here even though it also passes
 // the GetFilteredMocks path (matches YAML's current behavior — both
 // paths include it; a mock shows up in both buckets). Changing that
@@ -54,7 +62,7 @@ func isUnfilteredMockKind(kind models.Kind) bool {
 	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "MySQL", "DNS":
 		return true
 	}
-	return false
+	return models.IsImplicitSessionKind(kind)
 }
 
 // configuredMockFormat holds the mock format selected via config file
@@ -707,10 +715,11 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// same pointer, or a producer pool that reuses Mock structs)
 	// would otherwise race with the async gob encoder and persist
 	// an unintended payload. DeepCopy handles the nested Noise /
-	// Metadata / per-protocol-slice fields. The copy cost is
-	// bounded by the mock's own size and is acceptable vs. the
-	// alternative (encoding to bytes synchronously on every
-	// InsertMock, which would defeat the whole async-writer win).
+	// Metadata and the Generic/Mongo/MySQL/HTTP per-protocol slices.
+	// The copy cost is bounded by the mock's own size and is
+	// acceptable vs. the alternative (encoding to bytes
+	// synchronously on every InsertMock, which would defeat the
+	// whole async-writer win).
 	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
