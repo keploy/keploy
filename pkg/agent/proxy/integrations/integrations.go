@@ -166,6 +166,18 @@ type MockMemDb interface {
 	// test windows.
 	GetStartupMocks() ([]*models.Mock, error)
 
+	// GetStartupMocksByKind returns startup-tier mocks matching the
+	// given Kind. Symmetric counterpart to the session- / per-test-
+	// tier by-kind accessors (GetUnFilteredMocksByKind,
+	// GetFilteredMocksByKind). Parsers that build per-kind indices
+	// over the startup tier should prefer this over filtering the
+	// GetStartupMocks snapshot client-side.
+	//
+	// Returns (nil, nil) when the startup tree has never been
+	// populated on the underlying manager (fresh manager, pre-first
+	// SetMocksWithWindow call).
+	GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error)
+
 	// GetSessionScopedMocks returns the session-tier + connection-tagged
 	// mocks strictly — startup-tier entries are NOT included (those are
 	// in GetStartupMocks). Parsers opting into the Wave 2 tier-aware

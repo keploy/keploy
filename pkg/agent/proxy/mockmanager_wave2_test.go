@@ -801,6 +801,74 @@ func TestMockManager_TierAwareStrictGate_StartupSurvivesPartition(t *testing.T) 
 	}
 }
 
+// TestGetStartupMocksByKind pins the N1 API-symmetry addition: the
+// startup tier exposes a by-kind filter that mirrors
+// GetUnFilteredMocksByKind / GetFilteredMocksByKind on the session /
+// per-test tiers. Three mocks of differing kinds are seeded during
+// initial staging; the by-kind accessor returns only matching mocks,
+// the unfiltered snapshot still surfaces all three, and an empty-kind
+// query returns an empty slice (not an error).
+func TestGetStartupMocksByKind(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	req := time.Date(2024, 1, 1, 11, 59, 0, 0, time.UTC)
+	httpMock := newMockForTest("http-boot", req, models.LifetimeSession)
+	httpMock.Kind = models.HTTP
+	pgMock := newMockForTest("pg-boot", req.Add(time.Second), models.LifetimeSession)
+	pgMock.Kind = models.Kind("POSTGRES_V3")
+	dnsMock := newMockForTest("dns-boot", req.Add(2*time.Second), models.LifetimeSession)
+	dnsMock.Kind = models.DNS
+
+	mm.SetMocksWithWindow(nil, []*models.Mock{httpMock, pgMock, dnsMock}, models.BaseTime, time.Now())
+
+	all, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("GetStartupMocks: want 3 mocks, got %d: %v", len(all), mockNames(all))
+	}
+
+	pgOnly, err := mm.GetStartupMocksByKind(models.Kind("POSTGRES_V3"))
+	if err != nil {
+		t.Fatalf("GetStartupMocksByKind(POSTGRES_V3): %v", err)
+	}
+	if len(pgOnly) != 1 || pgOnly[0].Name != "pg-boot" {
+		t.Fatalf("GetStartupMocksByKind(POSTGRES_V3): want [pg-boot], got %v", mockNames(pgOnly))
+	}
+
+	httpOnly, err := mm.GetStartupMocksByKind(models.HTTP)
+	if err != nil {
+		t.Fatalf("GetStartupMocksByKind(HTTP): %v", err)
+	}
+	if len(httpOnly) != 1 || httpOnly[0].Name != "http-boot" {
+		t.Fatalf("GetStartupMocksByKind(HTTP): want [http-boot], got %v", mockNames(httpOnly))
+	}
+
+	// Unseeded kind: empty slice, not an error.
+	kafkaOnly, err := mm.GetStartupMocksByKind(models.KAFKA)
+	if err != nil {
+		t.Fatalf("GetStartupMocksByKind(KAFKA): %v", err)
+	}
+	if len(kafkaOnly) != 0 {
+		t.Fatalf("GetStartupMocksByKind(KAFKA): want empty, got %v", mockNames(kafkaOnly))
+	}
+
+	// Fresh manager with no SetMocksWithWindow ever called: the startup
+	// tree is non-nil (allocated by NewMockManager) but empty, so we
+	// get an empty (possibly nil-cap) slice back without error.
+	fresh := NewMockManager(nil, nil, zap.NewNop())
+	defer fresh.Close()
+	got, err := fresh.GetStartupMocksByKind(models.HTTP)
+	if err != nil {
+		t.Fatalf("GetStartupMocksByKind on fresh manager: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetStartupMocksByKind on fresh manager: want empty, got %v", mockNames(got))
+	}
+}
+
 // TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID pins
 // the H4 round-2 fix: during Runner/Replayer's initial BaseTime staging,
 // a session mock appears in BOTH the startup tree AND the unfiltered

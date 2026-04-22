@@ -998,6 +998,36 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 	return results, nil
 }
 
+// GetStartupMocksByKind returns startup-tier mocks whose Kind matches the
+// given kind. Mirror of GetUnFilteredMocksByKind / GetFilteredMocksByKind
+// for the startup tier.
+//
+// The startup tree is not partitioned by kind internally — typical startup
+// pool size is ~10^2 mocks (Flyway migrations + ORM metadata boot +
+// driver-handshake queries), so an in-memory filter walk is O(N) but with
+// a small N and no lock-surface expansion. If the startup pool ever grows
+// to a size where this is measurable, the remediation is to mirror the
+// per-kind trees the session / per-test tiers maintain.
+//
+// Returns nil, nil when the startup tree has never been populated (fresh
+// manager pre-first SetMocksWithWindow).
+func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	tree := m.startup
+	m.treesMu.RUnlock()
+	if tree == nil {
+		return nil, nil
+	}
+	results := make([]*models.Mock, 0, 16)
+	tree.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
 // GetSessionScopedMocks returns session-tier + connection-tagged mocks
 // strictly — startup-tier mocks are NOT included. Parsers opting into
 // tier-aware routing (Wave 2 Postgres v3) call this in preference to
