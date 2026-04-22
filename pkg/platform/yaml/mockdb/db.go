@@ -714,12 +714,15 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// RecordHooks.AfterMockInsert that tags telemetry fields on the
 	// same pointer, or a producer pool that reuses Mock structs)
 	// would otherwise race with the async gob encoder and persist
-	// an unintended payload. DeepCopy handles the nested slice,
-	// map, and pointer fields on MockSpec so the shipped copy shares
-	// no mutable state with the caller's. The copy cost is bounded
-	// by the mock's own size and is acceptable vs. the alternative
-	// (encoding to bytes synchronously on every InsertMock, which
-	// would defeat the whole async-writer win).
+	// an unintended payload. DeepCopy clones Mock's top-level
+	// MockSpec slices, maps, and pointers so the usual
+	// after-InsertMock field tagging is safe; it does not
+	// transitively clone every nested object reachable through a
+	// protocol payload, so callers should still avoid mutating
+	// deeply nested state in a mock they have handed off. The copy
+	// cost is bounded by the mock's own size and is acceptable vs.
+	// the alternative (encoding to bytes synchronously on every
+	// InsertMock, which would defeat the whole async-writer win).
 	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
