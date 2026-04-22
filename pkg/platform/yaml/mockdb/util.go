@@ -23,12 +23,12 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
 	}
-	handled, err := encodeRegisteredMock(mock, &yamlDoc)
+	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal the registered mock kind as yaml", zap.String("kind", string(mock.Kind)))
 		return nil, err
 	}
-	if handled {
+	if mapped {
 		return &yamlDoc, nil
 	}
 	switch mock.Kind {
@@ -262,12 +262,12 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
 		}
-		handled, err := decodeRegisteredMock(m, &mock)
+		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
 			utils.LogError(logger, err, "failed to unmarshal a registered mock yaml doc", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
 			return nil, err
 		}
-		if handled {
+		if mapped {
 			mocks = append(mocks, &mock)
 			continue
 		}

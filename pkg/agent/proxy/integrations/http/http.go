@@ -116,7 +116,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MockModifier)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -147,7 +147,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions, mockModifier func(*models.Mock)) error {
+func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
@@ -258,8 +258,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if mockModifier != nil {
-		mockModifier(newMock)
+	if onMockRecorded != nil {
+		onMockRecorded(newMock)
 	}
 
 	if mgr := syncMock.Get(); mgr != nil {

@@ -57,9 +57,15 @@ type RecordSession struct {
 	// passwords, TLS keys, noise config, etc.).
 	Opts models.OutgoingOptions
 
-	// MockModifier lets wrapper parsers adjust a mock produced by a shared
-	// parser before it is stored. For example, an enterprise parser that
-	// reuses HTTP recording can add protocol-specific metadata without
-	// teaching the OSS HTTP parser about that protocol.
-	MockModifier func(*models.Mock)
+	// OnMockRecorded runs against each newly created mock before it is stored.
+	// It lets a wrapper parser annotate a mock produced by a shared parser —
+	// for example, an enterprise parser that reuses HTTP recording can add
+	// protocol-specific metadata without teaching the OSS HTTP parser about
+	// that protocol.
+	OnMockRecorded PostRecordHook
 }
+
+// PostRecordHook is invoked after a shared parser produces a mock and before
+// the mock is handed off for storage. Parsers chain hooks by capturing any
+// existing hook and calling it after their own adjustments.
+type PostRecordHook func(*models.Mock)
