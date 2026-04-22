@@ -30,15 +30,11 @@ const (
 	Postgres   Kind = "Postgres"
 	PostgresV2 Kind = "PostgresV2"
 
-	// --- PostgresV3: deterministic replay, typed per-concern mocks ---
-	// Each lives in the same mocks.yaml stream but carries a distinct
-	// spec payload. See integrations/pkg/postgres/v3/README.md for the
-	// replay architecture.
-	PostgresV3Session   Kind = "PostgresV3Session"   // startup handshake + ParameterStatus bundle
-	PostgresV3Catalog   Kind = "PostgresV3Catalog"   // pg_catalog snapshot + framework virtual tables
-	PostgresV3Data      Kind = "PostgresV3Data"      // per-table seed rows for the row store
-	PostgresV3Query     Kind = "PostgresV3Query"     // single query invocation (SQL, binds, response, effects)
-	PostgresV3Generator Kind = "PostgresV3Generator" // deterministic volatile value stream
+	// PostgresV3 is the single top-level Kind for the v3 Postgres parser.
+	// The sub-type (session / catalog / data / query / generator) lives in
+	// Spec.PostgresV3.Type; consumers discriminate there instead of on Kind.
+	// See integrations/pkg/postgres/v3/README.md for the replay architecture.
+	PostgresV3 Kind = "PostgresV3"
 
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
@@ -132,13 +128,33 @@ type MockSpec struct {
 	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 
-	// --- PostgresV3 payloads — each nil unless Kind matches ---
-	PostgresV3Session   *PostgresV3SessionSpec   `json:"postgresV3Session,omitempty" bson:"postgres_v3_session,omitempty" yaml:"postgresV3Session,omitempty"`
-	PostgresV3Catalog   *PostgresV3CatalogSpec   `json:"postgresV3Catalog,omitempty" bson:"postgres_v3_catalog,omitempty" yaml:"postgresV3Catalog,omitempty"`
-	PostgresV3Data      *PostgresV3DataSpec      `json:"postgresV3Data,omitempty" bson:"postgres_v3_data,omitempty" yaml:"postgresV3Data,omitempty"`
-	PostgresV3Query     *PostgresV3QuerySpec     `json:"postgresV3Query,omitempty" bson:"postgres_v3_query,omitempty" yaml:"postgresV3Query,omitempty"`
-	PostgresV3Generator *PostgresV3GeneratorSpec `json:"postgresV3Generator,omitempty" bson:"postgres_v3_generator,omitempty" yaml:"postgresV3Generator,omitempty"`
+	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
+	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
+	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
 }
+
+// PostgresV3Spec is the single discriminated Spec for the five v3
+// mock sub-types. Exactly one of the pointer fields is non-nil, and
+// Type names which. A nil PostgresV3Spec or a Type that doesn't match
+// the populated pointer is a hard-reject at BuildIndex time.
+type PostgresV3Spec struct {
+	Type string `yaml:"type" json:"type" bson:"type"` // "session" | "catalog" | "data" | "query" | "generator"
+
+	Session   *PostgresV3SessionSpec   `yaml:"session,omitempty"   json:"session,omitempty"   bson:"session,omitempty"`
+	Catalog   *PostgresV3CatalogSpec   `yaml:"catalog,omitempty"   json:"catalog,omitempty"   bson:"catalog,omitempty"`
+	Data      *PostgresV3DataSpec      `yaml:"data,omitempty"      json:"data,omitempty"      bson:"data,omitempty"`
+	Query     *PostgresV3QuerySpec     `yaml:"query,omitempty"     json:"query,omitempty"     bson:"query,omitempty"`
+	Generator *PostgresV3GeneratorSpec `yaml:"generator,omitempty" json:"generator,omitempty" bson:"generator,omitempty"`
+}
+
+// PostgresV3 sub-type discriminator values (Spec.PostgresV3.Type).
+const (
+	PostgresV3TypeSession   = "session"
+	PostgresV3TypeCatalog   = "catalog"
+	PostgresV3TypeData      = "data"
+	PostgresV3TypeQuery     = "query"
+	PostgresV3TypeGenerator = "generator"
+)
 
 // ============================================================================
 // PostgresV3 specs — deterministic replay payloads.

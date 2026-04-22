@@ -1,10 +1,11 @@
-// YAML round-trip tests for the five PostgresV3 mock kinds. The gob
-// tests already exist in gob_roundtrip_test.go and catch encode/decode
-// regressions in the binary path, but v3 is loaded from mocks.yaml
-// in the default configuration. Any drift between the EncodeMock yaml
-// envelope and the DecodeMocks reader would silently drop fields (or
-// outright fail to parse on NUL bytes / missing yaml tags), and only
-// an actual yaml marshal → unmarshal cycle exercises that path.
+// YAML round-trip tests for the single PostgresV3 Kind with its five
+// discriminated sub-types. The gob tests already exist in
+// gob_roundtrip_test.go and catch encode/decode regressions in the
+// binary path, but v3 is loaded from mocks.yaml in the default
+// configuration. Any drift between the EncodeMock yaml envelope and
+// the DecodeMocks reader would silently drop fields (or outright fail
+// to parse on NUL bytes / missing yaml tags), and only an actual yaml
+// marshal → unmarshal cycle exercises that path.
 //
 // The sentinel case (PostgresV3NullCell) is called out as its own test:
 // its previous value (\x00NULL\x00) was a control character that
@@ -15,6 +16,7 @@ package mockdb
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -60,23 +62,38 @@ func yamlRoundTrip(t *testing.T, name string, m *models.Mock) *models.Mock {
 func TestYAMLRoundTrip_PostgresV3Session(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Session,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config", "connID": "0"},
-			PostgresV3Session: &models.PostgresV3SessionSpec{
-				ProtocolVersion:  "3.0",
-				SSLResponse:      "N",
-				ServerVersion:    "15.17 (Debian 15.17-1.pgdg13+1)",
-				ParameterStatus:  map[string]string{"DateStyle": "ISO, MDY", "client_encoding": "UTF8"},
-				BackendProcessID: 573,
-				BackendSecretKey: -271483429,
-				ObservedAuthMode: "scram",
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeSession,
+				Session: &models.PostgresV3SessionSpec{
+					ProtocolVersion:  "3.0",
+					SSLResponse:      "N",
+					ServerVersion:    "15.17 (Debian 15.17-1.pgdg13+1)",
+					ParameterStatus:  map[string]string{"DateStyle": "ISO, MDY", "client_encoding": "UTF8"},
+					BackendProcessID: 573,
+					BackendSecretKey: -271483429,
+					ObservedAuthMode: "scram",
+				},
 			},
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Session", in)
-	if !reflect.DeepEqual(got.Spec.PostgresV3Session, in.Spec.PostgresV3Session) {
-		t.Fatalf("session mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Session, got.Spec.PostgresV3Session)
+	if got.Spec.PostgresV3 == nil {
+		t.Fatal("got.Spec.PostgresV3 is nil after round-trip")
+	}
+	if got.Spec.PostgresV3.Type != models.PostgresV3TypeSession {
+		t.Errorf("Type mismatch: got %q, want %q", got.Spec.PostgresV3.Type, models.PostgresV3TypeSession)
+	}
+	if !reflect.DeepEqual(got.Spec.PostgresV3.Session, in.Spec.PostgresV3.Session) {
+		t.Fatalf("session mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Session, got.Spec.PostgresV3.Session)
+	}
+	// Only the Type-matching sub-pointer must be populated; the rest
+	// must be nil after round-trip.
+	if got.Spec.PostgresV3.Catalog != nil || got.Spec.PostgresV3.Data != nil ||
+		got.Spec.PostgresV3.Query != nil || got.Spec.PostgresV3.Generator != nil {
+		t.Errorf("non-Session sub-pointers unexpectedly populated: %#v", got.Spec.PostgresV3)
 	}
 	if !reflect.DeepEqual(got.Spec.Metadata, in.Spec.Metadata) {
 		t.Fatalf("metadata mismatch: got %v, want %v", got.Spec.Metadata, in.Spec.Metadata)
@@ -86,119 +103,190 @@ func TestYAMLRoundTrip_PostgresV3Session(t *testing.T) {
 func TestYAMLRoundTrip_PostgresV3Catalog(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Catalog,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config"},
-			PostgresV3Catalog: &models.PostgresV3CatalogSpec{
-				Schemas: []models.PostgresV3Schema{{
-					Name: "public",
-					Tables: []models.PostgresV3TableDef{{
-						Name: "customer_tag",
-						Columns: []models.PostgresV3Column{
-							{Name: "id", TypeOID: 20, TypeName: "bigint", NotNull: true, IsPrimary: true, AttNum: 1},
-							{Name: "tag", TypeOID: 1043, TypeName: "varchar", NotNull: true, AttNum: 2},
-						},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeCatalog,
+				Catalog: &models.PostgresV3CatalogSpec{
+					Schemas: []models.PostgresV3Schema{{
+						Name: "public",
+						Tables: []models.PostgresV3TableDef{{
+							Name: "customer_tag",
+							Columns: []models.PostgresV3Column{
+								{Name: "id", TypeOID: 20, TypeName: "bigint", NotNull: true, IsPrimary: true, AttNum: 1},
+								{Name: "tag", TypeOID: 1043, TypeName: "varchar", NotNull: true, AttNum: 2},
+							},
+						}},
 					}},
-				}},
-				Extensions: []string{"pgcrypto"},
+					Extensions: []string{"pgcrypto"},
+				},
 			},
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Catalog", in)
-	if !reflect.DeepEqual(got.Spec.PostgresV3Catalog, in.Spec.PostgresV3Catalog) {
-		t.Fatalf("catalog mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Catalog, got.Spec.PostgresV3Catalog)
+	if got.Spec.PostgresV3 == nil || got.Spec.PostgresV3.Type != models.PostgresV3TypeCatalog {
+		t.Fatalf("Type/spec mismatch: got %#v", got.Spec.PostgresV3)
+	}
+	if !reflect.DeepEqual(got.Spec.PostgresV3.Catalog, in.Spec.PostgresV3.Catalog) {
+		t.Fatalf("catalog mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Catalog, got.Spec.PostgresV3.Catalog)
 	}
 }
 
 func TestYAMLRoundTrip_PostgresV3Data(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Data,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config"},
-			PostgresV3Data: &models.PostgresV3DataSpec{
-				Schema:     "public",
-				Table:      "customer_tag",
-				PrimaryKey: []string{"id"},
-				Columns:    []string{"id", "tag", "created_at"},
-				Rows: [][]string{
-					{"1", "vip", "2026-04-22"},
-					{"2", "churn-risk", "2026-04-22"},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeData,
+				Data: &models.PostgresV3DataSpec{
+					Schema:     "public",
+					Table:      "customer_tag",
+					PrimaryKey: []string{"id"},
+					Columns:    []string{"id", "tag", "created_at"},
+					Rows: [][]string{
+						{"1", "vip", "2026-04-22"},
+						{"2", "churn-risk", "2026-04-22"},
+					},
+					Truncated: false,
 				},
-				Truncated: false,
 			},
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Data", in)
-	if !reflect.DeepEqual(got.Spec.PostgresV3Data, in.Spec.PostgresV3Data) {
-		t.Fatalf("data mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Data, got.Spec.PostgresV3Data)
+	if got.Spec.PostgresV3 == nil || got.Spec.PostgresV3.Type != models.PostgresV3TypeData {
+		t.Fatalf("Type/spec mismatch: got %#v", got.Spec.PostgresV3)
+	}
+	if !reflect.DeepEqual(got.Spec.PostgresV3.Data, in.Spec.PostgresV3.Data) {
+		t.Fatalf("data mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Data, got.Spec.PostgresV3.Data)
 	}
 }
 
 func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Query,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "mocks", "class": "APP"},
-			PostgresV3Query: &models.PostgresV3QuerySpec{
-				Class:         "APP",
-				Lifetime:      "perTest",
-				Scope:         "session",
-				SQLAstHash:    "sha256:abcd",
-				SQLNormalized: "select id from customer_tag where id=$1",
-				ParamOIDs:     []uint32{20},
-				InvocationID:  "sha256:abcd:0",
-				BindValues:    []string{"AAAAAQ=="},
-				BindFormats:   []int{1},
-				ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
-				Response: &models.PostgresV3Response{
-					RowDescription: []models.PostgresV3ColumnDescriptor{
-						{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					Scope:         "session",
+					SQLAstHash:    "sha256:abcd",
+					SQLNormalized: "select id from customer_tag where id=$1",
+					ParamOIDs:     []uint32{20},
+					InvocationID:  "sha256:abcd:0",
+					BindValues:    []string{"AAAAAQ=="},
+					BindFormats:   []int{1},
+					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+						},
+						Rows:            [][]string{{"MQ=="}},
+						CommandComplete: "SELECT 1",
 					},
-					Rows:            [][]string{{"MQ=="}},
-					CommandComplete: "SELECT 1",
+					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
 				},
-				SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
 			},
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Query", in)
-	if !reflect.DeepEqual(got.Spec.PostgresV3Query, in.Spec.PostgresV3Query) {
-		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Query, got.Spec.PostgresV3Query)
+	if got.Spec.PostgresV3 == nil || got.Spec.PostgresV3.Type != models.PostgresV3TypeQuery {
+		t.Fatalf("Type/spec mismatch: got %#v", got.Spec.PostgresV3)
+	}
+	if !reflect.DeepEqual(got.Spec.PostgresV3.Query, in.Spec.PostgresV3.Query) {
+		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Query, got.Spec.PostgresV3.Query)
+	}
+}
+
+// TestYAMLRoundTrip_PostgresV3_WireShape pins the on-disk yaml shape
+// the wave 3 refactor produces. If someone re-nests the envelope,
+// this test fails with a visible diff — regression canary for
+// analytics / search consumers that read mocks.yaml directly.
+func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
+	in := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					SQLAstHash:    "sha256:shape",
+					SQLNormalized: "select 1",
+					InvocationID:  "sha256:shape:0",
+				},
+			},
+		},
+	}
+	doc, err := EncodeMock(in, zap.NewNop())
+	if err != nil {
+		t.Fatalf("EncodeMock: %v", err)
+	}
+	buf, err := yamlLib.Marshal(doc)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	body := string(buf)
+	// Kind line must be the single top-level form.
+	if !strings.Contains(body, "kind: PostgresV3\n") {
+		t.Fatalf("expected top-level `kind: PostgresV3`, body:\n%s", body)
+	}
+	// Spec must carry `postgresV3:` + `type: query`.
+	if !strings.Contains(body, "postgresV3:") {
+		t.Fatalf("expected `postgresV3:` block under spec, body:\n%s", body)
+	}
+	if !strings.Contains(body, "type: query") {
+		t.Fatalf("expected `type: query` discriminator, body:\n%s", body)
+	}
+	// Legacy per-sub-type top-level-in-spec keys MUST be gone.
+	for _, legacy := range []string{
+		"postgresV3Session:", "postgresV3Catalog:", "postgresV3Data:",
+		"postgresV3Query:", "postgresV3Generator:",
+	} {
+		if strings.Contains(body, legacy) {
+			t.Errorf("legacy yaml key %q leaked into post-wave-3 output, body:\n%s", legacy, body)
+		}
 	}
 }
 
 // TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel — the reason this
-// kind gets a dedicated yaml test. The original sentinel used NUL
+// sub-type gets a dedicated yaml test. The original sentinel used NUL
 // bytes which yaml.v3 rejects outright; a future revert to any
 // control-byte-based sentinel must fail here first rather than
 // silently at record time when mocks.yaml becomes unwritable.
 func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Query,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
-			PostgresV3Query: &models.PostgresV3QuerySpec{
-				Class:         "APP",
-				Lifetime:      "perTest",
-				Scope:         "session",
-				SQLAstHash:    "sha256:null",
-				SQLNormalized: "select comment from customer_note where id=$1",
-				InvocationID:  "sha256:null:0",
-				BindValues:    []string{"AAAAAQ=="},
-				BindFormats:   []int{1},
-				Response: &models.PostgresV3Response{
-					RowDescription: []models.PostgresV3ColumnDescriptor{
-						{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					Scope:         "session",
+					SQLAstHash:    "sha256:null",
+					SQLNormalized: "select comment from customer_note where id=$1",
+					InvocationID:  "sha256:null:0",
+					BindValues:    []string{"AAAAAQ=="},
+					BindFormats:   []int{1},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+						},
+						Rows: [][]string{
+							{models.PostgresV3NullCell},
+							{"aGVsbG8="},
+						},
+						CommandComplete: "SELECT 2",
 					},
-					Rows: [][]string{
-						{models.PostgresV3NullCell},
-						{"aGVsbG8="},
-					},
-					CommandComplete: "SELECT 2",
+					SideEffects: &models.PostgresV3SideEffects{},
 				},
-				SideEffects: &models.PostgresV3SideEffects{},
 			},
 		},
 	}
@@ -208,7 +296,10 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 	// "Response is nil" message instead of panicking on a nil-ptr
 	// dereference inside the Rows indexing. t.Fatal stops the test
 	// before any dependent assertions run.
-	q := got.Spec.PostgresV3Query
+	if got.Spec.PostgresV3 == nil {
+		t.Fatal("expected non-nil PostgresV3 spec after round-trip")
+	}
+	q := got.Spec.PostgresV3.Query
 	if q == nil {
 		t.Fatal("expected non-nil Query spec after round-trip")
 	}
@@ -225,73 +316,90 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 		t.Fatalf("NULL sentinel lost in yaml round-trip: got %q, want %q",
 			q.Response.Rows[0][0], models.PostgresV3NullCell)
 	}
-	if !reflect.DeepEqual(q, in.Spec.PostgresV3Query) {
-		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Query, q)
+	if !reflect.DeepEqual(q, in.Spec.PostgresV3.Query) {
+		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Query, q)
 	}
 }
 
 // TestYAMLRoundTrip_PostgresV3_NilPayloadEncodeRejected pins the
-// encode-side nil-payload guard for every PostgresV3 Kind. Writing
-// `<field>: null` to disk silently corrupts downstream replay (the
-// loader dereferences the typed payload unconditionally), so the
-// encoder has to fail fast with the typed sentinel error.
+// encode-side nil-payload guard for every PostgresV3 sub-type. Writing
+// a mock with Type set but no matching sub-pointer silently corrupts
+// downstream replay (the loader dereferences the typed payload
+// unconditionally), so the encoder has to fail fast with the typed
+// sentinel error.
 func TestYAMLRoundTrip_PostgresV3_NilPayloadEncodeRejected(t *testing.T) {
-	kinds := []models.Kind{
-		models.PostgresV3Session,
-		models.PostgresV3Catalog,
-		models.PostgresV3Data,
-		models.PostgresV3Query,
-		models.PostgresV3Generator,
+	types := []string{
+		models.PostgresV3TypeSession,
+		models.PostgresV3TypeCatalog,
+		models.PostgresV3TypeData,
+		models.PostgresV3TypeQuery,
+		models.PostgresV3TypeGenerator,
 	}
-	for _, k := range kinds {
-		t.Run(string(k), func(t *testing.T) {
-			// All payload pointers left nil on purpose.
-			in := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: k}
+	for _, typ := range types {
+		t.Run(typ, func(t *testing.T) {
+			// Type set but all sub-pointers left nil on purpose.
+			in := &models.Mock{
+				Version: "api.keploy.io/v1beta1",
+				Kind:    models.PostgresV3,
+				Spec: models.MockSpec{
+					PostgresV3: &models.PostgresV3Spec{Type: typ},
+				},
+			}
 			_, err := EncodeMock(in, zap.NewNop())
 			if err == nil {
-				t.Fatalf("%s: EncodeMock unexpectedly succeeded on nil payload", k)
+				t.Fatalf("%s: EncodeMock unexpectedly succeeded on nil sub-payload", typ)
 			}
 			if !errors.Is(err, errPostgresV3NilPayload) {
-				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", k, err)
+				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", typ, err)
 			}
 		})
+	}
+
+	// Also pin the outer-nil case: Spec.PostgresV3 itself absent.
+	in := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.PostgresV3}
+	_, err := EncodeMock(in, zap.NewNop())
+	if err == nil {
+		t.Fatal("EncodeMock unexpectedly succeeded with nil Spec.PostgresV3")
+	}
+	if !errors.Is(err, errPostgresV3NilPayload) {
+		t.Fatalf("expected errPostgresV3NilPayload for nil Spec.PostgresV3, got: %v", err)
 	}
 }
 
 // TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected pins the
 // decode-side guard. A hand-edited mocks.yaml with `session: null`
-// (or any other kind's payload field explicitly null) must not load
-// silently — downstream engines assume non-nil payloads and would
-// NPE at replay time. The decode helper must surface the typed
+// (or any other sub-type's payload field explicitly null) must not
+// load silently — downstream engines assume non-nil payloads and
+// would NPE at replay time. The decode helper must surface the typed
 // sentinel so operators see the actionable next_step in logs.
 func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
 	cases := []struct {
-		kind models.Kind
+		name string
 		body string
 	}{
-		{models.PostgresV3Session, "metadata: {}\nsession: null\n"},
-		{models.PostgresV3Catalog, "metadata: {}\ncatalog: null\n"},
-		{models.PostgresV3Data, "metadata: {}\ndata: null\n"},
-		{models.PostgresV3Query, "metadata: {}\nquery: null\n"},
-		{models.PostgresV3Generator, "metadata: {}\ngenerator: null\n"},
+		{"session", "metadata: {}\npostgresV3:\n  type: session\n  session: null\n"},
+		{"catalog", "metadata: {}\npostgresV3:\n  type: catalog\n  catalog: null\n"},
+		{"data", "metadata: {}\npostgresV3:\n  type: data\n  data: null\n"},
+		{"query", "metadata: {}\npostgresV3:\n  type: query\n  query: null\n"},
+		{"generator", "metadata: {}\npostgresV3:\n  type: generator\n  generator: null\n"},
 	}
 	for _, c := range cases {
-		t.Run(string(c.kind), func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			var spec yamlLib.Node
 			if err := yamlLib.Unmarshal([]byte(c.body), &spec); err != nil {
-				t.Fatalf("%s: yaml.Unmarshal fixture: %v", c.kind, err)
+				t.Fatalf("%s: yaml.Unmarshal fixture: %v", c.name, err)
 			}
 			doc := &pyaml.NetworkTrafficDoc{
 				Version: "api.keploy.io/v1beta1",
-				Kind:    c.kind,
+				Kind:    models.PostgresV3,
 				Spec:    spec,
 			}
 			_, err := DecodeMocks([]*pyaml.NetworkTrafficDoc{doc}, zap.NewNop())
 			if err == nil {
-				t.Fatalf("%s: DecodeMocks unexpectedly accepted null payload", c.kind)
+				t.Fatalf("%s: DecodeMocks unexpectedly accepted null payload", c.name)
 			}
 			if !errors.Is(err, errPostgresV3NilPayload) {
-				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", c.kind, err)
+				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", c.name, err)
 			}
 		})
 	}
@@ -300,18 +408,24 @@ func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
 func TestYAMLRoundTrip_PostgresV3Generator(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Generator,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
-			PostgresV3Generator: &models.PostgresV3GeneratorSpec{
-				Name:           "uuid_generate_v4",
-				Type:           "uuid",
-				RecordedValues: []string{"6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
-				Policy:         "replay",
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeGenerator,
+				Generator: &models.PostgresV3GeneratorSpec{
+					Name:           "uuid_generate_v4",
+					Type:           "uuid",
+					RecordedValues: []string{"6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
+					Policy:         "replay",
+				},
 			},
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Generator", in)
-	if !reflect.DeepEqual(got.Spec.PostgresV3Generator, in.Spec.PostgresV3Generator) {
-		t.Fatalf("generator mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Generator, got.Spec.PostgresV3Generator)
+	if got.Spec.PostgresV3 == nil || got.Spec.PostgresV3.Type != models.PostgresV3TypeGenerator {
+		t.Fatalf("Type/spec mismatch: got %#v", got.Spec.PostgresV3)
+	}
+	if !reflect.DeepEqual(got.Spec.PostgresV3.Generator, in.Spec.PostgresV3.Generator) {
+		t.Fatalf("generator mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Generator, got.Spec.PostgresV3.Generator)
 	}
 }
