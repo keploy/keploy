@@ -88,6 +88,32 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
+// shouldCacheDNSResponse reports whether a DNS resolution result is
+// eligible for the per-proxy dnsCache.
+//
+// The cache stores real upstream responses and replayed mocks in both
+// record and test modes. Synthetic/fallback responses are never cached
+// (they exist only to keep the client from hanging on an unknown query
+// and caching them would pin the fallback for 30 s after transient
+// upstream failures).
+//
+// Record-mode caching is safe against duplicate DNS-mock emission
+// because a cache hit short-circuits before resolveUncachedDNSResponse
+// is called — which is the only site that invokes recordDNSMock. As a
+// second line of defense recordDNSMock has its own (name, qtype)
+// dedupe tracker (p.recordedDNSMocks), so even if the cache were
+// bypassed the mock stream would still see each query at most once.
+// A 30 s TTL is short enough to pick up DNS record changes during a
+// long recording session yet long enough to amortise repeated
+// resolutions from client libraries that open one TCP connection per
+// request.
+func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
+	if !resp.FromUpstream {
+		return false
+	}
+	return mode == models.MODE_TEST || mode == models.MODE_RECORD
+}
+
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
@@ -147,9 +173,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if !found {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// Only cache real mock responses in test mode.
-			// Never cache synthetic/fallback responses, and never cache in record mode.
-			if mode == models.MODE_TEST && resp.FromUpstream {
+			if shouldCacheDNSResponse(mode, resp) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
