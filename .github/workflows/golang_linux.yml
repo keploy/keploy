@@ -100,6 +100,7 @@ jobs:
   golang_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +145,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: native-linux
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
