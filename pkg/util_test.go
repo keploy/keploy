@@ -1460,3 +1460,115 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
 	})
 }
+
+// --- updateTemplateValuesFromHTTPResp: response-header walk tests ---
+//
+// These cover the gap noted against listmonk's session-cookie round-trip: at replay
+// time the live Set-Cookie/Authorization/etc. values must be pulled out of
+// resp.Header and written into utils.TemplatizedValues so that subsequent tests
+// that render {{.session}}/{{.token}}/... see the fresh value rather than the
+// stale record-time one.
+
+func runHeaderUpdateTest(
+	t *testing.T,
+	recordedHeader, liveHeader map[string]string,
+	initialTemplatedValues map[string]interface{},
+) (changed bool, final map[string]interface{}) {
+	t.Helper()
+	logger := zap.NewNop()
+
+	templated := models.HTTPResp{
+		StatusCode: 302,
+		Header:     recordedHeader,
+		Body:       "",
+	}
+	live := models.HTTPResp{
+		StatusCode: 302,
+		Header:     liveHeader,
+		Body:       "",
+	}
+
+	current := make(map[string]interface{}, len(initialTemplatedValues))
+	prev := make(map[string]interface{}, len(initialTemplatedValues))
+	for k, v := range initialTemplatedValues {
+		current[k] = v
+		prev[k] = v
+	}
+
+	changed = updateTemplateValuesFromHTTPResp(logger, templated, live, current, prev)
+	return changed, current
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_SetCookie(t *testing.T) {
+	recorded := map[string]string{
+		"Set-Cookie": "session={{.session}}; Path=/; HttpOnly",
+	}
+	live := map[string]string{
+		"Set-Cookie": "session=LIVE123; Path=/; HttpOnly",
+	}
+	initial := map[string]interface{}{"session": "RECORDED_VAL"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed, "expected Set-Cookie placeholder update to report changed=true")
+	assert.Equal(t, "LIVE123", final["session"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_BearerAuthorizationHeader(t *testing.T) {
+	recorded := map[string]string{
+		"Authorization": "Bearer {{.token}}",
+	}
+	live := map[string]string{
+		"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+	}
+	initial := map[string]interface{}{"token": "OLD_TOKEN"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "eyJhbGciOiJIUzI1NiJ9.payload.sig", final["token"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_GenericHeader(t *testing.T) {
+	recorded := map[string]string{
+		"X-Request-Id": "{{.reqId}}",
+	}
+	live := map[string]string{
+		"X-Request-Id": "abc-123-def-456",
+	}
+	initial := map[string]interface{}{"reqId": "old-id"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "abc-123-def-456", final["reqId"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_HeaderWithLiteralPrefix(t *testing.T) {
+	recorded := map[string]string{
+		"X-Correlation": "trace-{{.id}}",
+	}
+	live := map[string]string{
+		"X-Correlation": "trace-DEF456",
+	}
+	initial := map[string]interface{}{"id": "OLDID"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "DEF456", final["id"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_NoPlaceholder_NoOp(t *testing.T) {
+	recorded := map[string]string{
+		"X-Foo": "bar",
+	}
+	live := map[string]string{
+		"X-Foo": "bar",
+	}
+	// There's a templated value, but it's unrelated to this header -- must not
+	// leak into the map under a new key, and the existing key must stay untouched.
+	initial := map[string]interface{}{"unrelated": "keepme"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.False(t, changed, "no placeholder in recorded header should mean no template change")
+	assert.Equal(t, "keepme", final["unrelated"])
+	_, foundFoo := final["X-Foo"]
+	assert.False(t, foundFoo, "must not invent a new template key from a literal header")
+}
