@@ -641,7 +641,32 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	// test bleed and get dropped.
 	isInitialStaging := start.Equal(models.BaseTime)
 	if isInitialStaging {
+		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
+		// (session + connection) mocks in the startup pool during initial
+		// staging. Rationale: during Runner/Replayer's pre-test staging
+		// no test has fired, so tier-aware parsers (Postgres v3
+		// dispatcher) route ALL live queries to the startup engine —
+		// `!IsTestWindowActive && !HasFirstTestFired` falls through to
+		// StartupTransactional with no fallback. If a session-tagged
+		// mock (e.g. listmonk's `drop type if exists list_type cascade`
+		// DDL, recorder-tagged `type: config` → LifetimeSession) fires
+		// during the app's install/bootstrap phase, routing it through
+		// the session tier would make it unreachable until after the
+		// first test fires. Copy it into the startup pool so the
+		// startup engine's index covers every bootstrap-phase query.
+		//
+		// The session tree is still populated below via SetUnFilteredMocks,
+		// so once the first real test fires and SetMocksWithWindow
+		// re-partitions, session mocks revert to being session-tier-only
+		// in the startup tree (which rebuilds from the real-window
+		// firstStart cutoff, not from the unfiltered input).
 		for _, mk := range filtered {
+			if mk == nil {
+				continue
+			}
+			startupInit = append(startupInit, mk)
+		}
+		for _, mk := range unfiltered {
 			if mk == nil {
 				continue
 			}
@@ -798,10 +823,30 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 		}
 	}
 
-	m.windowMu.Lock()
-	m.windowStart = start
-	m.windowEnd = end
-	m.windowMu.Unlock()
+	// Wave-3 H3 fix: do NOT publish the BaseTime sentinel as an active
+	// window. Runner/Replayer's initial SetMocksWithWindow fires with
+	// start=models.BaseTime BEFORE any test runs, solely to stage
+	// bootstrap mocks into the startup tree. If we wrote BaseTime into
+	// m.windowStart, IsTestWindowActive (which only rejects zero-time)
+	// would flip true and tier-routing parsers (Postgres v3 dispatcher)
+	// would mis-route bootstrap traffic to the per-test engine — whose
+	// per-test tree is empty during initial staging because all filtered
+	// input was routed to the startup tree above. Symptom: startup-tier
+	// queries (listmonk's first `select count(*) from settings`) get
+	// `candidates=0` / KP001 misses even though the mock is present in
+	// the startup index.
+	//
+	// Keep windowStart/windowEnd at their current (zero for a fresh
+	// manager) values during initial staging. The next
+	// SetMocksWithWindow call — the first real test — overwrites them
+	// with real timestamps, at which point IsTestWindowActive becomes
+	// true and the dispatcher routes to PerTest as intended.
+	if !isInitialStaging {
+		m.windowMu.Lock()
+		m.windowStart = start
+		m.windowEnd = end
+		m.windowMu.Unlock()
+	}
 	// Counter reflects pre-filtering drops for THIS test; legacy
 	// match-time filtering in GetFilteredMocksInWindow will add zero
 	// now that the tree is pre-filtered, which keeps the semantic

@@ -177,13 +177,20 @@ func TestMockManager_Wave2_BaseTimeStagingDoesNotFireFirstTest(t *testing.T) {
 }
 
 // TestSetMocksWithWindow_InitialStaging_SeedsStartupTree covers the
-// Wave-3 C1/C3 fix: during Runner/Replayer's initial BaseTime staging
-// call, every per-test input mock is bootstrap traffic (no real test
-// has fired yet) and must be routed into the startup tree — not into
-// the session / unfiltered pool. The strict session tier must remain
-// unpolluted; the legacy GetSessionMocks union shim keeps returning
-// startup+session so pre-wave-2 parsers observe bootstrap mocks via
-// that path.
+// Wave-3 C1/C3/H3 composite behaviour during Runner/Replayer's initial
+// BaseTime staging call. Pre-first-test fire, tier-aware parsers (the
+// v3 dispatcher) route every live query to the startup engine with no
+// fallback — so EVERY mock visible to the app during bootstrap must be
+// reachable via GetStartupMocks. Both per-test and session-tagged
+// inputs are copied into the startup pool here; the session tree is
+// still populated normally so matchers that read GetSessionScopedMocks
+// directly see session-only (kept for post-first-test operation when
+// the dispatcher routes live queries to the session tier).
+//
+// After the first real test fires, SetMocksWithWindow re-partitions —
+// session mocks fall out of startup (rebuilt from firstStart cutoff)
+// and revert to session-only routing. That re-partitioning is covered
+// by TestSetMocksWithWindow_FirstRealWindow_RepartitionsStartup below.
 func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
@@ -201,13 +208,23 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 		models.BaseTime, time.Now(),
 	)
 
-	// GetStartupMocks returns all per-test mocks (pt1, pt2).
+	// GetStartupMocks returns ALL bootstrap-reachable mocks — pt1, pt2,
+	// and sess — because during pre-first-test the dispatcher's
+	// StartupTransactional engine is the only engine it will route to.
+	// Routing sess through the session tier alone would make it
+	// unreachable until after the first test fires, silently dropping
+	// legitimate bootstrap-phase DDL / config queries.
 	startup, err := mm.GetStartupMocks()
 	if err != nil {
 		t.Fatalf("GetStartupMocks: %v", err)
 	}
-	if len(startup) != 2 || !containsMockNamed(startup, "pt1") || !containsMockNamed(startup, "pt2") {
-		t.Fatalf("GetStartupMocks: want [pt1 pt2], got %v", mockNames(startup))
+	if len(startup) != 3 {
+		t.Fatalf("GetStartupMocks: want 3 (pt1+pt2+sess), got %d: %v", len(startup), mockNames(startup))
+	}
+	for _, want := range []string{"pt1", "pt2", "sess"} {
+		if !containsMockNamed(startup, want) {
+			t.Fatalf("GetStartupMocks: missing %q, got %v", want, mockNames(startup))
+		}
 	}
 
 	// GetPerTestMocksInWindow returns nothing — no real window active.
@@ -219,7 +236,10 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 		t.Fatalf("GetPerTestMocksInWindow: want empty, got %v", mockNames(pt))
 	}
 
-	// GetSessionScopedMocks returns only sess — no pollution from pt1/pt2.
+	// GetSessionScopedMocks still returns only sess — the session tree
+	// is populated from the unfiltered input unchanged, so post-first-
+	// test session routing keeps working. Per-test mocks are never
+	// promoted to the strict session tier under any staging path.
 	session, err := mm.GetSessionScopedMocks()
 	if err != nil {
 		t.Fatalf("GetSessionScopedMocks: %v", err)
@@ -231,14 +251,18 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 		t.Fatalf("session tier polluted with per-test mocks: %v", mockNames(session))
 	}
 
-	// GetSessionMocks (legacy union shim) returns sess + pt1 + pt2
-	// because startup ∪ session is what pre-wave-2 parsers see.
+	// GetSessionMocks (legacy union shim: startup + session) returns
+	// every routable mock. sess appears in BOTH startup and session
+	// trees during initial staging, so the union returns 4 entries
+	// (pt1, pt2, sess-via-startup, sess-via-session). Pre-wave-2
+	// parsers see bootstrap traffic via this shim unchanged.
 	union, err := mm.GetSessionMocks()
 	if err != nil {
 		t.Fatalf("GetSessionMocks: %v", err)
 	}
-	if len(union) != 3 {
-		t.Fatalf("GetSessionMocks: want 3 (sess+pt1+pt2), got %d: %v", len(union), mockNames(union))
+	if len(union) != 4 {
+		t.Fatalf("GetSessionMocks: want 4 (pt1+pt2+sess-from-startup+sess-from-session), "+
+			"got %d: %v", len(union), mockNames(union))
 	}
 	for _, want := range []string{"sess", "pt1", "pt2"} {
 		if !containsMockNamed(union, want) {
@@ -343,6 +367,64 @@ func TestSetMocksWithWindow_StartupTreeRebuildsOnNewTestSet(t *testing.T) {
 	if len(startup) != 0 {
 		t.Fatalf("GetStartupMocks (run2): stale startup tree bled across test-sets, got %v",
 			mockNames(startup))
+	}
+}
+
+// TestIsTestWindowActive_BaseTimeStagingIsInactive is a regression pin
+// for the Wave-3 H3 fix. During Runner/Replayer's initial staging call
+// (start=models.BaseTime), SetMocksWithWindow must NOT publish BaseTime
+// into m.windowStart — otherwise IsTestWindowActive (which only rejects
+// zero-time) would flip true while no real test has fired, mis-routing
+// tier-aware parsers (Postgres v3 dispatcher) to the per-test engine.
+// The per-test tree is empty during initial staging (all filtered input
+// goes to startup), so PerTest routing yields `candidates=0` KP001
+// misses for legitimate startup-tier mocks (e.g. listmonk install
+// `select count(*) from settings`).
+//
+// Invariants asserted:
+//  1. IsTestWindowActive stays false after a BaseTime staging call.
+//  2. HasFirstTestFired stays false after a BaseTime staging call.
+//  3. The first real-window call flips IsTestWindowActive to true, and
+//     a second BaseTime call (exotic but defensible) does NOT regress
+//     the window back to an inactive state.
+func TestIsTestWindowActive_BaseTimeStagingIsInactive(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Before any SetMocksWithWindow call, the window is inactive.
+	if mm.IsTestWindowActive() {
+		t.Fatalf("IsTestWindowActive: want false on a fresh manager, got true")
+	}
+
+	// Initial staging with BaseTime must NOT activate the window. This
+	// is the exact case the Runner/Replayer fires before any test runs.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if mm.IsTestWindowActive() {
+		t.Fatalf("IsTestWindowActive: want false after BaseTime staging, got true " +
+			"(dispatcher would mis-route startup traffic to PerTest engine)")
+	}
+	if mm.HasFirstTestFired() {
+		t.Fatalf("HasFirstTestFired: want false after BaseTime staging, got true")
+	}
+
+	// First real-window call flips the active flag.
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Second)
+	mm.SetMocksWithWindow(nil, nil, start, end)
+	if !mm.IsTestWindowActive() {
+		t.Fatalf("IsTestWindowActive: want true after first real-window call, got false")
+	}
+	if !mm.HasFirstTestFired() {
+		t.Fatalf("HasFirstTestFired: want true after first real-window call, got false")
+	}
+
+	// A subsequent BaseTime call must NOT regress the window back to
+	// inactive. Staging re-fires have no legitimate reason to undo the
+	// real window, and the fix must be targeted at "don't set it in
+	// the first place" rather than "unset it to BaseTime".
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if !mm.IsTestWindowActive() {
+		t.Fatalf("IsTestWindowActive: want true (unchanged) after a re-staging BaseTime call, got false")
 	}
 }
 
