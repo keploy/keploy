@@ -227,6 +227,12 @@ func (m *Mock) DeepCopy() *Mock {
 	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
 	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)
 
+	c.Spec.PostgresRequestsV2 = make([]postgres.Request, len(m.Spec.PostgresRequestsV2))
+	copy(c.Spec.PostgresRequestsV2, m.Spec.PostgresRequestsV2)
+
+	c.Spec.PostgresResponsesV2 = make([]postgres.Response, len(m.Spec.PostgresResponsesV2))
+	copy(c.Spec.PostgresResponsesV2, m.Spec.PostgresResponsesV2)
+
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
