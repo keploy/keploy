@@ -252,9 +252,39 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	case dns.TypeAAAA:
-		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
-		// clients prefer an unreachable ::1 destination in IPv4-only environments.
-		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		// When EnableIPv6Redirect is set, the BPF cgroup program rewrites
+		// v6 destinations (including ::1) to the v4-mapped proxy address,
+		// so it is safe — and in fact required on modern Linux distros
+		// where glibc prefers ::1 over 127.0.0.1 — to answer AAAA with
+		// the proxy's v6 address. Mirror the TypeA path symmetrically.
+		//
+		// With the flag disabled we preserve the legacy behaviour of
+		// returning an empty AAAA answer: synthesising ::1 in a v4-only
+		// environment (no v6 redirect) would point clients at an
+		// unreachable destination.
+		if p.EnableIPv6Redirect {
+			proxyIP6 := net.ParseIP(p.IP6)
+			if proxyIP6 == nil {
+				// Fallback to v4-mapped ::ffff:<IP4> if p.IP6 is not a
+				// valid address (defensive — p.IP6 is hard-coded to ::1
+				// in New() today but could be overridden in docker mode).
+				if v4 := net.ParseIP(p.IP4); v4 != nil {
+					proxyIP6 = v4.To16()
+				}
+			}
+			if proxyIP6 != nil {
+				p.logger.Debug("synthesising AAAA answer for proxy v6 redirect", zap.String("proxy IP6", proxyIP6.String()))
+				resp.Answer = []dns.RR{&dns.AAAA{
+					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: proxyIP6,
+				}}
+				return resp
+			}
+			// fall through to empty AAAA response if we could not build an answer
+			p.logger.Debug("could not build AAAA answer; returning empty AAAA response")
+			return resp
+		}
+		p.logger.Debug("AAAA synthesis disabled; returning empty AAAA response")
 		return resp
 
 	case dns.TypeSRV:
