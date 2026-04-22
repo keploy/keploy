@@ -43,22 +43,22 @@ func (m *mockMemDb) DeleteFilteredMock(mock models.Mock) bool {
 	m.deletedFiltered = &mock
 	return m.deleteFilteredReturn
 }
-func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool             { return false }
-func (m *mockMemDb) GetMySQLCounts() (total, config, data int)           { return 0, 0, 0 }
-func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                   { return false }
-func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)                 {}
-func (m *mockMemDb) IsTestWindowActive() bool                            { return false }
-func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error)   { return nil, m.err }
-func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)    { return nil, m.err }
-func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)            { return m.mocks, m.err }
-func (m *mockMemDb) GetStartupMocks() ([]*models.Mock, error)            { return nil, nil }
+func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool           { return false }
+func (m *mockMemDb) GetMySQLCounts() (total, config, data int)         { return 0, 0, 0 }
+func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                 { return false }
+func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)               {}
+func (m *mockMemDb) IsTestWindowActive() bool                          { return false }
+func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return nil, m.err }
+func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return nil, m.err }
+func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)          { return m.mocks, m.err }
+func (m *mockMemDb) GetStartupMocks() ([]*models.Mock, error)          { return nil, nil }
 func (m *mockMemDb) GetStartupMocksByKind(_ models.Kind) ([]*models.Mock, error) {
 	return nil, nil
 }
-func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error) { return m.mocks, m.err }
+func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { return m.mocks, m.err }
 func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
 func (m *mockMemDb) FirstTestWindowStart() time.Time                     { return time.Time{} }
-func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot                { return models.WindowSnapshot{} }
+func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot               { return models.WindowSnapshot{} }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 
