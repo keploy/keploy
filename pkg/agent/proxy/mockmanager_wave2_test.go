@@ -251,17 +251,20 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 		t.Fatalf("session tier polluted with per-test mocks: %v", mockNames(session))
 	}
 
-	// GetSessionMocks (legacy union shim: startup + session) returns
-	// every routable mock. sess appears in BOTH startup and session
-	// trees during initial staging, so the union returns 4 entries
-	// (pt1, pt2, sess-via-startup, sess-via-session). Pre-wave-2
-	// parsers see bootstrap traffic via this shim unchanged.
+	// GetSessionMocks (legacy union shim: startup + session, deduped
+	// by pointer identity) returns every routable mock exactly once.
+	// sess lives in BOTH startup and session trees during initial
+	// staging — pre-N-R1-fix the concat returned it twice, skewing
+	// HitCount / consumedIndex accounting on the initial-staging
+	// path. Post-fix the union returns 3 entries (pt1, pt2, sess),
+	// with sess deduped by *Mock pointer identity. Pre-wave-2
+	// parsers see every bootstrap mock via this shim exactly once.
 	union, err := mm.GetSessionMocks()
 	if err != nil {
 		t.Fatalf("GetSessionMocks: %v", err)
 	}
-	if len(union) != 4 {
-		t.Fatalf("GetSessionMocks: want 4 (pt1+pt2+sess-from-startup+sess-from-session), "+
+	if len(union) != 3 {
+		t.Fatalf("GetSessionMocks: want 3 (pt1+pt2+sess, deduped), "+
 			"got %d: %v", len(union), mockNames(union))
 	}
 	for _, want := range []string{"sess", "pt1", "pt2"} {
@@ -425,6 +428,140 @@ func TestIsTestWindowActive_BaseTimeStagingIsInactive(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	if !mm.IsTestWindowActive() {
 		t.Fatalf("IsTestWindowActive: want true (unchanged) after a re-staging BaseTime call, got false")
+	}
+}
+
+// TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging
+// pins the N-R1 (round 2) fix: during Runner/Replayer's BaseTime
+// staging call, SetMocksWithWindow deliberately over-populates the
+// startup tree with both filtered AND unfiltered input (so the v3
+// dispatcher's StartupTransactional engine can serve session-tagged
+// bootstrap DDL — listmonk's `DROP TYPE IF EXISTS` is the canonical
+// case). That means the SAME *Mock pointer lives in both the startup
+// tree AND the session tree during the pre-first-test window. The
+// legacy GetSessionMocks union shim used to concat both lists and
+// return each overlapping pointer TWICE, double-counting it against
+// any HitCount / consumedIndex accounting that walks the union. The
+// fix: pointer-identity dedup at the union point so every mock
+// surfaces exactly once regardless of how many tiers hold the same
+// pointer.
+//
+// Invariants pinned:
+//  1. During initial staging (BaseTime), a session mock and a perTest
+//     mock each appear in the startup tree AND the session tree (the
+//     session one via the real session tree, the perTest one via
+//     initial-staging's copy into startup).
+//  2. GetSessionMocks returns exactly 2 (startup+session deduped),
+//     NOT 3 (overlap double-count) and NOT 4 (both overlap variants).
+//  3. After the first real window fires and the trees re-partition,
+//     GetSessionMocks still returns exactly the same deduped count —
+//     the dedup path is free at steady state (no pointer-overlap
+//     between startup and session once re-partitioning completes).
+func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Stage a LifetimeSession mock and a LifetimePerTest mock at
+	// BaseTime. Both fire during Runner/Replayer's pre-first-test
+	// sweep; the session mock is the listmonk-style DDL, the perTest
+	// mock is any filtered-tier bootstrap query.
+	bootTs := time.Date(2023, 12, 31, 23, 59, 0, 0, time.UTC)
+	mSession := newMockForTest("boot-session", bootTs, models.LifetimeSession)
+	mPerTest := newMockForTest("boot-pertest", bootTs.Add(time.Millisecond), models.LifetimePerTest)
+
+	mm.SetMocksWithWindow(
+		[]*models.Mock{mPerTest},
+		[]*models.Mock{mSession},
+		models.BaseTime, time.Now(),
+	)
+
+	// GetStartupMocks returns both — the initial-staging branch copies
+	// filtered AND unfiltered into startup so the dispatcher's
+	// StartupTransactional engine can serve every bootstrap query.
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if len(startup) != 2 {
+		t.Fatalf("GetStartupMocks: want 2 (session+perTest via initial-staging copy), got %d: %v",
+			len(startup), mockNames(startup))
+	}
+	if !containsMockNamed(startup, "boot-session") || !containsMockNamed(startup, "boot-pertest") {
+		t.Fatalf("GetStartupMocks missing entries: got %v", mockNames(startup))
+	}
+
+	// GetSessionScopedMocks returns JUST the session mock — the
+	// session tree is populated from the unfiltered input only; the
+	// perTest input never bleeds into the strict session tier.
+	session, err := mm.GetSessionScopedMocks()
+	if err != nil {
+		t.Fatalf("GetSessionScopedMocks: %v", err)
+	}
+	if len(session) != 1 || !containsMockNamed(session, "boot-session") {
+		t.Fatalf("GetSessionScopedMocks: want [boot-session], got %v", mockNames(session))
+	}
+
+	// GetSessionMocks union MUST dedup: the session-tagged mock lives
+	// in both trees (startup via initial-staging, session via the
+	// unfiltered tree) with IDENTICAL pointers. A naive concat would
+	// return 3 entries; the dedup path returns 2.
+	union, err := mm.GetSessionMocks()
+	if err != nil {
+		t.Fatalf("GetSessionMocks: %v", err)
+	}
+	if len(union) != 2 {
+		t.Fatalf("GetSessionMocks: want 2 (deduped startup+session), got %d: %v",
+			len(union), mockNames(union))
+	}
+	// Count occurrences by pointer to prove the dedup is pointer-
+	// identity (not name-based, not structural): a later refactor
+	// that swaps the dedup key from pointer to Name would still
+	// satisfy the len==2 assertion but regress the guarantee
+	// HitCount / consumedIndex accounting depends on.
+	occurrencesOf := func(list []*models.Mock, target *models.Mock) int {
+		n := 0
+		for _, m := range list {
+			if m == target {
+				n++
+			}
+		}
+		return n
+	}
+	if got := occurrencesOf(union, mSession); got != 1 {
+		t.Fatalf("session pointer appears %d times in union (want 1)", got)
+	}
+	if got := occurrencesOf(union, mPerTest); got != 1 {
+		t.Fatalf("perTest pointer appears %d times in union (want 1)", got)
+	}
+
+	// Fire the first real test window. SetMocksWithWindow re-partitions
+	// into startup (req < firstStart), perTest window, session. Our
+	// perTest mock has req == bootTs (well before firstStart), so it
+	// moves back into startup; our session mock stays in the session
+	// tree AND is NOT re-copied into startup (that copy is unique to
+	// the BaseTime staging branch). The union should now be cleanly
+	// disjoint.
+	firstStart := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	firstEnd := firstStart.Add(10 * time.Second)
+	mm.SetMocksWithWindow(
+		[]*models.Mock{mPerTest},
+		[]*models.Mock{mSession},
+		firstStart, firstEnd,
+	)
+
+	unionAfter, err := mm.GetSessionMocks()
+	if err != nil {
+		t.Fatalf("GetSessionMocks (post-first-test): %v", err)
+	}
+	if len(unionAfter) != 2 {
+		t.Fatalf("GetSessionMocks (post-first-test): want 2, got %d: %v",
+			len(unionAfter), mockNames(unionAfter))
+	}
+	if occurrencesOf(unionAfter, mSession) != 1 {
+		t.Fatalf("session pointer double-counted post-first-test")
+	}
+	if occurrencesOf(unionAfter, mPerTest) != 1 {
+		t.Fatalf("perTest pointer double-counted post-first-test")
 	}
 }
 
