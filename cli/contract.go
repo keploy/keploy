@@ -35,12 +35,14 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "generate",
-		Short:   "Generate contract for specified services",
-		Example: `keploy contract generate --service="email,notify"`,
+		Short:   "Generate OpenAPI contract from recorded test cases",
+		Example: `keploy contract generate --path .`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger.Warn("`keploy contract generate` is a community-maintained OpenAPI spec generator; a fully managed, production-grade version is available as part of Keploy Enterprise")
+
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
@@ -52,9 +54,13 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			// Extract services from the flag
 
-			err = contract.Generate(ctx, true)
+			infer, _ := cmd.Flags().GetBool("infer")
+			if infer {
+				err = contract.GenerateFromTests(ctx)
+			} else {
+				err = contract.Generate(ctx, true)
+			}
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
@@ -65,8 +71,9 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		},
 	}
 
-	return cmd
+	cmd.Flags().Bool("infer", false, "Infer OpenAPI contract from recorded traffic (opt-in; the default path is service-mapping based generation)")
 
+	return cmd
 }
 
 func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
