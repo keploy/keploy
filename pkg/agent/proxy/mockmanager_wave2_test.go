@@ -565,6 +565,91 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 	}
 }
 
+// TestWindowSnapshot_CoherentPair pins the C2 (round 2) fix: the
+// (IsTestWindowActive, HasFirstTestFired) pair must NEVER be observable
+// in the forbidden Active=true && FirstTestFired=false state under
+// concurrent SetMocksWithWindow transitions. The individual bool
+// accessors read under different locks (windowMu vs swapMu) so a
+// sequential observer can catch the intermediate. WindowSnapshot takes
+// both locks under swapMu and returns a tear-free snapshot.
+//
+// Strategy: cycle a fresh MockManager through BaseTime staging ->
+// real-window transitions in a writer goroutine while N reader
+// goroutines call WindowSnapshot and assert the forbidden pair is
+// never observed. Between iterations we reset to a fresh manager so
+// the "first real window fires for the first time" transition can
+// repeat — that transition is the one a torn read can misobserve.
+func TestWindowSnapshot_CoherentPair(t *testing.T) {
+	const outerRounds = 40
+	const readers = 8
+	const iterationsPerReader = 500
+
+	realStart := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	realEnd := realStart.Add(10 * time.Second)
+
+	for round := 0; round < outerRounds; round++ {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+
+		stop := make(chan struct{})
+		done := make(chan struct{}, readers)
+		fail := make(chan string, readers)
+
+		// Writer: alternate BaseTime staging with real-window calls.
+		// Each BaseTime -> real-window edge is the one under race-
+		// risk: windowMu updates first, firstWindowStart is written
+		// first but both release windowMu's critical section at
+		// different times. WindowSnapshot must sample both bits
+		// under one outer lock to stay coherent.
+		go func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if i%2 == 0 {
+					mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+				} else {
+					mm.SetMocksWithWindow(nil, nil, realStart, realEnd)
+				}
+			}
+		}()
+
+		for r := 0; r < readers; r++ {
+			go func() {
+				defer func() { done <- struct{}{} }()
+				for j := 0; j < iterationsPerReader; j++ {
+					snap := mm.WindowSnapshot()
+					// The forbidden state. If the manager ever
+					// publishes an active window without also marking
+					// firstWindowStart non-zero, tier-aware parsers
+					// would route the same statement's Parse/Describe
+					// and Execute to different tiers.
+					if snap.Active && !snap.FirstTestFired {
+						select {
+						case fail <- "observed Active=true && FirstTestFired=false":
+						default:
+						}
+						return
+					}
+				}
+			}()
+		}
+
+		for i := 0; i < readers; i++ {
+			<-done
+		}
+		close(stop)
+		select {
+		case msg := <-fail:
+			mm.Close()
+			t.Fatalf("WindowSnapshot coherency violation (round %d): %s", round, msg)
+		default:
+		}
+		mm.Close()
+	}
+}
+
 // mockNames returns a slice of mock Names, for readable test failure
 // diagnostics.
 func mockNames(list []*models.Mock) []string {

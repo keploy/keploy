@@ -1003,10 +1003,46 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // a torn read on the time.Time. An inherently-racy pre-check is
 // tolerable — a caller that needs strict window/pool atomicity
 // consults GetPerTestMocksInWindow, which snapshots both under swapMu.
+//
+// Non-atomic-pair warning: a caller that reads IsTestWindowActive and
+// HasFirstTestFired sequentially can observe an inconsistent pair
+// during a SetCurrentTestWindow / SetMocksWithWindow transition
+// because the two bits live under different locks (windowMu vs
+// swapMu). For pair-coherent reads use WindowSnapshot, which
+// takes both locks in declared order and returns a tear-free snapshot.
 func (m *MockManager) HasFirstTestFired() bool {
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
 	return !m.firstWindowStart.IsZero()
+}
+
+// WindowSnapshot returns the (IsTestWindowActive, HasFirstTestFired)
+// pair under a single outer lock so callers that need BOTH bits as a
+// coherent point-in-time read cannot observe the torn intermediate
+// state the individual accessors admit. Takes swapMu.RLock first
+// (matches the writer-side SetMocksWithWindow lock order: swapMu →
+// windowMu; see mockmanager.go's lock-ordering invariant at the top)
+// then windowMu.RLock, preserving the declared acquisition order.
+//
+// This is the accessor the v3 Postgres dispatcher's routeTransactional
+// and types.TierIndex.orderForCurrentState consume — both read the
+// pair on the hot path and a torn read causes a cross-tier misroute
+// (a statement's Parse/Describe lands on one tier and its Execute on
+// another). Legacy callers that only read one bit at a time keep
+// using IsTestWindowActive / HasFirstTestFired unchanged.
+//
+// The individual field accessors are preserved for back-compat with
+// legacy parsers and out-of-repo consumers; those callers don't need
+// the pair and a single-lock read is materially cheaper per call.
+func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return models.WindowSnapshot{
+		Active:         !m.windowStart.IsZero() && !m.windowEnd.IsZero(),
+		FirstTestFired: !m.firstWindowStart.IsZero(),
+	}
 }
 
 // GetPerTestMocksInWindow is the unification-plan canonical name for
