@@ -185,7 +185,28 @@ type MockMemDb interface {
 	//   IsTestWindowActive() == true                  → perTest tier
 	//   !IsTestWindowActive() &&  HasFirstTestFired() → session tier
 	//   !IsTestWindowActive() && !HasFirstTestFired() → startup tier
+	//
+	// NON-ATOMIC-PAIR WARNING: reading IsTestWindowActive and
+	// HasFirstTestFired sequentially can observe the forbidden
+	// intermediate state Active=true && FirstTestFired=false during a
+	// SetCurrentTestWindow / SetMocksWithWindow transition because the
+	// two bits are guarded by different locks on the underlying
+	// MockManager. Callers that need the pair as a coherent point-in-
+	// time read (the v3 dispatcher's routeTransactional and
+	// TierIndex.orderForCurrentState) MUST use WindowSnapshot instead.
 	HasFirstTestFired() bool
+
+	// WindowSnapshot returns the (IsTestWindowActive, HasFirstTestFired)
+	// pair under one outer lock on the underlying MockManager, so
+	// callers that read BOTH bits cannot observe a torn intermediate
+	// state during a concurrent SetCurrentTestWindow /
+	// SetMocksWithWindow transition.
+	//
+	// Required for any caller that routes based on the PAIR (the v3
+	// Postgres dispatcher's routeTransactional and
+	// types.TierIndex.orderForCurrentState). The individual bool
+	// accessors are retained for legacy callers that read only one bit.
+	WindowSnapshot() models.WindowSnapshot
 
 	// GetConnectionMocks returns connection-scoped mock pool entries
 	// (Lifetime == LifetimeConnection) associated with the given

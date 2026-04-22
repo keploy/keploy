@@ -65,6 +65,37 @@ var orangeColorSGR = []color.Attribute{38, 5, 208}
 
 var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// WindowSnapshot is a coherent point-in-time read of the two test-window
+// state bits MockManager exposes:
+//
+//   - Active:         at least one real test window is currently set
+//                     (SetCurrentTestWindow / SetMocksWithWindow with
+//                     non-zero start+end; BaseTime staging does NOT
+//                     activate — see mockmanager.go isInitialStaging).
+//   - FirstTestFired: at least one real (non-BaseTime) test window has
+//                     ever been set; sticky once true.
+//
+// The principal-engineer review flagged a torn-read hazard: the legacy
+// IsTestWindowActive / HasFirstTestFired accessors read under different
+// locks (windowMu vs swapMu respectively), so a caller that observes
+// both bits sequentially during a SetCurrentTestWindow /
+// SetMocksWithWindow transition can see the forbidden intermediate
+// state Active=true && FirstTestFired=false (window flipped on, but
+// firstWindowStart not yet published). Cross-tier misroute follows:
+// the v3 dispatcher's routeTransactional picks PerTest, but TierIndex's
+// orderForCurrentState may fall to a different branch on the next
+// statement in the same bundle.
+//
+// Callers that need the PAIR as a coherent snapshot (v3 dispatcher's
+// routeTransactional, v3 types.TierIndex.orderForCurrentState) MUST use
+// the single MockManager.WindowSnapshot accessor, which takes one outer
+// lock. The individual bool accessors remain for legacy callers that
+// only read one bit at a time.
+type WindowSnapshot struct {
+	Active         bool
+	FirstTestFired bool
+}
+
 var IsAnsiDisabled = false
 
 var HighlightString = func(a ...interface{}) string {

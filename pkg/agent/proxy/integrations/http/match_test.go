@@ -54,6 +54,7 @@ func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)            { retur
 func (m *mockMemDb) GetStartupMocks() ([]*models.Mock, error)            { return nil, nil }
 func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { return m.mocks, m.err }
 func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
+func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot                { return models.WindowSnapshot{} }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 
