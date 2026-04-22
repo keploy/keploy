@@ -434,9 +434,10 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 			}
 			// Hydrate request body from BodyRef when the body was offloaded to disk (>1MB).
 			if tc.HTTPReq.Body == "" && tc.HTTPReq.BodyRef.Path != "" {
-				refPath := filepath.Join(keployPath, tc.HTTPReq.BodyRef.Path)
-				data, err := os.ReadFile(refPath)
+				refPath, err := safeJoinWithinRoot(keployPath, tc.HTTPReq.BodyRef.Path)
 				if err != nil {
+					s.logger.Debug("skipping offloaded request body with unsafe path", zap.String("bodyRefPath", tc.HTTPReq.BodyRef.Path), zap.Error(err), zap.String("hint", "BodyRef.Path must be a relative path contained within the keploy directory"))
+				} else if data, err := os.ReadFile(refPath); err != nil {
 					s.logger.Debug("could not read offloaded request body; continuing schema inference without it", zap.String("path", refPath), zap.Error(err), zap.String("hint", "ensure the asset file exists under keploy/<test-set>/assets and is readable"))
 				} else {
 					tc.HTTPReq.Body = string(data)
@@ -477,6 +478,27 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	s.logger.Info("Inferred OpenAPI contract generated", zap.String("path", outputPath))
 	return nil
+}
+
+// safeJoinWithinRoot resolves rel against root and guarantees the result stays
+// inside root. It rejects absolute paths and any traversal (via ..) that would
+// escape root, so a malformed BodyRef.Path cannot coerce os.ReadFile into
+// reading arbitrary files on disk.
+func safeJoinWithinRoot(root, rel string) (string, error) {
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("absolute path not allowed")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	joined := filepath.Join(absRoot, rel)
+	cleaned := filepath.Clean(joined)
+	rootWithSep := absRoot + string(filepath.Separator)
+	if cleaned != absRoot && !strings.HasPrefix(cleaned, rootWithSep) {
+		return "", fmt.Errorf("resolved path %q escapes root %q", cleaned, absRoot)
+	}
+	return cleaned, nil
 }
 
 func (s *contract) DownloadTests(_ string) error {

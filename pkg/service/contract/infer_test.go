@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -175,5 +176,40 @@ func assertSchemaType(t *testing.T, schemaRef *openapi3.SchemaRef, expected stri
 
 	if schemaRef == nil || schemaRef.Value == nil || schemaRef.Value.Type == nil || !schemaRef.Value.Type.Is(expected) {
 		t.Fatalf("expected type %q", expected)
+	}
+}
+
+func TestSafeJoinWithinRoot(t *testing.T) {
+	root := t.TempDir()
+
+	tests := []struct {
+		name    string
+		rel     string
+		wantErr bool
+	}{
+		{"relative within root", "assets/body.json", false},
+		{"dot path", ".", false},
+		{"absolute path rejected", "/etc/passwd", true},
+		{"traversal rejected", "../../etc/passwd", true},
+		{"nested traversal rejected", "assets/../../etc/passwd", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := safeJoinWithinRoot(root, tc.rel)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got path %q", tc.rel, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.rel, err)
+			}
+			absRoot, _ := filepath.Abs(root)
+			if got != absRoot && !filepath.IsAbs(got) {
+				t.Fatalf("expected absolute path, got %q", got)
+			}
+		})
 	}
 }

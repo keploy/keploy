@@ -24,12 +24,6 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 	cmd.AddCommand(Download(ctx, logger, serviceFactory, cmdConfigurator))
 	cmd.AddCommand(Validate(ctx, logger, serviceFactory, cmdConfigurator))
 	for _, subCmd := range cmd.Commands() {
-		// generate manages its own flags (--infer, --path via Validate);
-		// skip AddFlags to avoid registering --services/--tests which
-		// are unused by GenerateFromTests.
-		if subCmd.Name() == "generate" {
-			continue
-		}
 		err := cmdConfigurator.AddFlags(subCmd)
 		if err != nil {
 			utils.LogError(logger, err, "failed to add flags to command", zap.String("command", subCmd.Name()))
