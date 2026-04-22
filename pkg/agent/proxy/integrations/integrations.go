@@ -198,6 +198,17 @@ type MockMemDb interface {
 	// TierIndex.orderForCurrentState) MUST use WindowSnapshot instead.
 	HasFirstTestFired() bool
 
+	// FirstTestWindowStart returns the earliest test window start observed
+	// by the MockManager, or zero if no real test has fired yet (i.e. every
+	// SetMocksWithWindow call so far was either absent or fired with the
+	// models.BaseTime staging sentinel). Used by filter / strict-gate
+	// callers to distinguish startup-init mocks (req_ts < firstWindowStart)
+	// from stale previous-test mocks (firstWindowStart <= req_ts <
+	// currentStart): the former are legitimate app-bootstrap traffic that
+	// must be preserved, the latter are cross-test bleed that must be
+	// dropped.
+	FirstTestWindowStart() time.Time
+
 	// WindowSnapshot returns the (IsTestWindowActive, HasFirstTestFired)
 	// pair under one outer lock on the underlying MockManager, so
 	// callers that read BOTH bits cannot observe a torn intermediate

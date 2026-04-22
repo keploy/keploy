@@ -2708,7 +2708,26 @@ func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, a
 // Both slices are sorted by request-timestamp for deterministic
 // matcher ordering.
 func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
+	return FilterPerTestAndLaxPromotedTierAware(ctx, logger, m, afterTime, beforeTime, strict, time.Time{})
+}
+
+// FilterPerTestAndLaxPromotedTierAware is the tier-aware variant of
+// FilterPerTestAndLaxPromoted. It accepts firstWindowStart (the earliest
+// test window start observed by the agent's MockManager, or zero before
+// any real test has fired) so the strict gate can preserve per-test
+// startup-init mocks (req < firstWindowStart) in the returned perTestIn
+// slice instead of dropping them. MockManager.SetMocksWithWindow's
+// startup-tier partition then routes those preserved mocks into the
+// dedicated startup tree, and the v3 tier-aware dispatcher reaches them
+// via GetStartupMocks.
+//
+// Passing firstWindowStart == time.Time{} reproduces the legacy blanket-
+// drop contract (strict mode drops every per-test mock outside the
+// current window, regardless of whether the mock predates the first
+// test). Legacy callers that don't know firstWindowStart can keep
+// calling FilterPerTestAndLaxPromoted unchanged.
+func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -2726,7 +2745,18 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // See FilterTcsMocks for the env / config precedence that determines
 // the runtime-effective value.
 func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
+	return FilterConfigMocksTierAware(ctx, logger, m, afterTime, beforeTime, strict, time.Time{})
+}
+
+// FilterConfigMocksTierAware is the tier-aware variant of
+// FilterConfigMocks. Identical to FilterConfigMocks except it threads
+// firstWindowStart through to filterByTimeStampTierAware. Used by the
+// agent's UpdateMockParams so startup-init entries in the unfiltered
+// (config) pool are kept in the filtered return slice (via the
+// tier-aware strict branch) and reach MockManager.SetMocksWithWindow
+// where the startup-tier partition sorts them correctly.
+func FilterConfigMocksTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2859,6 +2889,43 @@ func strictWindowEnabled(perCall bool) bool {
 }
 
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampTierAware(nil, logger, m, afterTime, beforeTime, strictPerCall, time.Time{})
+}
+
+// filterByTimeStampTierAware is the tier-aware form of filterByTimeStamp.
+// It accepts firstWindowStart — the earliest test window start the agent's
+// MockManager has observed — so the strict gate can distinguish the two
+// out-of-window classes a per-test mock can fall into:
+//
+//   - Startup-init (req < firstWindowStart): genuine app-bootstrap traffic
+//     recorded before any test fired (Flyway migrations, Hibernate init,
+//     HikariCP pool warm-up, listmonk's cacheUsers SELECT). Under the
+//     legacy blanket-drop semantics these were incorrectly treated as
+//     bleed; under tier-aware semantics they are PRESERVED in the
+//     filtered slice so MockManager.SetMocksWithWindow can route them
+//     into the startup tree (its own scan for req < firstStart picks
+//     them up and rebuilds the startup tier — see pkg/agent/proxy/
+//     mockmanager.go's SetMocksWithWindow).
+//
+//   - Stale previous-test (firstWindowStart <= req < afterTime, OR
+//     req > beforeTime): real cross-test bleed. These are DROPPED under
+//     strict mode, same as before — this is the containment guarantee
+//     strictMockWindow exists to provide.
+//
+// Session- and connection-scoped mocks are kept unconditionally (they
+// span tests by definition; their visibility is bounded by test-set /
+// connID lifetime, not the per-test window). Mocks with zero or
+// inverted-order timestamps get the same defensive handling as the
+// legacy path.
+//
+// Passing firstWindowStart == time.Time{} restores the legacy blanket-
+// drop behaviour (no startup-tier preservation). Callers that can
+// supply a real cutoff — principally the agent, via the
+// FirstWindowStartReader optional extension on *Proxy — should thread
+// it through. Third-party Proxy implementations that don't implement
+// the reader fall through to the zero-time behaviour and remain
+// functionally identical to the pre-fix blanket-drop contract.
+func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -2873,7 +2940,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 
 	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
-	var droppedOutOfWindow, droppedInvalidOrder int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -2925,13 +2992,12 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 
 		// Out-of-window handling differs between modes.
 		if strict {
-			// Only session- or connection-scoped mocks survive out of
-			// window. Connection-scoped (Lifetime == LifetimeConnection,
-			// used by prepared-statement setup) is semantically reusable
-			// across tests as long as the owning connID is alive, so it
-			// must survive window filtering; enforcement happens at
-			// connection-pool lookup time. Per-test mocks are dropped —
-			// this is the bleed prevention.
+			// Session- and connection-scoped mocks survive out of window
+			// unconditionally. Connection-scoped (LifetimeConnection, used
+			// by prepared-statement setup) is semantically reusable across
+			// tests as long as the owning connID is alive; session-scoped
+			// covers handshake, auth, heartbeats, etc. Enforcement for
+			// connection-scoped happens at connection-pool lookup time.
 			//
 			// DeriveLifetime is called at pool ingest so
 			// TestModeInfo.Lifetime is already populated when we get
@@ -2941,7 +3007,9 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 				p.TestModeInfo.Lifetime == models.LifetimeConnection {
 				p.TestModeInfo.IsFiltered = false
 				unfilteredMocks = append(unfilteredMocks, p)
-			} else if p.Spec.Metadata != nil &&
+				continue
+			}
+			if p.Spec.Metadata != nil &&
 				(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
 				// Defensive fallback: mock entered filterByTimeStamp
 				// without DeriveLifetime having run. Set the cached
@@ -2957,9 +3025,27 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 				}
 				p.TestModeInfo.IsFiltered = false
 				unfilteredMocks = append(unfilteredMocks, p)
-			} else {
-				droppedOutOfWindow++
+				continue
 			}
+			// Per-test, out-of-window. Tier-aware split: startup-init
+			// (req < firstWindowStart) is preserved in the filtered slice
+			// so MockManager.SetMocksWithWindow's startup-tier partition
+			// routes it into the startup tree. Genuine stale cross-test
+			// bleed (firstWindowStart <= req < afterTime, or req >
+			// beforeTime) is dropped — the strictMockWindow guarantee.
+			//
+			// When firstWindowStart is zero we have no cutoff yet (either
+			// the agent hasn't observed a real test window on this
+			// MockManager, or the caller didn't thread the value through).
+			// In that case fall back to the legacy blanket-drop contract
+			// so the behaviour is strictly no worse than before.
+			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				preservedStartup++
+				continue
+			}
+			droppedOutOfWindow++
 		} else {
 			// Legacy: anything out-of-window goes to the unfiltered pool
 			// (where parsers may still pick it up as a fallback).
@@ -2967,13 +3053,15 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 {
-		logger.Debug("filterByTimeStamp dropped mocks (see separate counts for reason)",
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
+			zap.Int("preserved_startup_pre_first_window", preservedStartup),
 			zap.Bool("strict", strict),
 			zap.Time("after", afterTime),
-			zap.Time("before", beforeTime))
+			zap.Time("before", beforeTime),
+			zap.Time("firstWindowStart", firstWindowStart))
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")

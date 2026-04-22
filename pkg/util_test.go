@@ -1255,6 +1255,153 @@ func mockNames(ms []*models.Mock) []string {
 	return out
 }
 
+// TestFilterByTimeStampTierAware_StartupPreservation pins the
+// tier-aware strictMockWindow contract. Given the five cases from the
+// contract (startup, in-window, stale prev-test, session, connection)
+// plus the stale-past-window case, the filter KEEPs startup + session +
+// connection + in-window and DROPs only genuinely stale cross-test
+// per-test mocks. See pkg/util.go's filterByTimeStampTierAware doc.
+func TestFilterByTimeStampTierAware_StartupPreservation(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// firstWindowStart < previousTestEnd < currentStart < currentEnd
+	//         |             |                 |              |
+	//      2:00 UTC      2:30 UTC          3:00 UTC       3:10 UTC
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	previousTestEnd := time.Date(2026, 4, 22, 2, 30, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// startup: per-test mock recorded BEFORE any test fired (req <
+	// firstWindowStart). Legacy blanket-drop killed this; tier-aware
+	// must preserve.
+	startup := &models.Mock{
+		Name: "startup-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// inWindow: per-test mock whose req is inside [currentStart, currentEnd].
+	inWindow := &models.Mock{
+		Name: "in-window-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// stalePrev: per-test mock from a previous test window
+	// (firstWindowStart <= req < currentStart). REAL bleed — must drop.
+	stalePrev := &models.Mock{
+		Name: "stale-prev-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-5 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// session: LifetimeSession is always preserved (spans tests).
+	session := &models.Mock{
+		Name: "session-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-10 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// connection: LifetimeConnection is always preserved (conn-bounded).
+	connection := &models.Mock{
+		Name: "connection-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-15 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-15*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// stalePast: per-test mock whose req is PAST currentEnd (future-test
+	// bleed). Also genuine stale and must be dropped.
+	stalePast := &models.Mock{
+		Name: "stale-past-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentEnd.Add(10 * time.Minute),
+			ResTimestampMock: currentEnd.Add(10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{startup, inWindow, stalePrev, session, connection, stalePast}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// The startup per-test mock survives in `filtered` so MockManager's
+	// SetMocksWithWindow partition-by-firstWindowStart routes it into
+	// the startup tree. The in-window per-test mock also lives in
+	// `filtered` — that's its current tier.
+	assert.ElementsMatch(t, []string{"startup-pertest", "in-window-pertest"}, mockNames(filtered),
+		"startup + in-window per-test mocks must survive in filtered slice")
+
+	// Session and connection mocks go to unfiltered (reusable-across-
+	// tests pool). Stale previous-test and stale future-test per-test
+	// mocks are DROPPED — genuine cross-test bleed.
+	assert.ElementsMatch(t, []string{"session-scoped", "connection-scoped"}, mockNames(unfiltered),
+		"session + connection must survive in unfiltered slice; stale per-test must drop")
+}
+
+// TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback pins the
+// fallback contract: when firstWindowStart is zero (no test has fired
+// yet on the underlying MockManager, or the caller couldn't thread
+// it), the tier-aware filter reverts to the legacy blanket-drop
+// semantics so behaviour is strictly no worse than before the fix.
+func TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict fallback not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	// Per-test mock predating the current window. Under tier-aware with
+	// a known firstWindowStart this would be preserved as startup; under
+	// zero-firstWindowStart fallback it behaves like the legacy blanket
+	// drop (dropped under strict).
+	preWindow := &models.Mock{
+		Name: "pre-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now.Add(-3 * time.Hour),
+			ResTimestampMock: now.Add(-3*time.Hour + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	inWindow := &models.Mock{
+		Name: "in-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{preWindow, inWindow}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, after, before, true, time.Time{})
+
+	// Zero firstWindowStart → legacy blanket-drop — pre-window dropped,
+	// in-window kept.
+	assert.ElementsMatch(t, []string{"in-window"}, mockNames(filtered),
+		"zero firstWindowStart must fall back to legacy blanket drop for per-test mocks")
+	assert.Empty(t, mockNames(unfiltered),
+		"zero firstWindowStart strict mode must leave per-test unfiltered empty")
+}
+
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
 // including IPv4, IPv6, and hostnames, both with and without ports.
 func TestHasExplicitPort_IPv6_777(t *testing.T) {

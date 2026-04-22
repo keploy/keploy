@@ -1585,6 +1585,23 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	return nil
 }
 
+// FirstTestWindowStart returns the earliest test window start observed
+// by the underlying MockManager, or zero before any non-BaseTime
+// SetMocksWithWindow has landed. Satisfies the agent's optional
+// FirstWindowStartReader extension interface.
+//
+// Used by the agent's tier-aware strictMockWindow filter to preserve
+// startup-init mocks (req < firstWindowStart) while still dropping
+// stale cross-test bleed (firstWindowStart <= req < currentStart).
+// Zero-time return means "no cutoff known yet" and callers should fall
+// back to legacy strict-gate semantics.
+func (p *Proxy) FirstTestWindowStart() time.Time {
+	if m := p.getMockManager(); m != nil {
+		return m.FirstTestWindowStart()
+	}
+	return time.Time{}
+}
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()

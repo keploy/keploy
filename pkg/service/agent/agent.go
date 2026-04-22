@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -420,6 +421,21 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
 	agentStrict := params.StrictMockWindow && !isWindowedProxy
 
+	// Tier-aware strictMockWindow: when the proxy exposes the optional
+	// FirstWindowStartReader extension, read the earliest test-window
+	// start the MockManager has observed so filterByTimeStamp can keep
+	// per-test mocks with req < firstWindowStart in the filtered slice
+	// (they are startup-tier, not cross-test bleed). Stale previous-test
+	// mocks (firstWindowStart <= req < currentStart, or req > currentEnd)
+	// are still dropped — that's the containment guarantee strict mode
+	// exists to provide. A zero return from the reader (no test has
+	// fired yet) reverts to the legacy blanket-drop contract so callers
+	// observe behaviour strictly no worse than before.
+	var firstWindowStart time.Time
+	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
+		firstWindowStart = reader.FirstTestWindowStart()
+	}
+
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
 		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
@@ -438,9 +454,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		// filter and merge them into the session pool passed to the
 		// proxy. Under strict mode this branch doesn't fire because
 		// filterByTimeStamp drops rather than promotes.
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromoted(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict)
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		filteredMocks = perTestIn
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict)
+		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		if len(promotedToSession) > 0 {
 			unfilteredMocks = append(unfilteredMocks, promotedToSession...)
 			// Ordering: both FilterConfigMocks and FilterPerTestAndLaxPromoted

@@ -663,3 +663,140 @@ func mockNames(list []*models.Mock) []string {
 	}
 	return out
 }
+
+// TestMockManager_FirstTestWindowStart_AccessorBehavior locks in the
+// FirstTestWindowStart accessor contract that the agent's tier-aware
+// strictMockWindow filter depends on:
+//
+//   - Zero on a fresh manager (no SetMocksWithWindow yet).
+//   - Zero after a BaseTime staging call (BaseTime doesn't count).
+//   - Equal to the first real-window start after the first non-BaseTime
+//     call.
+//   - Does NOT advance when a later-starting test fires (only moves
+//     earlier to protect genuine startup-mock classification).
+func TestMockManager_FirstTestWindowStart_AccessorBehavior(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Fresh: zero.
+	if got := mm.FirstTestWindowStart(); !got.IsZero() {
+		t.Fatalf("FirstTestWindowStart: fresh manager want zero, got %v", got)
+	}
+
+	// BaseTime staging: still zero.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	if got := mm.FirstTestWindowStart(); !got.IsZero() {
+		t.Fatalf("FirstTestWindowStart: after BaseTime staging want zero, got %v", got)
+	}
+
+	// First real window sets the cutoff.
+	first := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	mm.SetMocksWithWindow(nil, nil, first, first.Add(10*time.Second))
+	if got := mm.FirstTestWindowStart(); !got.Equal(first) {
+		t.Fatalf("FirstTestWindowStart: after first real window want %v, got %v", first, got)
+	}
+
+	// A later test does NOT push firstWindowStart forward (that would
+	// re-classify genuine startup mocks as stale).
+	later := first.Add(1 * time.Hour)
+	mm.SetMocksWithWindow(nil, nil, later, later.Add(10*time.Second))
+	if got := mm.FirstTestWindowStart(); !got.Equal(first) {
+		t.Fatalf("FirstTestWindowStart: later window must not advance cutoff; want %v, got %v", first, got)
+	}
+}
+
+// TestMockManager_TierAwareStrictGate_StartupSurvivesPartition is the
+// integration test for the tier-aware strictMockWindow fix. It stages
+// startup + per-test-1 + per-test-2 mocks, fires two test windows in
+// sequence, and asserts that after the second test:
+//
+//   - The startup-tier mock is reachable via GetStartupMocks (routed
+//     into the startup tree by SetMocksWithWindow's req < firstStart
+//     partition).
+//   - The test-1 mock is NOT in per-test (it was stale cross-test bleed
+//     for test 2 — dropped by SetMocksWithWindow's per-test partition).
+//   - The test-2 mock IS in per-test.
+//
+// Before the tier-aware fix, the agent's strict gate would drop the
+// startup mock BEFORE SetMocksWithWindow saw it, so
+// GetStartupMocks returned empty and the v3 dispatcher routed startup-
+// tier traffic with candidates=0.
+func TestMockManager_TierAwareStrictGate_StartupSurvivesPartition(t *testing.T) {
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+
+	// Window layout:
+	//   startup_req < test1_start < test1_end < test2_start < test2_end
+	test1Start := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	test1End := test1Start.Add(10 * time.Second)
+	test2Start := test1End.Add(1 * time.Minute)
+	test2End := test2Start.Add(10 * time.Second)
+
+	startupReq := test1Start.Add(-5 * time.Minute)
+	test1Req := test1Start.Add(1 * time.Second)
+	test2Req := test2Start.Add(1 * time.Second)
+
+	startupMock := newMockForTest("startup", startupReq, models.LifetimePerTest)
+	test1Mock := newMockForTest("test1", test1Req, models.LifetimePerTest)
+	test2Mock := newMockForTest("test2", test2Req, models.LifetimePerTest)
+
+	// Test 1 fires with ALL THREE mocks in the filtered slice — this is
+	// the input shape the tier-aware agent filter produces (startup +
+	// in-window per-test mocks kept in filtered; only the stale past-
+	// window mocks are dropped at the agent). The manager partitions
+	// them:
+	//   startupMock: req < firstStart(=test1Start) → startup tree
+	//   test1Mock:   in-window → per-test tree
+	//   test2Mock:   req > test1End → stale future; dropped out-of-window
+	mm.SetMocksWithWindow([]*models.Mock{startupMock, test1Mock, test2Mock}, nil, test1Start, test1End)
+
+	if got := mm.FirstTestWindowStart(); !got.Equal(test1Start) {
+		t.Fatalf("FirstTestWindowStart: after test 1, want %v, got %v", test1Start, got)
+	}
+
+	// After test 1, startup tree has the startupMock.
+	startup, err := mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "startup") {
+		t.Fatalf("GetStartupMocks after test 1 missing 'startup' mock; got %v", mockNames(startup))
+	}
+
+	// Now test 2 fires. Input shape from the tier-aware agent filter:
+	//   startupMock: req < firstWindowStart (=test1Start) → preserved
+	//                in filtered as startup-tier (not dropped as bleed).
+	//   test2Mock:   in-window for test 2 → per-test.
+	//   test1Mock:   firstWindowStart <= req < test2Start → STALE
+	//                cross-test bleed; the agent's tier-aware gate
+	//                DROPS this before it reaches SetMocksWithWindow.
+	//
+	// So test 2's input to SetMocksWithWindow is {startup, test2}.
+	mm.SetMocksWithWindow([]*models.Mock{startupMock, test2Mock}, nil, test2Start, test2End)
+
+	// firstWindowStart must still be test1Start (doesn't advance).
+	if got := mm.FirstTestWindowStart(); !got.Equal(test1Start) {
+		t.Fatalf("FirstTestWindowStart: after test 2, want %v (stuck at test 1), got %v", test1Start, got)
+	}
+
+	// Startup tree still has the startup mock.
+	startup, err = mm.GetStartupMocks()
+	if err != nil {
+		t.Fatalf("GetStartupMocks: %v", err)
+	}
+	if !containsMockNamed(startup, "startup") {
+		t.Fatalf("GetStartupMocks after test 2 missing 'startup' mock; got %v", mockNames(startup))
+	}
+
+	// Per-test tree contains only test2, not test1.
+	perTest, err := mm.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatalf("GetPerTestMocksInWindow: %v", err)
+	}
+	if !containsMockNamed(perTest, "test2") {
+		t.Fatalf("GetPerTestMocksInWindow after test 2 missing 'test2'; got %v", mockNames(perTest))
+	}
+	if containsMockNamed(perTest, "test1") {
+		t.Fatalf("GetPerTestMocksInWindow after test 2 must NOT contain stale 'test1' (cross-test bleed); got %v", mockNames(perTest))
+	}
+}
