@@ -112,6 +112,19 @@ type MockMemDb interface {
 	// sanity check, but response containment is NOT enforced against `end`.
 	SetCurrentTestWindow(start, end time.Time)
 
+	// IsTestWindowActive reports whether a non-zero test window has been
+	// set via SetCurrentTestWindow or SetMocksWithWindow. Parsers that
+	// partition their index into per-test and session tiers consult this
+	// at dispatch time to decide which tier a live query should be served
+	// from: true = inside a test-body window (route to per-test index),
+	// false = session / connection-scoped traffic (route to session index).
+	//
+	// Inherently racy — a concurrent test-window flip could change the
+	// answer between observation and use — but callers that need strict
+	// window/pool atomicity go through GetPerTestMocksInWindow, which
+	// snapshots both under the manager's swap lock.
+	IsTestWindowActive() bool
+
 	// Deprecated: use GetPerTestMocksInWindow.
 	GetFilteredMocksInWindow() ([]*models.Mock, error)
 

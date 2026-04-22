@@ -419,6 +419,23 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 }
 
+// IsTestWindowActive reports whether a non-zero test window is currently
+// set on this MockManager (via SetCurrentTestWindow or SetMocksWithWindow).
+// Parsers that split mocks into per-test and session tiers use this as
+// the authoritative signal for which tier a live query should be routed
+// to: a true result means the runner is inside a test-body window, a
+// false result means session/connection-scoped traffic (startup, idle
+// gap between tests, post-last-test teardown).
+//
+// Concurrency: acquires windowMu for read only. A racy observation is
+// tolerable — callers that need strict window/pool atomicity go
+// through GetPerTestMocksInWindow (which snapshots both under swapMu).
+func (m *MockManager) IsTestWindowActive() bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return !m.windowStart.IsZero() && !m.windowEnd.IsZero()
+}
+
 // GetFilteredMocksInWindow returns non-config filtered mocks whose recorded
 // REQUEST timestamp lies inside the current test window. Response timestamps
 // may legitimately straggle outside the window (downstream async completion)

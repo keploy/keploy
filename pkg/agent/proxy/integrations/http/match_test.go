@@ -47,6 +47,7 @@ func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool             { retur
 func (m *mockMemDb) GetMySQLCounts() (total, config, data int)           { return 0, 0, 0 }
 func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                   { return false }
 func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)                 {}
+func (m *mockMemDb) IsTestWindowActive() bool                            { return false }
 func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error)   { return nil, m.err }
 func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)    { return nil, m.err }
 func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)            { return m.mocks, m.err }
