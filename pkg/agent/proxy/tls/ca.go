@@ -152,9 +152,37 @@ func MarkCAFailed(err error) {
 // multiple goroutines and multiple times.
 func markCAReady() { caReadyOnce.Do(func() { close(caReadyCh) }) }
 
-// SetupCA setups custom certificate authority to handle TLS connections
+// SetupCA setups custom certificate authority to handle TLS connections.
+//
+// Legacy entry point — SetupCAForApp is preferred when the app PID is
+// known (native mode on Linux), because it lets the Java keystore import
+// target the app's actual JDK instead of whatever keytool happens to be
+// on PATH. This shim preserves the three-arg signature for the docker /
+// shared-volume path (which writes a JKS from pure Go and doesn't shell
+// out to keytool) and for external callers that pre-date the PID plumbing.
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
+	return SetupCAForApp(ctx, logger, isDocker, 0, "")
+}
 
+// SetupCAForApp is SetupCA plus two inputs the Java truststore install
+// uses to target the right JDK:
+//
+//   - appPID: the process ID of the application being instrumented
+//     (config.Agent.ClientNSPID). When >0 and javaHomeOverride is empty,
+//     detectJavaHomeForPID reads /proc/<pid>/environ and /proc/<pid>/exe
+//     to discover the JDK the app is actually using. 0 disables
+//     detection (and we fall back to PATH keytool).
+//
+//   - javaHomeOverride: manual override from the CLI flag
+//     --ca-java-home. When non-empty it SHORT-CIRCUITS auto-detection;
+//     operators set this when an exotic launcher masks both JAVA_HOME
+//     and the exe symlink.
+//
+// Docker / shared-volume mode ignores both inputs: the JKS written to
+// /tmp/keploy-tls/truststore.jks is built in pure Go and consumed by the
+// app via -Djavax.net.ssl.trustStore=, so the "which keytool" problem
+// doesn't apply there.
+func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPID int, javaHomeOverride string) error {
 	if isDocker {
 		logger.Debug("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", "/tmp/keploy-tls"))
 		return setupSharedVolume(ctx, logger, "/tmp/keploy-tls")
@@ -162,7 +190,7 @@ func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
 	// Native Mode
 	logger.Debug("Detected Native Mode. Installing to system store...")
-	return setupNative(ctx, logger)
+	return setupNativeForApp(ctx, logger, appPID, javaHomeOverride)
 }
 
 // It extracts the cert to a temp file and sets the env vars.
@@ -403,6 +431,22 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 }
 
 func setupNative(ctx context.Context, logger *zap.Logger) error {
+	return setupNativeForApp(ctx, logger, 0, "")
+}
+
+// setupNativeForApp is the PID-aware native-install path. appPID and
+// javaHomeOverride are passed through to the Java keystore install so
+// the Keploy MITM CA lands in the app's actual truststore (see
+// SetupCAForApp doc comment for the full rationale).
+func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, javaHomeOverride string) error {
+	// Resolve the target JDK's java.home once, up front. Order:
+	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
+	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
+	//   3. Empty — installJavaCAForHome falls back to PATH keytool.
+	// We log the chosen source at Debug so operators can see why a
+	// particular cacerts file was targeted without turning on trace.
+	resolvedJavaHome := resolveAppJavaHome(logger, appPID, javaHomeOverride)
+
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
 		// Extract certificate to a temporary file
@@ -424,7 +468,7 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 
 		// install CA in the java keystore if java is installed
-		if err = installJavaCA(ctx, logger, tempCertPath); err != nil {
+		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
@@ -465,8 +509,10 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 		fs.Close()
 
-		// install CA in the java keystore if java is installed
-		if err := installJavaCA(ctx, logger, caPath); err != nil {
+		// install CA in the java keystore if java is installed.
+		// resolvedJavaHome may be "" — installJavaCAForHome falls back
+		// to PATH keytool in that case, preserving legacy behaviour.
+		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
@@ -711,7 +757,19 @@ func getCaPaths() ([]string, error) {
 }
 
 func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bool {
-	cmd := exec.CommandContext(ctx, "keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
+	return isJavaCAExistWithTool(ctx, "keytool", alias, storepass, cacertsPath)
+}
+
+// isJavaCAExistWithTool checks whether the given alias already exists in
+// cacertsPath, using a specific keytool executable.
+//
+// The split vs isJavaCAExist exists so callers with a resolved
+// $javaHome/bin/keytool (installJavaCAForHome) use the SAME keytool for
+// the existence check as for the import — otherwise a PATH keytool's
+// different default store format or cacerts layout can produce a false
+// negative and we'd re-import over and over across agent restarts.
+func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
+	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 	err := cmd.Run()
 	select {
 	case <-ctx.Done():
@@ -721,42 +779,102 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 	return err == nil
 }
 
-// installJavaCA installs the CA in the Java keystore
+// installJavaCA installs the Keploy MITM CA into the Java keystore
+// resolved from PATH (`java -XshowSettings:properties`).
+//
+// Legacy entry point — prefer installJavaCAForHome when the app PID or
+// operator override is available. On multi-JDK hosts (SDKMAN, Maven
+// wrappers, fat-jar launches with absolute JDK paths) the PATH JDK may
+// differ from the one the app actually runs with, which silently causes
+// the Keploy MITM certificate to be trusted in the wrong cacerts file
+// — TLS handshakes from the app then fail cert-verify even though this
+// function returned nil.
+//
+// Signature preserved for backward compat (external callers + tests).
 func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
-	// check if java is installed
-	if util.IsJavaInstalled() {
+	return installJavaCAForHome(ctx, logger, caPath, "")
+}
+
+// installJavaCAForHome installs the Keploy MITM CA into a specific JDK's
+// cacerts truststore.
+//
+// javaHome semantics:
+//   - "" (empty): legacy behaviour — fall back to
+//     util.GetJavaHome(ctx), which runs `java` from PATH. Used when the
+//     agent has no better signal (pre-registration boot, or the
+//     auto-detector returned empty).
+//   - non-empty: use $javaHome/bin/keytool as the executable and
+//     $javaHome/lib/security/cacerts as the target keystore, bypassing
+//     PATH. This is the path that fixes the SDKMAN/Maven-wrapper
+//     divergence described at the top of java_detect.go.
+//
+// The split matters because keytool reads and writes cacerts using its
+// own JDK's security providers; on multi-JDK hosts the PATH keytool can
+// silently write to a different file than the app's JVM reads at
+// startup, producing "unable to find valid certification path" at TLS
+// handshake time even though the import appeared to succeed.
+func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaHome string) error {
+	if javaHome == "" {
+		// Legacy path — fall back to PATH keytool after the usual
+		// "is java installed?" guard. When no PATH java exists this
+		// is a no-op (Debug-logged), which is correct on hosts that
+		// don't run Java workloads at all.
+		if !util.IsJavaInstalled() {
+			logger.Debug("Java is not installed on the system")
+			return nil
+		}
 		logger.Debug("checking java path from default java home")
-		javaHome, err := util.GetJavaHome(ctx)
+		var err error
+		javaHome, err = util.GetJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
 		}
-
-		// Assuming modern Java structure (without /jre/)
-		// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes)
-		cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
-		// You can modify these as per your requirements
-		storePass := "changeit"
-		alias := "keployCA"
-
-		logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
-
-		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
-			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
-			return nil
-		}
-
-		cmd := exec.CommandContext(ctx, "keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-		cmdOutput, err := cmd.CombinedOutput()
-		if err != nil {
-			utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
-			return err
-		}
-		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
-	} else {
-		logger.Debug("Java is not installed on the system")
 	}
+
+	// Resolve the JDK-specific keytool binary so we write to the
+	// cacerts of THIS JDK, not whatever happens to be first on PATH.
+	// On hosts with a single JDK the two resolve to the same thing;
+	// on multi-JDK / SDKMAN hosts they diverge and the bug we're
+	// fixing shows up as a TLS handshake failure in the app despite
+	// SetupCA appearing to succeed.
+	keytoolBin := filepath.Join(javaHome, "bin", "keytool")
+	if runtime.GOOS == "windows" {
+		keytoolBin = filepath.Join(javaHome, "bin", "keytool.exe")
+	}
+	// If the expected keytool binary is absent (e.g. a JRE-only layout
+	// or a malformed javaHome path), fall back to PATH keytool so we
+	// don't regress single-JDK hosts. We still target the resolved
+	// cacerts path — that's the part that actually determines which
+	// truststore the app's JVM reads.
+	if _, statErr := os.Stat(keytoolBin); statErr != nil {
+		logger.Debug("resolved keytool binary not found in javaHome; falling back to PATH keytool",
+			zap.String("expected", keytoolBin), zap.Error(statErr))
+		keytoolBin = "keytool"
+	}
+
+	// Assuming modern Java structure (without /jre/).
+	// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes).
+	cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+	// You can modify these as per your requirements
+	storePass := "changeit"
+	alias := "keployCA"
+
+	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
+
+	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
+		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+	cmdOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
+		return err
+	}
+	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return nil
 }
 
