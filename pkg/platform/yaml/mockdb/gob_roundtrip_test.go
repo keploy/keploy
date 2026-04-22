@@ -127,29 +127,32 @@ func TestRoundTrip_Postgres(t *testing.T) {
 }
 
 // --- PostgresV3 round-trips -------------------------------------------------
-// v3 persists typed per-concern specs (Session / Catalog / Data / Query /
-// Generator) under the same mocks file. Each Kind needs to round-trip
-// through gob byte-for-byte so the replayer's BuildIndex doesn't see
-// partial or missing fields after a save-load cycle. The NULL-cell
-// sentinel case is separated out because its handling is easy to
-// regress (was originally \x00NULL\x00, which gopkg.in/yaml.v3 rejects
+// Post wave 3, v3 persists ONE Kind (PostgresV3) with a discriminated
+// Spec (Type + one populated sub-pointer). Each sub-type still needs to
+// round-trip through gob byte-for-byte so the replayer's BuildIndex
+// doesn't see partial or missing fields after a save-load cycle. The
+// NULL-cell sentinel case is separated out because its handling is easy
+// to regress (was originally \x00NULL\x00, which gopkg.in/yaml.v3 rejects
 // as a control character — the printable form must keep round-tripping
 // through both gob AND yaml paths).
 
 func TestRoundTrip_PostgresV3Session(t *testing.T) {
 	roundTrip(t, "PostgresV3Session", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Session,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config", "connID": "0"},
-			PostgresV3Session: &models.PostgresV3SessionSpec{
-				ProtocolVersion:  "3.0",
-				SSLResponse:      "N",
-				ServerVersion:    "15.17 (Debian 15.17-1.pgdg13+1)",
-				ParameterStatus:  map[string]string{"DateStyle": "ISO, MDY", "client_encoding": "UTF8"},
-				BackendProcessID: 573,
-				BackendSecretKey: -271483429,
-				ObservedAuthMode: "scram",
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeSession,
+				Session: &models.PostgresV3SessionSpec{
+					ProtocolVersion:  "3.0",
+					SSLResponse:      "N",
+					ServerVersion:    "15.17 (Debian 15.17-1.pgdg13+1)",
+					ParameterStatus:  map[string]string{"DateStyle": "ISO, MDY", "client_encoding": "UTF8"},
+					BackendProcessID: 573,
+					BackendSecretKey: -271483429,
+					ObservedAuthMode: "scram",
+				},
 			},
 		},
 	})
@@ -158,21 +161,24 @@ func TestRoundTrip_PostgresV3Session(t *testing.T) {
 func TestRoundTrip_PostgresV3Catalog(t *testing.T) {
 	roundTrip(t, "PostgresV3Catalog", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Catalog,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config"},
-			PostgresV3Catalog: &models.PostgresV3CatalogSpec{
-				Schemas: []models.PostgresV3Schema{{
-					Name: "public",
-					Tables: []models.PostgresV3TableDef{{
-						Name: "customer_tag",
-						Columns: []models.PostgresV3Column{
-							{Name: "id", TypeOID: 20, TypeName: "bigint", NotNull: true, IsPrimary: true, AttNum: 1},
-							{Name: "tag", TypeOID: 1043, TypeName: "varchar", NotNull: true, AttNum: 2},
-						},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeCatalog,
+				Catalog: &models.PostgresV3CatalogSpec{
+					Schemas: []models.PostgresV3Schema{{
+						Name: "public",
+						Tables: []models.PostgresV3TableDef{{
+							Name: "customer_tag",
+							Columns: []models.PostgresV3Column{
+								{Name: "id", TypeOID: 20, TypeName: "bigint", NotNull: true, IsPrimary: true, AttNum: 1},
+								{Name: "tag", TypeOID: 1043, TypeName: "varchar", NotNull: true, AttNum: 2},
+							},
+						}},
 					}},
-				}},
-				Extensions: []string{"pgcrypto"},
+					Extensions: []string{"pgcrypto"},
+				},
 			},
 		},
 	})
@@ -181,19 +187,22 @@ func TestRoundTrip_PostgresV3Catalog(t *testing.T) {
 func TestRoundTrip_PostgresV3Data(t *testing.T) {
 	roundTrip(t, "PostgresV3Data", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Data,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "config"},
-			PostgresV3Data: &models.PostgresV3DataSpec{
-				Schema:     "public",
-				Table:      "customer_tag",
-				PrimaryKey: []string{"id"},
-				Columns:    []string{"id", "tag", "created_at"},
-				Rows: [][]string{
-					{"1", "vip", "2026-04-22"},
-					{"2", "churn-risk", "2026-04-22"},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeData,
+				Data: &models.PostgresV3DataSpec{
+					Schema:     "public",
+					Table:      "customer_tag",
+					PrimaryKey: []string{"id"},
+					Columns:    []string{"id", "tag", "created_at"},
+					Rows: [][]string{
+						{"1", "vip", "2026-04-22"},
+						{"2", "churn-risk", "2026-04-22"},
+					},
+					Truncated: false,
 				},
-				Truncated: false,
 			},
 		},
 	})
@@ -202,27 +211,30 @@ func TestRoundTrip_PostgresV3Data(t *testing.T) {
 func TestRoundTrip_PostgresV3Query(t *testing.T) {
 	roundTrip(t, "PostgresV3Query", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Query,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{"type": "mocks", "class": "APP"},
-			PostgresV3Query: &models.PostgresV3QuerySpec{
-				Class:         "APP",
-				Lifetime:      "perTest",
-				Scope:         "session",
-				SQLAstHash:    "sha256:abcd",
-				SQLNormalized: "select id from customer_tag where id=$1",
-				ParamOIDs:     []uint32{20},
-				InvocationID:  "sha256:abcd:0",
-				BindValues:    []string{"AAAAAQ=="},
-				BindFormats:   []int{1},
-				Response: &models.PostgresV3Response{
-					RowDescription: []models.PostgresV3ColumnDescriptor{
-						{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					Scope:         "session",
+					SQLAstHash:    "sha256:abcd",
+					SQLNormalized: "select id from customer_tag where id=$1",
+					ParamOIDs:     []uint32{20},
+					InvocationID:  "sha256:abcd:0",
+					BindValues:    []string{"AAAAAQ=="},
+					BindFormats:   []int{1},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+						},
+						Rows:            [][]string{{"MQ=="}},
+						CommandComplete: "SELECT 1",
 					},
-					Rows:            [][]string{{"MQ=="}},
-					CommandComplete: "SELECT 1",
+					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
 				},
-				SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
 			},
 		},
 	})
@@ -237,28 +249,31 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 	roundTrip(t, "PostgresV3QueryNullCell", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Query,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
-			PostgresV3Query: &models.PostgresV3QuerySpec{
-				Class:         "APP",
-				Lifetime:      "perTest",
-				Scope:         "session",
-				SQLAstHash:    "sha256:null",
-				SQLNormalized: "select comment from customer_note where id=$1",
-				InvocationID:  "sha256:null:0",
-				BindValues:    []string{"AAAAAQ=="},
-				BindFormats:   []int{1},
-				Response: &models.PostgresV3Response{
-					RowDescription: []models.PostgresV3ColumnDescriptor{
-						{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					Scope:         "session",
+					SQLAstHash:    "sha256:null",
+					SQLNormalized: "select comment from customer_note where id=$1",
+					InvocationID:  "sha256:null:0",
+					BindValues:    []string{"AAAAAQ=="},
+					BindFormats:   []int{1},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+						},
+						Rows: [][]string{
+							{models.PostgresV3NullCell},
+							{"aGVsbG8="},
+						},
+						CommandComplete: "SELECT 2",
 					},
-					Rows: [][]string{
-						{models.PostgresV3NullCell},
-						{"aGVsbG8="},
-					},
-					CommandComplete: "SELECT 2",
+					SideEffects: &models.PostgresV3SideEffects{},
 				},
-				SideEffects: &models.PostgresV3SideEffects{},
 			},
 		},
 	})
@@ -267,13 +282,16 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 func TestRoundTrip_PostgresV3Generator(t *testing.T) {
 	roundTrip(t, "PostgresV3Generator", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
-		Kind:    models.PostgresV3Generator,
+		Kind:    models.PostgresV3,
 		Spec: models.MockSpec{
-			PostgresV3Generator: &models.PostgresV3GeneratorSpec{
-				Name:           "uuid_generate_v4",
-				Type:           "uuid",
-				RecordedValues: []string{"6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
-				Policy:         "replay",
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeGenerator,
+				Generator: &models.PostgresV3GeneratorSpec{
+					Name:           "uuid_generate_v4",
+					Type:           "uuid",
+					RecordedValues: []string{"6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
+					Policy:         "replay",
+				},
 			},
 		},
 	})
