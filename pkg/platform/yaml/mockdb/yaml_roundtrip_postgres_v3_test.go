@@ -202,18 +202,30 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 		},
 	}
 	got := yamlRoundTrip(t, "PostgresV3Query-NullCell", in)
-	if got.Spec.PostgresV3Query == nil {
+	// Peel the nested structure one layer at a time so a future
+	// regression that drops (say) Response would fail with a clear
+	// "Response is nil" message instead of panicking on a nil-ptr
+	// dereference inside the Rows indexing. t.Fatal stops the test
+	// before any dependent assertions run.
+	q := got.Spec.PostgresV3Query
+	if q == nil {
 		t.Fatal("expected non-nil Query spec after round-trip")
 	}
-	if len(got.Spec.PostgresV3Query.Response.Rows) != 2 {
-		t.Fatalf("want 2 rows, got %d", len(got.Spec.PostgresV3Query.Response.Rows))
+	if q.Response == nil {
+		t.Fatal("expected non-nil Query.Response after round-trip (a dropped Response would otherwise NPE below)")
 	}
-	if got.Spec.PostgresV3Query.Response.Rows[0][0] != models.PostgresV3NullCell {
+	if len(q.Response.Rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(q.Response.Rows))
+	}
+	if len(q.Response.Rows[0]) == 0 {
+		t.Fatal("Rows[0] is empty; expected the NULL sentinel cell")
+	}
+	if q.Response.Rows[0][0] != models.PostgresV3NullCell {
 		t.Fatalf("NULL sentinel lost in yaml round-trip: got %q, want %q",
-			got.Spec.PostgresV3Query.Response.Rows[0][0], models.PostgresV3NullCell)
+			q.Response.Rows[0][0], models.PostgresV3NullCell)
 	}
-	if !reflect.DeepEqual(got.Spec.PostgresV3Query, in.Spec.PostgresV3Query) {
-		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Query, got.Spec.PostgresV3Query)
+	if !reflect.DeepEqual(q, in.Spec.PostgresV3Query) {
+		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3Query, q)
 	}
 }
 
