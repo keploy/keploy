@@ -151,6 +151,7 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 				InvocationID:  "sha256:abcd:0",
 				BindValues:    []string{"AAAAAQ=="},
 				BindFormats:   []int{1},
+				ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 				Response: &models.PostgresV3Response{
 					RowDescription: []models.PostgresV3ColumnDescriptor{
 						{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
