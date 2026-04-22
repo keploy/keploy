@@ -86,6 +86,13 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
+	// EnableIPv6Redirect mirrors config.Agent.EnableIPv6Redirect. When
+	// true (the default), the synthetic DNS fallback answers AAAA
+	// queries with ::1 so clients can reach the proxy via the IPv6
+	// loopback that the BPF cgroup program redirects. When false, AAAA
+	// is returned empty to preserve the legacy v4-only behaviour.
+	EnableIPv6Redirect bool
+
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
@@ -237,11 +244,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		DestInfo:          info,
 		clientClose:       make(chan bool, 1),
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:          opts.Agent.IsDocker,
-		dnsCache:          newDNSCache(),
-		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
+		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:           opts.Agent.IsDocker,
+		EnableIPv6Redirect: opts.Agent.EnableIPv6Redirect,
+		dnsCache:           newDNSCache(),
+		recordedDNSMocks:   newRecordedDNSMocksCache(),
 	}
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
