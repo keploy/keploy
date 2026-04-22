@@ -274,7 +274,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		if err := yamlDoc.Spec.Encode(spec); err != nil {
-			utils.LogError(logger, err, "failed to marshal PostgresV3Session as yaml")
+			utils.LogError(logger, err, "failed to marshal PostgresV3Session as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
 	case models.PostgresV3Catalog:
@@ -285,7 +288,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		if err := yamlDoc.Spec.Encode(spec); err != nil {
-			utils.LogError(logger, err, "failed to marshal PostgresV3Catalog as yaml")
+			utils.LogError(logger, err, "failed to marshal PostgresV3Catalog as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
 	case models.PostgresV3Data:
@@ -296,7 +302,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		if err := yamlDoc.Spec.Encode(spec); err != nil {
-			utils.LogError(logger, err, "failed to marshal PostgresV3Data as yaml")
+			utils.LogError(logger, err, "failed to marshal PostgresV3Data as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
 	case models.PostgresV3Query:
@@ -307,7 +316,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		if err := yamlDoc.Spec.Encode(spec); err != nil {
-			utils.LogError(logger, err, "failed to marshal PostgresV3Query as yaml")
+			utils.LogError(logger, err, "failed to marshal PostgresV3Query as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
 	case models.PostgresV3Generator:
@@ -318,7 +330,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		if err := yamlDoc.Spec.Encode(spec); err != nil {
-			utils.LogError(logger, err, "failed to marshal PostgresV3Generator as yaml")
+			utils.LogError(logger, err, "failed to marshal PostgresV3Generator as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
 	default:
@@ -333,6 +348,15 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 // PostgresV3 YAML Spec envelopes — one per Kind. Each carries the
 // metadata + the typed payload + timestamps.
 // ---------------------------------------------------------------------------
+
+// Remediation strings attached to PostgresV3 yaml encode/decode errors
+// via the structured `next_step` field. Kept here so both halves of
+// the switch use identical guidance and operators get a consistent
+// signal in logs.
+const (
+	nextStepPostgresV3Encode = "The mock could not be serialised to yaml — inspect mock_name + mock_kind for the offending record, then check the PostgresV3*Spec struct for non-serialisable data (nil slice elements, invalid UTF-8, or gob-unsafe pointers). Re-record the affected test-set if the on-disk record is corrupt."
+	nextStepPostgresV3Decode = "The stored PostgresV3 yaml block could not be parsed — compare the mock_kind against the expected envelope (PostgresV3Session / Catalog / Data / Query / Generator) and verify the file was written by a compatible keploy version. If the file was edited by hand, restore from source-of-truth or re-record; otherwise upgrade keploy so the running binary matches the on-disk schema."
+)
 
 type postgresV3SessionYamlSpec struct {
 	Metadata         map[string]string             `yaml:"metadata,omitempty"`
@@ -543,7 +567,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		case models.PostgresV3Session:
 			var spec postgresV3SessionYamlSpec
 			if err := m.Spec.Decode(&spec); err != nil {
-				utils.LogError(logger, err, "failed to unmarshal PostgresV3Session yaml", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Session yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -555,7 +582,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		case models.PostgresV3Catalog:
 			var spec postgresV3CatalogYamlSpec
 			if err := m.Spec.Decode(&spec); err != nil {
-				utils.LogError(logger, err, "failed to unmarshal PostgresV3Catalog yaml", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Catalog yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -567,7 +597,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		case models.PostgresV3Data:
 			var spec postgresV3DataYamlSpec
 			if err := m.Spec.Decode(&spec); err != nil {
-				utils.LogError(logger, err, "failed to unmarshal PostgresV3Data yaml", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Data yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -579,7 +612,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		case models.PostgresV3Query:
 			var spec postgresV3QueryYamlSpec
 			if err := m.Spec.Decode(&spec); err != nil {
-				utils.LogError(logger, err, "failed to unmarshal PostgresV3Query yaml", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Query yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -591,7 +627,10 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		case models.PostgresV3Generator:
 			var spec postgresV3GeneratorYamlSpec
 			if err := m.Spec.Decode(&spec); err != nil {
-				utils.LogError(logger, err, "failed to unmarshal PostgresV3Generator yaml", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3Generator yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
