@@ -889,6 +889,20 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 // yet migrated. The order is startup-first so matchers that iterate in
 // order still see bootstrap traffic before regular session mocks, which
 // matches pre-wave-2 behaviour.
+//
+// N-R1 fix: during Runner/Replayer's initial BaseTime staging call the
+// startup tree is deliberately over-populated with the full unfiltered
+// slice (to keep session-tagged bootstrap DDL like listmonk's
+// `DROP TYPE IF EXISTS` reachable by the dispatcher's StartupTransactional
+// engine before the first test fires — see the isInitialStaging branch
+// in SetMocksWithWindow). That means the SAME *Mock pointer lives in
+// both m.startup and m.unfiltered during the pre-first-test window, and
+// a naive concat here would double-count it in the union — skewing
+// HitCount / consumedIndex accounting on the one replay path that
+// matters most (Flyway + HikariCP + ORM boot). Dedup by pointer
+// identity before returning. At steady state (post-first-test) the
+// trees are disjoint and the dedup is a free no-op (zero duplicate
+// insertions into the seen-set).
 func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 	startup, err := m.GetStartupMocks()
 	if err != nil {
@@ -901,9 +915,33 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 	if len(startup) == 0 {
 		return session, nil
 	}
+	// Pointer-identity dedup. Map-with-struct{}-value keyed on *Mock is
+	// cheaper than a slice-scan per candidate because the worst case
+	// (initial staging with N ~ 10^2 startup mocks, M ~ 10^2 session
+	// mocks, each pointer shared) would be O(N*M) under the naive
+	// form. The map keeps it O(N+M) with one allocation.
 	out := make([]*models.Mock, 0, len(startup)+len(session))
-	out = append(out, startup...)
-	out = append(out, session...)
+	seen := make(map[*models.Mock]struct{}, len(startup)+len(session))
+	for _, mk := range startup {
+		if mk == nil {
+			continue
+		}
+		if _, dup := seen[mk]; dup {
+			continue
+		}
+		seen[mk] = struct{}{}
+		out = append(out, mk)
+	}
+	for _, mk := range session {
+		if mk == nil {
+			continue
+		}
+		if _, dup := seen[mk]; dup {
+			continue
+		}
+		seen[mk] = struct{}{}
+		out = append(out, mk)
+	}
 	return out, nil
 }
 
