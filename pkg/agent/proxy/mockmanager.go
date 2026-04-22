@@ -1016,6 +1016,35 @@ func (m *MockManager) HasFirstTestFired() bool {
 	return !m.firstWindowStart.IsZero()
 }
 
+// FirstTestWindowStart returns the earliest test window start this
+// MockManager has observed, or the zero time if no non-BaseTime
+// SetMocksWithWindow call has landed yet.
+//
+// Exposed so the agent's tier-aware strictMockWindow filter can
+// distinguish:
+//
+//   - startup-init mocks (req < firstWindowStart) — legitimate
+//     app-bootstrap traffic that predates the first test window
+//     (Flyway migrations, Hibernate init, HikariCP pool warm-up,
+//     listmonk's cacheUsers SELECT) and MUST be preserved so
+//     MockManager.SetMocksWithWindow can route them into the
+//     startup tree.
+//
+//   - stale previous-test mocks (firstWindowStart <= req < currentStart) —
+//     cross-test bleed the strict gate exists to protect against.
+//     These are DROPPED.
+//
+// Concurrency: read under swapMu.RLock to avoid a torn time.Time read
+// against the writer inside SetMocksWithWindow. Inherently racy as a
+// point-in-time sample but that's tolerable — the filter only needs
+// a stable enough value to tell "before any test fired" (zero) from
+// "startup cutoff is at T".
+func (m *MockManager) FirstTestWindowStart() time.Time {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	return m.firstWindowStart
+}
+
 // WindowSnapshot returns the (IsTestWindowActive, HasFirstTestFired)
 // pair under a single outer lock so callers that need BOTH bits as a
 // coherent point-in-time read cannot observe the torn intermediate
