@@ -44,16 +44,13 @@ jobs:
           repository: keploy/samples-java
           path: samples-java
 
-      - name: Installing the necessary dependencies
-        run: |
-          cd samples-java/${{ matrix.app.path }}
-          ./mvnw dependency:resolve
-
-      - name: Compile the project
-        run: |
-          cd samples-java/${{ matrix.app.path }}
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/update-java.sh
-          ./mvnw compile
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/${{ matrix.app.path }}/pom.xml
 
       - name: Run the ${{ matrix.app.name }} app
         env:
@@ -99,6 +96,14 @@ jobs:
         with:
           repository: keploy/samples-java
           path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
 
       - name: Run mysql-dual-conn app
         env:

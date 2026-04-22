@@ -104,6 +104,14 @@ type SetupOptions struct {
 	ConfigPath        string
 	ExtraArgs         []string
 	EnableSampling    int
+	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
+	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
+	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
+	// program can rewrite ::1 destinations to the v4-mapped proxy address.
+	// When false, the v6 proxy address is left as all-zero and v6 traffic
+	// falls through unredirected — this preserves the legacy zero-address
+	// behaviour as an opt-in rollback knob.
+	EnableIPv6Redirect bool
 	// InMemoryCompose holds docker-compose YAML content to avoid writing sensitive
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
