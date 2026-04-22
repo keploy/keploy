@@ -419,6 +419,26 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory", zap.String("path", keployPath), zap.String("hint", "verify that --path points to a directory containing keploy/<test-set>/tests/*.yaml files"))
 		return err
 	}
+
+	// Honor --tests as a test-set filter so the flag has an observable effect
+	// on inference output; without this it is silently ignored.
+	if selected := s.config.Contract.Tests; len(selected) > 0 {
+		allowed := make(map[string]struct{}, len(selected))
+		for _, id := range selected {
+			allowed[id] = struct{}{}
+		}
+		filtered := make([]string, 0, len(testSetIDs))
+		for _, id := range testSetIDs {
+			if _, ok := allowed[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) == 0 {
+			utils.LogError(s.logger, nil, "no recorded test sets match the --tests filter", zap.Strings("requested", selected), zap.Strings("available", testSetIDs))
+			return fmt.Errorf("no recorded test sets match the --tests filter")
+		}
+		testSetIDs = filtered
+	}
 	sort.Strings(testSetIDs)
 
 	testCases := make([]models.TestCase, 0)
