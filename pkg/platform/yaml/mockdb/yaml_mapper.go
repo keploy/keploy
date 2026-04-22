@@ -39,8 +39,7 @@ var builtinYAMLKinds = map[models.Kind]struct{}{
 // implementation for kind. It is intended to be called from an init()
 // function so the mapper is available before any mock is loaded.
 //
-// The call is a no-op (with a stderr log on misuse cases that are
-// likely bugs) when:
+// The call is a no-op when:
 //   - kind is empty or Encode/Decode is nil — clearly malformed, the
 //     caller has a programming error and silent no-op matches the
 //     existing best-effort contract,

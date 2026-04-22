@@ -3,6 +3,7 @@ package mockdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -25,8 +26,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
-		utils.LogError(logger, err, "failed to marshal the registered mock kind as yaml", zap.String("kind", string(mock.Kind)))
-		return nil, err
+		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
+		utils.LogError(logger, wrapped, "failed to marshal the registered mock kind as yaml", zap.String("kind", string(mock.Kind)))
+		return nil, wrapped
 	}
 	if mapped {
 		return &yamlDoc, nil
@@ -264,8 +266,9 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal a registered mock yaml doc", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
-			return nil, err
+			wrapped := fmt.Errorf("mockdb: decode mapper for mock %q kind %q: %w", m.Name, m.Kind, err)
+			utils.LogError(logger, wrapped, "failed to unmarshal a registered mock yaml doc", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
+			return nil, wrapped
 		}
 		if mapped {
 			mocks = append(mocks, &mock)
