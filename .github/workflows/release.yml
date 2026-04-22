@@ -62,6 +62,9 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # TEMPORARY override — remove once keploy/integrations#130 merges
+          # to main; the Postgres v3 parser package lives on that branch until then.
+          integration-ref: feat/postgres-v3-parser
 
 #      - name: Checkout UI
 #        uses: actions/checkout@v4

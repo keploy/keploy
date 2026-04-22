@@ -269,21 +269,27 @@ type PostgresV3QuerySpec struct {
 type PostgresV3Response struct {
 	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
 	// Rows stores each row as a []string. The sentinel value
-	// PostgresV3NullCell ("\x00NULL\x00") indicates SQL NULL — chosen
-	// so it cannot collide with base64-encoded cell data (base64 output
-	// only includes [A-Za-z0-9+/=], never \x00). Non-NULL cells are the
-	// base64-encoded raw wire bytes. The sentinel-based encoding is
-	// deliberately gob-safe: no nil pointers in slice elements (gob's
-	// encodeArray rejects those).
+	// PostgresV3NullCell indicates SQL NULL — chosen so it cannot
+	// collide with base64-encoded cell data (base64 output only includes
+	// [A-Za-z0-9+/=], never '~'). Non-NULL cells are the base64-encoded
+	// raw wire bytes. The sentinel-based encoding is deliberately yaml-
+	// and gob-safe: printable ASCII (no control characters that yaml.v3
+	// rejects) and []string rather than []*string (nil pointers in slice
+	// elements crash gob's encodeArray).
 	Rows            [][]string       `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 	CommandComplete string           `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
 	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
 }
 
 // PostgresV3NullCell is the sentinel string stored in
-// PostgresV3Response.Rows for SQL NULL cells. The value starts with a
-// NUL byte that base64 never emits, so it is unambiguous.
-const PostgresV3NullCell = "\x00NULL\x00"
+// PostgresV3Response.Rows for SQL NULL cells. Chosen so it cannot
+// collide with base64-encoded cell data — base64 output uses only
+// [A-Za-z0-9+/=], never '~' — and so every byte of the sentinel is a
+// printable ASCII character that yaml.v3 and gob can both encode
+// without escaping. Earlier drafts used NUL bytes which gopkg.in/yaml.v3
+// rejects as control characters; '~' avoids that failure mode while
+// staying short and unambiguous.
+const PostgresV3NullCell = "~~KEPLOY_PG_NULL~~"
 
 type PostgresV3ColumnDescriptor struct {
 	Name       string `json:"name" yaml:"name" bson:"name"`

@@ -43,6 +43,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # TEMPORARY override — remove once keploy/integrations#130 merges
+          # to main and the Postgres v3 parser package lives on the default
+          # branch. Until then, CI needs this feature branch to resolve the
+          # `github.com/keploy/integrations/pkg/postgres/v3` import added
+          # to extraparsers.go by this action.
+          integration-ref: feat/postgres-v3-parser
 
       - name: Configure Git to use SSH
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
