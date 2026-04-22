@@ -21,14 +21,14 @@ func init() {
 type Kind string
 
 const (
-	HTTP        Kind = "Http"
-	HTTP2       Kind = "Http2"
-	GENERIC     Kind = "Generic"
-	REDIS       Kind = "Redis"
-	KAFKA       Kind = "Kafka"
-	MySQL       Kind = "MySQL"
-	Postgres    Kind = "Postgres"
-	PostgresV2  Kind = "PostgresV2"
+	HTTP       Kind = "Http"
+	HTTP2      Kind = "Http2"
+	GENERIC    Kind = "Generic"
+	REDIS      Kind = "Redis"
+	KAFKA      Kind = "Kafka"
+	MySQL      Kind = "MySQL"
+	Postgres   Kind = "Postgres"
+	PostgresV2 Kind = "PostgresV2"
 
 	// --- PostgresV3: deterministic replay, typed per-concern mocks ---
 	// Each lives in the same mocks.yaml stream but carries a distinct
@@ -176,15 +176,15 @@ type PostgresV3CatalogSpec struct {
 }
 
 type PostgresV3Schema struct {
-	Name   string                  `json:"name" yaml:"name" bson:"name"`
-	Tables []PostgresV3TableDef    `json:"tables,omitempty" yaml:"tables,omitempty" bson:"tables,omitempty"`
+	Name   string               `json:"name" yaml:"name" bson:"name"`
+	Tables []PostgresV3TableDef `json:"tables,omitempty" yaml:"tables,omitempty" bson:"tables,omitempty"`
 }
 
 type PostgresV3TableDef struct {
-	Name        string                  `json:"name" yaml:"name" bson:"name"`
-	Columns     []PostgresV3Column      `json:"columns,omitempty" yaml:"columns,omitempty" bson:"columns,omitempty"`
-	Indexes     []PostgresV3IndexDef    `json:"indexes,omitempty" yaml:"indexes,omitempty" bson:"indexes,omitempty"`
-	Constraints []PostgresV3Constraint  `json:"constraints,omitempty" yaml:"constraints,omitempty" bson:"constraints,omitempty"`
+	Name        string                 `json:"name" yaml:"name" bson:"name"`
+	Columns     []PostgresV3Column     `json:"columns,omitempty" yaml:"columns,omitempty" bson:"columns,omitempty"`
+	Indexes     []PostgresV3IndexDef   `json:"indexes,omitempty" yaml:"indexes,omitempty" bson:"indexes,omitempty"`
+	Constraints []PostgresV3Constraint `json:"constraints,omitempty" yaml:"constraints,omitempty" bson:"constraints,omitempty"`
 }
 
 type PostgresV3Column struct {
@@ -225,31 +225,31 @@ type PostgresV3Sequence struct {
 }
 
 type PostgresV3MigrationTable struct {
-	Name    string              `json:"name" yaml:"name" bson:"name"`
-	Columns []string            `json:"columns" yaml:"columns" bson:"columns"`
-	Rows    [][]string          `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Name    string     `json:"name" yaml:"name" bson:"name"`
+	Columns []string   `json:"columns" yaml:"columns" bson:"columns"`
+	Rows    [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 }
 
 // PostgresV3DataSpec — one per seeded user table. Carries the row-store
 // seed for L4's transactional engine.
 type PostgresV3DataSpec struct {
-	Schema     string       `json:"schema" yaml:"schema" bson:"schema"`
-	Table      string       `json:"table" yaml:"table" bson:"table"`
-	PrimaryKey []string     `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
-	Columns    []string     `json:"columns" yaml:"columns" bson:"columns"`
-	Rows       [][]string   `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	Truncated  bool         `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
-	RowLimit   int          `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
+	Schema     string     `json:"schema" yaml:"schema" bson:"schema"`
+	Table      string     `json:"table" yaml:"table" bson:"table"`
+	PrimaryKey []string   `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
+	Columns    []string   `json:"columns" yaml:"columns" bson:"columns"`
+	Rows       [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Truncated  bool       `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
+	RowLimit   int        `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
 }
 
 // PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
 // replay-time index by sqlAstHash.
 type PostgresV3QuerySpec struct {
 	// Classification
-	Class        string `json:"class,omitempty" yaml:"class,omitempty" bson:"class,omitempty"`
-	Lifetime     string `json:"lifetime,omitempty" yaml:"lifetime,omitempty" bson:"lifetime,omitempty"`
-	Scope        string `json:"scope,omitempty" yaml:"scope,omitempty" bson:"scope,omitempty"`
-	SQLAstHash   string `json:"sqlAstHash" yaml:"sqlAstHash" bson:"sql_ast_hash"`
+	Class      string `json:"class,omitempty" yaml:"class,omitempty" bson:"class,omitempty"`
+	Lifetime   string `json:"lifetime,omitempty" yaml:"lifetime,omitempty" bson:"lifetime,omitempty"`
+	Scope      string `json:"scope,omitempty" yaml:"scope,omitempty" bson:"scope,omitempty"`
+	SQLAstHash string `json:"sqlAstHash" yaml:"sqlAstHash" bson:"sql_ast_hash"`
 
 	// SQL
 	SQLNormalized     string   `json:"sqlNormalized" yaml:"sqlNormalized" bson:"sql_normalized"`
@@ -271,7 +271,7 @@ type PostgresV3QuerySpec struct {
 }
 
 type PostgresV3Response struct {
-	RowDescription  []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
+	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
 	// Rows stores each row as a []string. The sentinel value
 	// PostgresV3NullCell ("\x00NULL\x00") indicates SQL NULL — chosen
 	// so it cannot collide with base64-encoded cell data (base64 output
