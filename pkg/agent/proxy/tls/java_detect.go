@@ -36,7 +36,49 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 )
+
+// resolveAppJavaHome picks the java.home SetupCA should target for the
+// Keploy MITM CA truststore install. Precedence, highest to lowest:
+//
+//  1. override — the --ca-java-home CLI flag
+//     (config.Agent.CAJavaHome). Operator-set, wins over everything
+//     else. Used when the auto-detector can't see through an exotic
+//     launcher (custom shell wrapper, container re-exec, etc.).
+//
+//  2. detectJavaHomeForPID(appPID) — /proc-based auto-detect. Covers
+//     the common cases (SDKMAN, Maven wrapper, fat-jar launch).
+//
+//  3. "" — caller falls back to PATH keytool. Correct on single-JDK
+//     hosts and backward-compatible with pre-Track-C behaviour.
+//
+// The logger is written at Debug so operators can grep the agent log
+// for "ca_java_home_source" and see exactly which path was chosen
+// without turning on trace-level noise.
+func resolveAppJavaHome(logger *zap.Logger, appPID int, override string) string {
+	if override != "" {
+		logger.Debug("using --ca-java-home override for Java truststore install",
+			zap.String("ca_java_home_source", "override"),
+			zap.String("java_home", override),
+			zap.Int("app_pid", appPID))
+		return override
+	}
+	if appPID > 0 {
+		if detected := detectJavaHomeForPID(appPID); detected != "" {
+			logger.Debug("auto-detected app's java.home from /proc",
+				zap.String("ca_java_home_source", "proc"),
+				zap.String("java_home", detected),
+				zap.Int("app_pid", appPID))
+			return detected
+		}
+	}
+	logger.Debug("no app-aware java.home available; falling back to PATH keytool",
+		zap.String("ca_java_home_source", "path"),
+		zap.Int("app_pid", appPID))
+	return ""
+}
 
 // detectJavaHomeForPID resolves the java.home of the process with the
 // given PID by consulting /proc/<pid>/environ first, then
