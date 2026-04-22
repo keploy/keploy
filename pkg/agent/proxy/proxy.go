@@ -241,6 +241,142 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 	}
 }
 
+// speculativeUpstreamTLS holds the state of an upstream TLS dial that was
+// kicked off concurrently with the MITM client-facing handshake. A completed
+// dial (conn or err) is published on done; cancel aborts an in-flight dial
+// if the caller decides the speculative config is unusable and wants to
+// synchronously redial.
+//
+// The helper exists so the record-mode hot path can overlap the two
+// handshakes (each ~1 RTT) instead of running them serially. Against slow
+// remotes the saving is ~one full RTT of client-facing handshake time per
+// intercepted TLS connection.
+type speculativeUpstreamTLS struct {
+	done     chan speculativeUpstreamTLSResult
+	cancel   context.CancelFunc
+	settled  sync.Once // ensures exactly one of join()/abandon() consumes done
+	// protos is the NextProtos slice the speculative dial offered upstream.
+	// The caller compares it against the final (post-initialBuf) desired
+	// ALPN; on mismatch the caller abandons the speculative conn and
+	// synchronously redials. Keeping the slice here avoids re-deriving it.
+	protos []string
+}
+
+type speculativeUpstreamTLSResult struct {
+	conn *tls.Conn
+	err  error
+}
+
+// startSpeculativeUpstreamTLS kicks off a background tls.Dial against addr
+// using cfg. The returned *speculativeUpstreamTLS MUST either be joined via
+// join() or cancelled via abandon(); otherwise the dial goroutine and its
+// socket are leaked.
+//
+// parentCtx is typically the same ctx used by handleConnection so the dial
+// participates in shutdown. The helper derives its own cancellable ctx so
+// the caller can tear the dial down independently (e.g. on client-handshake
+// failure or an ALPN mismatch).
+func startSpeculativeUpstreamTLS(parentCtx context.Context, addr string, cfg *tls.Config) *speculativeUpstreamTLS {
+	dialCtx, cancel := context.WithCancel(parentCtx)
+	s := &speculativeUpstreamTLS{
+		done:   make(chan speculativeUpstreamTLSResult, 1),
+		cancel: cancel,
+		protos: append([]string(nil), cfg.NextProtos...),
+	}
+	go func() {
+		dialer := &tls.Dialer{Config: cfg}
+		c, err := dialer.DialContext(dialCtx, "tcp", addr)
+		var tlsConn *tls.Conn
+		if err == nil {
+			if tc, ok := c.(*tls.Conn); ok {
+				tlsConn = tc
+			} else {
+				// DialContext returns net.Conn; for tls.Dialer the
+				// concrete type is always *tls.Conn. Guard anyway
+				// in case future stdlib refactors wrap it.
+				_ = c.Close()
+				err = errors.New("tls.Dialer returned non-*tls.Conn")
+			}
+		}
+		s.done <- speculativeUpstreamTLSResult{conn: tlsConn, err: err}
+	}()
+	return s
+}
+
+// join waits for the speculative dial to finish and returns the result. The
+// caller owns the returned conn (or nothing on error) and is responsible
+// for closing it. join() must be called at most once and must not be
+// interleaved with abandon().
+func (s *speculativeUpstreamTLS) join(ctx context.Context) (*tls.Conn, error) {
+	var (
+		conn    *tls.Conn
+		joinErr error
+	)
+	s.settled.Do(func() {
+		select {
+		case r := <-s.done:
+			s.cancel() // free the derived ctx; no-op if dial already returned
+			conn, joinErr = r.conn, r.err
+		case <-ctx.Done():
+			// Parent ctx expired; make sure the dial goroutine unblocks.
+			s.cancel()
+			// Drain the pending result so the goroutine can exit cleanly.
+			r := <-s.done
+			if r.conn != nil {
+				_ = r.conn.Close()
+			}
+			joinErr = ctx.Err()
+		}
+	})
+	return conn, joinErr
+}
+
+// abandon cancels the in-flight dial and closes the resulting conn if the
+// dial had already succeeded. Safe to call multiple times. After abandon()
+// join() becomes a no-op.
+//
+// The drain happens on a detached goroutine so callers on the hot path
+// don't block waiting for an in-flight dial to observe the cancellation.
+// We cannot skip the drain entirely: if the dial completed successfully
+// just before cancel fired, the goroutine will publish a live *tls.Conn
+// to the buffered channel — without a reader that conn leaks.
+func (s *speculativeUpstreamTLS) abandon() {
+	s.cancel()
+	s.settled.Do(func() {
+		go func() {
+			r := <-s.done
+			if r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+	})
+}
+
+// nextProtosSubset reports whether every element of want is also present in
+// offered. It is used to decide whether a speculative dial's NextProtos set
+// is still satisfactory once initialBuf has been read and the real
+// per-connection ALPN preference is known. When the offered set is a
+// superset of want, the server's negotiated protocol — which was picked
+// from offered — is necessarily one the caller is also willing to accept.
+func nextProtosSubset(want, offered []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, w := range want {
+		found := false
+		for _, o := range offered {
+			if o == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
@@ -1152,9 +1288,71 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+
+	// Speculative upstream TLS dial — kicked off in parallel with the
+	// MITM client-facing handshake below so the two ~1 RTT handshakes
+	// overlap instead of running serially. This is a record-mode
+	// HTTP-only optimization; parser-driven paths (Postgres v2/v3,
+	// MySQL, gRPC) and the CONNECT-tunnel-piped path keep the original
+	// serial dial to preserve their exact TLS sequencing.
+	//
+	// The speculative dial uses a generic ALPN set [h2, http/1.1]; if
+	// the per-connection ALPN decision made after initialBuf is
+	// readable turns out to be incompatible (e.g. mTLS requires a
+	// client cert, or the caller ends up wanting http/1.1-only while
+	// the server picked h2), the join site abandons the speculative
+	// conn and redials synchronously.
+	var speculativeDial *speculativeUpstreamTLS
+	var speculativeDialAddr string
+	if isTLS && rule.Mode != models.MODE_TEST &&
+		!(connectResult != nil && dstConn != nil) &&
+		!(agent.InterceptPostgresSSLRequest && destInfo.Port == 5432) &&
+		outgoingOpts.TLSPrivateKey == "" {
+		if sniVal, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
+			if sni, ok := sniVal.(string); ok && sni != "" {
+				addr := net.JoinHostPort(sni, fmt.Sprint(destInfo.Port))
+				// InsecureSkipVerify mirrors the synchronous dial
+				// below and the current MITM model (keploy is a
+				// man-in-the-middle by design; upstream cert chain
+				// verification would require shipping a CA bundle).
+				specCfg := &tls.Config{
+					InsecureSkipVerify: true, // nolint:gosec
+					ServerName:         sni,
+					NextProtos:         []string{"h2", "http/1.1"},
+				}
+				speculativeDial = startSpeculativeUpstreamTLS(ctx, addr, specCfg)
+				speculativeDialAddr = addr
+				p.logger.Debug("started speculative upstream TLS dial",
+					zap.String("addr", addr),
+					zap.String("sni", sni),
+					zap.Strings("offeredALPN", specCfg.NextProtos))
+				// Belt-and-braces cleanup: covers every early
+				// return path between here and the join/abandon
+				// sites below (clientID/destID lookup, initialBuf
+				// read, partial-header read, HTTP/2 HEADERS
+				// read, mTLS client cert apply). The captured
+				// pointer is a local scoped above; nilling it at
+				// the explicit join/abandon sites makes this a
+				// no-op when control flows normally.
+				defer func() {
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+					}
+				}()
+			}
+		}
+	}
+
 	if isTLS {
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
+			// Client-facing MITM handshake failed; abandon the
+			// speculative upstream dial so its goroutine and socket
+			// are not leaked.
+			if speculativeDial != nil {
+				speculativeDial.abandon()
+				speculativeDial = nil
+			}
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
@@ -1166,7 +1364,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					clientPeerCert = state.PeerCertificates[0]
 				}
 			}
+			// mTLS requires applying the client cert to the upstream
+			// TLS config before the handshake — our speculative dial
+			// did not do that, so discard it.
+			if speculativeDial != nil {
+				speculativeDial.abandon()
+				speculativeDial = nil
+			}
 		}
+	} else if speculativeDial != nil {
+		// isTLS flipped to false somewhere between the check above and
+		// this branch — defensive; abandon.
+		speculativeDial.abandon()
+		speculativeDial = nil
 	}
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
@@ -1350,8 +1560,50 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// while the upstream connection fails, leaving the
 				// replayed client staring at a broken stream.
 				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
+					// Postgres SSL preamble — never use the
+					// speculative conn (different wire sequence).
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+						speculativeDial = nil
+					}
 					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+				} else if speculativeDial != nil && addr == speculativeDialAddr &&
+					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
+					// Fast path: the speculative dial targeted the
+					// same addr and offered a superset of the ALPN
+					// the caller now wants. Join it.
+					var specConn *tls.Conn
+					specConn, err = speculativeDial.join(ctx)
+					speculativeDial = nil
+					if err == nil {
+						negotiated := specConn.ConnectionState().NegotiatedProtocol
+						// Guard against the server negotiating a
+						// protocol that is NOT in the caller's
+						// desired set. Offered was a superset, so
+						// this is only possible when the server
+						// negotiated h2 while cfg wanted http/1.1
+						// exclusively. Redial synchronously with
+						// the caller's exact cfg to preserve
+						// record-mode semantics.
+						if negotiated != "" && !nextProtosSubset([]string{negotiated}, cfg.NextProtos) {
+							p.logger.Debug("speculative upstream TLS protocol mismatch, redialing",
+								zap.String("negotiated", negotiated),
+								zap.Strings("wanted", cfg.NextProtos))
+							_ = specConn.Close()
+							dstConn, err = tls.Dial("tcp", addr, cfg)
+						} else {
+							dstConn = specConn
+						}
+					}
 				} else {
+					// Conditions for speculation did not hold (different
+					// addr, narrower ALPN than offered, or no speculation
+					// was started). Abandon any in-flight speculative
+					// dial and do a fresh synchronous dial with cfg.
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+						speculativeDial = nil
+					}
 					dstConn, err = tls.Dial("tcp", addr, cfg)
 				}
 				if err != nil {
