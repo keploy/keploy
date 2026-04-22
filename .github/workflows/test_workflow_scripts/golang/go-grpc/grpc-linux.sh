@@ -134,8 +134,7 @@ wait_for_port() {
     local port=$1
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
-        # Use lsof to check if ANY process is listening on the port
-        if sudo lsof -i :$port -sTCP:LISTEN >/dev/null 2>&1; then
+        if (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -143,8 +142,7 @@ wait_for_port() {
         sleep 2
     done
     echo "Timed out waiting for port $port."
-    # List open ports for debugging before failing
-    sudo lsof -i -P -n | grep LISTEN
+    ss -ltnp || true
     exit 1
 }
 
