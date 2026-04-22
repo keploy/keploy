@@ -59,7 +59,7 @@ const gobMockMagic = "keploy-gob-v1\n"
 // semantics is out of scope for this PR.
 func isUnfilteredMockKind(kind models.Kind) bool {
 	switch kind {
-	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "MySQL", "DNS":
+	case models.GENERIC, models.Postgres, models.PostgresV2, models.HTTP, models.HTTP2, models.MySQL, models.DNS:
 		return true
 	}
 	return models.IsImplicitSessionKind(kind)
