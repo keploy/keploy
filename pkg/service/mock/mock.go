@@ -150,7 +150,10 @@ func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, test
 
 	testMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		r.logger.Warn("MockLoader: failed to get mappings, falling back to timestamp-based filtering",
+		// Downgraded from Warn to Info per repo logging guideline — this
+		// path is a recoverable fallback (timestamp-based filtering is the
+		// documented next step), not an operator-actionable warning.
+		r.logger.Info("MockLoader: failed to get mappings, falling back to timestamp-based filtering",
 			zap.String("testSetID", testSetID), zap.Error(err))
 		return
 	}
