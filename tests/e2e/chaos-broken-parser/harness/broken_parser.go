@@ -17,46 +17,39 @@
 // -----------------------------------------------------------------
 // STATUS ON THIS BRANCH (feat/proxy-v2-foundation):
 //
-// The supervisor + relay + fakeconn packages, and the
-// IntegrationsV2 interface with IsV2() bool — all named in the task
-// spec — do not exist on feat/proxy-v2-foundation yet. This file is
-// a compile-clean stub that documents the registration pattern the
-// follow-up lands. The harness still brings up the compose stack,
-// drives queries, and evaluates the pass/fail predicate; it will
-// fail the "supervisor-fallback log observed" invariant until the
-// real registration below is enabled.
+// The V2 packages (pkg/agent/proxy/fakeconn, directive, supervisor,
+// relay, proxy_v2.go, integrations.IntegrationsV2) ARE landed on
+// this branch — the chaos stub was written in an isolated worktree
+// based on an older snapshot and missed them. What remains for a
+// focused follow-up is the in-process proxy instantiation and the
+// broken parser type definition. Concretely:
 //
-// To land the real parser, replace the body of
-// startBrokenParserProxyIfEnabled with code that:
+//  1. Define a local parser type that implements
+//     integrations.IntegrationsV2 with:
+//     - MatchType sniffing the Postgres startup packet (length-
+//     prefix + protocol version 0x00 0x03 0x00 0x00 at bytes 4..8).
+//     - IsV2() returning true so the dispatcher runs it under the
+//     supervisor.
+//     - RecordOutgoing that does `_, _ = sess.V2.ClientStream.ReadChunk()`
+//     then panics.
 //
-//  1. Constructs an IntegrationsV2-compatible parser whose:
-//     - MatchType sniffs the Postgres startup packet (len-prefix +
-//     protocol version 0x00 0x03 0x00 0x00 at bytes 4..8).
-//     - IsV2() returns true so the dispatcher routes it through
-//     the supervisor.
-//     - The V2 chunk-reader implementation panics on the first
-//     call (this is the "broken parser").
+//  2. integrations.Register it under a synthetic IntegrationType
+//     (e.g. "chaos_pg") with a priority strictly greater than
+//     integrations.POSTGRES_V2 so p.integrationsPriority lists it
+//     first, overriding the real Postgres parser for the test.
 //
-//  2. Registers it under a synthetic IntegrationType (e.g.
-//     "chaos_pg") via integrations.Register with a priority strictly
-//     greater than integrations.POSTGRES_V2 so
-//     p.integrationsPriority lists it first.
+//  3. Instantiate a proxy on an ephemeral port using proxy.New(...)
+//     plus a stub MockManager. Retarget the compose-driven queries
+//     at that port instead of the postgres service directly, and
+//     watch the harness' logSink for:
 //
-//  3. Starts a proxy with proxy.New(...) on an ephemeral port,
-//     points the compose-driven queries at that port instead of the
-//     postgres service directly, and waits for the supervisor to
-//     emit the canonical fallback log:
+//         "parser supervisor triggered passthrough fallback"
 //
-//     "parser supervisor triggered passthrough fallback"
+//     which recordViaSupervisor emits on FallthroughToPassthrough.
 //
-//     which the harness' logSink scans for.
-//
-// Once those packages ship, the STATUS block can be removed and the
-// body replaced with the real in-process proxy wiring. The
-// invariants under test (I1: supervisor is a panic firewall; I2:
-// dispatcher falls through to globalPassThrough; I3: app's queries
-// keep succeeding) are then all verifiable end-to-end by a single
-// `go test -tags chaos_broken_parser` run.
+// The compose stack, query driver, logSink, and pass/fail evaluator
+// are already live and pass when run in-process. Wiring this stub
+// closes the loop end-to-end for invariants I1/I2/I3.
 // -----------------------------------------------------------------
 package main
 
