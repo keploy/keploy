@@ -24,10 +24,16 @@ const UpstreamErrorMarker = "Keploy-Recorded-Upstream-Error"
 // SAP-demo diagnostic so operators can eyeball captured timeouts at a glance.
 const UpstreamTimeoutMarker = "keploy-recorded-upstream-timeout: true"
 
+// UpstreamGenericMarker is the catch-all marker used when the recorder has to
+// synthesize a mock but the error class is unknown (or err == nil). Keeping
+// nil out of the timeout bucket avoids skewing downstream timeout analysis.
+const UpstreamGenericMarker = "keploy-recorded-upstream-error: true"
+
 // classifyUpstreamError maps a raw network error into the
 // (statusCode, reasonPhrase, marker-line) tuple used by
 // synthesizeUpstreamErrorResponse.
 //
+//   - err == nil (unexpected, but handled)          -> 502 Bad Gateway (generic marker)
 //   - context.DeadlineExceeded / net.Error.Timeout() -> 504 Gateway Timeout
 //   - io.EOF / io.ErrUnexpectedEOF                   -> 502 Bad Gateway
 //   - "connection refused" / reset / unreachable     -> 502 Bad Gateway
@@ -38,7 +44,11 @@ const UpstreamTimeoutMarker = "keploy-recorded-upstream-timeout: true"
 // downstream diff tooling (and humans) can grep for it in recorded YAML.
 func classifyUpstreamError(err error) (status int, reason, marker string) {
 	if err == nil {
-		return 502, "Bad Gateway", UpstreamTimeoutMarker
+		// Don't classify nil as a timeout — that would mislabel any
+		// synthesized response whose caller forgot to pass the underlying
+		// error, and poison downstream timeout analysis. Use the generic
+		// 502 marker instead.
+		return 502, "Bad Gateway", UpstreamGenericMarker
 	}
 
 	// Timeouts: DeadlineExceeded or any net.Error whose Timeout() flag is set.
