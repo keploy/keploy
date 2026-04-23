@@ -1,11 +1,14 @@
 package http
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	nhttp "net/http"
 	"strings"
 )
 
@@ -69,6 +72,60 @@ func classifyUpstreamError(err error) (status int, reason, marker string) {
 	// Everything else still gets persisted — default to 502 so replay sees a
 	// deterministic error instead of silently dropping.
 	return 502, "Bad Gateway", "keploy-recorded-upstream-error: true"
+}
+
+// upstreamErrorClass returns a short human label for an upstream error —
+// "timeout", "eof", "unreachable", or "other" — suitable for structured
+// logging. It shares the same classification logic as classifyUpstreamError
+// but exposes only the error-class dimension (not HTTP status / reason).
+func upstreamErrorClass(err error) string {
+	if err == nil {
+		return "other"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof"
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "broken pipe") {
+		return "unreachable"
+	}
+	return "other"
+}
+
+// upstreamRequestURL extracts a best-effort URL string from a raw HTTP
+// request buffer. Falls back to the dest-socket address if the request
+// cannot be parsed (e.g. truncated / non-HTTP bytes). The returned string
+// is log-only; callers must not depend on its format.
+func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
+	if len(rawReq) > 0 {
+		req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+		if err == nil && req != nil {
+			host := req.Host
+			if host == "" && destAddr != nil {
+				host = destAddr.String()
+			}
+			path := "/"
+			if req.URL != nil && req.URL.RequestURI() != "" {
+				path = req.URL.RequestURI()
+			}
+			scheme := "http"
+			return fmt.Sprintf("%s://%s%s", scheme, host, path)
+		}
+	}
+	if destAddr != nil {
+		return destAddr.String()
+	}
+	return "unknown"
 }
 
 // synthesizeUpstreamErrorResponse builds a well-formed HTTP/1.1 response that

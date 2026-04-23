@@ -208,7 +208,9 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				// from legitimate upstream replies. See upstream_error.go.
 				resTimestampMock := time.Now()
 				synthResp := synthesizeUpstreamErrorResponse("", "", err)
-				h.Logger.Warn("upstream returned error before any response bytes; persisting synthesized mock",
+				h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
+					zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+					zap.String("error_class", upstreamErrorClass(err)),
 					zap.Error(err))
 				enqueueMock(finalReq, synthResp, reqTimestampMock, resTimestampMock)
 				errCh <- nil

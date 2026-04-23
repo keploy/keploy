@@ -87,7 +87,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
 	}
 
-	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -236,7 +236,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	if a.proxyStarted {
-		a.logger.Info("Proxy already started")
+		a.logger.Debug("Proxy already started")
 		return nil
 	}
 
