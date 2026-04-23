@@ -37,7 +37,7 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 	cmd := exec.Command("coverage")
 	err := cmd.Run()
 	if err != nil {
-		p.logger.Info("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
+		p.logger.Info("coverage tool not found, skipping coverage calculation. Please install coverage tool using 'pip install coverage'")
 		return p.cmd, err
 	}
 	createPyCoverageConfig(p.logger)

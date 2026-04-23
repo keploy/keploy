@@ -35,7 +35,7 @@ func (j *Javascript) PreProcess(disableLineCoverage bool) (string, error) {
 	cmd := exec.Command("nyc", "--version")
 	err := cmd.Run()
 	if err != nil {
-		j.logger.Info("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
+		j.logger.Info("coverage tool not found, skipping coverage calculation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err
 	}
 	nycCmd := "nyc --clean=$CLEAN "

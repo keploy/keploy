@@ -323,7 +323,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
 			if language == models.Unknown {
-				r.logger.Debug("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.logger.Debug("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
 				r.config.Test.SkipCoverage = true
 			} else {
 				r.logger.Debug(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
@@ -366,7 +366,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Debug("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+			r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation", zap.Error(err))
 		}
 	}
 
@@ -425,7 +425,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+				r.logger.Debug("failed to set TESTSETID env variable, skipping coverage calculation", zap.Error(err))
 			}
 		}
 
@@ -593,12 +593,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set APPEND env variable, skipping coverage calculation.", zap.Error(err))
 			}
 		}
 	}
