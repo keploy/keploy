@@ -1333,8 +1333,16 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	match := true
 	_, isHeaderNoisy := noise["header"]
+	// Pre-normalize noise-map keys to lowercase once per CompareHeaders call.
+	// SubstringKeyMatch's contract requires lowercased keys (see its docstring);
+	// hoisting the ToLower out of the per-header loop avoids O(N·M) redundant
+	// lowercasings where N = headers and M = noise keys.
+	loweredNoise := make(map[string][]string, len(noise))
+	for k, v := range noise {
+		loweredNoise[strings.ToLower(k)] = v
+	}
 	for k, v := range h1 {
-		regexArr, isNoisy := SubstringKeyMatch(k, noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1411,7 +1419,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := SubstringKeyMatch(k, noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1461,15 +1469,16 @@ func MapToArray(mp map[string][]string) []string {
 }
 
 // SubstringKeyMatch returns the regex list associated with a matching noise
-// key that occurs as a substring of s. The comparison is case-insensitive on
-// BOTH sides: s and every key in mp are folded to lower case before
-// comparison. This ensures HTTP header keys (canonically CamelCase, e.g.
-// "X-Correlation-Id") match noise patterns regardless of how the user cased
-// them in keploy.yml (e.g. "x-correlation-id" or "X-Correlation-Id").
+// key that occurs as a substring of s. The comparison is case-insensitive:
+// s is folded to lower case internally, and the keys in mp MUST be
+// pre-lowercased by the caller. This keeps HTTP header key matching
+// case-insensitive regardless of how the user cased the noise pattern in
+// keploy.yml (e.g. "x-correlation-id" vs "X-Correlation-Id").
 //
-// Callers should pass the raw header key; this function is the single
-// normalization point and will lower-case s internally (so callers MUST NOT
-// pre-lowercase to avoid redundant work).
+// Precondition: keys in mp MUST already be lowercase. See CompareHeaders for
+// the expected caller pattern — it builds a lowered companion map once per
+// invocation rather than lowercasing every key on every SubstringKeyMatch
+// call. Passing a map with non-lowercase keys will cause silent misses.
 //
 // Go map iteration order is unspecified, so when multiple keys in mp could
 // match s, any one of them may be returned — callers MUST NOT rely on a
@@ -1481,7 +1490,7 @@ func MapToArray(mp map[string][]string) []string {
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	sLower := strings.ToLower(s)
 	for key, val := range mp {
-		if strings.Contains(sLower, strings.ToLower(key)) {
+		if strings.Contains(sLower, key) {
 			return val, true
 		}
 	}

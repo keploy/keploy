@@ -1,6 +1,24 @@
 package matcher
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// subsKeyMatchWithOriginal is a test helper that preserves the old
+// "caller passes raw keys" ergonomics: it pre-lowercases the noise map
+// exactly once (mirroring the contract documented on SubstringKeyMatch and
+// implemented in CompareHeaders) and then delegates. Keeping the helper in
+// tests lets the table-driven cases below keep expressive CamelCase /
+// MIXED-CASE noise keys — which document the case-insensitivity guarantee —
+// without burdening production callers with per-call normalization.
+func subsKeyMatchWithOriginal(s string, mp map[string][]string) ([]string, bool) {
+	lowered := make(map[string][]string, len(mp))
+	for k, v := range mp {
+		lowered[strings.ToLower(k)] = v
+	}
+	return SubstringKeyMatch(s, lowered)
+}
 
 // TestSubstringKeyMatch_CaseInsensitive verifies that SubstringKeyMatch treats
 // both the header key and the noise-pattern key as case-insensitive. This
@@ -69,7 +87,7 @@ func TestSubstringKeyMatch_CaseInsensitive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := SubstringKeyMatch(tt.s, tt.noise)
+			got, ok := subsKeyMatchWithOriginal(tt.s, tt.noise)
 			if ok != tt.wantMatch {
 				t.Fatalf("SubstringKeyMatch(%q, %v) matched=%v, want %v",
 					tt.s, tt.noise, ok, tt.wantMatch)
@@ -99,12 +117,12 @@ func TestSubstringKeyMatch_GlobSuffixLiteral(t *testing.T) {
 
 	// An arbitrary "x-..." header must NOT match the glob pattern — the "*" is
 	// treated as a literal character, not a wildcard.
-	if _, ok := SubstringKeyMatch("X-Correlation-Id", noise); ok {
+	if _, ok := subsKeyMatchWithOriginal("X-Correlation-Id", noise); ok {
 		t.Fatalf("SubstringKeyMatch should not treat '*' as a glob; got match for X-Correlation-Id vs x-*")
 	}
 
 	// But when the header genuinely contains "x-*" (literal), it does match.
-	if _, ok := SubstringKeyMatch("some-X-*-thing", noise); !ok {
+	if _, ok := subsKeyMatchWithOriginal("some-X-*-thing", noise); !ok {
 		t.Fatalf("SubstringKeyMatch should match literal '*' substring; missed some-X-*-thing vs x-*")
 	}
 }
