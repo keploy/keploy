@@ -4,6 +4,7 @@ package log
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"sync/atomic"
 	"time"
@@ -126,18 +127,27 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 	if r == nil {
 		return w.inner.Write(p)
 	}
-	redacted := r.RedactEncoded(string(p))
-	// Report bytes-written against the original length so zap's accounting
-	// (and anything downstream that compares against len(p)) stays consistent
-	// even when redaction changes the encoded length. Redact() itself is
-	// length-preserving per character, but when a value gets replaced with
-	// an obfuscated substitute of the same byte length, the overall line
-	// length doesn't change; still, guard against any future scanner that
-	// might add or drop bytes.
-	if _, err := w.inner.Write([]byte(redacted)); err != nil {
-		return 0, err
+	redacted := []byte(r.RedactEncoded(string(p)))
+	// RedactEncoded is designed to be byte-length-preserving — Redact
+	// itself substitutes characters within their class without adding
+	// or dropping bytes. In the ordinary case len(redacted) == len(p)
+	// and the io.Writer contract resolves cleanly: return whatever the
+	// inner writer reported. If a future scanner changes that, surface
+	// the mismatch as io.ErrShortWrite rather than silently lying about
+	// bytes-written — zap's accounting downstream compares n against
+	// len(p), and masking a short write there would be worse than a
+	// visible error.
+	n, err := w.inner.Write(redacted)
+	if err != nil {
+		return n, err
 	}
-	return len(p), nil
+	if len(redacted) != len(p) {
+		if n >= len(p) {
+			n = len(p)
+		}
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 func (w *redactingWriter) Sync() error {
@@ -282,13 +292,21 @@ func AddMode(mode string) (*zap.Logger, error) {
 }
 
 func ChangeColorEncoding() (*zap.Logger, error) {
-	// For non-color mode, use the standard console encoder
+	// For non-color mode, use the standard console encoder.
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
-	logger, err := LogCfg.Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
-	}
-	return logger.WithOptions(zap.WrapCore(newRedactingCore)), nil
+	// Build the core ourselves rather than using LogCfg.Build so the
+	// underlying WriteSyncer passes through wrapWriter. zap.Config.Build
+	// creates a stock ioCore whose sink we can't reach afterwards, which
+	// would mean the post-encode RedactEncoded pass never runs in
+	// --disable-ansi mode and non-string zap fields (Any/Binary/Reflect)
+	// would leak from that path.
+	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
+	core := zapcore.NewCore(
+		encoder,
+		wrapWriter(zapcore.AddSync(os.Stdout)),
+		LogCfg.Level,
+	)
+	return zap.New(newRedactingCore(core)), nil
 }
