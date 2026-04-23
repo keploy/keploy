@@ -1332,16 +1332,15 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		return false
 	}
 	match := true
-	// Build `loweredNoise` once so the header-side ToLower is done 2N times
-	// (N headers × 2 lookups) instead of 2N×M (× M noise keys). SubstringKeyMatch
-	// remains idempotent to input casing for safety — the inner ToLower(key) is
-	// a no-op on already-lowercase strings but preserved to avoid a silent-
-	// failure precondition on the exported API.
-	//
-	// On case-only collisions (e.g. both "X-Request-Id" and "x-request-id" in
-	// user config) the regex slices are merged so neither user-authored entry
-	// is silently dropped, and the result is independent of Go's unspecified
-	// map iteration order.
+	// loweredNoise is built once per CompareHeaders call. Its primary benefit is
+	// CORRECTNESS, not perf: it (1) merges regex slices on case-only noise-key
+	// collisions deterministically (e.g. X-Correlation-Id + x-correlation-id),
+	// and (2) lets isHeaderNoisy look up the sentinel "header" key regardless
+	// of the user's casing. Perf-wise it pays one map build + defensive slice
+	// copies per call; in exchange SubstringKeyMatch's inner ToLower is a
+	// no-op on already-lowercase keys. A true O(N+M) fast path would require
+	// a skip-ToLower-if-pre-normalized invariant on the exported helper — we
+	// kept the helper idempotent instead to avoid a silent-failure API.
 	loweredNoise := make(map[string][]string, len(noise))
 	for k, v := range noise {
 		lk := strings.ToLower(k)
