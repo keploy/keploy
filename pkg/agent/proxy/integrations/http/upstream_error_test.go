@@ -217,7 +217,7 @@ func TestParseFinalHTTPAcceptsSynthesizedTimeoutResponse(t *testing.T) {
 	mocks := make(chan *models.Mock, 2)
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "test-conn")
 
-	err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{})
+	err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{}, nil)
 	if err != nil {
 		t.Fatalf("parseFinalHTTP returned error on synthesized timeout response: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestParseFinalHTTPAcceptsSynthesizedConnResetResponse(t *testing.T) {
 	mocks := make(chan *models.Mock, 2)
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "test-conn")
 
-	if err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{}); err != nil {
+	if err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{}, nil); err != nil {
 		t.Fatalf("parseFinalHTTP returned error on synthesized conn-reset response: %v", err)
 	}
 }
@@ -292,7 +292,7 @@ func TestParseFinalHTTPAcceptsSynthesizedEOFResponse(t *testing.T) {
 	mocks := make(chan *models.Mock, 2)
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "test-conn")
 
-	if err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{}); err != nil {
+	if err := h.parseFinalHTTP(ctx, mock, 443, mocks, models.OutgoingOptions{}, nil); err != nil {
 		t.Fatalf("parseFinalHTTP returned error on synthesized eof response: %v", err)
 	}
 }
