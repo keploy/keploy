@@ -1473,8 +1473,11 @@ func MapToArray(mp map[string][]string) []string {
 //
 // Go map iteration order is unspecified, so when multiple keys in mp could
 // match s, any one of them may be returned — callers MUST NOT rely on a
-// specific match precedence. If deterministic precedence is required, the
-// caller must sort the keys before invoking this function.
+// specific match precedence. Callers cannot impose precedence on this
+// function: it iterates mp internally, so sorting keys before the call has
+// no effect. For call sites that need deterministic match precedence, pass
+// the keys as an ordered slice via a different helper — SubstringKeyMatch
+// does not accept one today.
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	sLower := strings.ToLower(s)
 	for key, val := range mp {
