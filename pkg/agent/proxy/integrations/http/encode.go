@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -23,7 +24,7 @@ import (
 // difference is that parseFinalHTTP (HTTP parsing, body decompression, mock
 // creation) is offloaded to a background goroutine so it never blocks the
 // forwarding path.
-func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
@@ -59,7 +60,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(recorderDone)
 		for m := range mockDataCh {
-			err := h.parseFinalHTTP(recordCtx, m, destPort, mocks, opts)
+			err := h.parseFinalHTTP(recordCtx, m, destPort, mocks, opts, onMockRecorded)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to parse the final http request and response")
 			}

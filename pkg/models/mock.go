@@ -24,8 +24,6 @@ const (
 	HTTP        Kind = "Http"
 	HTTP2       Kind = "Http2"
 	GENERIC     Kind = "Generic"
-	REDIS       Kind = "Redis"
-	KAFKA       Kind = "Kafka"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
 	PostgresV2  Kind = "PostgresV2"
@@ -101,10 +99,6 @@ type MockSpec struct {
 	Metadata            map[string]string   `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	GenericRequests     []Payload           `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
 	GenericResponses    []Payload           `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
-	RedisRequests       []Payload           `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
-	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
-	KafkaRequests       []Payload           `json:"kafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
-	KafkaResponses      []Payload           `json:"kafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
 	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
@@ -221,12 +215,6 @@ func (m *Mock) DeepCopy() *Mock {
 	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
 	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
 
-	c.Spec.RedisRequests = make([]Payload, len(m.Spec.RedisRequests))
-	copy(c.Spec.RedisRequests, m.Spec.RedisRequests)
-
-	c.Spec.RedisResponses = make([]Payload, len(m.Spec.RedisResponses))
-	copy(c.Spec.RedisResponses, m.Spec.RedisResponses)
-
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
 
@@ -238,6 +226,12 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
 	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)
+
+	c.Spec.PostgresRequestsV2 = make([]postgres.Request, len(m.Spec.PostgresRequestsV2))
+	copy(c.Spec.PostgresRequestsV2, m.Spec.PostgresRequestsV2)
+
+	c.Spec.PostgresResponsesV2 = make([]postgres.Response, len(m.Spec.PostgresResponsesV2))
+	copy(c.Spec.PostgresResponsesV2, m.Spec.PostgresResponsesV2)
 
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {

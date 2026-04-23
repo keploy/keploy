@@ -68,17 +68,6 @@ func TestRoundTrip_HTTP(t *testing.T) {
 	})
 }
 
-func TestRoundTrip_Redis(t *testing.T) {
-	roundTrip(t, "Redis", &models.Mock{
-		Version: "api.keploy.io/v1beta1",
-		Kind:    models.REDIS,
-		Spec: models.MockSpec{
-			RedisRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "bin", Data: "cGluZwo="}}}},
-			RedisResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "bin", Data: "UE9OR1xy"}}}},
-		},
-	})
-}
-
 func TestRoundTrip_Generic(t *testing.T) {
 	roundTrip(t, "Generic", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
@@ -86,17 +75,6 @@ func TestRoundTrip_Generic(t *testing.T) {
 		Spec: models.MockSpec{
 			GenericRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8", Data: "hello"}}}},
 			GenericResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "utf-8", Data: "world"}}}},
-		},
-	})
-}
-
-func TestRoundTrip_Kafka(t *testing.T) {
-	roundTrip(t, "Kafka", &models.Mock{
-		Version: "api.keploy.io/v1beta1",
-		Kind:    models.KAFKA,
-		Spec: models.MockSpec{
-			KafkaRequests:  []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "bin", Data: "AAA="}}}},
-			KafkaResponses: []models.Payload{{Origin: models.FromServer, Message: []models.OutputBinary{{Type: "bin", Data: "AAE="}}}},
 		},
 	})
 }
