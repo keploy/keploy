@@ -252,7 +252,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 
 	err = h.mock.upload(ctx, testSetID)
 	if err != nil {
-		h.logger.Error("Failed to upload mock, hence skipping", zap.String("testSetID", testSetID), zap.Error(err))
+		h.logger.Error("Failed to upload mock, hence skipping", zap.String("testSetID", testSetID), zap.Error(err), zap.String("next_step", "check auth/login state, network connectivity, or set disableMockUpload=true to suppress uploads"))
 	}
 
 	return nil

@@ -127,7 +127,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
-					o.logger.Error("Failed to re-record some testcases", zap.String("testset", testSet))
+					o.logger.Error("Failed to re-record some testcases", zap.String("testset", testSet), zap.String("next_step", "re-run with reduced concurrency, re-record specific failing testcases, or inspect the failing testcase names in logs"))
 					stopReason = "failed to re-record some testcases"
 				}
 
@@ -208,7 +208,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			for _, testSet := range SelectedTests {
 				err := o.replay.DeleteTestSet(ctx, testSet)
 				if err != nil {
-					o.logger.Error("Failed to delete the testset", zap.String("testset", testSet))
+					o.logger.Error("Failed to delete the testset", zap.String("testset", testSet), zap.Error(err), zap.String("next_step", "retry deletion, check filesystem permissions, or manually delete the testset directory at <path>"))
 				}
 			}
 			o.logger.Info("Deleted the older testsets successfully")
@@ -545,7 +545,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 			// Persist any template changes (best-effort) after propagation
 			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
-				o.logger.Error("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+				o.logger.Error("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err), zap.String("next_step", "verify keploy folder is writable, check configdb path, or re-run rerecord with --debug to capture the underlying storage error"))
 			} else {
 				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 			}

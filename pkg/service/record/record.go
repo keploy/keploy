@@ -485,7 +485,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				} else {
 					r.logger.Error("Failed to correlate mock mapping",
 						zap.String("test", mapping.TestName),
-						zap.String("tempMockID", tempID))
+						zap.String("tempMockID", tempID),
+						zap.String("next_step", "ensure mapping store is enabled, avoid high parallelism, or re-record if mappings are inconsistent"))
 				}
 			}
 
