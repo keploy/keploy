@@ -80,14 +80,23 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // MarshalYAML serializes an HTTPResp to YAML.
 // If the response has streaming chunks (StreamBody), the body field is written
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
+//
+// If the body contains non-UTF-8 bytes (e.g. application/zip, image/*,
+// application/octet-stream payloads) yaml.v3 refuses to emit it as a !!str
+// scalar. The raw bytes are moved into a sibling body_base64 field instead —
+// see splitBodyForYAML.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
+	var bodyB64 string
 	if chunks, ok := streamChunksForYAML(h); ok {
-		// Streaming response — encode as a YAML sequence of chunks
+		// Streaming response — encode as a YAML sequence of chunks.
+		// Streaming formats (SSE / NDJSON / text) are always UTF-8 by
+		// construction, so no base64 fallback is needed here.
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
-		// Non-streaming response — encode body as a plain string scalar
-		if err := bodyNode.Encode(h.Body); err != nil {
+		plain, b64 := splitBodyForYAML(h.Body)
+		bodyB64 = b64
+		if err := bodyNode.Encode(plain); err != nil {
 			return nil, err
 		}
 	}
@@ -96,6 +105,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		StatusCode    int               `yaml:"status_code"`
 		Header        map[string]string `yaml:"header"`
 		Body          *yamlLib.Node     `yaml:"body"`
+		BodyBase64    string            `yaml:"body_base64,omitempty"`
 		BodySkipped   bool              `yaml:"body_skipped,omitempty"`
 		BodySize      int64             `yaml:"body_size,omitempty"`
 		StatusMessage string            `yaml:"status_message"`
@@ -109,6 +119,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		StatusCode:    h.StatusCode,
 		Header:        h.Header,
 		Body:          bodyNode,
+		BodyBase64:    bodyB64,
 		BodySkipped:   h.BodySkipped,
 		BodySize:      h.BodySize,
 		StatusMessage: h.StatusMessage,
@@ -122,11 +133,15 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 // UnmarshalYAML deserializes an HTTPResp from YAML.
 // The body field can be either a plain string (non-streaming)
 // or a YAML sequence of chunks (streaming). Both formats are handled.
+//
+// If body_base64 is present on the document, it takes precedence over body
+// and is decoded into the raw byte-for-byte Body — see joinBodyFromYAML.
 func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	type httpRespYAML struct {
 		StatusCode    int               `yaml:"status_code"`
 		Header        map[string]string `yaml:"header"`
 		Body          yamlLib.Node      `yaml:"body"`
+		BodyBase64    string            `yaml:"body_base64,omitempty"`
 		BodySkipped   bool              `yaml:"body_skipped,omitempty"`
 		BodySize      int64             `yaml:"body_size,omitempty"`
 		StatusMessage string            `yaml:"status_message"`
@@ -156,6 +171,15 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	body, streamChunks, err := decodeStreamBody(raw.Body, raw.Header, raw.Timestamp)
 	if err != nil {
 		return err
+	}
+	// body_base64 is only used for non-streaming binary bodies and wins
+	// over an (expected to be empty) plain body.
+	if streamChunks == nil {
+		joined, err := joinBodyFromYAML(body, raw.BodyBase64)
+		if err != nil {
+			return err
+		}
+		body = joined
 	}
 	h.Body = body
 	h.StreamBody = streamChunks
