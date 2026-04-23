@@ -4,9 +4,10 @@ import "testing"
 
 // TestSubstringKeyMatch_CaseInsensitive verifies that SubstringKeyMatch treats
 // both the header key and the noise-pattern key as case-insensitive. This
-// guards against a historical regression where the incoming key was lower-
-// cased by callers but the map key was compared verbatim, so CamelCase HTTP
-// headers silently failed to match lowercase noise entries (and vice-versa).
+// guards against a historical regression where callers already lower-cased
+// the incoming header key, but the noise-map key (as authored in keploy.yml)
+// was compared verbatim, so a CamelCase noise pattern like "X-Correlation-Id"
+// silently failed to match the already-lowercased header "x-correlation-id".
 func TestSubstringKeyMatch_CaseInsensitive(t *testing.T) {
 	tests := []struct {
 		name      string

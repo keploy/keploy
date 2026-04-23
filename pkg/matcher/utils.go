@@ -1334,7 +1334,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1411,7 +1411,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1460,12 +1460,21 @@ func MapToArray(mp map[string][]string) []string {
 	return result
 }
 
-// SubstringKeyMatch returns the regex list associated with the first noise key
-// that occurs as a substring of s. The comparison is case-insensitive on BOTH
-// sides: s and every key in mp are folded to lower case before comparison.
-// This ensures HTTP header keys (canonically CamelCase, e.g. "X-Correlation-Id")
-// match noise patterns regardless of how the user cased them in keploy.yml
-// (e.g. "x-correlation-id" or "X-Correlation-Id").
+// SubstringKeyMatch returns the regex list associated with a matching noise
+// key that occurs as a substring of s. The comparison is case-insensitive on
+// BOTH sides: s and every key in mp are folded to lower case before
+// comparison. This ensures HTTP header keys (canonically CamelCase, e.g.
+// "X-Correlation-Id") match noise patterns regardless of how the user cased
+// them in keploy.yml (e.g. "x-correlation-id" or "X-Correlation-Id").
+//
+// Callers should pass the raw header key; this function is the single
+// normalization point and will lower-case s internally (so callers MUST NOT
+// pre-lowercase to avoid redundant work).
+//
+// Go map iteration order is unspecified, so when multiple keys in mp could
+// match s, any one of them may be returned — callers MUST NOT rely on a
+// specific match precedence. If deterministic precedence is required, the
+// caller must sort the keys before invoking this function.
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	sLower := strings.ToLower(s)
 	for key, val := range mp {
