@@ -24,6 +24,12 @@ type Service interface {
 	Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error
 	SetGlobalMockChannel(mockCh chan<- *models.Mock)
 	GetNextTestSetID(ctx context.Context) (string, error)
+	// SetDisableProcessStop opts a single Recorder out of the global
+	// utils.Stop() calls. Embedders that host multiple Recorders in
+	// one process (e.g. k8s-proxy) call this with true so a single
+	// session's failure only unwinds its own context, not the shared
+	// root.
+	SetDisableProcessStop(disabled bool)
 }
 
 type TestDB interface {
