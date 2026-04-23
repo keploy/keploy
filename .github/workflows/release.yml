@@ -7,6 +7,18 @@ on:
 permissions:
   contents: write
 
+env:
+  # Central pin for the keploy/integrations commit every build leg in
+  # this workflow checks out via setup-private-parsers. Mirrors the
+  # default in prepare_and_run.yml so all three workflows
+  # (prepare_and_run, release, golangci-lint) track the same
+  # integrations SHA. Prefer the repo-level `vars.INTEGRATION_REF` when
+  # set (so operators can override the pin without editing this file),
+  # falling back to the hard-coded SHA.
+  #
+  # Revert to `main` (drop this key) once keploy/integrations#130 merges.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'f54614b22babce4dbda573e13776735a10e09b50' }}
+
 # Session 174: release.yml is split across native platform runners to
 # unblock CGO_ENABLED=1 release builds. pg_query_go v6.2.2 (Session P)
 # links libpg_query via cgo, so every release binary needs a native
@@ -74,12 +86,8 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          # TEMPORARY override — pinned to the exact commit SHA on the
-          # integrations feature branch that contains the Postgres v3
-          # parser, so release builds stay reproducible even if the
-          # branch is renamed or deleted. Revert to `main` (drop this
-          # key) once keploy/integrations#130 merges.
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Resolve release version
         id: ver
@@ -179,7 +187,8 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Import Code-Signing Certificates
         uses: Apple-Actions/import-codesign-certs@v5
@@ -288,7 +297,8 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Resolve release version
         id: ver

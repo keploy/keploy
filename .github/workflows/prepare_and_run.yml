@@ -31,11 +31,9 @@ env:
   # operators can override the pin without editing this file), falling
   # back to the hard-coded SHA this PR currently needs.
   #
-  # Scope is intentionally limited to prepare_and_run.yml: release.yml
-  # and golangci-lint.yml pin a different (earlier) integrations SHA
-  # because they don't exercise the Postgres v3 parser, and bumping
-  # them would require a separate compatibility check against the
-  # release build. A full repo-wide centralisation is a follow-up.
+  # Kept in sync with release.yml and golangci-lint.yml — all three
+  # workflows now track the same integrations SHA so a bump updates
+  # one place per workflow and the three cannot drift apart.
   #
   # Revert to `main` (drop this key) once keploy/integrations#130 merges.
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'f54614b22babce4dbda573e13776735a10e09b50' }}
