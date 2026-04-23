@@ -8,13 +8,13 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// subsKeyMatchWithOriginal is a test helper that preserves the old
-// "caller passes raw keys" ergonomics: it pre-lowercases the noise map
-// exactly once (mirroring the contract documented on SubstringKeyMatch and
-// implemented in CompareHeaders) and then delegates. Keeping the helper in
-// tests lets the table-driven cases below keep expressive CamelCase /
-// MIXED-CASE noise keys — which document the case-insensitivity guarantee —
-// without burdening production callers with per-call normalization.
+// subsKeyMatchWithOriginal is a test helper that lets subtests pass
+// CamelCase noise-map keys directly. It builds the lowered+merged
+// companion map locally (same pattern as CompareHeaders in production)
+// and delegates to SubstringKeyMatch. Not a contract — SubstringKeyMatch
+// is idempotent to pre-lowering now, so tests could just as well call
+// SubstringKeyMatch directly; this helper just keeps the subtests' data
+// tables readable with CamelCase inputs.
 func subsKeyMatchWithOriginal(s string, mp map[string][]string) ([]string, bool) {
 	lowered := make(map[string][]string, len(mp))
 	for k, v := range mp {

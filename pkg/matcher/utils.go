@@ -1339,10 +1339,13 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	// (e.g. X-Correlation-Id + x-correlation-id),
 	// and (2) lets isHeaderNoisy look up the sentinel "header" key regardless
 	// of the user's casing. Perf-wise it pays one map build + defensive slice
-	// copies per call; in exchange SubstringKeyMatch's inner ToLower is a
-	// no-op on already-lowercase keys. A true O(N+M) fast path would require
-	// a skip-ToLower-if-pre-normalized invariant on the exported helper — we
-	// kept the helper idempotent instead to avoid a silent-failure API.
+	// copies per call; strings.ToLower inside SubstringKeyMatch still scans each
+	// map key per call (no allocation on already-lowercase input, but an O(L)
+	// scan per key). We accept that cost to keep the helper idempotent rather
+	// than require a silent precondition on exported callers. A true O(N+M)
+	// fast path would require a skip-ToLower-if-pre-normalized invariant on
+	// the exported helper — we kept the helper idempotent instead to avoid a
+	// silent-failure API.
 	loweredNoise := make(map[string][]string, len(noise))
 	for k, v := range noise {
 		lk := strings.ToLower(k)
