@@ -269,6 +269,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
 					zap.String("error_class", upstreamErrorClass(err)),
 					zap.Error(err))
+				// Write the synthesized response back to the client so
+				// record-mode behaviour matches replay-mode: in replay the
+				// captured 502/504 is served from the mock store, so the
+				// real live client in record mode should see the same
+				// response instead of an unexplained EOF/timeout. Safe to
+				// do here because no response bytes were forwarded yet.
+				// A write failure is non-fatal — the mock has already
+				// been persisted for replay determinism.
+				if _, werr := clientConn.Write(synthResp); werr != nil {
+					h.Logger.Debug("failed to write synthesized upstream-error response to client; mock already persisted",
+						zap.Error(werr))
+				}
 				enqueueMock(finalReq, synthResp, reqTimestampMock, resTimestampMock)
 				errCh <- nil
 				return nil
