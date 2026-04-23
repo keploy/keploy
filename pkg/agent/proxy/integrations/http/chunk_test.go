@@ -95,6 +95,58 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 	}
 }
 
+// TestChunkedResponseExitsOnSuffixedTerminator reproduces the SAP /360 bug:
+// pUtil.ReadBytes returns a buffer shaped like "<body>0\r\n\r\n" (last-chunk
+// terminator concatenated with the preceding body bytes in the same TLS
+// record) rather than the terminator in a dedicated read. The old strict
+// equality check `string(resp) == "0\r\n\r\n"` missed this shape, so the
+// loop blocked on a second ReadBytes until the upstream's keep-alive timed
+// out (~60s observed). After the fix uses bytes.HasSuffix, the loop must
+// exit promptly — we assert completion well under the keep-alive idle
+// window by enforcing a tight 100 ms budget (the happy-path return takes
+// microseconds; anything over 100 ms means the suffix check regressed).
+func TestChunkedResponseExitsOnSuffixedTerminator(t *testing.T) {
+	h := newTestHTTP()
+
+	clientConn := &mockConn{}
+	// Buggy shape: body tail + last-chunk marker in one TLS record.
+	destConn := &mockConn{
+		data: []byte("abcdef0\r\n\r\n"),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
+	defer cancel()
+
+	var finalResp []byte
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn)
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		if elapsed > 100*time.Millisecond {
+			t.Fatalf("chunkedResponse took %v (> 100ms) — suggests a second "+
+				"ReadBytes call on an idle conn; the suffix check did not match",
+				elapsed)
+		}
+		if destConn.readCount != 1 {
+			t.Errorf("expected exactly 1 read (exit on suffix match), got %d "+
+				"— a second read means the terminator detection regressed to "+
+				"strict equality", destConn.readCount)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("chunkedResponse stuck past 100ms on buffer \"<body>0\\r\\n\\r\\n\" "+
+			"after %d reads — suffix-terminator check regressed", destConn.readCount)
+	}
+}
+
 // TestChunkedResponseEmptyBody tests the specific case where the server closes
 // the connection immediately (no body). This reproduces the bug seen with Playwright
 // where the proxy gets stuck in a loop. Also verifies we don't do excessive reads.
