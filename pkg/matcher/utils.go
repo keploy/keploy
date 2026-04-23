@@ -1344,9 +1344,24 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	for k, v := range noise {
 		lk := strings.ToLower(k)
 		if existing, ok := loweredNoise[lk]; ok {
-			loweredNoise[lk] = append(existing, v...)
+			// Case-collision: build a NEW merged slice rather than appending
+			// onto `existing`. `existing` may share its backing array with a
+			// caller-owned slice (we copy on first insert below, but be
+			// defensive — a future change could reintroduce sharing), and
+			// appending here could otherwise mutate that caller slice across
+			// repeated CompareHeaders calls.
+			merged := make([]string, 0, len(existing)+len(v))
+			merged = append(merged, existing...)
+			merged = append(merged, v...)
+			loweredNoise[lk] = merged
 		} else {
-			loweredNoise[lk] = v
+			// Copy `v` so later case-collision merges (or any downstream
+			// mutation of loweredNoise) can never grow/duplicate the caller's
+			// original noise-map slice. The caller's `noise` is treated as
+			// read-only config.
+			cp := make([]string, len(v))
+			copy(cp, v)
+			loweredNoise[lk] = cp
 		}
 	}
 	// Look up the "header"-scope sentinel via the normalized map so user-supplied

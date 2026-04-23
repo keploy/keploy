@@ -109,6 +109,80 @@ func TestSubstringKeyMatch_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestSubstringKeyMatch_DirectUnNormalized pins down SubstringKeyMatch's
+// "both sides case-insensitive" contract without going through the
+// subsKeyMatchWithOriginal helper (which lowercases noise-map keys before
+// delegating). Calling the function directly with an un-normalized
+// (CamelCase / MIXED-CASE) noise map proves that SubstringKeyMatch itself
+// performs the case folding on the map-key side — not merely on the
+// incoming header string. If someone regresses SubstringKeyMatch back to
+// verbatim map-key comparison, these assertions fail immediately.
+func TestSubstringKeyMatch_DirectUnNormalized(t *testing.T) {
+	tests := []struct {
+		name      string
+		s         string
+		mp        map[string][]string
+		wantVals  []string
+		wantMatch bool
+	}{
+		{
+			name:      "camel pattern vs lower input",
+			s:         "x-correlation-id",
+			mp:        map[string][]string{"X-Correlation-Id": {"val-a"}},
+			wantVals:  []string{"val-a"},
+			wantMatch: true,
+		},
+		{
+			name:      "lower pattern vs camel input",
+			s:         "X-Correlation-Id",
+			mp:        map[string][]string{"x-correlation-id": {"val-b"}},
+			wantVals:  []string{"val-b"},
+			wantMatch: true,
+		},
+		{
+			name:      "all-upper pattern vs all-upper input",
+			s:         "CORRELATION-ID",
+			mp:        map[string][]string{"CORRELATION-ID": {"val-c"}},
+			wantVals:  []string{"val-c"},
+			wantMatch: true,
+		},
+		{
+			name:      "mixed-case pattern vs mixed-case input (different casings)",
+			s:         "X-rEqUeSt-Id",
+			mp:        map[string][]string{"X-Request-ID": {"val-d"}},
+			wantVals:  []string{"val-d"},
+			wantMatch: true,
+		},
+		{
+			name:      "no match preserved with camel-case map key",
+			s:         "X-Other",
+			mp:        map[string][]string{"X-Correlation-Id": {"val-e"}},
+			wantVals:  []string{},
+			wantMatch: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			val, ok := SubstringKeyMatch(tc.s, tc.mp)
+			if ok != tc.wantMatch {
+				t.Fatalf("SubstringKeyMatch(%q, %v) matched=%v, want %v",
+					tc.s, tc.mp, ok, tc.wantMatch)
+			}
+			if len(val) != len(tc.wantVals) {
+				t.Fatalf("SubstringKeyMatch(%q, %v) vals=%v, want %v",
+					tc.s, tc.mp, val, tc.wantVals)
+			}
+			for i := range val {
+				if val[i] != tc.wantVals[i] {
+					t.Fatalf("SubstringKeyMatch(%q, %v) vals[%d]=%q, want %q",
+						tc.s, tc.mp, i, val[i], tc.wantVals[i])
+				}
+			}
+		})
+	}
+}
+
 // TestSubstringKeyMatch_GlobSuffixLiteral documents that SubstringKeyMatch does
 // NOT interpret glob metacharacters (e.g. "x-*") — it does a literal substring
 // match. A pattern like "x-*" will therefore only match a header that literally
