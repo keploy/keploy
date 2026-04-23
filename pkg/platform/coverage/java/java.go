@@ -55,7 +55,7 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 		}
 	}
 	if err != nil {
-		j.logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
+		j.logger.Info("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
 		return j.cmd, err
 	}
 	// downlaod jacoco cli

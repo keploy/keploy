@@ -65,7 +65,7 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 	if emptyResponsesExist {
 		if !pi.promptUserForCapture() {
 			pi.toCapture = false
-			pi.logger.Warn("Few test cases will be skipped as responses are missing from the collection")
+			pi.logger.Info("Few test cases will be skipped as responses are missing from the collection")
 		}
 	}
 
@@ -99,7 +99,7 @@ func (pi *PostmanImporter) parsePostmanCollection(collectionBytes []byte) (*Post
 
 func (pi *PostmanImporter) validatePostmanSchema(schema string) {
 	if schema != postmanSchemaVersion {
-		pi.logger.Warn("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
+		pi.logger.Info("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
 	}
 }
 

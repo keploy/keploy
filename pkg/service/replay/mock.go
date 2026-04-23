@@ -88,7 +88,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 			m.logger.Debug("Local mock file is empty, proceeding with download from keploy registry", zap.String("testSetID", testSetID))
 			response = "y"
 		} else {
-			m.logger.Warn("Local mock file is different from the one in the Keploy registry.")
+			m.logger.Info("Local mock file is different from the one in the Keploy registry.")
 			// Prompt user for confirmation to override the local mock file
 			fmt.Print("The mock file present locally is different from the one in the Keploy registry. Do you want to override the local mock file with the version from the registry? (y/n): ")
 		}
@@ -123,13 +123,13 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 			m.logger.Info("Overriding the local mock file with the version from the Keploy registry", zap.String("testSetID", testSetID))
 
 		case <-ctx.Done(): // context cancellation (Ctrl+C)
-			m.logger.Warn("Download interrupted by user")
+			m.logger.Info("Download interrupted by user")
 			return ctx.Err() // Return the context cancellation error
 		}
 	}
 
 	if tsConfig.MockRegistry.App != m.cfg.AppName {
-		m.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", m.cfg.AppName))
+		m.logger.Info("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", m.cfg.AppName))
 		m.logger.Debug("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 

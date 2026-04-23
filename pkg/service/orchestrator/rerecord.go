@@ -176,7 +176,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	if ctx.Err() != nil {
 		stopReason = "context cancelled"
-		o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
+		o.logger.Info("Re-record was cancelled, keploy might have not recorded few test cases")
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
@@ -184,7 +184,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	if !o.config.Test.DisableMockUpload {
 		o.replay.UploadMocks(ctx, ReRecordedTests)
 	} else {
-		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+		o.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
@@ -662,7 +662,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	o.config.Templatize.TestSets = nonTemplatized
-	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets", nonTemplatized))
+	o.logger.Info("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {

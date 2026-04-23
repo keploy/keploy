@@ -518,7 +518,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			timer := time.After(r.config.Record.RecordTimer)
 			select {
 			case <-timer:
-				r.logger.Warn("Time up! Stopping keploy")
+				r.logger.Info("Time up! Stopping keploy")
 				err := utils.Stop(r.logger, "Time up! Stopping keploy")
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -543,7 +543,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
 		case models.ErrAppStopped:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
-			r.logger.Warn(stopReason, zap.Error(appErr))
+			r.logger.Info(stopReason, zap.Error(appErr))
 			return nil
 		case models.ErrCtxCanceled:
 			return nil
@@ -769,7 +769,7 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	newSuffix := highestSuffix + 1
 	assignedName := fmt.Sprintf("%s-%d", requestedName, newSuffix)
 
-	r.logger.Warn(fmt.Sprintf(
+	r.logger.Info(fmt.Sprintf(
 		"Test set name '%s' already exists, using '%s' instead. You can change this name if you want.",
 		requestedName, assignedName,
 	))

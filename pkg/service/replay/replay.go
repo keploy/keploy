@@ -610,7 +610,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if len(flakyTestSets) > 0 {
-		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+		r.logger.Info("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
 	}
 
 	testRunStatus := "fail"
@@ -619,7 +619,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+		r.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	r.completeTestReportMu.RLock()
@@ -649,7 +649,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -3241,8 +3241,8 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	token, err := r.auth.GetToken(ctx)
 	if err != nil {
 		r.logger.Error("Failed to Authenticate user", zap.Error(err))
-		r.logger.Warn("Looks like you haven't logged in, skipping mock upload/download")
-		r.logger.Warn("Please login using `keploy login` to perform mock upload/download action")
+		r.logger.Info("Looks like you haven't logged in, skipping mock upload/download")
+		r.logger.Info("Please login using `keploy login` to perform mock upload/download action")
 		return fmt.Errorf("mocks downloading failed to due to authentication error")
 	}
 

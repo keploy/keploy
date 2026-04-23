@@ -153,7 +153,7 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 
 	// Log the files with permission issues
 	fmt.Println()
-	logger.Warn("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
+	logger.Info("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
 
 	// Show the problematic files (up to 5, then "and X more...")
 	if len(permErrors) > 0 {
@@ -190,8 +190,8 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 				return context.Canceled
 			}
 		}
-		logger.Warn(fmt.Sprintf("Failed to authenticate sudo: %v", err))
-		logger.Warn(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
+		logger.Info(fmt.Sprintf("Failed to authenticate sudo: %v", err))
+		logger.Info(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
 		return fmt.Errorf("sudo authentication failed")
 	}
 
@@ -201,8 +201,8 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		logger.Warn(fmt.Sprintf("Failed to fix permissions: %v", err))
-		logger.Warn(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
+		logger.Info(fmt.Sprintf("Failed to fix permissions: %v", err))
+		logger.Info(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
 		return fmt.Errorf("failed to fix permissions")
 	}
 

@@ -305,7 +305,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	}
 
 	if tsConfig.MockRegistry.App != h.cfg.AppName {
-		h.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", h.cfg.AppName))
+		h.logger.Info("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", h.cfg.AppName))
 		h.logger.Debug("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
