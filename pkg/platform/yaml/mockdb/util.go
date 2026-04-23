@@ -3,6 +3,7 @@ package mockdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -22,6 +23,15 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Name:         mock.Name,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+	}
+	mapped, err := encodeWithMapper(mock, &yamlDoc)
+	if err != nil {
+		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
+		utils.LogError(logger, wrapped, "registered MockYAMLMapper.Encode returned an error; check the mapper for this kind", zap.String("kind", string(mock.Kind)))
+		return nil, wrapped
+	}
+	if mapped {
+		return &yamlDoc, nil
 	}
 	switch mock.Kind {
 	case models.Mongo:
@@ -116,34 +126,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
-			return nil, err
-		}
-	case models.REDIS:
-		redisSpec := models.RedisSchema{
-			Metadata: mock.Spec.Metadata,
-
-			RedisRequests:    mock.Spec.RedisRequests,
-			RedisResponses:   mock.Spec.RedisResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(redisSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
-			return nil, err
-		}
-	case models.KAFKA:
-		kafkaSpec := models.KafkaSchema{
-			Metadata: mock.Spec.Metadata,
-
-			KafkaRequests:    mock.Spec.KafkaRequests,
-			KafkaResponses:   mock.Spec.KafkaResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(kafkaSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
 			return nil, err
 		}
 	case models.PostgresV2:
@@ -282,6 +264,16 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
 		}
+		mapped, err := decodeWithMapper(m, &mock)
+		if err != nil {
+			wrapped := fmt.Errorf("mockdb: decode mapper for mock %q kind %q: %w", m.Name, m.Kind, err)
+			utils.LogError(logger, wrapped, "registered MockYAMLMapper.Decode returned an error; check the mapper for this kind and that the on-disk yaml matches its schema", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
+			return nil, wrapped
+		}
+		if mapped {
+			mocks = append(mocks, &mock)
+			continue
+		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {
 			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
@@ -366,36 +358,6 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				GenericResponses: genericSpec.GenericResponses,
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
 				ResTimestampMock: genericSpec.ResTimestampMock,
-			}
-		case models.REDIS:
-			redisSpec := models.RedisSchema{}
-			err := m.Spec.Decode(&redisSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.String("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: redisSpec.Metadata,
-
-				RedisRequests:    redisSpec.RedisRequests,
-				RedisResponses:   redisSpec.RedisResponses,
-				ReqTimestampMock: redisSpec.ReqTimestampMock,
-				ResTimestampMock: redisSpec.ResTimestampMock,
-			}
-		case models.KAFKA:
-			kafkaSpec := models.KafkaSchema{}
-			err := m.Spec.Decode(&kafkaSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into kafka mock", zap.String("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: kafkaSpec.Metadata,
-
-				KafkaRequests:    kafkaSpec.KafkaRequests,
-				KafkaResponses:   kafkaSpec.KafkaResponses,
-				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
-				ResTimestampMock: kafkaSpec.ResTimestampMock,
 			}
 		case models.PostgresV2:
 

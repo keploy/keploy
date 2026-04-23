@@ -45,13 +45,24 @@ const gobMockMagic = "keploy-gob-v1\n"
 // gob read paths must share this classification verbatim so replay
 // behavior does not diverge based on on-disk format.
 //
+// The switch enumerates only OSS-owned kinds whose recorders do not
+// tag lifetime at record time, so mocks need a kind-level fallback
+// to land in the config pool. Out-of-tree parsers (Enterprise Redis
+// / Kafka / HBase, downstream third parties) are NOT listed here:
+// their recorders stamp type=config / mocks / connection, so the
+// explicit `mock.Spec.Metadata["type"] == "config"` check at the
+// caller already routes their config mocks correctly. Adding them
+// would wrongly send every type=mocks data mock to the config pool
+// as well, which breaks the per-test consumption contract the
+// replayer's DeleteFilteredMock path depends on.
+//
 // PostgresV2 is intentionally listed here even though it also passes
 // the GetFilteredMocks path (matches YAML's current behavior — both
 // paths include it; a mock shows up in both buckets). Changing that
 // semantics is out of scope for this PR.
 func isUnfilteredMockKind(kind models.Kind) bool {
 	switch kind {
-	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
+	case models.GENERIC, models.Postgres, models.PostgresV2, models.HTTP, models.HTTP2, models.MySQL, models.DNS:
 		return true
 	}
 	return false
@@ -706,10 +717,14 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// RecordHooks.AfterMockInsert that tags telemetry fields on the
 	// same pointer, or a producer pool that reuses Mock structs)
 	// would otherwise race with the async gob encoder and persist
-	// an unintended payload. DeepCopy handles the nested Noise /
-	// Metadata / per-protocol-slice fields. The copy cost is
-	// bounded by the mock's own size and is acceptable vs. the
-	// alternative (encoding to bytes synchronously on every
+	// an unintended payload. DeepCopy clones Mock's top-level
+	// MockSpec slices, maps, and pointers so the usual
+	// after-InsertMock field tagging is safe; it does not
+	// transitively clone every nested object reachable through a
+	// protocol payload, so callers should still avoid mutating
+	// deeply nested state in a mock they have handed off. The copy
+	// cost is bounded by the mock's own size and is acceptable vs.
+	// the alternative (encoding to bytes synchronously on every
 	// InsertMock, which would defeat the whole async-writer win).
 	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
 	select {
@@ -1046,7 +1061,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 			// Shared classifier with GetUnFilteredMocks and with the
 			// YAML read path. Kinds that belong to the unfiltered
-			// bucket (HTTP, Postgres, Redis, ...) are excluded here;
+			// bucket (HTTP, Postgres, ...) are excluded here;
 			// per-testcase kinds (Mongo, gRPC, ...) fall through to
 			// the append. PostgresV2 is a special case: YAML's
 			// GetFilteredMocks keeps it in the tcs bucket while
