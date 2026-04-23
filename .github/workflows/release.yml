@@ -17,7 +17,7 @@ env:
   # falling back to the hard-coded SHA.
   #
   # Revert to `main` (drop this key) once keploy/integrations#130 merges.
-  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'f54614b22babce4dbda573e13776735a10e09b50' }}
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'f0115f6426f4105a6674901c89e4e545ae5eca12' }}
 
 # Session 174: release.yml is split across native platform runners to
 # unblock CGO_ENABLED=1 release builds. pg_query_go v6.2.2 (Session P)
