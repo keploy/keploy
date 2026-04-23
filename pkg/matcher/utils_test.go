@@ -1,8 +1,11 @@
 package matcher
 
 import (
+	"net/http"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // subsKeyMatchWithOriginal is a test helper that preserves the old
@@ -124,5 +127,116 @@ func TestSubstringKeyMatch_GlobSuffixLiteral(t *testing.T) {
 	// But when the header genuinely contains "x-*" (literal), it does match.
 	if _, ok := subsKeyMatchWithOriginal("some-X-*-thing", noise); !ok {
 		t.Fatalf("SubstringKeyMatch should match literal '*' substring; missed some-X-*-thing vs x-*")
+	}
+}
+
+// findHeaderResult returns the HeaderResult whose expected or actual key matches k.
+func findHeaderResult(res []models.HeaderResult, k string) (models.HeaderResult, bool) {
+	for _, r := range res {
+		if r.Expected.Key == k || r.Actual.Key == k {
+			return r, true
+		}
+	}
+	return models.HeaderResult{}, false
+}
+
+// TestCompareHeaders_CamelCaseNoiseKey is the focused regression test for the
+// originally reported bug: a user authors a noise key in keploy.yml using the
+// natural HTTP-header casing (e.g. "X-Correlation-Id") and expects
+// CompareHeaders to treat that header as noise — i.e. differing values must
+// NOT flip the overall match result to false. Before the case-insensitive
+// fix, the CamelCase noise pattern silently failed to match the already-
+// lowercased http.Header canonicalization, and the test would fail.
+func TestCompareHeaders_CamelCaseNoiseKey(t *testing.T) {
+	h1 := http.Header{}
+	h1.Set("X-Correlation-Id", "req-aaaaaaaa")
+
+	h2 := http.Header{}
+	h2.Set("X-Correlation-Id", "req-bbbbbbbb") // different value — should be ignored
+
+	// Note the CamelCase noise key, exactly as a user would author it.
+	noise := map[string][]string{"X-Correlation-Id": {}}
+
+	var res []models.HeaderResult
+	ok := CompareHeaders(h1, h2, &res, noise)
+	if !ok {
+		t.Fatalf("CompareHeaders should return true when differing header is noise; got false (res=%+v)", res)
+	}
+
+	got, found := findHeaderResult(res, "X-Correlation-Id")
+	if !found {
+		t.Fatalf("expected a HeaderResult entry for X-Correlation-Id, got %+v", res)
+	}
+	if !got.Normal {
+		t.Fatalf("expected Normal=true for noise-matched CamelCase key; got %+v", got)
+	}
+}
+
+// TestLoweredNoise_MergesCaseCollisions verifies that when a user supplies two
+// noise entries that differ only by case (e.g. "X-Request-Id" and
+// "x-request-id"), CompareHeaders does not silently drop one of the regex
+// slices. The expected behavior is that both regex patterns contribute — i.e.
+// a header value matching EITHER pattern is still treated as noise. This
+// pins down the collision-merge semantics independent of Go map iteration
+// order.
+func TestLoweredNoise_MergesCaseCollisions(t *testing.T) {
+	h1 := http.Header{}
+	h1.Set("X-Request-Id", "beta-12345") // matches the second (camel-case-authored) pattern only
+
+	h2 := http.Header{}
+	h2.Set("X-Request-Id", "beta-99999")
+
+	// Two distinct noise entries keyed by case-only variants. If the builder
+	// picked one and dropped the other (pre-fix behavior), then depending on
+	// which regex survived, the "beta-..." value might not match and the
+	// header would flip to non-noise → overall match=false.
+	noise := map[string][]string{
+		"x-request-id": {"^alpha-.*$"},
+		"X-Request-Id": {"^beta-.*$"},
+	}
+
+	var res []models.HeaderResult
+	ok := CompareHeaders(h1, h2, &res, noise)
+	if !ok {
+		t.Fatalf("CompareHeaders should treat value matching merged regex as noise; got false (res=%+v)", res)
+	}
+
+	got, found := findHeaderResult(res, "X-Request-Id")
+	if !found {
+		t.Fatalf("expected a HeaderResult entry for X-Request-Id, got %+v", res)
+	}
+	if !got.Normal {
+		t.Fatalf("expected Normal=true after merging case-collided noise regex slices; got %+v", got)
+	}
+
+	// And the symmetric case: a value matching the OTHER pattern (alpha-*)
+	// should also be treated as noise, proving the merge is bidirectional.
+	h1b := http.Header{}
+	h1b.Set("X-Request-Id", "alpha-abc")
+	h2b := http.Header{}
+	h2b.Set("X-Request-Id", "alpha-xyz")
+
+	var resB []models.HeaderResult
+	if ok := CompareHeaders(h1b, h2b, &resB, noise); !ok {
+		t.Fatalf("CompareHeaders should treat alpha-* value as noise via merged slice; got false (res=%+v)", resB)
+	}
+}
+
+// TestCompareHeaders_UppercaseHeaderSentinel verifies that the whole-section
+// "header" noise sentinel is recognized case-insensitively — a user config
+// with "Header" or "HEADER" must still mark every header as noise. This pins
+// down the isHeaderNoisy-via-loweredNoise lookup fix.
+func TestCompareHeaders_UppercaseHeaderSentinel(t *testing.T) {
+	h1 := http.Header{}
+	h1.Set("X-Anything", "val-a")
+
+	h2 := http.Header{}
+	h2.Set("X-Anything", "val-DIFFERENT")
+
+	noise := map[string][]string{"Header": {}} // user-authored with title case
+
+	var res []models.HeaderResult
+	if ok := CompareHeaders(h1, h2, &res, noise); !ok {
+		t.Fatalf("uppercase 'Header' sentinel should mark all headers noisy; got match=false (res=%+v)", res)
 	}
 }

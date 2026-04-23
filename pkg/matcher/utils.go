@@ -1332,15 +1332,27 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		return false
 	}
 	match := true
-	_, isHeaderNoisy := noise["header"]
 	// Pre-normalize noise-map keys to lowercase once per CompareHeaders call.
-	// SubstringKeyMatch's contract requires lowercased keys (see its docstring);
-	// hoisting the ToLower out of the per-header loop avoids O(N·M) redundant
-	// lowercasings where N = headers and M = noise keys.
+	// SubstringKeyMatch is itself case-insensitive (see its docstring), so this
+	// is purely a performance hint — hoisting the ToLower out of the per-header
+	// loop avoids O(N·M) redundant lowercasings where N = headers and M = noise
+	// keys. On case-only collisions (e.g. both "X-Request-Id" and
+	// "x-request-id" in user config) the regex slices are merged so neither
+	// user-authored entry is silently dropped, and the result is independent of
+	// Go's unspecified map iteration order.
 	loweredNoise := make(map[string][]string, len(noise))
 	for k, v := range noise {
-		loweredNoise[strings.ToLower(k)] = v
+		lk := strings.ToLower(k)
+		if existing, ok := loweredNoise[lk]; ok {
+			loweredNoise[lk] = append(existing, v...)
+		} else {
+			loweredNoise[lk] = v
+		}
 	}
+	// Look up the "header"-scope sentinel via the normalized map so user-supplied
+	// casing (e.g. "Header" / "HEADER") is still recognized as the whole-section
+	// noise marker. The sentinel key is canonically lowercase "header".
+	_, isHeaderNoisy := loweredNoise["header"]
 	for k, v := range h1 {
 		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
@@ -1469,16 +1481,17 @@ func MapToArray(mp map[string][]string) []string {
 }
 
 // SubstringKeyMatch returns the regex list associated with a matching noise
-// key that occurs as a substring of s. The comparison is case-insensitive:
-// s is folded to lower case internally, and the keys in mp MUST be
-// pre-lowercased by the caller. This keeps HTTP header key matching
+// key that occurs as a substring of s. The comparison is case-insensitive on
+// BOTH sides: s is folded to lower case internally, and each key in mp is
+// folded to lower case on the fly. This keeps HTTP header key matching
 // case-insensitive regardless of how the user cased the noise pattern in
 // keploy.yml (e.g. "x-correlation-id" vs "X-Correlation-Id").
 //
-// Precondition: keys in mp MUST already be lowercase. See CompareHeaders for
-// the expected caller pattern — it builds a lowered companion map once per
-// invocation rather than lowercasing every key on every SubstringKeyMatch
-// call. Passing a map with non-lowercase keys will cause silent misses.
+// The helper is idempotent to pre-lowering: callers MAY pre-lowercase the
+// map keys to avoid redundant ToLower allocations in hot paths (see
+// CompareHeaders, which hoists the normalization out of a per-header loop),
+// but it is NOT a precondition — correctness is preserved either way. Passing
+// an already-lowercase key makes the inner ToLower a cheap no-op.
 //
 // Go map iteration order is unspecified, so when multiple keys in mp could
 // match s, any one of them may be returned — callers MUST NOT rely on a
@@ -1490,7 +1503,7 @@ func MapToArray(mp map[string][]string) []string {
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 	sLower := strings.ToLower(s)
 	for key, val := range mp {
-		if strings.Contains(sLower, key) {
+		if strings.Contains(sLower, strings.ToLower(key)) {
 			return val, true
 		}
 	}
