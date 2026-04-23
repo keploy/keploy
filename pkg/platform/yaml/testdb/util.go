@@ -324,7 +324,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
@@ -360,7 +360,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {

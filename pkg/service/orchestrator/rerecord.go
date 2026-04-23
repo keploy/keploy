@@ -192,12 +192,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			o.logger.Warn("Failed to read input. The older testsets will be kept.")
+			o.logger.Debug("Failed to read input. The older testsets will be kept.")
 			return nil
 		}
 
 		if len(input) == 0 {
-			o.logger.Warn("Empty input. The older testsets will be kept.")
+			o.logger.Debug("Empty input. The older testsets will be kept.")
 			return nil
 		}
 
@@ -215,7 +215,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		case "n", "N":
 			o.logger.Info("skipping the deletion of older testsets")
 		default:
-			o.logger.Warn("Invalid input. The older testsets will be kept.")
+			o.logger.Debug("Invalid input. The older testsets will be kept.")
 		}
 	}
 	return nil
@@ -234,7 +234,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 	}
 
 	if len(tcs) == 0 {
-		o.logger.Warn("No testcases found for the given testset", zap.String("testset", testSet))
+		o.logger.Debug("No testcases found for the given testset", zap.String("testset", testSet))
 		return false, nil
 	}
 
@@ -666,7 +666,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
-		o.logger.Warn("failed to read input. Skipping templatization")
+		o.logger.Debug("failed to read input. Skipping templatization")
 	}
 	if input == "n\n" || input == "N\n" {
 		o.logger.Info("skipping templatization")

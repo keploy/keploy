@@ -282,14 +282,14 @@ func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionSt
 	for _, item := range collection.Items.PostmanItems {
 		for _, testItem := range item.Item {
 			if len(testItem.Response) == 0 {
-				pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
 			}
 		}
 	}
 	for _, testItem := range collection.Items.TestDataItems {
 		if len(testItem.Response) == 0 {
-			pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+			pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 			return true
 		}
 	}

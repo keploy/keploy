@@ -121,7 +121,7 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("glob failed for .coverage.keploy.*: %w", err)
 	}
 	if len(matches) == 0 {
-		p.logger.Warn("no per-process .coverage files found – nothing to combine")
+		p.logger.Debug("no per-process .coverage files found – nothing to combine")
 		return testCov, nil
 	}
 

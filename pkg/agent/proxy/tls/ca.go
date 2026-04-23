@@ -401,7 +401,7 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	// "Wrote Keploy MITM CA only" message would be redundant noise.
 
 	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
-		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
+		logger.Debug("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 
 	// Generate Java Truststore from the MERGED bundle (system roots +
@@ -457,7 +457,7 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, java
 		}
 		defer func() {
 			if err := os.Remove(tempCertPath); err != nil {
-				logger.Warn("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
+				logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
 			}
 		}()
 

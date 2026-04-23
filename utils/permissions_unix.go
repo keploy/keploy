@@ -311,7 +311,7 @@ func FixFilePermission(ctx context.Context, logger *zap.Logger, filePath string)
 		return fmt.Errorf("failed to get current user: %w", err)
 	}
 
-	logger.Warn("Cannot access file (likely owned by root from older keploy version)",
+	logger.Debug("Cannot access file (likely owned by root from older keploy version)",
 		zap.String("path", filePath))
 	logger.Info(fmt.Sprintf("Running: sudo chown %s %s", currentUser.Username, filePath))
 
@@ -378,7 +378,7 @@ func RestoreKeployFolderOwnership(logger *zap.Logger, keployPath string) {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		logger.Warn("Failed to restore keploy folder ownership",
+		logger.Debug("Failed to restore keploy folder ownership",
 			zap.String("user", sudoUser),
 			zap.String("path", keployPath),
 			zap.Error(err))

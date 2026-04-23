@@ -326,7 +326,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if setupOpts.IsDocker {
 		var ts unix.Timespec
 		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Warn("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
+			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
 		} else {
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))

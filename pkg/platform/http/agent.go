@@ -434,7 +434,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 
 func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, tcName string) error {
 	if timestamp == nil || timestamp.IsZero() {
-		a.logger.Warn("Skipping agent hook: timestamp is zero or nil")
+		a.logger.Debug("Skipping agent hook: timestamp is zero or nil")
 		return nil
 	}
 
@@ -461,7 +461,7 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -497,7 +497,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -532,7 +532,7 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -568,7 +568,7 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -606,7 +606,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -1098,7 +1098,7 @@ func (a *AgentClient) stopAgent() {
 	if a.agentPTY != nil {
 		// Use the utils function to gracefully stop PTY
 		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
-			a.logger.Warn("failed to stop PTY command", zap.Error(err))
+			a.logger.Debug("failed to stop PTY command", zap.Error(err))
 		}
 	}
 }
@@ -1290,7 +1290,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
 				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
 				if output, err := stopCmd.CombinedOutput(); err != nil {
-					logger.Warn("Could not stop the docker container. It may have already stopped.",
+					logger.Debug("Could not stop the docker container. It may have already stopped.",
 						zap.String("container", containerName),
 						zap.Error(err),
 						zap.String("output", string(output)))
@@ -1298,7 +1298,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 					logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
 				}
 			} else {
-				logger.Warn("Could not stop the docker container. It may have already stopped.",
+				logger.Debug("Could not stop the docker container. It may have already stopped.",
 					zap.String("container", containerName),
 					zap.Error(err),
 					zap.String("output", string(output)))
@@ -1478,7 +1478,7 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
-			a.logger.Warn("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
 		} else {
 			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
 		}

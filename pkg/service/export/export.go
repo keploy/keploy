@@ -191,7 +191,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 					}
 
 					if len(data) == 0 {
-						logger.Warn("skippping empty testcase", zap.String("testcase name", testFile.Name()))
+						logger.Debug("skippping empty testcase", zap.String("testcase name", testFile.Name()))
 						continue
 					}
 
@@ -202,7 +202,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 						continue
 					}
 					if testCase == nil {
-						logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testFile.Name()))
+						logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", testFile.Name()))
 						continue
 					}
 

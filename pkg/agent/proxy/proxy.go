@@ -909,7 +909,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Instead of failing with an error (which causes the app to see a broken connection),
 		// we close the connection gracefully. The client will see "connection refused" or EOF,
 		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Warn("Untracked connection (eBPF lookup failed), closing gracefully",
+		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
 			zap.Int("Source port", sourcePort), zap.Error(err))
 		if srcConn != nil {
 			srcConn.Close()

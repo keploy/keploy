@@ -272,7 +272,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	token, err := h.auth.GetToken(ctx)
 	if err != nil {
-		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.String("reason", err.Error()))
+		h.logger.Debug("Failed to Authenticate user, continuing with local mock if present", zap.String("reason", err.Error()))
 		return nil
 	}
 	h.mock.setToken(token)
@@ -285,12 +285,12 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	}
 
 	if tsConfig.MockRegistry.Mock == "" {
-		h.logger.Warn("Mock is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
+		h.logger.Debug("Mock is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
 		return nil
 	}
 
 	if tsConfig.MockRegistry.App == "" {
-		h.logger.Warn("App name is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
+		h.logger.Debug("App name is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
 		return nil
 	}
 
@@ -306,7 +306,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	if tsConfig.MockRegistry.App != h.cfg.AppName {
 		h.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", h.cfg.AppName))
-		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
+		h.logger.Debug("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
 	h.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))

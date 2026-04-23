@@ -349,7 +349,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	default:
-		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
+		p.logger.Debug("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 		return resp
 	}
 }
