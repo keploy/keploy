@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -19,6 +22,40 @@ import (
 	"go.uber.org/zap"
 )
 
+// probeHTTPOnce, probeHTTPEnabled mirror the proxy.go probe gate. See
+// KEPLOY_PROBE_FANOUT in pkg/agent/proxy/proxy.go. encode.go cannot import
+// proxy (would cycle), so the toggle is replicated here.
+var (
+	probeHTTPOnce    sync.Once
+	probeHTTPEnabled atomic.Bool
+)
+
+func probeHTTPOn() bool {
+	probeHTTPOnce.Do(func() {
+		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
+			probeHTTPEnabled.Store(true)
+		}
+	})
+	return probeHTTPEnabled.Load()
+}
+
+// probeHTTP emits a [PROBE/http] log tagged with the connID pulled from
+// the parser context and a phase name. Cheap to call when the probe is
+// off (single atomic load + early return).
+func probeHTTP(ctx context.Context, logger *zap.Logger, phase string, fields ...zap.Field) {
+	if !probeHTTPOn() {
+		return
+	}
+	connID, _ := ctx.Value(models.ClientConnectionIDKey).(string)
+	base := []zap.Field{
+		zap.String("probe", "http"),
+		zap.String("phase", phase),
+		zap.String("connID", connID),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/http]", append(base, fields...)...)
+}
+
 // encodeHTTP records outgoing HTTP traffic. The read/forward/chunked-handling
 // logic is identical to the original synchronous implementation. The only
 // difference is that parseFinalHTTP (HTTP parsing, body decompression, mock
@@ -28,8 +65,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
+	probeHTTP(ctx, h.Logger, "encode-start",
+		zap.String("dstAddr", destConn.RemoteAddr().String()),
+		zap.Int("reqBufLen", len(reqBuf)))
+
 	// Forward initial request to server.
+	reqWriteStart := time.Now()
 	_, err := destConn.Write(reqBuf)
+	probeHTTP(ctx, h.Logger, "encode-req-written",
+		zap.Int64("write_dur_ns", time.Since(reqWriteStart).Nanoseconds()),
+		zap.Error(err))
 	if err != nil {
 		h.Logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
@@ -165,7 +210,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			// Capture the request timestamp.
 			reqTimestampMock := time.Now()
 
+			chunkedReqStart := time.Now()
 			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
+			probeHTTP(ctx, h.Logger, "encode-chunked-req-done",
+				zap.Int64("dur_ns", time.Since(chunkedReqStart).Nanoseconds()),
+				zap.Int("finalReqLen", len(finalReq)),
+				zap.Error(err))
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
@@ -175,7 +225,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
 
 			// Read the response from the actual server.
+			probeHTTP(ctx, h.Logger, "encode-read-resp-start")
+			readRespStart := time.Now()
 			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
+			probeHTTP(ctx, h.Logger, "encode-read-resp-done",
+				zap.Int64("dur_ns", time.Since(readRespStart).Nanoseconds()),
+				zap.Int("respLen", len(resp)),
+				zap.Error(err))
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("Response complete, exiting the loop.")
@@ -233,7 +289,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			finalResp = append(finalResp, resp...)
 			h.Logger.Debug("This is the initial response: " + string(resp))
 
+			chunkedRespStart := time.Now()
 			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
+			probeHTTP(ctx, h.Logger, "encode-chunked-resp-done",
+				zap.Int64("dur_ns", time.Since(chunkedRespStart).Nanoseconds()),
+				zap.Int("finalRespLen", len(finalResp)),
+				zap.Error(err))
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))
@@ -265,8 +326,14 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 
 			// Read the next request from the client.
 			h.Logger.Debug("Reading the request from the user client again from the same connection")
+			probeHTTP(ctx, h.Logger, "encode-next-req-read-start")
+			nextReqStart := time.Now()
 
 			finalReq, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+			probeHTTP(ctx, h.Logger, "encode-next-req-read-done",
+				zap.Int64("dur_ns", time.Since(nextReqStart).Nanoseconds()),
+				zap.Int("reqLen", len(finalReq)),
+				zap.Error(err))
 			if err != nil {
 				if err != io.EOF {
 					h.Logger.Debug("failed to read the request message from the user client", zap.Error(err))
