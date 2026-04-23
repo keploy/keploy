@@ -79,7 +79,7 @@ jobs:
           # parser, so release builds stay reproducible even if the
           # branch is renamed or deleted. Revert to `main` (drop this
           # key) once keploy/integrations#130 merges.
-          integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
+          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
 
       - name: Resolve release version
         id: ver
@@ -179,7 +179,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
+          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
 
       - name: Import Code-Signing Certificates
         uses: Apple-Actions/import-codesign-certs@v5
@@ -288,7 +288,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
-          integration-ref: 479ad383e856f469423321d5de8b0f2cd827bd20
+          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
 
       - name: Resolve release version
         id: ver
