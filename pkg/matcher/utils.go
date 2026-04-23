@@ -48,7 +48,7 @@ func getCompiled(pattern string) *regexp.Regexp {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
 		// Fallback to a regex that never matches to avoid panics / repeated compiles
-		compiled, _ = regexp.Compile(`(?!)`)
+		compiled, _ = regexp.Compile(`($.^)`)
 	}
 
 	regexCacheMu.Lock()
