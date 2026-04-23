@@ -429,19 +429,41 @@ jobs:
           if [[ "$TAG" == *-* ]]; then
             prerelease_flag="--prerelease"
           fi
+          # Idempotent publish: if a previous run of this workflow
+          # got as far as creating the release but died before
+          # uploading assets (e.g. v3.5.1 where `gh release create`
+          # failed partway; or a manual pre-create by an operator),
+          # re-running this step with `gh release create` would
+          # abort with "a release with the same tag name already
+          # exists". Check first, then dispatch to create vs. upload.
+          # --clobber on upload lets a re-run overwrite partial
+          # uploads from a prior-failed run so the release assets
+          # end up in the intended final state either way.
           # make_latest:false in goreleaser.yaml — marking-latest is
           # deferred to the mark-latest job below (only after docker
           # images have been published and signed).
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "$TAG" \
-            --generate-notes \
-            --latest=false \
-            $prerelease_flag \
-            release-assets/keploy_linux_amd64.tar.gz \
-            release-assets/keploy_linux_arm64.tar.gz \
-            release-assets/keploy_darwin_all.tar.gz \
+          assets=(
+            release-assets/keploy_linux_amd64.tar.gz
+            release-assets/keploy_linux_arm64.tar.gz
+            release-assets/keploy_darwin_all.tar.gz
             release-assets/keploy_windows_amd64
+          )
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading assets with --clobber"
+            gh release upload "$TAG" \
+              --repo "${{ github.repository }}" \
+              --clobber \
+              "${assets[@]}"
+          else
+            echo "Release $TAG does not exist — creating"
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --generate-notes \
+              --latest=false \
+              $prerelease_flag \
+              "${assets[@]}"
+          fi
 
   # Per-platform docker image build. Each matrix leg runs on a
   # native runner for its target arch (ubuntu-latest for amd64,
