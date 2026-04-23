@@ -322,13 +322,13 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		for key, raw := range httpSpec.Assertions {
 			tc.Assertions[key] = raw
 			if key == models.NoiseAssertion {
-				noiseMap, ok := raw.(map[models.AssertionType]interface{})
+				noiseMap, ok := raw.(map[string]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Warn("noise assertion not in expected map[string]interface{}", zap.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
-					field := string(kt)
+					field := kt
 					// initialize slice
 					tc.Noise[field] = []string{}
 					arr, ok := inner.([]interface{})
@@ -358,13 +358,13 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		for key, raw := range grpcSpec.Assertions {
 			tc.Assertions[key] = raw
 			if key == models.NoiseAssertion {
-				noiseMap, ok := raw.(map[models.AssertionType]interface{})
+				noiseMap, ok := raw.(map[string]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Warn("noise assertion not in expected map[string]interface{}", zap.Any("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
-					field := string(kt)
+					field := kt
 					tc.Noise[field] = []string{}
 					arr, ok := inner.([]interface{})
 					if !ok {
