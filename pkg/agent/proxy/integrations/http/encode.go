@@ -305,11 +305,14 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				}
 				// Upstream error while we were already reading the response
 				// body (timeout mid-body, peer reset, broken pipe, etc.).
-				// Prefer to persist whatever partial bytes we collected so
-				// that replay observes a consistent error; if the partial
-				// bytes are not a valid HTTP message fall back to a fully
-				// synthesized response. Either way we persist SOMETHING —
-				// dropping the mock silently is the bug this fix addresses.
+				// We always synthesize a fresh well-formed response here
+				// rather than persisting the partial finalResp bytes: a
+				// truncated HTTP message is unsafe to replay (downstream
+				// parseFinalHTTP would fail and we'd still drop the mock),
+				// and the synthesized response already carries the error
+				// class marker + original error text so operators can see
+				// exactly what went wrong. The important invariant — that
+				// we persist SOMETHING instead of dropping — is preserved.
 				utils.LogError(h.Logger, err, "failed to handle chunk response; persisting synthesized mock")
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
