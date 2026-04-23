@@ -250,36 +250,73 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					}
 					break
 				}
-				// Upstream error BEFORE any response bytes were received
-				// (timeout, connection refused, reset, etc.). Historically
-				// the recorder dropped the call on the floor here, which
-				// meant replay had no mock to match the re-issued request
-				// and served a synthetic "no matching mock" 502 — producing
-				// body- and elapsed-ms diffs against the recorded run.
+				// Upstream error from pUtil.ReadBytes. The happy-path
+				// assumption is "no response bytes received yet" (timeout,
+				// connection refused, reset before any byte arrived, etc.).
+				// Verify that invariant explicitly: pUtil.ReadBytes can, in
+				// principle, return a non-EOF error after partial bytes were
+				// already appended to its buffer (see the read loop in
+				// pkg/agent/proxy/util/util.go — non-EOF errors surface
+				// immediately and any bytes collected in the same iteration
+				// are returned alongside the error). Copilot PR #4101 r6
+				// flagged the missing precondition check on this branch.
 				//
-				// Synthesize a well-formed HTTP response that captures the
-				// observed error (504 for timeouts, 502 for everything else)
-				// and persist it as a mock. A distinctive marker header is
-				// added so operators can distinguish captured-error mocks
-				// from legitimate upstream replies. See upstream_error.go.
+				// Two cases:
+				//  1. len(resp) == 0 — the expected path. Historically the
+				//     recorder dropped the call on the floor here, which
+				//     meant replay had no mock to match the re-issued request
+				//     and served a synthetic "no matching mock" 502 —
+				//     producing body- and elapsed-ms diffs against the
+				//     recorded run. Synthesize a well-formed HTTP response
+				//     that captures the observed error (504 for timeouts,
+				//     502 for everything else) and persist it as a mock,
+				//     plus write it back to the client so record-mode
+				//     matches replay-mode. See upstream_error.go.
+				//  2. len(resp) != 0 — partial response bytes already
+				//     received, then upstream errored. We DON'T write the
+				//     partial bytes back and we DON'T persist them: a
+				//     truncated HTTP message is unsafe to replay (downstream
+				//     parseFinalHTTP would fail and we'd still drop the
+				//     mock). Log a WARNING so operators can see the partial
+				//     capture, then fall through to synthesize a fresh
+				//     error response — same behaviour as the mid-body
+				//     error branch below (line ~318).
 				resTimestampMock := time.Now()
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
-				h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
-					zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
-					zap.String("error_class", upstreamErrorClass(err)),
-					zap.Error(err))
-				// Write the synthesized response back to the client so
-				// record-mode behaviour matches replay-mode: in replay the
-				// captured 502/504 is served from the mock store, so the
-				// real live client in record mode should see the same
-				// response instead of an unexplained EOF/timeout. Safe to
-				// do here because no response bytes were forwarded yet.
-				// A write failure is non-fatal — the mock has already
-				// been persisted for replay determinism.
-				if _, werr := clientConn.Write(synthResp); werr != nil {
-					h.Logger.Debug("failed to write synthesized upstream-error response to client; mock already persisted",
-						zap.Error(werr))
+				if len(resp) == 0 {
+					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
+						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("error_class", upstreamErrorClass(err)),
+						zap.Error(err))
+					// Write the synthesized response back to the client so
+					// record-mode behaviour matches replay-mode: in replay
+					// the captured 502/504 is served from the mock store,
+					// so the real live client in record mode should see
+					// the same response instead of an unexplained
+					// EOF/timeout. Safe to do here because no response
+					// bytes were forwarded yet. A write failure is
+					// non-fatal — the mock has already been persisted for
+					// replay determinism.
+					if _, werr := clientConn.Write(synthResp); werr != nil {
+						h.Logger.Debug("failed to write synthesized upstream-error response to client; mock already persisted",
+							zap.Error(werr))
+					}
+				} else {
+					// Partial-response-then-error: we can't safely write
+					// the synth response back to the client because some
+					// real upstream bytes were already forwarded-pending
+					// (not yet flushed to clientConn — the forward happens
+					// on the non-error path at line ~292). The client has
+					// not seen anything from us on this response yet, but
+					// the capture is still truncated — drop the partial
+					// bytes on the floor for replay safety and persist
+					// the synthesized error mock instead.
+					h.Logger.Warn("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
+						zap.Int("partial_resp_len", len(resp)),
+						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.String("error_class", upstreamErrorClass(err)),
+						zap.Error(err))
 				}
 				enqueueMock(finalReq, synthResp, reqTimestampMock, resTimestampMock)
 				errCh <- nil
