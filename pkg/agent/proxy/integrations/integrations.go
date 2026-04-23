@@ -50,6 +50,18 @@ func Register(name IntegrationType, p *Parsers) {
 // pool structure owned by the agent's MockManager (see
 // pkg/agent/proxy/mockmanager.go).
 //
+// The surface is split into four focused facets — MockReader,
+// MockWriter, MockConsumer, WindowAware — and MockMemDb itself is
+// the composite of those four. The composite shape is unchanged from
+// prior releases so every existing implementation (the agent's
+// MockManager, test doubles like match_test.go's mockMemDb) continues
+// to satisfy it without edits. Parsers that only read mocks can now
+// type their argument as MockReader; matchers that only need the
+// window accessors can take WindowAware; and so on. This is
+// opt-in — the Integrations.MockOutgoing signature still passes the
+// composite MockMemDb, so migrating a parser to a narrower facet is
+// a local, mechanical change.
+//
 // Unification plan (see docs/explanation/mock-lifetimes.md):
 //
 //   - The primary, lifetime-aware methods are GetSessionMocks,
@@ -84,6 +96,20 @@ func Register(name IntegrationType, p *Parsers) {
 // PREPARE) may need to consult the connection pool ahead of per-test
 // — follow the existing matcher's shape when in doubt.
 type MockMemDb interface {
+	MockReader
+	MockWriter
+	MockConsumer
+	WindowAware
+}
+
+// MockReader is the read-only facet of MockMemDb. Parsers that need
+// to enumerate mocks from the in-memory pool but never mutate or
+// consume on match should take this interface directly. Includes both
+// the historical accessor API (GetFilteredMocks / GetUnFilteredMocks
+// / GetFilteredMocksInWindow) and the unification API (GetSessionMocks
+// / GetPerTestMocksInWindow / GetStartupMocks / GetConnectionMocks /
+// GetSessionScopedMocks).
+type MockReader interface {
 	// --- Historical API (alias layer during Phase 2 migration). ---
 	//
 	// Deprecated: use GetPerTestMocksInWindow or GetSessionMocks.
@@ -95,33 +121,7 @@ type MockMemDb interface {
 	// GetUnFilteredMocks returns the current session-pool snapshot.
 	GetUnFilteredMocks() ([]*models.Mock, error)
 
-	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
-	DeleteFilteredMock(mock models.Mock) bool
-	DeleteUnFilteredMock(mock models.Mock) bool
 	GetMySQLCounts() (total, config, data int)
-	MarkMockAsUsed(mock models.Mock) bool
-
-	// SetCurrentTestWindow records the [start,end] timestamps of the outer
-	// HTTP/gRPC test currently being replayed. Parsers use this window via
-	// GetPerTestMocksInWindow to filter non-config mocks by their REQUEST
-	// timestamp. Responses may legitimately straggle past `end` (downstream
-	// async completion); mocks with an invalid timestamp ordering
-	// (ResTimestampMock earlier than ReqTimestampMock) are dropped as a
-	// sanity check, but response containment is NOT enforced against `end`.
-	SetCurrentTestWindow(start, end time.Time)
-
-	// IsTestWindowActive reports whether a non-zero test window has been
-	// set via SetCurrentTestWindow or SetMocksWithWindow. Parsers that
-	// partition their index into per-test and session tiers consult this
-	// at dispatch time to decide which tier a live query should be served
-	// from: true = inside a test-body window (route to per-test index),
-	// false = session / connection-scoped traffic (route to session index).
-	//
-	// Inherently racy — a concurrent test-window flip could change the
-	// answer between observation and use — but callers that need strict
-	// window/pool atomicity go through GetPerTestMocksInWindow, which
-	// snapshots both under the manager's swap lock.
-	IsTestWindowActive() bool
 
 	// Deprecated: use GetPerTestMocksInWindow.
 	GetFilteredMocksInWindow() ([]*models.Mock, error)
@@ -185,6 +185,79 @@ type MockMemDb interface {
 	// union shim.
 	GetSessionScopedMocks() ([]*models.Mock, error)
 
+	// GetConnectionMocks returns connection-scoped mock pool entries
+	// (Lifetime == LifetimeConnection) associated with the given
+	// connID (Spec.Metadata["connID"]). These are reusable for the
+	// lifetime of that specific client connection only. Prepared-
+	// statement setup mocks (Postgres Parse, MySQL COM_STMT_PREPARE)
+	// use this pool so their executes still find them across test-
+	// window boundaries while remaining isolated per connection.
+	//
+	// Returns an empty slice (no error) if connID has no associated
+	// connection pool — the caller should then fall through to the
+	// session / per-test pools.
+	GetConnectionMocks(connID string) ([]*models.Mock, error)
+
+	// SessionMockHitCounts returns per-mock atomic HitCount values for
+	// session- and connection-scoped mocks. Used by replay summary
+	// output and "which reusable mocks actually got reused?" telemetry.
+	// Key is mock.Name; value is the atomic counter's current read.
+	// Inherently racy as a snapshot — counters may increment during
+	// iteration — but that's tolerable for observability.
+	SessionMockHitCounts() map[string]uint64
+}
+
+// MockWriter is the in-place mutation facet of MockMemDb — narrow on
+// purpose, because in-place mock updates are rare (the recorder writes
+// through a different path). UpdateUnFilteredMock is used by parsers
+// that rewrite a session-pool entry after augmenting it on the fly
+// (e.g. stamping server-issued auth tokens onto a session mock so a
+// later matcher sees the updated bytes).
+type MockWriter interface {
+	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
+}
+
+// MockConsumer is the match-time consumption facet of MockMemDb.
+// Per-test mocks are consumed on match (DeleteFilteredMock), session
+// and connection mocks are marked-used for telemetry
+// (MarkMockAsUsed); DeleteUnFilteredMock exists for the rare consumer
+// that eagerly evicts a session-pool entry (e.g. the MySQL prepared-
+// statement teardown path on COM_STMT_CLOSE).
+type MockConsumer interface {
+	DeleteFilteredMock(mock models.Mock) bool
+	DeleteUnFilteredMock(mock models.Mock) bool
+	MarkMockAsUsed(mock models.Mock) bool
+}
+
+// WindowAware is the test-window facet of MockMemDb. Parsers that
+// partition their index into per-test / session / startup tiers
+// consult these accessors at dispatch time to pick the right tier
+// for a live query. The pair (IsTestWindowActive, HasFirstTestFired)
+// is NON-ATOMIC — callers that need a coherent point-in-time read of
+// both bits MUST use WindowSnapshot.
+type WindowAware interface {
+	// SetCurrentTestWindow records the [start,end] timestamps of the outer
+	// HTTP/gRPC test currently being replayed. Parsers use this window via
+	// GetPerTestMocksInWindow to filter non-config mocks by their REQUEST
+	// timestamp. Responses may legitimately straggle past `end` (downstream
+	// async completion); mocks with an invalid timestamp ordering
+	// (ResTimestampMock earlier than ReqTimestampMock) are dropped as a
+	// sanity check, but response containment is NOT enforced against `end`.
+	SetCurrentTestWindow(start, end time.Time)
+
+	// IsTestWindowActive reports whether a non-zero test window has been
+	// set via SetCurrentTestWindow or SetMocksWithWindow. Parsers that
+	// partition their index into per-test and session tiers consult this
+	// at dispatch time to decide which tier a live query should be served
+	// from: true = inside a test-body window (route to per-test index),
+	// false = session / connection-scoped traffic (route to session index).
+	//
+	// Inherently racy — a concurrent test-window flip could change the
+	// answer between observation and use — but callers that need strict
+	// window/pool atomicity go through GetPerTestMocksInWindow, which
+	// snapshots both under the manager's swap lock.
+	IsTestWindowActive() bool
+
 	// HasFirstTestFired reports whether at least one real test window
 	// has been set on the underlying MockManager via SetMocksWithWindow
 	// (non-zero start that is not the BaseTime staging sentinel).
@@ -230,25 +303,4 @@ type MockMemDb interface {
 	// types.TierIndex.orderForCurrentState). The individual bool
 	// accessors are retained for legacy callers that read only one bit.
 	WindowSnapshot() models.WindowSnapshot
-
-	// GetConnectionMocks returns connection-scoped mock pool entries
-	// (Lifetime == LifetimeConnection) associated with the given
-	// connID (Spec.Metadata["connID"]). These are reusable for the
-	// lifetime of that specific client connection only. Prepared-
-	// statement setup mocks (Postgres Parse, MySQL COM_STMT_PREPARE)
-	// use this pool so their executes still find them across test-
-	// window boundaries while remaining isolated per connection.
-	//
-	// Returns an empty slice (no error) if connID has no associated
-	// connection pool — the caller should then fall through to the
-	// session / per-test pools.
-	GetConnectionMocks(connID string) ([]*models.Mock, error)
-
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
-	SessionMockHitCounts() map[string]uint64
 }
