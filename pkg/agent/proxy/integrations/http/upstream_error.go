@@ -138,6 +138,26 @@ func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
 	return "unknown"
 }
 
+// parseRequestMethodAndURL extracts (method, request-uri) from a raw HTTP/1.x
+// request buffer on a best-effort basis. Both return values are "" if the
+// buffer cannot be parsed — callers must treat them as optional metadata
+// intended for synthesizeUpstreamErrorResponse / log annotation, not for
+// wire-level replay decisions.
+func parseRequestMethodAndURL(rawReq []byte) (method, requestURI string) {
+	if len(rawReq) == 0 {
+		return "", ""
+	}
+	req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+	if err != nil || req == nil {
+		return "", ""
+	}
+	uri := ""
+	if req.URL != nil {
+		uri = req.URL.RequestURI()
+	}
+	return req.Method, uri
+}
+
 // synthesizeUpstreamErrorResponse builds a well-formed HTTP/1.1 response that
 // captures an upstream error the recorder observed. The returned byte slice
 // is structured exactly like a real upstream response so that the downstream

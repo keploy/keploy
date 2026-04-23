@@ -263,7 +263,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				// added so operators can distinguish captured-error mocks
 				// from legitimate upstream replies. See upstream_error.go.
 				resTimestampMock := time.Now()
-				synthResp := synthesizeUpstreamErrorResponse("", "", err)
+				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
+				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
 				h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
 					zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
 					zap.String("error_class", upstreamErrorClass(err)),
@@ -310,7 +311,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				// synthesized response. Either way we persist SOMETHING —
 				// dropping the mock silently is the bug this fix addresses.
 				utils.LogError(h.Logger, err, "failed to handle chunk response; persisting synthesized mock")
-				synthResp := synthesizeUpstreamErrorResponse("", "", err)
+				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
+				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
 				enqueueMock(finalReq, synthResp, reqTimestampMock, time.Now())
 				errCh <- nil
 				return nil
