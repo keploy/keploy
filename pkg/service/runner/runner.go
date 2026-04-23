@@ -219,7 +219,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	if r.config != nil {
 		outOpts.Rules = r.config.BypassRules
 		outOpts.MongoPassword = r.config.Test.MongoPassword
-		outOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 	}
 	// Extract header noise for mock matching (mirrors replay behavior).
@@ -261,14 +261,14 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 		MockMapping:     expected,
 	}
 	// When config is nil (unit tests, embedders), follow the shipped
-	// config.Test.StrictMockWindow default (false in Phase 1, opt-in
-	// via keploy.yaml or KEPLOY_STRICT_MOCK_WINDOW=1). The env override
-	// still applies at the agent, so users can force strict without
-	// editing code.
+	// config.Test.StrictMockWindow default (true — opt out via
+	// keploy.yaml or KEPLOY_STRICT_MOCK_WINDOW=0). The env override
+	// still applies at the agent, so users can force strict off
+	// without editing code.
 	if r.config != nil {
 		params.StrictMockWindow = r.config.Test.StrictMockWindow
 	} else {
-		params.StrictMockWindow = false
+		params.StrictMockWindow = true
 	}
 	if err := r.instrumentation.UpdateMockParams(ctx, params); err != nil {
 		return expected, cleanup, fmt.Errorf("failed to update mock params: %w", err)

@@ -88,6 +88,33 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
+// shouldCacheDNSResponse reports whether a DNS resolution result is
+// eligible for the per-proxy dnsCache.
+//
+// Only real upstream responses are cached (FromUpstream == true), in
+// both record and test modes. Replayed-mock responses and
+// synthetic/fallback responses are intentionally NOT cached: mock
+// responses already come from an in-memory store and adding another
+// layer only complicates invalidation, and caching a fallback would
+// pin it for 30 s after transient upstream failures.
+//
+// Record-mode caching is safe against duplicate DNS-mock emission
+// because a cache hit short-circuits before resolveUncachedDNSResponse
+// is called — which is the only site that invokes recordDNSMock. As a
+// second line of defense recordDNSMock has its own (name, qtype)
+// dedupe tracker (p.recordedDNSMocks), so even if the cache were
+// bypassed the mock stream would still see each query at most once.
+// A 30 s TTL is short enough to pick up DNS record changes during a
+// long recording session yet long enough to amortise repeated
+// resolutions from client libraries that open one TCP connection per
+// request.
+func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
+	if !resp.FromUpstream {
+		return false
+	}
+	return mode == models.MODE_TEST || mode == models.MODE_RECORD
+}
+
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
@@ -147,9 +174,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if !found {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// Only cache real mock responses in test mode.
-			// Never cache synthetic/fallback responses, and never cache in record mode.
-			if mode == models.MODE_TEST && resp.FromUpstream {
+			if shouldCacheDNSResponse(mode, resp) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
@@ -252,9 +277,39 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	case dns.TypeAAAA:
-		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
-		// clients prefer an unreachable ::1 destination in IPv4-only environments.
-		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		// When EnableIPv6Redirect is set, the BPF cgroup program rewrites
+		// v6 destinations (including ::1) to the v4-mapped proxy address,
+		// so it is safe — and in fact required on modern Linux distros
+		// where glibc prefers ::1 over 127.0.0.1 — to answer AAAA with
+		// the proxy's v6 address. Mirror the TypeA path symmetrically.
+		//
+		// With the flag disabled we preserve the legacy behaviour of
+		// returning an empty AAAA answer: synthesising ::1 in a v4-only
+		// environment (no v6 redirect) would point clients at an
+		// unreachable destination.
+		if p.EnableIPv6Redirect {
+			proxyIP6 := net.ParseIP(p.IP6)
+			if proxyIP6 == nil {
+				// Fallback to v4-mapped ::ffff:<IP4> if p.IP6 is not a
+				// valid address (defensive — p.IP6 is hard-coded to ::1
+				// in New() today but could be overridden in docker mode).
+				if v4 := net.ParseIP(p.IP4); v4 != nil {
+					proxyIP6 = v4.To16()
+				}
+			}
+			if proxyIP6 != nil {
+				p.logger.Debug("synthesising AAAA answer for proxy v6 redirect", zap.String("proxy_ip6", proxyIP6.String()))
+				resp.Answer = []dns.RR{&dns.AAAA{
+					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: proxyIP6,
+				}}
+				return resp
+			}
+			// fall through to empty AAAA response if we could not build an answer
+			p.logger.Debug("could not build AAAA answer; returning empty AAAA response")
+			return resp
+		}
+		p.logger.Debug("AAAA synthesis disabled; returning empty AAAA response")
 		return resp
 
 	case dns.TypeSRV:
@@ -295,7 +350,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	default:
-		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
+		p.logger.Debug("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 		return resp
 	}
 }

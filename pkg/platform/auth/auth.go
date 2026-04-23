@@ -125,8 +125,8 @@ func (a *Auth) GetToken(ctx context.Context) (string, error) {
 	}
 
 	if a.jwtToken == "" {
-		a.logger.Warn("Looks like you are not logged in.")
-		a.logger.Warn("Please follow the instructions to login.")
+		a.logger.Info("Looks like you are not logged in.")
+		a.logger.Info("Please follow the instructions to login.")
 		isSuccessful := a.Login(ctx)
 		if !isSuccessful {
 			return "", fmt.Errorf("failed to login")

@@ -323,10 +323,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
 			if language == models.Unknown {
-				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.logger.Debug("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
 				r.config.Test.SkipCoverage = true
 			} else {
-				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+				r.logger.Debug(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 			}
 			r.config.Test.Language = language
 		} else if language != r.config.Test.Language && language != models.Unknown {
@@ -344,7 +344,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	case models.Python:
 		// if the executable is not starting with "python" or "python3" then skipCoverage
 		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
-			r.logger.Warn("python command not python or python3, skipping coverage calculation")
+			r.logger.Debug("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
@@ -366,7 +366,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+			r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation", zap.Error(err))
 		}
 	}
 
@@ -425,7 +425,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+				r.logger.Debug("failed to set TESTSETID env variable, skipping coverage calculation", zap.Error(err))
 			}
 		}
 
@@ -593,12 +593,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set APPEND env variable, skipping coverage calculation.", zap.Error(err))
 			}
 		}
 	}
@@ -610,7 +610,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if len(flakyTestSets) > 0 {
-		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+		r.logger.Info("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
 	}
 
 	testRunStatus := "fail"
@@ -619,7 +619,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+		r.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	r.completeTestReportMu.RLock()
@@ -649,7 +649,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -666,7 +666,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 
 			} else {
-				r.logger.Warn("failed to calculate coverage for the test run", zap.Error(err))
+				r.logger.Debug("failed to calculate coverage for the test run", zap.Error(err))
 			}
 		}
 
@@ -765,7 +765,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if len(testCases) == 0 {
-		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
+		r.logger.Debug("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
 		testReport := &models.TestReport{
 			Version:   models.GetVersion(),
@@ -971,7 +971,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:                  r.config.BypassRules,
 			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay),
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
@@ -1030,7 +1030,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if filteredMocks == nil && unfilteredMocks == nil {
-			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
+			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
@@ -1139,7 +1139,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:                  r.config.BypassRules,
 			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay),
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
@@ -1249,7 +1249,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if len(utils.SecretValues) > 0 {
 		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
 		if err != nil {
-			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+			r.logger.Debug("Failed to add secret files to .gitignore", zap.Error(err))
 		}
 	}
 
@@ -1392,7 +1392,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.config.Test.BasePath != "" {
 				newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
 				if err != nil {
-					r.logger.Warn("failed to replace the request basePath", zap.String("testcase", testCase.Name), zap.String("basePath", r.config.Test.BasePath), zap.Error(err))
+					r.logger.Error("failed to replace the request basePath",
+						zap.String("testcase", testCase.Name),
+						zap.String("basePath", r.config.Test.BasePath),
+						zap.String("next_step", "verify --basePath / test.basePath value — expected format is an absolute URL like http://host:port or a path prefix starting with /; ensure the recorded URL is compatible with this base"),
+						zap.Error(err))
 				} else {
 					testCase.HTTPReq.URL = newURL
 				}
@@ -1810,7 +1814,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		insertStart := time.Now()
 		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, tcResult)
 		if time.Since(insertStart) > 50*time.Millisecond {
-			r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+			r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 		}
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert final test case result")
@@ -1864,7 +1868,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
 
-			// Execute: Call SimulateRequest synchronously (blocks until stream is done).
+			// Execute: SimulateRequest returns once response headers arrive;
+			// for streaming cases the body reader is drained later by
+			// CompareHTTPStream below, so in-stream mock consumption can
+			// continue after this call returns.
 			started := time.Now().UTC()
 			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
 
@@ -1888,7 +1895,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var hadStreamingMismatch bool              // Track if streaming comparison failed
 			var streamMismatch *pkg.StreamMismatchInfo // Detailed mismatch info for body result
 
-			// Calculate mock mismatch early so we can use emitFailureLogs in streaming comparison
+			// Pre-stream drain + mismatch snapshot: needed to decide whether
+			// CompareHTTPStream below should emit failure logs. The mismatch
+			// is re-evaluated after the post-stream drain so extra mocks
+			// consumed while reading the stream body are counted too.
 			mockNames := make([]string, 0)
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
@@ -1984,14 +1994,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			// Update consumed mocks map.
+			// Drain mocks consumed during stream body transmission and union
+			// with the pre-stream mocks captured earlier. GetConsumedMocks
+			// drains on read, so if any mocks land between the pre-stream
+			// drain and here (e.g., one backend call per SSE frame, consumed
+			// while CompareHTTPStream was still reading frames above), they
+			// would otherwise be dropped from mappings.yaml.
 			if r.instrument {
-				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				additionalMocks, drainErr := r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if drainErr != nil {
+					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
 				}
-				for _, m := range consumedMocks {
+				for _, m := range additionalMocks {
 					totalConsumedMocks[m.Name] = m
+					mockNames = append(mockNames, m.Name)
+				}
+				consumedMocks = append(consumedMocks, additionalMocks...)
+			}
+
+			// Re-evaluate mismatch now that consumedMocks covers the full
+			// test case (pre-stream + in-stream). If CompareHTTPStream
+			// already forced emitFailureLogs=false on a streaming body
+			// mismatch, keep it suppressed — don't un-suppress just because
+			// the mock set still looks like a subset.
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+				if !hadStreamingMismatch {
+					emitFailureLogs = !mockSetMismatch
 				}
 			}
 
@@ -2428,11 +2457,12 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		return nil
 	}
 
-	// Build filter parameters. Default to strict=false when r.config is
-	// nil (unit tests, embedders) — matches the Phase 1 opt-in default
-	// in config.Test.StrictMockWindow. The env override applies at the
-	// agent for users who need strict without touching code.
-	strictMockWindow := false
+	// Build filter parameters. Default to strict=true when r.config is
+	// nil (unit tests, embedders) — matches the shipped default in
+	// config.Test.StrictMockWindow. The env override applies at the
+	// agent so KEPLOY_STRICT_MOCK_WINDOW=0 still opts out without
+	// touching code.
+	strictMockWindow := true
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
@@ -3215,8 +3245,8 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	token, err := r.auth.GetToken(ctx)
 	if err != nil {
 		r.logger.Error("Failed to Authenticate user", zap.Error(err))
-		r.logger.Warn("Looks like you haven't logged in, skipping mock upload/download")
-		r.logger.Warn("Please login using `keploy login` to perform mock upload/download action")
+		r.logger.Info("Looks like you haven't logged in, skipping mock upload/download")
+		r.logger.Info("Please login using `keploy login` to perform mock upload/download action")
 		return fmt.Errorf("mocks downloading failed to due to authentication error")
 	}
 
@@ -3456,7 +3486,7 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	// Try to get mappings from the database.
 	expectedTestMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+		r.logger.Debug("Failed to get mappings, falling back to timestamp-based filtering",
 			zap.String("testSetID", testSetID),
 			zap.Error(err))
 		return false, defaultMappings

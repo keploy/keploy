@@ -217,28 +217,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-	case "gen":
-		cmd.Flags().String("source-file-path", "", "Path to the source file.")
-		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
-		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
-		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
-		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
-		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
-		cmd.Flags().String("test-dir", "", "Path to the test directory.")
-		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
-		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
-		cmd.Flags().String("llm-api-version", "", "API version of the llm")
-		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
-		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
-		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
-		err := cmd.MarkFlagRequired("test-command")
-		if err != nil {
-			errMsg := "failed to mark testCommand as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
@@ -322,6 +300,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// --ca-java-home is the manual override for the app-aware Java
+		// truststore install. When the auto-detector in
+		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
+		// (exotic launcher, containerised re-exec), operators can point
+		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
+		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
+		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
 
 	default:
 		return errors.New("unknown command name")
@@ -406,16 +391,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
-		"sourceFilePath":        "source-file-path",
-		"testFilePath":          "test-file-path",
-		"testCommand":           "test-command",
-		"coverageFormat":        "coverage-format",
-		"expectedCoverage":      "expected-coverage",
-		"maxIterations":         "max-iterations",
-		"testDir":               "test-dir",
-		"llmBaseUrl":            "llm-base-url",
-		"model":                 "model",
-		"llmApiVersion":         "llm-api-version",
 		"configPath":            "config-path",
 		"path":                  "path",
 		"port":                  "port",
@@ -496,7 +471,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Debug("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
+		c.logger.Info("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
 	// The "create config file if missing" behavior is meaningful
@@ -1054,7 +1029,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			// check if the buildDelay is less than 30 seconds
 			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
-				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
+				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
@@ -1314,7 +1289,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if c.cfg.Test.Delay <= 5 {
-				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
+				c.logger.Info(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
 					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
@@ -1354,20 +1329,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	case "templatize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
-	case "gen":
-		if os.Getenv("API_KEY") == "" {
-			utils.LogError(c.logger, nil, "API_KEY is not set")
-			return errors.New("API_KEY is not set")
-		}
-		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
-			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
-			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
-			if c.cfg.Gen.TestDir == "" {
-				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
-				return errors.New("TestDir is not set")
-			}
-		}
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -1404,6 +1365,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
+
+		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get ca-java-home flag")
+			return nil
+		}
+		// Trim whitespace so accidental `--ca-java-home=" "` doesn't
+		// short-circuit auto-detection with a junk path that will
+		// stat-fail in installJavaCAForHome and fall back to PATH
+		// keytool anyway (but logged at Debug as a spurious override).
+		c.cfg.Agent.CAJavaHome = strings.TrimSpace(caJavaHome)
 
 		mode, err := cmd.Flags().GetString("mode")
 		if err != nil {

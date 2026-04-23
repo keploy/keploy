@@ -70,7 +70,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 	}
 
 	if tsConfig.MockRegistry.App == "" {
-		m.logger.Warn("App name is empty in test-set config", zap.String("testSetID", testSetID))
+		m.logger.Debug("App name is empty in test-set config", zap.String("testSetID", testSetID))
 		return fmt.Errorf("app name is empty in test-set config")
 	}
 
@@ -85,10 +85,10 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 		var response string
 
 		if len(mockContent) == 0 {
-			m.logger.Warn("Local mock file is empty, proceeding with download from keploy registry", zap.String("testSetID", testSetID))
+			m.logger.Debug("Local mock file is empty, proceeding with download from keploy registry", zap.String("testSetID", testSetID))
 			response = "y"
 		} else {
-			m.logger.Warn("Local mock file is different from the one in the Keploy registry.")
+			m.logger.Info("Local mock file is different from the one in the Keploy registry.")
 			// Prompt user for confirmation to override the local mock file
 			fmt.Print("The mock file present locally is different from the one in the Keploy registry. Do you want to override the local mock file with the version from the registry? (y/n): ")
 		}
@@ -123,14 +123,14 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 			m.logger.Info("Overriding the local mock file with the version from the Keploy registry", zap.String("testSetID", testSetID))
 
 		case <-ctx.Done(): // context cancellation (Ctrl+C)
-			m.logger.Warn("Download interrupted by user")
+			m.logger.Info("Download interrupted by user")
 			return ctx.Err() // Return the context cancellation error
 		}
 	}
 
 	if tsConfig.MockRegistry.App != m.cfg.AppName {
-		m.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", m.cfg.AppName))
-		m.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
+		m.logger.Info("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", m.cfg.AppName))
+		m.logger.Debug("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
 	m.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))
@@ -198,7 +198,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 	// If mock file is empty, return error
 	if len(mockFileContent) == 0 {
-		m.logger.Warn("Mock file is empty, skipping upload", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
+		m.logger.Debug("Mock file is empty, skipping upload", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
 		return nil
 	}
 

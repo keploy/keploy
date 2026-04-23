@@ -7,51 +7,73 @@ on:
 permissions:
   contents: write
 
+env:
+  # Central ref for the keploy/integrations commit every build leg in
+  # this workflow checks out via setup-private-parsers. Mirrors the
+  # default in prepare_and_run.yml + golangci-lint.yml so all three
+  # workflows track the same integrations ref. Prefer the repo-level
+  # `vars.INTEGRATION_REF` when set (so operators can override without
+  # editing this file), falling back to `main`. Pin to a specific SHA
+  # via the repo var if a feat branch needs to carry a cross-repo change.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
+# Session 174: release.yml is split across native platform runners to
+# unblock CGO_ENABLED=1 release builds. pg_query_go v6.2.2 (Session P)
+# links libpg_query via cgo, so every release binary needs a native
+# toolchain:
+#
+#   - linux: cross-compiling to linux from macOS without osxcross/zig-cc
+#     is out of scope (Session P TODO in goreleaser.yaml).
+#   - darwin: cross-compiling to darwin from linux needs osxcross; same
+#     issue.
+#   - windows: cross-compiling CGo to windows from linux via mingw-w64
+#     hits pg_query_go issue #138 (libpg_query does not upstream a
+#     reliable mingw-w64 build path). Native windows-latest + MinGW that
+#     ships with the hosted runner is the supported path.
+#
+# Job graph:
+#   build-linux   (matrix amd64/arm64, native linux, plain `go build`)
+#   build-darwin  (macos-latest, native clang handles both darwin archs
+#                  via the universal macOS SDK; lipo + gon for the
+#                  universal+signed archive)
+#   build-windows (windows-latest, native cgo via MinGW on PATH)
+#   release       (ubuntu-latest, downloads all per-platform archives
+#                  and creates the GitHub release via `gh release create`)
+#   build-docker / build-docker-manifest / mark-latest (unchanged;
+#     consume the linux binaries uploaded by build-linux)
+#
+# Why not `goreleaser release --skip=build` on a merger job: goreleaser
+# OSS does not support merging per-platform dist trees across runs (the
+# split-and-merge story is Pro-only). Producing archives by hand with
+# the same name_template goreleaser used (keploy_<os>_<arch>.tar.gz,
+# keploy_darwin_all.tar.gz, keploy_windows_amd64 as bare .exe) keeps
+# keploy.sh's download URLs stable. goreleaser.yaml stays in the repo
+# for local snapshot builds and as the canonical ldflags source of
+# truth.
+
 jobs:
-#  build-ui:
-#    runs-on: ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v4
-#        with:
-#          fetch-depth: 0
-#
-#      - name: Set up Go
-#        uses: actions/setup-go@v2
-#        with:
-#          go-version-file: go.mod
-
-#      - name: Checkout UI
-#        uses: actions/checkout@v4
-#        with:
-#          repository: keploy/ui
-#          path: ui
-#
-#      - name: Cache UI
-#        id: cache-ui
-#        uses: actions/cache@v3
-#        with:
-#          path: web
-#          key: ${{ hashFiles('ui/src') }}
-#
-#      - name: Set up Node
-#        if: steps.cache-ui.outputs.cache-hit != 'true'
-#        uses: actions/setup-node@v3
-#        with:
-#          node-version: '14'
-#
-#      - name: Build web app
-#        if: steps.cache-ui.outputs.cache-hit != 'true'
-#        run: |
-#          cd $GITHUB_WORKSPACE/ui
-#          npm install
-#          npm run build
-#          cp -r public $GITHUB_WORKSPACE/web
-#          rm -rf $GITHUB_WORKSPACE/ui
-
-  build-go:
-    runs-on: macos-latest
-    # runs-on: ubuntu-latest
-#    needs: build-ui
+  # ---------------------------------------------------------------
+  # Linux native builds (amd64 + arm64).
+  #
+  # Produces TWO binaries per arch:
+  #   - keploy (ldflags include SENTRY_DSN_BINARY) → archived as
+  #     keploy_linux_<arch>.tar.gz for the public GitHub release.
+  #   - keploy-docker (ldflags include SENTRY_DSN_DOCKER) → uploaded
+  #     raw for the downstream build-docker job, which COPYs it into
+  #     Dockerfile.runtime. Matches the existing
+  #     release-keploy-linux-<arch> artifact contract so build-docker
+  #     below is unchanged.
+  # ---------------------------------------------------------------
+  build-linux:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,53 +84,388 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
-#      - name: Checkout UI
-#        uses: actions/checkout@v4
-#        with:
-#          repository: keploy/ui
-#          path: ui
-#
-#      - name: Cache UI
-#        id: cache-ui
-#        uses: actions/cache@v3
-#        with:
-#          path: web
-#          key: ${{ hashFiles('ui/src') }}
+      - name: Resolve release version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build keploy (public binary)
+        # CGO_ENABLED=1 for pg_query_go / libpg_query. gcc ships with
+        # both ubuntu-latest (amd64) and ubuntu-24.04-arm (arm64) so
+        # no toolchain install is required.
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+        run: |
+          set -euxo pipefail
+          mkdir -p out/public
+          version="${{ steps.ver.outputs.version }}"
+          go build \
+            -tags=viper_bind_struct \
+            -ldflags="-s -w \
+              -X main.dsn=${SENTRY_DSN_BINARY} \
+              -X main.version=${version} \
+              -X main.apiServerURI=${SERVER_URL} \
+              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
+            -o out/public/keploy \
+            ./main.go
+
+      - name: Package keploy_linux_${{ matrix.arch }}.tar.gz
+        run: |
+          set -euxo pipefail
+          mkdir -p archive
+          cp out/public/keploy archive/keploy
+          chmod +x archive/keploy
+          tar -C archive -czf "keploy_linux_${{ matrix.arch }}.tar.gz" keploy
+
+      - name: Upload public release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-linux-${{ matrix.arch }}
+          path: keploy_linux_${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Build keploy-docker (docker sentry dsn)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+        run: |
+          set -euxo pipefail
+          mkdir -p out/docker
+          version="${{ steps.ver.outputs.version }}"
+          go build \
+            -tags=viper_bind_struct \
+            -ldflags="-s -w \
+              -X main.dsn=${SENTRY_DSN_DOCKER} \
+              -X main.version=${version} \
+              -X main.apiServerURI=${SERVER_URL} \
+              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
+            -o out/docker/keploy \
+            ./main.go
+          chmod +x out/docker/keploy
+
+      # Artifact name matches the previous build-go output so the
+      # build-docker matrix legs below download exactly what they did
+      # before (no changes to the docker flow).
+      - name: Upload docker linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-keploy-linux-${{ matrix.arch }}
+          path: out/docker/keploy
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # Darwin native build (macos-latest is Apple-silicon; Xcode's
+  # clang handles darwin/amd64 via the universal macOS SDK without a
+  # separate cross-toolchain). Produces a universal binary via lipo
+  # and signs/notarizes it with gon — same contract as the old
+  # goreleaser-on-macOS leg, just hand-rolled.
+  # ---------------------------------------------------------------
+  build-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
       - name: Import Code-Signing Certificates
         uses: Apple-Actions/import-codesign-certs@v5
         with:
-          # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
           p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
-          # The password used to import the PKCS12 file.
           p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
-      - name:  Install gon for code signing and app notarization
+
+      - name: Install gon for code signing and app notarization
         run: |
+          set -euxo pipefail
           wget -q https://github.com/Bearer/gon/releases/download/v0.0.37/gon_macos.zip
           unzip gon_macos.zip -d /usr/local/bin
           rm -rf gon_macos.zip
 
-      - name: Install cross-compilation tools
+      - name: Resolve release version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build darwin/amd64 and darwin/arm64 (native clang)
+        # CGO_ENABLED=1 with Apple clang. The macOS SDK on Apple
+        # silicon includes both arm64 and x86_64 slices, so `GOARCH=
+        # amd64 CGO_ENABLED=1 go build` links a native amd64 binary
+        # without needing osxcross. No external toolchain install.
+        env:
+          CGO_ENABLED: "1"
+          SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
         run: |
-          brew install mingw-w64
-          
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: v1.26.2
-          args: release --rm-dist --skip-validate
+          set -euxo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          mkdir -p out/darwin-amd64 out/darwin-arm64
+          for arch in amd64 arm64; do
+            GOOS=darwin GOARCH="$arch" go build \
+              -tags=viper_bind_struct \
+              -ldflags="-s -w \
+                -X main.dsn=${SENTRY_DSN_BINARY} \
+                -X main.version=${version} \
+                -X main.apiServerURI=${SERVER_URL} \
+                -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
+              -o "out/darwin-${arch}/keploy" \
+              ./main.go
+          done
+
+      - name: Fuse darwin universal binary via lipo
+        run: |
+          set -euxo pipefail
+          mkdir -p out/darwin-all
+          lipo -create -output out/darwin-all/keploy \
+            out/darwin-amd64/keploy \
+            out/darwin-arm64/keploy
+          chmod +x out/darwin-all/keploy
+          lipo -info out/darwin-all/keploy
+
+      - name: Code-sign and notarize via gon
         env:
           AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
-          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
-          SERVER_URL: https://api.keploy.io
+        # gon.json historically points at the goreleaser universal
+        # output path; override at invocation time by copying the
+        # universal binary where gon expects it. The gon.json file
+        # must reference ./out/darwin-all/keploy OR we stage at the
+        # documented goreleaser path. Stage at the documented path
+        # so gon.json is unchanged.
+        run: |
+          set -euxo pipefail
+          mkdir -p dist/keploy-mac-universal_darwin_all
+          cp out/darwin-all/keploy dist/keploy-mac-universal_darwin_all/keploy
+          chmod +x dist/keploy-mac-universal_darwin_all/keploy
+          gon -log-level=info -log-json ./gon.json
+          cp dist/keploy-mac-universal_darwin_all/keploy out/darwin-all/keploy
 
-  build-docker:
-    needs: build-go
+      - name: Package keploy_darwin_all.tar.gz
+        run: |
+          set -euxo pipefail
+          mkdir -p archive
+          cp out/darwin-all/keploy archive/keploy
+          chmod +x archive/keploy
+          tar -C archive -czf keploy_darwin_all.tar.gz keploy
+
+      - name: Upload darwin release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-darwin-all
+          path: keploy_darwin_all.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # Windows native CGo build.
+  #
+  # windows-latest ships MinGW-w64 (gcc.exe) via the pre-installed
+  # msys2/mingw64 toolchain on PATH, which satisfies pg_query_go's
+  # cgo link. Running native here avoids the linux → windows cross
+  # path that pg_query_go #138 documents as unreliable.
+  # ---------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Resolve release version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure MinGW gcc on PATH
+        # windows-latest ships MinGW-w64 under
+        # C:\ProgramData\mingw64\mingw64\bin (hosted runner image).
+        # Append defensively — if a future image moves it, the job
+        # fails fast at gcc --version rather than later at `go build`
+        # with a cryptic 'cannot find -lpg_query' link error.
+        shell: pwsh
+        run: |
+          $candidates = @(
+            'C:\ProgramData\mingw64\mingw64\bin',
+            'C:\msys64\mingw64\bin',
+            'C:\mingw64\bin'
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c 'gcc.exe')) {
+              Add-Content -Path $env:GITHUB_PATH -Value $c
+              Write-Host "Using MinGW at $c"
+            }
+          }
+          # Verify once PATH is rewritten for the next step.
+
+      - name: Verify gcc
+        shell: bash
+        run: gcc --version
+
+      - name: Build keploy.exe
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: amd64
+          SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
+          SERVER_URL: https://api.keploy.io
+          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+        run: |
+          set -euxo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          mkdir -p out
+          go build \
+            -tags=viper_bind_struct \
+            -ldflags="-s -w \
+              -X main.dsn=${SENTRY_DSN_BINARY} \
+              -X main.version=${version} \
+              -X main.apiServerURI=${SERVER_URL} \
+              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
+            -o out/keploy_windows_amd64.exe \
+            ./main.go
+
+      # Windows ships as a bare binary (goreleaser format_overrides:
+      # goos=windows → format=binary). Keep the same naming without
+      # a .exe suffix in the final release asset so existing download
+      # instructions stay valid; keploy_windows_amd64 is just the
+      # binary.
+      - name: Stage final windows asset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          cp out/keploy_windows_amd64.exe release-assets/keploy_windows_amd64
+
+      - name: Upload windows release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-windows-amd64
+          path: release-assets/keploy_windows_amd64
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # Final release assembly: downloads per-platform archives from the
+  # native build jobs and publishes a single GitHub release.
+  #
+  # We use `gh release create` directly rather than `goreleaser
+  # release --skip=build` because goreleaser OSS cannot merge dist
+  # trees produced on different runners (split-and-merge is a Pro
+  # feature). The release block in goreleaser.yaml is small
+  # (prerelease:auto, mode:replace, draft:false, make_latest:false)
+  # so replicating it here is trivial.
+  # ---------------------------------------------------------------
+  release:
+    needs: [build-linux, build-darwin, build-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download linux amd64 archive
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archive-linux-amd64
+          path: release-assets
+
+      - name: Download linux arm64 archive
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archive-linux-arm64
+          path: release-assets
+
+      - name: Download darwin archive
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archive-darwin-all
+          path: release-assets
+
+      - name: Download windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: release-archive-windows-amd64
+          path: release-assets
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+          ls -la release-assets/
+          # prerelease:auto — pre-release if the tag has a suffix
+          # (v1.2.3-beta1, -rc1, etc).
+          prerelease_flag=""
+          if [[ "$TAG" == *-* ]]; then
+            prerelease_flag="--prerelease"
+          fi
+          # make_latest:false in goreleaser.yaml — marking-latest is
+          # deferred to the mark-latest job below (only after docker
+          # images have been published and signed).
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --generate-notes \
+            --latest=false \
+            $prerelease_flag \
+            release-assets/keploy_linux_amd64.tar.gz \
+            release-assets/keploy_linux_arm64.tar.gz \
+            release-assets/keploy_darwin_all.tar.gz \
+            release-assets/keploy_windows_amd64
+
+  # Per-platform docker image build. Each matrix leg runs on a
+  # native runner for its target arch (ubuntu-latest for amd64,
+  # ubuntu-24.04-arm for arm64) so Dockerfile.runtime's RUN steps
+  # (apt-get + sed/chmod) execute natively — no qemu anywhere in
+  # the release pipeline, not even for the base-image bootstrap.
+  # Each leg pushes by digest without a tag; build-docker-manifest
+  # below stitches the per-arch digests into the final multi-arch
+  # manifest list and signs it.
+  build-docker:
+    needs: build-linux
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+            artifact: release-keploy-linux-amd64
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: release-keploy-linux-arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -118,11 +475,69 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3.12.0
 
+      - name: Log into registry ghcr.io
+        uses: docker/login-action@v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Download prebuilt binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/keploy-linux-${{ matrix.arch }}
+
+      - name: Make binary executable
+        run: chmod +x dist/keploy-linux-${{ matrix.arch }}/keploy
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile.runtime
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest for manifest stitch
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine the per-arch digests published by each build-docker leg
+  # into a single multi-arch manifest list under the public
+  # metadata-derived tags, then cosign-sign the resulting manifest
+  # list. Signing at the manifest level covers every arch ref in one
+  # go (cosign walks the manifest). Kept on ubuntu-latest because
+  # only docker/imagetools + cosign run here — no per-arch workload.
+  build-docker-manifest:
+    needs: build-docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.10.1
 
@@ -142,43 +557,40 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
-      - name: Set version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-      - name: Prepare Dockerfile for Release Build
-        run: |
-          cp Dockerfile Dockerfile.release
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
-          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
-          sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
-
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@v6.19.2
+      - name: Download per-arch digests
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          file: ./Dockerfile.release
-          ssh: default
-          platforms: linux/amd64, linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
-            VERSION=${{ env.VERSION }}
-            SERVER_URL=https://api.keploy.io
-            GITHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Inspect and capture manifest digest
+        id: inspect
+        run: |
+          TAG="${{ steps.meta.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository }}:$TAG"
+          docker buildx imagetools inspect "$IMAGE"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::failed to resolve manifest digest for $IMAGE"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Sign the published Docker image
         env:
           COSIGN_EXPERIMENTAL: "true"
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.inspect.outputs.digest }}
 
   mark-latest:
-    needs: [build-go, build-docker]
+    needs: [release, build-docker-manifest]
     runs-on: ubuntu-latest
     # Only mark stable releases (no pre-release suffix like -beta1, -rc1) as latest
     if: ${{ !contains(github.ref_name, '-') }}

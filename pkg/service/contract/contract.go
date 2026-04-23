@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/fatih/color"
@@ -245,7 +246,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 		for _, service := range services {
 			if _, exists := mappings[service]; !exists {
 				// Warn if the service is not found in the services mapping.
-				s.logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
+				s.logger.Debug("Service not found in services mapping, no contract generation", zap.String("service", service))
 			}
 		}
 	}
@@ -401,6 +402,123 @@ func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 	}
 
 	return nil
+}
+
+func (s *contract) GenerateFromTests(ctx context.Context) error {
+	keployPath := filepath.Join(s.config.Path, "keploy")
+	if filepath.Base(filepath.Clean(s.config.Path)) == "keploy" {
+		keployPath = s.config.Path
+	}
+	originalPath := s.config.Path
+
+	s.testDB.ChangePath(keployPath)
+	defer s.testDB.ChangePath(originalPath)
+
+	testSetIDs, err := s.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to get test set IDs from keploy directory", zap.String("path", keployPath), zap.String("hint", "verify that --path points to a directory containing keploy/<test-set>/tests/*.yaml files"))
+		return err
+	}
+
+	// Honor --tests as a test-set filter so the flag has an observable effect
+	// on inference output; without this it is silently ignored.
+	if selected := s.config.Contract.Tests; len(selected) > 0 {
+		allowed := make(map[string]struct{}, len(selected))
+		for _, id := range selected {
+			allowed[id] = struct{}{}
+		}
+		filtered := make([]string, 0, len(testSetIDs))
+		for _, id := range testSetIDs {
+			if _, ok := allowed[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) == 0 {
+			utils.LogError(s.logger, nil, "no recorded test sets match the --tests filter", zap.Strings("requested", selected), zap.Strings("available", testSetIDs))
+			return fmt.Errorf("no recorded test sets match the --tests filter")
+		}
+		testSetIDs = filtered
+	}
+	sort.Strings(testSetIDs)
+
+	testCases := make([]models.TestCase, 0)
+	for _, testSetID := range testSetIDs {
+		tcs, err := s.testDB.GetTestCases(ctx, testSetID)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID), zap.String("path", keployPath), zap.String("hint", "ensure the test set directory contains valid YAML test case files"))
+			return err
+		}
+		for _, tc := range tcs {
+			if tc == nil {
+				continue
+			}
+			// Hydrate request body from BodyRef when the body was offloaded to disk (>1MB).
+			if tc.HTTPReq.Body == "" && tc.HTTPReq.BodyRef.Path != "" {
+				refPath, err := safeJoinWithinRoot(keployPath, tc.HTTPReq.BodyRef.Path)
+				if err != nil {
+					s.logger.Debug("skipping offloaded request body with unsafe path", zap.String("bodyRefPath", tc.HTTPReq.BodyRef.Path), zap.Error(err), zap.String("hint", "BodyRef.Path must be a relative path contained within the keploy directory"))
+				} else if data, err := os.ReadFile(refPath); err != nil {
+					s.logger.Debug("could not read offloaded request body; continuing schema inference without it", zap.String("path", refPath), zap.Error(err), zap.String("hint", "ensure the asset file exists under keploy/<test-set>/assets and is readable"))
+				} else {
+					tc.HTTPReq.Body = string(data)
+					s.logger.Debug("hydrated request body from BodyRef", zap.String("path", refPath), zap.Int64("size", tc.HTTPReq.BodyRef.Size))
+				}
+			}
+			testCases = append(testCases, *tc)
+		}
+	}
+
+	inferred, err := InferSchema(testCases)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to infer OpenAPI schema from test cases")
+		return err
+	}
+
+	if err := inferred.Validate(ctx); err != nil {
+		utils.LogError(s.logger, err, "inferred OpenAPI schema validation failed")
+		return err
+	}
+
+	data, err := yamlLib.Marshal(inferred)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to marshal inferred OpenAPI schema")
+		return err
+	}
+
+	if err := os.MkdirAll(keployPath, 0o755); err != nil {
+		utils.LogError(s.logger, err, "failed to create keploy directory", zap.String("path", keployPath))
+		return err
+	}
+
+	outputPath := filepath.Join(keployPath, "contract.yaml")
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
+		return err
+	}
+
+	s.logger.Info("Inferred OpenAPI contract generated", zap.String("path", outputPath))
+	return nil
+}
+
+// safeJoinWithinRoot resolves rel against root and guarantees the result stays
+// inside root. It rejects absolute paths and any traversal (via ..) that would
+// escape root, so a malformed BodyRef.Path cannot coerce os.ReadFile into
+// reading arbitrary files on disk.
+func safeJoinWithinRoot(root, rel string) (string, error) {
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("absolute path not allowed")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	joined := filepath.Join(absRoot, rel)
+	cleaned := filepath.Clean(joined)
+	rootWithSep := absRoot + string(filepath.Separator)
+	if cleaned != absRoot && !strings.HasPrefix(cleaned, rootWithSep) {
+		return "", fmt.Errorf("resolved path %q escapes root %q", cleaned, absRoot)
+	}
+	return cleaned, nil
 }
 
 func (s *contract) DownloadTests(_ string) error {
