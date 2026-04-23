@@ -39,34 +39,6 @@ const mockFormatGob = "gob"
 // decoding to a corrupt struct.
 const gobMockMagic = "keploy-gob-v1\n"
 
-// isUnfilteredMockKind is a compat no-op retained for symmetry with
-// earlier revisions of this file. Pool routing in GetFilteredMocks /
-// GetUnFilteredMocks now goes through models.Mock.DeriveLifetime (the
-// same classifier the in-memory filter layer uses), so the kind-level
-// shortcut this function used to own is no longer part of the read-
-// path decision tree. The models.DeriveLifetime kind-fallback covers
-// the same OSS-owned kinds (HTTP, HTTP2, MySQL, Postgres, PostgresV2,
-// Generic, DNS) when a mock arrives without an explicit Metadata
-// ["type"] tag, so untagged recordings from those recorders still
-// resolve to LifetimeSession and land in the config/unfiltered pool
-// exactly as before. Kept as a zero-maintenance surface so an external
-// caller in an internal branch that references the symbol does not
-// break on rebase; remove in a follow-up once every tree is
-// confirmed clean.
-func isUnfilteredMockKind(kind models.Kind) bool {
-	switch kind {
-	case models.GENERIC, models.Postgres, models.PostgresV2, models.HTTP, models.HTTP2, models.MySQL, models.DNS:
-		return true
-	}
-	return false
-}
-
-// Ensure isUnfilteredMockKind is retained (see doc comment). The
-// compiler does not complain about unused package-level functions,
-// but explicit pinning makes the no-op status legible to readers and
-// to simple grep-based audits.
-var _ = isUnfilteredMockKind
-
 // configuredMockFormat holds the mock format selected via config file
 // (record.mockFormat). The env var KEPLOY_MOCK_FORMAT takes precedence
 // so ad-hoc runs can override the file without editing it.
