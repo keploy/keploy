@@ -17,16 +17,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Central pin for the keploy/integrations commit this workflow checks
+  # Central ref for the keploy/integrations commit this workflow checks
   # out via setup-private-parsers. Mirrors the default in
-  # prepare_and_run.yml so all three workflows (prepare_and_run,
-  # release, golangci-lint) track the same integrations SHA. Prefer the
-  # repo-level `vars.INTEGRATION_REF` when set (so operators can
-  # override the pin without editing this file), falling back to the
-  # hard-coded SHA.
-  #
-  # Revert to `main` (drop this key) once keploy/integrations#130 merges.
-  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || '127d5c37875ba2762e3561d17e4e8501fe671afa' }}
+  # prepare_and_run.yml + release.yml so all three workflows track the
+  # same integrations ref. Prefer the repo-level `vars.INTEGRATION_REF`
+  # when set (so operators can override without editing this file),
+  # falling back to `main`. Pin to a specific SHA via the repo var if
+  # a feat branch needs to carry a cross-repo change.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
 
 jobs:
   golangci:
