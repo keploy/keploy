@@ -194,8 +194,24 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					}
 					break
 				}
-				utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
-				errCh <- err
+				// Upstream error BEFORE any response bytes were received
+				// (timeout, connection refused, reset, etc.). Historically
+				// the recorder dropped the call on the floor here, which
+				// meant replay had no mock to match the re-issued request
+				// and served a synthetic "no matching mock" 502 — producing
+				// body- and elapsed-ms diffs against the recorded run.
+				//
+				// Synthesize a well-formed HTTP response that captures the
+				// observed error (504 for timeouts, 502 for everything else)
+				// and persist it as a mock. A distinctive marker header is
+				// added so operators can distinguish captured-error mocks
+				// from legitimate upstream replies. See upstream_error.go.
+				resTimestampMock := time.Now()
+				synthResp := synthesizeUpstreamErrorResponse("", "", err)
+				h.Logger.Warn("upstream returned error before any response bytes; persisting synthesized mock",
+					zap.Error(err))
+				enqueueMock(finalReq, synthResp, reqTimestampMock, resTimestampMock)
+				errCh <- nil
 				return nil
 			}
 
@@ -223,8 +239,17 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- nil
 					return nil
 				}
-				utils.LogError(h.Logger, err, "failed to handle chunk response")
-				errCh <- err
+				// Upstream error while we were already reading the response
+				// body (timeout mid-body, peer reset, broken pipe, etc.).
+				// Prefer to persist whatever partial bytes we collected so
+				// that replay observes a consistent error; if the partial
+				// bytes are not a valid HTTP message fall back to a fully
+				// synthesized response. Either way we persist SOMETHING —
+				// dropping the mock silently is the bug this fix addresses.
+				utils.LogError(h.Logger, err, "failed to handle chunk response; persisting synthesized mock")
+				synthResp := synthesizeUpstreamErrorResponse("", "", err)
+				enqueueMock(finalReq, synthResp, reqTimestampMock, time.Now())
+				errCh <- nil
 				return nil
 			}
 
