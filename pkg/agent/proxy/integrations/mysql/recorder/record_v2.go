@@ -509,19 +509,32 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 // relay when dialing TLS to the real upstream MySQL server. We derive
 // the ServerName from the destination address (host portion of
 // host:port in Opts.DstCfg.Addr) so the handshake uses correct SNI.
+//
+// InsecureSkipVerify is intentionally true here: keploy runs as a
+// record-mode MITM between the application and its real database.
+// The application's own trust store is the authoritative check on
+// the upstream cert; keploy sits inside the network path only to
+// observe the handshake and subsequent traffic, and has no way to
+// verify against the application's CA bundle. The same pattern is
+// used throughout keploy's MITM paths (see pkg/agent/proxy/proxy.go
+// and pkg/agent/proxy/integrations/mysql/recorder/conn.go for the
+// legacy callers). Record mode only — replay mode uses a different
+// config path.
 func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
-	cfg := &tls.Config{InsecureSkipVerify: true}
+	var serverName string
 	if sess.Opts.DstCfg != nil {
 		addr := sess.Opts.DstCfg.Addr
 		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
-			cfg.ServerName = host
+			serverName = host
 		} else if addr != "" {
-			// Fall back to raw addr; TLS will still proceed with
-			// InsecureSkipVerify but SNI may be wrong.
-			cfg.ServerName = addr
+			serverName = addr
 		}
 	}
-	return cfg
+	return &tls.Config{
+		// #nosec G402 — MITM record mode; see function doc.
+		InsecureSkipVerify: true, // lgtm[go/disabled-certificate-check]
+		ServerName:         serverName,
+	}
 }
 
 // buildClientTLSConfigV2 returns a non-nil placeholder TLS config to
