@@ -194,8 +194,10 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	setup.mergeConsumed(consumed)
 
 	// 8. Check mock mismatches (DNS-filtered — DNS resolution order is
-	//    non-deterministic, so it would produce spurious diffs).
-	mismatch := r.checkMockMismatches(setup, expectedMocks, consumed)
+	//    non-deterministic, so it would produce spurious diffs). The
+	//    mismatch report carries kind for every entry so downstream
+	//    consumers never fall back to name-substring heuristics.
+	mismatch := r.checkMockMismatches(setup, expectedEntriesForTest(setup, tc.Name), consumed)
 
 	diffJSON, err := json.Marshal(respCompare)
 	if err != nil {
@@ -497,8 +499,10 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 }
 
 // expectedMocksForTest returns this step's expected mock-name list from
-// the cached mapping. No error case — a missing test case name means
-// the step has no mapped mocks, which is legal.
+// the cached mapping. Used by sendPerTestParams for the agent's
+// MockMapping filter — the agent only needs names. No error case — a
+// missing test case name means the step has no mapped mocks, which is
+// legal.
 func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
 	if setup == nil {
 		return nil
@@ -512,6 +516,32 @@ func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
 		expected = append(expected, m.Name)
 	}
 	return expected
+}
+
+// expectedEntriesForTest returns this step's expected mocks as
+// {name, kind} pairs for the mismatch report. Kind is sourced from the
+// mapping entry when present; otherwise falls back to the name→Kind
+// registry built from the loaded pool (mapping entries frequently have
+// empty Kind, same issue replay.go:1499-1510 guards against).
+func expectedEntriesForTest(setup *testSetSetup, testCaseName string) []MockRef {
+	if setup == nil {
+		return nil
+	}
+	entries, ok := setup.mappings[testCaseName]
+	if !ok {
+		return nil
+	}
+	out := make([]MockRef, 0, len(entries))
+	for _, m := range entries {
+		kind := m.Kind
+		if kind == "" {
+			if k, ok := setup.mockKindByName[m.Name]; ok {
+				kind = string(k)
+			}
+		}
+		out = append(out, MockRef{Name: m.Name, Kind: kind})
+	}
+	return out
 }
 
 // sendPerTestParams issues the per-step UpdateMockParams. The window
@@ -537,7 +567,14 @@ func (r *Runner) sendPerTestParams(ctx context.Context, setup *testSetSetup, exp
 // non-deterministic (replay.go:1499-1517 does the same). MockEntry.Kind
 // in mappings is frequently empty, so we fall back to the kind registry
 // built from the loaded mock pool.
-func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []string, consumed []models.MockState) *MockMismatch {
+//
+// Both lists carry {Name, Kind} so downstream consumers (UI, stored
+// reports) don't need to re-derive kind from the name. Kind on consumed
+// entries comes from MockState.Kind (what the agent's matcher actually
+// classified the mock as); on expected entries it comes from the
+// mapping with a fallback to the loaded-pool kind registry for
+// mappings that shipped without Kind fields.
+func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, consumed []models.MockState) *MockMismatch {
 	if r.instrumentation == nil {
 		return nil
 	}
@@ -553,17 +590,21 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []string, con
 		return false
 	}
 
-	filteredExpected := make([]string, 0, len(expected))
-	for _, name := range expected {
-		if !isDNS(name, "") {
-			filteredExpected = append(filteredExpected, name)
+	filteredExpected := make([]MockRef, 0, len(expected))
+	for _, e := range expected {
+		if !isDNS(e.Name, models.Kind(e.Kind)) {
+			filteredExpected = append(filteredExpected, e)
 		}
 	}
-	filteredConsumed := make([]string, 0, len(consumed))
+	filteredConsumed := make([]MockRef, 0, len(consumed))
 	for _, s := range consumed {
-		if !isDNS(s.Name, s.Kind) {
-			filteredConsumed = append(filteredConsumed, s.Name)
+		if isDNS(s.Name, s.Kind) {
+			continue
 		}
+		filteredConsumed = append(filteredConsumed, MockRef{
+			Name: s.Name,
+			Kind: string(s.Kind),
+		})
 	}
 	return &MockMismatch{
 		ExpectedMocks: filteredExpected,
