@@ -174,7 +174,7 @@ func (m *Mock) DeriveLifetime() {
 	}
 	// Kind-based fallback for UN-TAGGED mocks only. Pre-tag recordings
 	// relied on the kind-switch in pkg/platform/yaml/mockdb/db.go to
-	// route everything HTTP/HTTP2/MySQL/Redis/Postgres/PostgresV2/Generic
+	// route everything HTTP/HTTP2/MySQL/Postgres/PostgresV2/Generic
 	// /DNS to the "config" pool. Emulate that here so the Lifetime field
 	// has a defensible value for those recordings.
 	//
@@ -326,12 +326,23 @@ func LegacyKindFallbackFires() uint64 {
 // record time (via a protocol-specific classifier like
 // recordMock's type=mocks/config/connection branches).
 //
+// Out-of-tree parsers (Enterprise Redis / Kafka / HBase) do NOT get
+// added here. Their recorders already stamp type=config / mocks /
+// connection at record time, so DeriveLifetime's tag-based switch
+// routes them correctly without a kind-fallback. Listing them here
+// would additionally fire the lax-mode promotion below for their
+// explicitly-tagged "mocks" captures and wrongly route those to
+// the session pool — which breaks the per-test consumption the
+// matcher depends on (observed in the kafka-ecommerce e2e as
+// dataMocksConsumed=0 when tagged Kafka Produce mocks were force-
+// promoted to session).
+//
 // The LegacyKindFallbackFires counter still tracks uses for
 // observability, but non-zero fires are EXPECTED for HTTP/Generic
 // recordings.
 func kindsWithImplicitSessionLifetime(k Kind) bool {
 	switch k {
-	case HTTP, HTTP2, MySQL, REDIS, Postgres, PostgresV2, GENERIC, DNS:
+	case HTTP, HTTP2, MySQL, Postgres, PostgresV2, GENERIC, DNS:
 		return true
 	}
 	return false
