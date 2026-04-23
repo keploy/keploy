@@ -1838,22 +1838,51 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	<-ctx.Done()
 
 	p.logger.Info("stopping proxy server...")
-	var cleanupErrors []error
-	p.connMutex.Lock()
-	for _, clientConn := range p.clientConnections {
-		if err := clientConn.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
 
-		}
-	}
-	p.clientConnections = nil
-	p.connMutex.Unlock()
+	// Coordinated shutdown sequence (PLAN.md §3.7, partial I8).
+	//
+	// 1. Trip the parsing kill switch first. Any connection still in
+	//    flight between Accept and parser dispatch is routed to raw
+	//    globalPassThrough instead of a parser — so we don't start a
+	//    parser goroutine for a connection that's about to be torn
+	//    down.
+	// 2. Close the listener, stopping further Accepts.
+	// 3. Give existing parser goroutines a bounded grace window to
+	//    finish (they see ctx.Done via parserCtx and return).
+	// 4. Force-close any still-live client connections at the end.
+	//
+	// The kernel-side proxy_ready BPF gate that would prevent new
+	// connects from being redirected here once the userspace process
+	// is unhealthy requires BPF source changes (the source is not in
+	// this repo) and is tracked as deferred work in PLAN.md.
+	util.DefaultKillSwitch.Trip()
+	defer util.DefaultKillSwitch.Reset()
+
+	var cleanupErrors []error
 	if p.Listener != nil {
 		if err := p.Listener.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close listener: %w", err))
 		}
 		p.Listener = nil
 	}
+
+	// Drain grace: let in-flight parsers finish naturally before we
+	// pull the rug on their client connections. 5 seconds is long
+	// enough for typical request/response cycles but short enough
+	// that shutdown doesn't hang indefinitely on a stuck parser.
+	const drainGrace = 5 * time.Second
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainGrace)
+	defer drainCancel()
+	p.waitForConnDrain(drainCtx)
+
+	p.connMutex.Lock()
+	for _, clientConn := range p.clientConnections {
+		if err := clientConn.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
+		}
+	}
+	p.clientConnections = nil
+	p.connMutex.Unlock()
 	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
 		if err := p.stopDNSServers(ctx); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))

@@ -224,3 +224,29 @@ func newProxyTLSUpgradeFn(srcPtr, dstPtr *net.Conn, logger *zap.Logger) relay.TL
 var _ = fakeconn.FromClient
 var _ directive.Kind = directive.KindUpgradeTLS
 var _ = util.DefaultKillSwitch
+
+// waitForConnDrain blocks until either all tracked client connections
+// have closed or ctx is done (typically a 5-second shutdown grace).
+// Called from StopProxyServer after the listener is closed and the
+// kill switch is tripped. Poll-based rather than channel-based
+// because p.clientConnections is a slice of raw net.Conn values we
+// don't own lifecycle hooks on; we just watch the count.
+func (p *Proxy) waitForConnDrain(ctx context.Context) {
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+	for {
+		p.connMutex.Lock()
+		n := len(p.clientConnections)
+		p.connMutex.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			p.logger.Debug("shutdown drain grace expired; force-closing remaining connections",
+				zap.Int("remaining", n))
+			return
+		case <-t.C:
+		}
+	}
+}
