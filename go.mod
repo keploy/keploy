@@ -206,13 +206,3 @@ require (
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 )
-
-// Local-build pull-in of integrations (postgres v3 parser + friends).
-// Mirrors the CI setup-private-parsers action; ensures the combined-branch
-// agent binary registers the v3 parser so JDBC Postgres traffic isn't
-// silently handled as Generic. The replace points at the sibling checkout,
-// which itself has a replace back to this keploy clone — bidirectional
-// local development.
-require github.com/keploy/integrations v0.0.0-00010101000000-000000000000
-
-replace github.com/keploy/integrations => /home/shubham/tricentis/sap_testing/integrations
