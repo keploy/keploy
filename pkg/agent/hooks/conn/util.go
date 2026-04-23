@@ -36,7 +36,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 
 // LargeBodyThreshold is the size threshold (1MB) above which response bodies
 // are skipped during recording and only body size is stored.
-const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 M
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	if memoryguard.IsRecordingPaused() {
