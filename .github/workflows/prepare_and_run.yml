@@ -51,7 +51,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          integration-ref: f54614b22babce4dbda573e13776735a10e09b50
 
       - name: Build Keploy (non-race)
         # CGO_ENABLED=1 explicit so the pg_query_go (libpg_query) cgo
@@ -111,7 +111,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          integration-ref: f54614b22babce4dbda573e13776735a10e09b50
 
       - name: Build Keploy (non-race, linux/arm64)
         # CGO_ENABLED=1 explicit — see the build-and-upload job
@@ -152,7 +152,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          integration-ref: f54614b22babce4dbda573e13776735a10e09b50
 
       - name: Build Keploy (darwin/arm64)
         # Native arm64 build — macos-latest GHA runners are
@@ -427,7 +427,7 @@ jobs:
           # parser, so CI stays reproducible even if the branch is
           # renamed or deleted. Revert to `main` (drop this key) once
           # keploy/integrations#130 merges.
-          integration-ref: 3d3f2a0fe4e77008e6f84a83225d99f8a6a1b3e0
+          integration-ref: f54614b22babce4dbda573e13776735a10e09b50
 
       - name: Add MinGW gcc to PATH
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
