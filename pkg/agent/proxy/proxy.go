@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,57 @@ import (
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
+}
+
+// probeFanoutEnabled toggles [PROBE/proxy] / [PROBE/dial] structured
+// logs via KEPLOY_PROBE_FANOUT=1. The flag is read once at first use
+// and cached in an atomic so hot-path branches are a single load.
+// Used to diagnose the parallel-TLS-fanout stall (SAP + Postgres
+// concurrent handshakes) without polluting normal record runs.
+var (
+	probeFanoutOnce    sync.Once
+	probeFanoutEnabled atomic.Bool
+)
+
+func probeOn() bool {
+	probeFanoutOnce.Do(func() {
+		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
+			probeFanoutEnabled.Store(true)
+		}
+	})
+	return probeFanoutEnabled.Load()
+}
+
+// probeProxy emits a [PROBE/proxy] log tagged with a stable conn id
+// and phase name. Cheap to call when the probe is off (single atomic
+// load + early return); zero allocations on the hot disabled path.
+func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Field) {
+	if !probeOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "proxy"),
+		zap.String("phase", phase),
+		zap.Int64("connID", connID),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/proxy]", append(base, fields...)...)
+}
+
+// probeDial emits a [PROBE/dial] log for upstream dial timing.
+func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durNs int64, fields ...zap.Field) {
+	if !probeOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "dial"),
+		zap.String("phase", phase),
+		zap.Int64("connID", connID),
+		zap.String("addr", addr),
+		zap.Int64("dur_ns", durNs),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/dial]", append(base, fields...)...)
 }
 
 type Proxy struct {
@@ -85,6 +137,23 @@ type Proxy struct {
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
 	IsDocker          bool
+
+	// EnableIPv6Redirect mirrors config.Agent.EnableIPv6Redirect. When
+	// true (the default), the synthetic DNS fallback answers AAAA
+	// queries with ::1 so clients can reach the proxy via the IPv6
+	// loopback that the BPF cgroup program redirects. When false, AAAA
+	// is returned empty to preserve the legacy v4-only behaviour.
+	EnableIPv6Redirect bool
+
+	// appPID and caJavaHome are captured at proxy-construction time from
+	// config.Agent (ClientNSPID + CAJavaHome) and passed to
+	// pTls.SetupCAForApp so the Java keystore import targets the JDK the
+	// instrumented application is actually running with — not the
+	// arbitrary JDK first on PATH. On non-Java, Windows, or shared-volume
+	// paths these are ignored. See pkg/agent/proxy/tls/java_detect.go for
+	// the resolution order and rationale.
+	appPID     uint32
+	caJavaHome string
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
@@ -224,24 +293,163 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 	}
 }
 
+// speculativeUpstreamTLS holds the state of an upstream TLS dial that was
+// kicked off concurrently with the MITM client-facing handshake. A completed
+// dial (conn or err) is published on done; cancel aborts an in-flight dial
+// if the caller decides the speculative config is unusable and wants to
+// synchronously redial.
+//
+// The helper exists so the record-mode hot path can overlap the two
+// handshakes (each ~1 RTT) instead of running them serially. Against slow
+// remotes the saving is ~one full RTT of client-facing handshake time per
+// intercepted TLS connection.
+type speculativeUpstreamTLS struct {
+	done    chan speculativeUpstreamTLSResult
+	cancel  context.CancelFunc
+	settled sync.Once // ensures exactly one of join()/abandon() consumes done
+	// protos is the NextProtos slice the speculative dial offered upstream.
+	// The caller compares it against the final (post-initialBuf) desired
+	// ALPN; on mismatch the caller abandons the speculative conn and
+	// synchronously redials. Keeping the slice here avoids re-deriving it.
+	protos []string
+}
+
+type speculativeUpstreamTLSResult struct {
+	conn *tls.Conn
+	err  error
+}
+
+// startSpeculativeUpstreamTLS kicks off a background tls.Dial against addr
+// using cfg. The returned *speculativeUpstreamTLS MUST either be joined via
+// join() or cancelled via abandon(); otherwise the dial goroutine and its
+// socket are leaked.
+//
+// parentCtx is typically the same ctx used by handleConnection so the dial
+// participates in shutdown. The helper derives its own cancellable ctx so
+// the caller can tear the dial down independently (e.g. on client-handshake
+// failure or an ALPN mismatch).
+func startSpeculativeUpstreamTLS(parentCtx context.Context, addr string, cfg *tls.Config) *speculativeUpstreamTLS {
+	dialCtx, cancel := context.WithCancel(parentCtx)
+	s := &speculativeUpstreamTLS{
+		done:   make(chan speculativeUpstreamTLSResult, 1),
+		cancel: cancel,
+		protos: append([]string(nil), cfg.NextProtos...),
+	}
+	go func() {
+		dialer := &tls.Dialer{Config: cfg}
+		c, err := dialer.DialContext(dialCtx, "tcp", addr)
+		var tlsConn *tls.Conn
+		if err == nil {
+			if tc, ok := c.(*tls.Conn); ok {
+				tlsConn = tc
+			} else {
+				// DialContext returns net.Conn; for tls.Dialer the
+				// concrete type is always *tls.Conn. Guard anyway
+				// in case future stdlib refactors wrap it.
+				_ = c.Close()
+				err = errors.New("tls.Dialer returned non-*tls.Conn")
+			}
+		}
+		s.done <- speculativeUpstreamTLSResult{conn: tlsConn, err: err}
+	}()
+	return s
+}
+
+// join waits for the speculative dial to finish and returns the result. The
+// caller owns the returned conn (or nothing on error) and is responsible
+// for closing it. join() must be called at most once and must not be
+// interleaved with abandon().
+func (s *speculativeUpstreamTLS) join(ctx context.Context) (*tls.Conn, error) {
+	var (
+		conn    *tls.Conn
+		joinErr error
+	)
+	s.settled.Do(func() {
+		select {
+		case r := <-s.done:
+			s.cancel() // free the derived ctx; no-op if dial already returned
+			conn, joinErr = r.conn, r.err
+		case <-ctx.Done():
+			// Parent ctx expired; make sure the dial goroutine unblocks.
+			s.cancel()
+			// Drain the pending result so the goroutine can exit cleanly.
+			r := <-s.done
+			if r.conn != nil {
+				_ = r.conn.Close()
+			}
+			joinErr = ctx.Err()
+		}
+	})
+	return conn, joinErr
+}
+
+// abandon cancels the in-flight dial and closes the resulting conn if the
+// dial had already succeeded. Safe to call multiple times. After abandon()
+// join() becomes a no-op.
+//
+// The drain happens on a detached goroutine so callers on the hot path
+// don't block waiting for an in-flight dial to observe the cancellation.
+// We cannot skip the drain entirely: if the dial completed successfully
+// just before cancel fired, the goroutine will publish a live *tls.Conn
+// to the buffered channel — without a reader that conn leaks.
+func (s *speculativeUpstreamTLS) abandon() {
+	s.cancel()
+	s.settled.Do(func() {
+		go func() {
+			r := <-s.done
+			if r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+	})
+}
+
+// nextProtosSubset reports whether every element of want is also present in
+// offered. It is used to decide whether a speculative dial's NextProtos set
+// is still satisfactory once initialBuf has been read and the real
+// per-connection ALPN preference is known. When the offered set is a
+// superset of want, the server's negotiated protocol — which was picked
+// from offered — is necessarily one the caller is also willing to accept.
+func nextProtosSubset(want, offered []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, w := range want {
+		found := false
+		for _, o := range offered {
+			if o == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort, // default: 26789
-		synchronous:       opts.Agent.Synchronous,
-		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		clientClose:       make(chan bool, 1),
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:          opts.Agent.IsDocker,
-		dnsCache:          newDNSCache(),
-		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		logger:             logger,
+		Port:               opts.ProxyPort,
+		DNSPort:            opts.DNSPort, // default: 26789
+		synchronous:        opts.Agent.Synchronous,
+		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:            &sync.Mutex{},
+		connMutex:          &sync.Mutex{},
+		DestInfo:           info,
+		clientClose:        make(chan bool, 1),
+		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
+		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
+		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:           opts.Agent.IsDocker,
+		EnableIPv6Redirect: opts.Agent.EnableIPv6Redirect,
+		appPID:             opts.Agent.ClientNSPID,
+		caJavaHome:         opts.Agent.CAJavaHome,
+		dnsCache:           newDNSCache(),
+		recordedDNSMocks:   newRecordedDNSMocksCache(),
 	}
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
@@ -406,7 +614,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// continue starting the proxy — the proxy can serve non-TLS
 	// traffic and surfacing the error to readiness probes is a better
 	// signal to operators than hard-aborting the agent here.
-	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
+	// Use the PID-aware SetupCAForApp so the Java truststore import
+	// (installJavaCAForHome) targets the JDK the instrumented app is
+	// actually running with. On non-Java workloads / shared-volume
+	// mode / appPID==0 these extra args are harmless — SetupCAForApp
+	// falls back to the legacy PATH-keytool behaviour. See
+	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
+	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and
 		// Keploy-proxied TLS will fail cert-verify for every workload
@@ -735,6 +949,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
+
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
@@ -747,7 +963,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Instead of failing with an error (which causes the app to see a broken connection),
 		// we close the connection gracefully. The client will see "connection refused" or EOF,
 		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Warn("Untracked connection (eBPF lookup failed), closing gracefully",
+		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
 			zap.Int("Source port", sourcePort), zap.Error(err))
 		if srcConn != nil {
 			srcConn.Close()
@@ -1126,9 +1342,84 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+
+	// Speculative upstream TLS dial — kicked off in parallel with the
+	// MITM client-facing handshake below so the two ~1 RTT handshakes
+	// overlap instead of running serially. This is a record-mode
+	// HTTP-only optimization; parser-driven paths (Postgres v2/v3,
+	// MySQL, gRPC) and the CONNECT-tunnel-piped path keep the original
+	// serial dial to preserve their exact TLS sequencing.
+	//
+	// The speculative dial uses a generic ALPN set [h2, http/1.1]; if
+	// the per-connection ALPN decision made after initialBuf is
+	// readable turns out to be incompatible (e.g. mTLS requires a
+	// client cert, or the caller ends up wanting http/1.1-only while
+	// the server picked h2), the join site abandons the speculative
+	// conn and redials synchronously.
+	var speculativeDial *speculativeUpstreamTLS
+	var speculativeDialAddr string
+	if isTLS && rule.Mode != models.MODE_TEST &&
+		!(connectResult != nil && dstConn != nil) &&
+		!(agent.InterceptPostgresSSLRequest && destInfo.Port == 5432) &&
+		outgoingOpts.TLSPrivateKey == "" {
+		if sniVal, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
+			if sni, ok := sniVal.(string); ok && sni != "" {
+				addr := net.JoinHostPort(sni, fmt.Sprint(destInfo.Port))
+				// InsecureSkipVerify mirrors the synchronous dial
+				// below and the current MITM model (keploy is a
+				// man-in-the-middle by design; upstream cert chain
+				// verification would require shipping a CA bundle).
+				specCfg := &tls.Config{
+					InsecureSkipVerify: true, // nolint:gosec
+					ServerName:         sni,
+					NextProtos:         []string{"h2", "http/1.1"},
+				}
+				speculativeDial = startSpeculativeUpstreamTLS(ctx, addr, specCfg)
+				speculativeDialAddr = addr
+				p.logger.Debug("started speculative upstream TLS dial",
+					zap.String("addr", addr),
+					zap.String("sni", sni),
+					zap.Strings("offeredALPN", specCfg.NextProtos))
+				// Belt-and-braces cleanup: covers every early
+				// return path between here and the join/abandon
+				// sites below (clientID/destID lookup, initialBuf
+				// read, partial-header read, HTTP/2 HEADERS
+				// read, mTLS client cert apply). The captured
+				// pointer is a local scoped above; nilling it at
+				// the explicit join/abandon sites makes this a
+				// no-op when control flows normally.
+				defer func() {
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+					}
+				}()
+			}
+		}
+	}
+
 	if isTLS {
+		probeProxy(p.logger, "tls-handshake-start", clientConnID,
+			zap.Int("srcPort", sourcePort),
+			zap.Uint32("dstPort", destInfo.Port),
+			zap.String("dstAddr", dstAddr),
+			zap.Bool("speculative", speculativeDial != nil),
+		)
+		tlsStart := time.Now()
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		probeProxy(p.logger, "tls-handshake-done", clientConnID,
+			zap.Int("srcPort", sourcePort),
+			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),
+			zap.Bool("isMTLS", isMTLS),
+			zap.Error(err),
+		)
 		if err != nil {
+			// Client-facing MITM handshake failed; abandon the
+			// speculative upstream dial so its goroutine and socket
+			// are not leaked.
+			if speculativeDial != nil {
+				speculativeDial.abandon()
+				speculativeDial = nil
+			}
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
@@ -1140,7 +1431,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					clientPeerCert = state.PeerCertificates[0]
 				}
 			}
+			// mTLS requires applying the client cert to the upstream
+			// TLS config before the handshake — our speculative dial
+			// did not do that, so discard it.
+			if speculativeDial != nil {
+				speculativeDial.abandon()
+				speculativeDial = nil
+			}
 		}
+	} else if speculativeDial != nil {
+		// isTLS flipped to false somewhere between the check above and
+		// this branch — defensive; abandon.
+		speculativeDial.abandon()
+		speculativeDial = nil
 	}
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
@@ -1324,9 +1627,60 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// while the upstream connection fails, leaving the
 				// replayed client staring at a broken stream.
 				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
+					// Postgres SSL preamble — never use the
+					// speculative conn (different wire sequence).
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+						speculativeDial = nil
+					}
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
+					dialStart := time.Now()
 					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+				} else if speculativeDial != nil && addr == speculativeDialAddr &&
+					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
+					// Fast path: the speculative dial targeted the
+					// same addr and offered a superset of the ALPN
+					// the caller now wants. Join it.
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "speculative-join"), zap.String("addr", addr))
+					joinStart := time.Now()
+					var specConn *tls.Conn
+					specConn, err = speculativeDial.join(ctx)
+					probeDial(p.logger, "speculative-join", clientConnID, addr, time.Since(joinStart).Nanoseconds(), zap.Error(err))
+					speculativeDial = nil
+					if err == nil {
+						negotiated := specConn.ConnectionState().NegotiatedProtocol
+						// Guard against the server negotiating a
+						// protocol that is NOT in the caller's
+						// desired set. Offered was a superset, so
+						// this is only possible when the server
+						// negotiated h2 while cfg wanted http/1.1
+						// exclusively. Redial synchronously with
+						// the caller's exact cfg to preserve
+						// record-mode semantics.
+						if negotiated != "" && !nextProtosSubset([]string{negotiated}, cfg.NextProtos) {
+							p.logger.Debug("speculative upstream TLS protocol mismatch, redialing",
+								zap.String("negotiated", negotiated),
+								zap.Strings("wanted", cfg.NextProtos))
+							_ = specConn.Close()
+							dstConn, err = tls.Dial("tcp", addr, cfg)
+						} else {
+							dstConn = specConn
+						}
+					}
 				} else {
+					// Conditions for speculation did not hold (different
+					// addr, narrower ALPN than offered, or no speculation
+					// was started). Abandon any in-flight speculative
+					// dial and do a fresh synchronous dial with cfg.
+					if speculativeDial != nil {
+						speculativeDial.abandon()
+						speculativeDial = nil
+					}
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
+					dialStart := time.Now()
 					dstConn, err = tls.Dial("tcp", addr, cfg)
+					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
@@ -1345,7 +1699,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
+			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
+			dialStart := time.Now()
 			dstConn, err = net.Dial("tcp", dstAddr)
+			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
@@ -1387,6 +1744,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
+	probeProxy(p.logger, "integration-select", clientConnID,
+		zap.String("parser", string(parserType)),
+		zap.Bool("generic", generic),
+	)
+
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
@@ -1394,7 +1756,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Create TLSUpgrader in handleConnection scope so it holds pointers to
 			// the real srcConn/dstConn variables (not copies in buildRecordSession).
 			var upgrader models.TLSUpgrader
-			if parserType == integrations.MYSQL || parserType == integrations.POSTGRES_V2 {
+			if parserType == integrations.MYSQL ||
+				parserType == integrations.POSTGRES_V2 ||
+				parserType == integrations.POSTGRES_V3 {
 				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
@@ -1473,7 +1837,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		for _, err := range cleanupErrors {
 			utils.LogError(p.logger, err, "cleanup error in StopProxyServer")
 		}
-		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
+		p.logger.Error("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
 	} else {
 		p.logger.Debug("proxy stopped cleanly...")
 	}
@@ -1581,6 +1945,23 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 		p.dnsCache.Purge()
 	}
 	return nil
+}
+
+// FirstTestWindowStart returns the earliest test window start observed
+// by the underlying MockManager, or zero before any non-BaseTime
+// SetMocksWithWindow has landed. Satisfies the agent's optional
+// FirstWindowStartReader extension interface.
+//
+// Used by the agent's tier-aware strictMockWindow filter to preserve
+// startup-init mocks (req < firstWindowStart) while still dropping
+// stale cross-test bleed (firstWindowStart <= req < currentStart).
+// Zero-time return means "no cutoff known yet" and callers should fall
+// back to legacy strict-gate semantics.
+func (p *Proxy) FirstTestWindowStart() time.Time {
+	if m := p.getMockManager(); m != nil {
+		return m.FirstTestWindowStart()
+	}
+	return time.Time{}
 }
 
 // GetConsumedMocks returns the consumed filtered mocks.
@@ -1716,7 +2097,7 @@ func (p *Proxy) SendError(err error) {
 	select {
 	case p.errChannel <- err:
 	default:
-		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
+		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
 	}
 }
 

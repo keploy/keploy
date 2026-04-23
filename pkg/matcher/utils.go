@@ -1460,9 +1460,16 @@ func MapToArray(mp map[string][]string) []string {
 	return result
 }
 
+// SubstringKeyMatch returns the regex list associated with the first noise key
+// that occurs as a substring of s. The comparison is case-insensitive on BOTH
+// sides: s and every key in mp are folded to lower case before comparison.
+// This ensures HTTP header keys (canonically CamelCase, e.g. "X-Correlation-Id")
+// match noise patterns regardless of how the user cased them in keploy.yml
+// (e.g. "x-correlation-id" or "X-Correlation-Id").
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
+	sLower := strings.ToLower(s)
 	for key, val := range mp {
-		if strings.Contains(s, key) {
+		if strings.Contains(sLower, strings.ToLower(key)) {
 			return val, true
 		}
 	}

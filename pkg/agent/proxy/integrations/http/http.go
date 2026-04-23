@@ -256,6 +256,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
+		// HTTP is a request-response protocol — every exchange is per-test
+		// by construction. No handshake/session tier exists at the HTTP
+		// layer; outbound calls from an application under test are always
+		// bound to the current test window. Stamp LifetimePerTest + mark
+		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
+		// no-op (the recorder is authoritative at emit time). Leaves
+		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
 	}
 
 	if onMockRecorded != nil {

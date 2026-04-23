@@ -23,6 +23,20 @@ concurrency:
 env:
   # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
   _ISO_ROOT: .git-isolation
+  # Central pin for the keploy/integrations commit that every build
+  # leg in this workflow checks out. Keeping it in one place means the
+  # 4 Add-Private-Parsers steps below (linux/amd64, linux/arm64,
+  # darwin/arm64, windows/amd64) cannot drift apart when the pin is
+  # bumped. Prefer the repo-level `vars.INTEGRATION_REF` when set (so
+  # operators can override the pin without editing this file), falling
+  # back to the hard-coded SHA this PR currently needs.
+  #
+  # Kept in sync with release.yml and golangci-lint.yml — all three
+  # workflows now track the same integrations SHA so a bump updates
+  # one place per workflow and the three cannot drift apart.
+  #
+  # Revert to `main` (drop this key) once keploy/integrations#130 merges.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || '127d5c37875ba2762e3561d17e4e8501fe671afa' }}
 
 jobs:
   # -------------------------------------------------------------------
@@ -46,8 +60,18 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Build Keploy (non-race)
+        # CGO_ENABLED=1 explicit so the pg_query_go (libpg_query) cgo
+        # link succeeds. ubuntu-latest ships gcc out-of-the-box; on
+        # native linux Go already defaults CGO_ENABLED to 1, but we
+        # pin it so a cross-compile slipping in here fails loud
+        # instead of silently producing a non-cgo binary that
+        # panics on first pg_query.Parse call.
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p out/build-no-race
           go build -tags=viper_bind_struct -o out/build-no-race/keploy
@@ -92,8 +116,15 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Build Keploy (non-race, linux/arm64)
+        # CGO_ENABLED=1 explicit — see the build-and-upload job
+        # comment. ubuntu-24.04-arm ships gcc; the aarch64 default
+        # CGO_ENABLED matches the amd64 one.
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p out/build-no-race-linux-arm64
           go build -tags=viper_bind_struct -o out/build-no-race-linux-arm64/keploy
@@ -104,9 +135,16 @@ jobs:
 
   build-darwin-arm64:
     # darwin/arm64 binary for the macOS self-hosted native tests.
-    # Cross-compiled from linux — no CGO / race, matches prior flow.
+    #
+    # Session P: moved from ubuntu-latest (linux→darwin/arm64
+    # cross-compile, CGO_ENABLED=0) to macos-latest (native arm64
+    # build, CGO_ENABLED=1). pg_query_go links libpg_query via cgo
+    # and a linux runner cannot cross-compile darwin cgo without an
+    # osxcross toolchain, which is heavy to maintain for a single
+    # build leg. macos-latest is already arm64 on the GitHub-hosted
+    # fleet so the build is native (no cross-compile).
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -115,10 +153,16 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Build Keploy (darwin/arm64)
+        # Native arm64 build — macos-latest GHA runners are
+        # Apple-silicon as of 2024. GOOS/GOARCH left unset so the
+        # build uses the host arch (darwin/arm64); CGO_ENABLED
+        # defaults to 1 on native builds.
         run: |
-          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with:
           name: build-darwin
@@ -380,6 +424,8 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: false
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Add MinGW gcc to PATH
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'

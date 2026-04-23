@@ -70,6 +70,9 @@ runs:
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
         	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
+        	// v3 — deterministic Postgres record/replay; registers at
+        	// priority 110 so new recordings pick it up over v2.
+        	_ "github.com/keploy/integrations/pkg/postgres/v3"
         )
         EOF
 
@@ -100,6 +103,8 @@ runs:
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
+        	_ "github.com/keploy/integrations/pkg/postgres/v3"
         )
         "@
 

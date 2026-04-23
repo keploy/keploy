@@ -98,7 +98,7 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 
 func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
 	if latestRunID == "" {
-		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
+		ts.logger.Debug("No latest run ID provided, returning empty test set IDs")
 		return []string{}, nil
 	}
 
@@ -184,7 +184,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		if len(data) == 0 {
-			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			ts.logger.Debug("skipping empty testcase", zap.String("testcase name", name))
 			continue
 		}
 
@@ -196,7 +196,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		if testCase == nil {
-			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", name))
 			continue
 		}
 
@@ -393,7 +393,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return err
 	}
 	if len(data) == 0 {
-		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
+		ts.logger.Debug("skipping empty testcase", zap.String("testcase name", testCaseID))
 		return nil
 	}
 	var testCase *yaml.NetworkTrafficDoc
@@ -405,7 +405,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 	}
 
 	if testCase == nil {
-		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
 		return nil
 	}
 

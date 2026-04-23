@@ -127,7 +127,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
-					o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
+					o.logger.Error("Failed to re-record some testcases", zap.String("testset", testSet), zap.String("next_step", "re-run with reduced concurrency, re-record specific failing testcases, or inspect the failing testcase names in logs"))
 					stopReason = "failed to re-record some testcases"
 				}
 
@@ -176,7 +176,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	if ctx.Err() != nil {
 		stopReason = "context cancelled"
-		o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
+		o.logger.Info("Re-record was cancelled, keploy might have not recorded few test cases")
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
@@ -184,7 +184,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	if !o.config.Test.DisableMockUpload {
 		o.replay.UploadMocks(ctx, ReRecordedTests)
 	} else {
-		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+		o.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
@@ -192,12 +192,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			o.logger.Warn("Failed to read input. The older testsets will be kept.")
+			o.logger.Debug("Failed to read input. The older testsets will be kept.")
 			return nil
 		}
 
 		if len(input) == 0 {
-			o.logger.Warn("Empty input. The older testsets will be kept.")
+			o.logger.Debug("Empty input. The older testsets will be kept.")
 			return nil
 		}
 
@@ -208,14 +208,14 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			for _, testSet := range SelectedTests {
 				err := o.replay.DeleteTestSet(ctx, testSet)
 				if err != nil {
-					o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+					o.logger.Error("Failed to delete the testset", zap.String("testset", testSet), zap.Error(err), zap.String("next_step", "retry deletion, check filesystem permissions, or manually delete the testset directory at <path>"))
 				}
 			}
 			o.logger.Info("Deleted the older testsets successfully")
 		case "n", "N":
 			o.logger.Info("skipping the deletion of older testsets")
 		default:
-			o.logger.Warn("Invalid input. The older testsets will be kept.")
+			o.logger.Debug("Invalid input. The older testsets will be kept.")
 		}
 	}
 	return nil
@@ -234,7 +234,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 	}
 
 	if len(tcs) == 0 {
-		o.logger.Warn("No testcases found for the given testset", zap.String("testset", testSet))
+		o.logger.Debug("No testcases found for the given testset", zap.String("testset", testSet))
 		return false, nil
 	}
 
@@ -545,7 +545,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 			// Persist any template changes (best-effort) after propagation
 			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
-				o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+				o.logger.Error("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err), zap.String("next_step", "verify keploy folder is writable, check configdb path, or re-run rerecord with --debug to capture the underlying storage error"))
 			} else {
 				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 			}
@@ -662,11 +662,11 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	o.config.Templatize.TestSets = nonTemplatized
-	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets", nonTemplatized))
+	o.logger.Info("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
-		o.logger.Warn("failed to read input. Skipping templatization")
+		o.logger.Debug("failed to read input. Skipping templatization")
 	}
 	if input == "n\n" || input == "N\n" {
 		o.logger.Info("skipping templatization")
