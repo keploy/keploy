@@ -191,7 +191,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 					}
 
 					if len(data) == 0 {
-						logger.Debug("skippping empty testcase", zap.String("testcase name", testFile.Name()))
+						logger.Debug("skipping empty testcase", zap.String("testcase name", testFile.Name()))
 						continue
 					}
 

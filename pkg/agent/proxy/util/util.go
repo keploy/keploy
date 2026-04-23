@@ -452,12 +452,16 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	var buffer []byte
 	emptyEOFRetries := 0
 
-	// Channel to communicate read results
+	// Channel to communicate read results. Buffered with capacity 1 so the
+	// read goroutine's send never blocks even if the outer select has already
+	// returned on ctx.Done — otherwise the deferred g.Wait() could deadlock
+	// waiting for a goroutine that is itself blocked sending on an
+	// unbuffered channel.
 	readResult := make(chan struct {
 		n   int
 		err error
 		buf []byte
-	})
+	}, 1)
 
 	g, ctx := errgroup.WithContext(ctx)
 
