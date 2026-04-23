@@ -79,7 +79,7 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 	}
 
 	// Step 3 – resolve which mocks are needed using the mapping table.
-	mocksThatHaveMappings, mocksWeNeed := r.resolveMockSets(ctx, testSetID, testCaseName)
+	mocksThatHaveMappings, mocksWeNeed, expectedMockMapping, useMappingBased := r.resolveMockSets(ctx, testSetID, testCaseName)
 
 	// Step 4 – fetch mocks from the database.
 	filteredMocks, unfilteredMocks, err := r.getMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
@@ -92,8 +92,13 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		return fmt.Errorf("MockLoader: failed to store mocks: %w", err)
 	}
 
-	expectedMockMapping := []string{}
-	useMappingBased := len(expectedMockMapping) > 0
+	// Step 6 – send filtering parameters to the agent. Mirrors the
+	// setup-time call in Replayer.RunTestSet (see replay.go:1047): when
+	// no testCaseName is provided we send an empty mapping slice (the
+	// agent still honors useMappingBased via the mapping-registry it
+	// populated in Step 5); when a specific testCaseName is provided we
+	// send that test case's mock names so the agent can restrict
+	// serving to them (matches the per-test-case call at replay.go:1437).
 	err = r.SendMockFilterParamsToAgent(ctx, expectedMockMapping, models.BaseTime, time.Now(), nil, useMappingBased)
 	if err != nil {
 		return fmt.Errorf("MockLoader: failed to send mock filter params to agent: %w", err)
@@ -108,13 +113,16 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		zap.String("testSetID", testSetID),
 		zap.Int("filtered", len(filteredMocks)),
 		zap.Int("unfiltered", len(unfilteredMocks)),
+		zap.Bool("useMappingBased", useMappingBased),
+		zap.Int("expectedMocks", len(expectedMockMapping)),
 	)
 	return nil
 }
 
 // resolveMockSets uses the MappingDB (when available) to determine which mock
 // names are relevant, mirroring the logic in Replayer.determineMockingStrategy
-// and the mapping population block inside RunTestSet.
+// (replay.go:~3460) and the mapping population block inside RunTestSet
+// (replay.go:~992).
 //
 // Returns:
 //   - mocksThatHaveMappings: all mock names that appear in any mapping entry
@@ -123,12 +131,20 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 //   - mocksWeNeed: the subset of mapped mocks that this particular load
 //     actually requires (restricted to testCaseName when provided; all mapped
 //     mocks otherwise).
+//   - expectedMockMapping: ordered slice of expected mock names for the
+//     single test case (when testCaseName != ""), empty otherwise. Matches
+//     the "expectedNames" slice Replayer passes to SendMockFilterParamsToAgent
+//     at replay.go:~1433.
+//   - useMappingBased: true iff the MappingDB reports meaningful mappings
+//     exist for this test set, mirroring determineMockingStrategy's return.
 //
-// Both maps are empty when no meaningful mappings exist, which causes MockDB to
-// fall back to timestamp-based filtering.
-func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, testCaseName string) (mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) {
+// All outputs are zero-valued when no meaningful mappings exist, which causes
+// MockDB to fall back to timestamp-based filtering and the agent to ignore
+// mapping-based selection.
+func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, testCaseName string) (mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, expectedMockMapping []string, useMappingBased bool) {
 	mocksThatHaveMappings = make(map[string]bool)
 	mocksWeNeed = make(map[string]bool)
+	expectedMockMapping = []string{}
 
 	if r.mappingDB == nil {
 		r.logger.Debug("MockLoader: no mapping DB, using timestamp-based filtering")
@@ -151,6 +167,8 @@ func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, test
 		return
 	}
 
+	useMappingBased = true
+
 	// Populate the full set of mapped mock names.
 	for _, mocks := range testMockMappings {
 		for _, m := range mocks {
@@ -161,8 +179,10 @@ func (r *MockLoader) resolveMockSets(ctx context.Context, testSetID string, test
 	if testCaseName != "" {
 		// Only load the mocks that belong to this specific test case.
 		if mocks, ok := testMockMappings[testCaseName]; ok {
-			for _, m := range mocks {
+			expectedMockMapping = make([]string, len(mocks))
+			for i, m := range mocks {
 				mocksWeNeed[m.Name] = true
+				expectedMockMapping[i] = m.Name
 			}
 		}
 	} else {
