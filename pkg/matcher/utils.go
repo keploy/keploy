@@ -1334,7 +1334,9 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	// loweredNoise is built once per CompareHeaders call. Its primary benefit is
 	// CORRECTNESS, not perf: it (1) merges regex slices on case-only noise-key
-	// collisions deterministically (e.g. X-Correlation-Id + x-correlation-id),
+	// collisions without dropping either entry — the set of regexes is preserved
+	// even though the merged slice order depends on Go map iteration
+	// (e.g. X-Correlation-Id + x-correlation-id),
 	// and (2) lets isHeaderNoisy look up the sentinel "header" key regardless
 	// of the user's casing. Perf-wise it pays one map build + defensive slice
 	// copies per call; in exchange SubstringKeyMatch's inner ToLower is a
