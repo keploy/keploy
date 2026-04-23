@@ -158,8 +158,9 @@ send_request() {
   echo "Running curl.sh..."
   chmod +x ./curl.sh
   # Aim DNS queries at fixture CoreDNS containers rather than
-  # /etc/resolv.conf. SECONDARY_NAMESERVER lets /suite exercise one
-  # unconnected UDP socket sending to more than one upstream.
+  # /etc/resolv.conf. /suite uses fixture-only keploy.test domains, and
+  # SECONDARY_NAMESERVER lets it exercise one unconnected UDP socket
+  # sending to more than one upstream.
   NAMESERVER="${COREDNS_IP}:53" SECONDARY_NAMESERVER="${COREDNS_SECONDARY_IP}:53" ./curl.sh 2>&1 | tee "$CURL_OUT" || true
   endsec
 }
