@@ -113,11 +113,41 @@ func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	return true
 }
 
+// IsV2 signals the proxy dispatcher that this parser consumes the new
+// supervisor + relay + FakeConn architecture. The V2 path handles the
+// MySQL mid-stream TLS upgrade (CLIENT_SSL capability bit) via the
+// directive channel rather than touching the real sockets directly.
+func (m *MySQL) IsV2() bool { return true }
+
 func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	if session != nil && session.V2 != nil {
+		return m.recordV2(ctx, session)
+	}
+	return m.recordLegacy(ctx, session)
+}
+
+// recordLegacy is the byte-for-byte preserved pre-V2 record path. It
+// is invoked when the session is not running under the supervisor +
+// relay architecture (RecordSession.V2 == nil). Do not edit this body
+// without a matching change in recordV2.
+func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
 	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader)
 
+	if err != nil {
+		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
+		return err
+	}
+	return nil
+}
+
+// recordV2 delegates to the V2 recorder which consumes the supervisor
+// Session's FakeConns and uses directives for the CLIENT_SSL TLS
+// upgrade. The legacy record path is not entered on this code path.
+func (m *MySQL) recordV2(ctx context.Context, session *integrations.RecordSession) error {
+	logger := session.Logger
+	err := recorder.RecordV2(ctx, logger, session.V2)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return err
