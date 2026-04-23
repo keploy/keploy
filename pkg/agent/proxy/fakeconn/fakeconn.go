@@ -1,0 +1,301 @@
+package fakeconn
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ErrFakeConnNoWrite is returned by FakeConn.Write. Parsers are
+// consumers of bytes, not producers; a parser calling Write is a
+// bug and this error makes it loud rather than silent.
+var ErrFakeConnNoWrite = errors.New("fakeconn: Write is not permitted; parsers must not write to real peers")
+
+// ErrClosed is returned by Read/ReadChunk after Close.
+var ErrClosed = errors.New("fakeconn: closed")
+
+// deadlineError implements net.Error with Timeout()=true and
+// Temporary()=true so callers that inspect via net.Error can treat
+// Read deadline hits like real socket deadline hits.
+type deadlineError struct{}
+
+func (deadlineError) Error() string   { return "fakeconn: read deadline exceeded" }
+func (deadlineError) Timeout() bool   { return true }
+func (deadlineError) Temporary() bool { return true }
+
+// ErrDeadlineExceeded is the sentinel returned when a read deadline passes.
+var ErrDeadlineExceeded net.Error = deadlineError{}
+
+// FakeConn is a read-only net.Conn driven by a Chunk channel owned
+// by the proxy relay. Reads drain an internal buffer first, then
+// fetch the next Chunk from the channel. Writes always fail with
+// [ErrFakeConnNoWrite]. Close marks the FakeConn closed but does
+// not touch any real socket — the relay owns those.
+//
+// FakeConn is safe for a single reader goroutine concurrent with
+// calls to Close and SetReadDeadline. Concurrent Read callers are
+// not supported; parsers are single-consumer by construction.
+//
+// Satisfies [net.Conn] so that parsers coded against net.Conn can
+// consume it unchanged. Note that [FakeConn.Write] always returns
+// an error — callers that do not check Write's error will silently
+// drop their output and this is intentional: we want that bug to
+// surface loudly during testing, not silently in production.
+type FakeConn struct {
+	ch     <-chan Chunk
+	logger logger
+
+	mu           sync.Mutex
+	buf          bytes.Buffer
+	lastReadNano atomic.Int64
+	closed       atomic.Bool
+	closeCh      chan struct{}
+
+	deadlineMu sync.Mutex
+	deadline   time.Time
+	deadlineCh chan struct{}
+	deadlineT  *time.Timer
+
+	local  net.Addr
+	remote net.Addr
+}
+
+// logger is the minimal surface FakeConn needs from the outside
+// world. Zero-value-safe — nil is treated as no-op.
+type logger interface {
+	// Warn is called on protocol violations (e.g. Write attempts).
+	// Parsers shouldn't be hitting this path; when they do we want
+	// a record of it.
+	Warn(msg string, kv ...any)
+}
+
+type nopLogger struct{}
+
+func (nopLogger) Warn(string, ...any) {}
+
+// New constructs a FakeConn. ch is the relay-owned Chunk channel;
+// localAddr and remoteAddr are returned from LocalAddr/RemoteAddr
+// (nil values are replaced with a "fakeconn" placeholder).
+func New(ch <-chan Chunk, localAddr, remoteAddr net.Addr) *FakeConn {
+	return newWithLogger(ch, localAddr, remoteAddr, nopLogger{})
+}
+
+// NewWithLogger is New with a caller-supplied logger for diagnostic
+// messages (e.g. rejected Write attempts). Pass nil for no logging.
+func NewWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) *FakeConn {
+	if log == nil {
+		log = nopLogger{}
+	}
+	return newWithLogger(ch, localAddr, remoteAddr, log)
+}
+
+func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) *FakeConn {
+	if localAddr == nil {
+		localAddr = placeholderAddr{label: "fakeconn-local"}
+	}
+	if remoteAddr == nil {
+		remoteAddr = placeholderAddr{label: "fakeconn-remote"}
+	}
+	return &FakeConn{
+		ch:      ch,
+		logger:  log,
+		closeCh: make(chan struct{}),
+		local:   localAddr,
+		remote:  remoteAddr,
+	}
+}
+
+// Read implements io.Reader / net.Conn. It first drains any bytes
+// left over from a previous Chunk, then blocks for the next Chunk
+// (subject to read deadline and Close).
+func (f *FakeConn) Read(p []byte) (int, error) {
+	if f.closed.Load() {
+		return 0, ErrClosed
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	f.mu.Lock()
+	if f.buf.Len() > 0 {
+		n, err := f.buf.Read(p)
+		f.mu.Unlock()
+		return n, err
+	}
+	f.mu.Unlock()
+
+	chunk, err := f.readChunkLocked()
+	if err != nil {
+		return 0, err
+	}
+
+	// Copy as much as fits; stash the remainder in the buffer for
+	// the next Read.
+	n := copy(p, chunk.Bytes)
+	if n < len(chunk.Bytes) {
+		f.mu.Lock()
+		f.buf.Write(chunk.Bytes[n:])
+		f.mu.Unlock()
+	}
+	return n, nil
+}
+
+// ReadChunk returns the next Chunk from the underlying channel with
+// timestamps intact. Bytes are returned without being copied into a
+// caller buffer; parsers that want chunk-level timestamps (e.g.
+// HTTP/2 frame parsers that care about per-frame arrival time) use
+// this instead of Read.
+//
+// ReadChunk returns [io.EOF] when the channel is closed and no
+// further chunks are available. It returns [ErrClosed] if Close
+// has been called. It returns a net.Error with Timeout()=true if
+// a read deadline was set and has passed.
+//
+// ReadChunk drains any residual bytes left in the internal buffer
+// by a previous Read into a synthetic Chunk first. Those synthetic
+// chunks carry the ReadAt/WrittenAt timestamps of the Chunk they
+// were drained from; callers should typically use Read XOR ReadChunk
+// on a single FakeConn to avoid mixing the two.
+func (f *FakeConn) ReadChunk() (Chunk, error) {
+	if f.closed.Load() {
+		return Chunk{}, ErrClosed
+	}
+	return f.readChunkLocked()
+}
+
+func (f *FakeConn) readChunkLocked() (Chunk, error) {
+	// Check deadline up front; if already passed, return immediately.
+	dlCh := f.currentDeadlineCh()
+	for {
+		select {
+		case c, ok := <-f.ch:
+			if !ok {
+				// Channel closed: drain any buffered bytes into a
+				// synthetic final chunk so no byte is lost.
+				f.mu.Lock()
+				if f.buf.Len() > 0 {
+					out := make([]byte, f.buf.Len())
+					_, _ = f.buf.Read(out)
+					f.mu.Unlock()
+					return Chunk{Bytes: out}, nil
+				}
+				f.mu.Unlock()
+				return Chunk{}, io.EOF
+			}
+			f.lastReadNano.Store(c.ReadAt.UnixNano())
+			return c, nil
+		case <-f.closeCh:
+			return Chunk{}, ErrClosed
+		case <-dlCh:
+			return Chunk{}, ErrDeadlineExceeded
+		}
+	}
+}
+
+// Write always returns (0, [ErrFakeConnNoWrite]). It exists solely
+// to satisfy io.Writer / net.Conn interface shapes that parsers
+// consume. Parsers must not call it. A logger Warn is emitted when
+// called so the bug surfaces in logs.
+func (f *FakeConn) Write(p []byte) (int, error) {
+	f.logger.Warn("fakeconn: Write attempted by parser", "bytes", len(p))
+	return 0, ErrFakeConnNoWrite
+}
+
+// LastReadTime returns the ReadAt timestamp of the most recently
+// delivered Chunk, or the zero time if no Chunk has been delivered.
+func (f *FakeConn) LastReadTime() time.Time {
+	n := f.lastReadNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// Close marks the FakeConn closed. All in-flight and future Reads
+// return [ErrClosed]. Close does NOT close the underlying channel
+// (the relay owns that) and does NOT affect any real socket.
+// Idempotent; calling twice returns nil on the second call.
+func (f *FakeConn) Close() error {
+	if f.closed.Swap(true) {
+		return nil
+	}
+	close(f.closeCh)
+	f.deadlineMu.Lock()
+	if f.deadlineT != nil {
+		f.deadlineT.Stop()
+		f.deadlineT = nil
+	}
+	f.deadlineMu.Unlock()
+	return nil
+}
+
+// LocalAddr returns the address configured at construction, or a
+// placeholder with network "fakeconn" if none was supplied.
+func (f *FakeConn) LocalAddr() net.Addr { return f.local }
+
+// RemoteAddr returns the address configured at construction, or a
+// placeholder with network "fakeconn" if none was supplied.
+func (f *FakeConn) RemoteAddr() net.Addr { return f.remote }
+
+// SetDeadline sets both the read and write deadlines. The write
+// deadline is ignored (Write always errors); the read deadline
+// controls when Read/ReadChunk unblock with [ErrDeadlineExceeded].
+// A zero t clears the deadline.
+func (f *FakeConn) SetDeadline(t time.Time) error {
+	return f.SetReadDeadline(t)
+}
+
+// SetReadDeadline sets the deadline for future Read/ReadChunk calls.
+// A zero t clears the deadline. Safe to call from a different goroutine
+// than the reader.
+func (f *FakeConn) SetReadDeadline(t time.Time) error {
+	f.deadlineMu.Lock()
+	defer f.deadlineMu.Unlock()
+
+	if f.deadlineT != nil {
+		f.deadlineT.Stop()
+		f.deadlineT = nil
+	}
+	f.deadline = t
+
+	if t.IsZero() {
+		f.deadlineCh = nil
+		return nil
+	}
+
+	ch := make(chan struct{})
+	f.deadlineCh = ch
+	d := time.Until(t)
+	if d <= 0 {
+		close(ch)
+		return nil
+	}
+	f.deadlineT = time.AfterFunc(d, func() { close(ch) })
+	return nil
+}
+
+// SetWriteDeadline is a no-op; Write always errors.
+func (f *FakeConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+// currentDeadlineCh returns the deadline channel for the current
+// deadline state. A nil returned channel means "no deadline."
+func (f *FakeConn) currentDeadlineCh() <-chan struct{} {
+	f.deadlineMu.Lock()
+	defer f.deadlineMu.Unlock()
+	return f.deadlineCh
+}
+
+// placeholderAddr is returned from LocalAddr/RemoteAddr when no
+// real address is configured. Parsers that log the address get
+// something readable rather than a nil panic.
+type placeholderAddr struct{ label string }
+
+func (p placeholderAddr) Network() string { return "fakeconn" }
+func (p placeholderAddr) String() string  { return p.label }
+
+// Compile-time check that FakeConn implements net.Conn.
+var _ net.Conn = (*FakeConn)(nil)

@@ -890,6 +890,40 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("java.home not found in command output")
 }
 
+// RecoverWithoutClose catches a panic in a parser goroutine, logs
+// it, reports it to Sentry, and returns. Unlike [Recover] it does
+// NOT close any connections — parsers in the new architecture do
+// not hold real sockets and the relay is responsible for socket
+// lifecycle. Call sites:
+//
+//	defer pUtil.RecoverWithoutClose(logger)
+//
+// The recovered panic value (if any) is swallowed; the enclosing
+// function returns with whatever named return value it had (or
+// zero value). If you need to transform the panic into a returned
+// error, wrap this in a named-return-value defer that sets err.
+func RecoverWithoutClose(logger *zap.Logger) {
+	if logger == nil {
+		// Mirror Recover's safe-fallback behaviour: the enclosing
+		// function is already unwinding and the caller asked us to
+		// swallow the panic, so the least-bad thing we can do
+		// without a logger is announce ourselves on stdout and
+		// still recover() so the goroutine doesn't crash the
+		// process.
+		if r := recover(); r != nil {
+			fmt.Println(Emoji + "Recovered from panic in parser (no logger available)")
+		}
+		return
+	}
+
+	sentry.Flush(2 * time.Second)
+	if r := recover(); r != nil {
+		logger.Error("Recovered from panic in parser")
+		utils.HandleRecovery(logger, r, "Recovered from panic")
+		sentry.Flush(time.Second * 2)
+	}
+}
+
 // Recover recovers from a panic in any parser and logs the stack trace to Sentry.
 // It also closes the client and destination connection.
 func Recover(logger *zap.Logger, client, dest net.Conn) {

@@ -1749,10 +1749,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
+	// Process-wide kill switch: if parsing has been disabled via env var,
+	// SIGUSR1, or admin endpoint, skip all parser dispatch and hand the
+	// connection to globalPassThrough. Existing connections whose parsers
+	// are already running are unaffected; this only gates new dispatch.
+	if util.DefaultKillSwitch.Enabled() {
+		logger.Debug("parsing kill switch tripped; routing to passthrough",
+			zap.String("parser", string(parserType)), zap.Bool("generic", generic))
+		return p.globalPassThrough(parserCtx, srcConn, dstConn)
+	}
+
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
+			// V2 path: parsers that have been migrated to the supervisor +
+			// relay + FakeConn architecture declare it via IntegrationsV2.
+			// The dispatcher routes them through recordViaSupervisor which
+			// isolates parser panics/hangs and falls through to passthrough
+			// on failure. The legacy path below is preserved for parsers
+			// that have not yet migrated.
+			if v2, ok := matchedParser.(integrations.IntegrationsV2); ok && v2.IsV2() && !newRelayDisabled() {
+				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+					if isNetworkClosedErr(err) {
+						logger.Debug("V2 record path: connection closed", zap.Error(err))
+					} else {
+						utils.LogError(logger, err, "V2 record path failed")
+					}
+					return err
+				}
+				logger.Debug("successfully recorded outgoing message via V2 path", zap.String("ParserType", string(parserType)))
+				break
+			}
+
 			// Create TLSUpgrader in handleConnection scope so it holds pointers to
 			// the real srcConn/dstConn variables (not copies in buildRecordSession).
 			var upgrader models.TLSUpgrader
