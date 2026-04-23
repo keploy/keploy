@@ -91,11 +91,12 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 // shouldCacheDNSResponse reports whether a DNS resolution result is
 // eligible for the per-proxy dnsCache.
 //
-// The cache stores real upstream responses and replayed mocks in both
-// record and test modes. Synthetic/fallback responses are never cached
-// (they exist only to keep the client from hanging on an unknown query
-// and caching them would pin the fallback for 30 s after transient
-// upstream failures).
+// Only real upstream responses are cached (FromUpstream == true), in
+// both record and test modes. Replayed-mock responses and
+// synthetic/fallback responses are intentionally NOT cached: mock
+// responses already come from an in-memory store and adding another
+// layer only complicates invalidation, and caching a fallback would
+// pin it for 30 s after transient upstream failures.
 //
 // Record-mode caching is safe against duplicate DNS-mock emission
 // because a cache hit short-circuits before resolveUncachedDNSResponse
@@ -297,7 +298,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 				}
 			}
 			if proxyIP6 != nil {
-				p.logger.Debug("synthesising AAAA answer for proxy v6 redirect", zap.String("proxy IP6", proxyIP6.String()))
+				p.logger.Debug("synthesising AAAA answer for proxy v6 redirect", zap.String("proxy_ip6", proxyIP6.String()))
 				resp.Answer = []dns.RR{&dns.AAAA{
 					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
 					AAAA: proxyIP6,
