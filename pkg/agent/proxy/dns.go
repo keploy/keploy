@@ -213,6 +213,36 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
 				return resp
 			}
+			// Mock miss. Before falling back to a synthetic/NXDOMAIN
+			// response, try forwarding to the cluster's real resolver
+			// (typically CoreDNS). This is the fix for the sap-demo /
+			// mysql.svc.cluster.local case: cluster-internal hostnames
+			// are not — and should not be — recorded as mocks, so a
+			// miss in replay mode is the expected shape for in-cluster
+			// DB / cache / queue connections. Faking them with the
+			// proxy's 127.0.0.1 (the legacy default) steers the app at
+			// the wrong IP and crashes the DB driver.
+			//
+			// If the forward succeeds we return the real answer as
+			// FromUpstream so the outer cache layer retains it for the
+			// usual 30 s — subsequent queries don't hit the network.
+			// If the forward fails we fall through to the existing
+			// "mock not found" path: same error, same log line, same
+			// NXDOMAIN / synthetic fallback. Forwarding is strictly
+			// additive.
+			if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+				p.logger.Debug("DNS mock miss resolved via upstream forward",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]),
+					zap.Int("rcode", fwdResp.Rcode),
+					zap.Int("answers", len(fwdResp.Answer)))
+				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+			} else if fwdErr != nil {
+				p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]),
+					zap.Error(fwdErr))
+			}
 			// Send mock not found error if we couldn't match any DNS mock.
 			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
@@ -475,15 +505,24 @@ func generateDNSDedupeKey(question dns.Question) string {
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
-	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	// Prefer the upstream resolver list captured once at proxy
+	// startup (see captureDNSUpstream). This is critical in sidecar
+	// deployments where the app-container resolv.conf has been
+	// rewritten to point at 127.0.0.1:26789 — re-reading the file
+	// here would either (a) discover the loopback entry and forward
+	// queries back at ourselves, or (b) discover nothing at all.
+	// Capturing once at startup pins the REAL cluster resolvers.
+	//
+	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
+	// rare local-dev case where the proxy runs outside a cluster AND
+	// resolv.conf is entirely missing — the forwarder treats this as
+	// "no upstream" and we would otherwise be stuck.
 	var servers []string
 	port := "53"
-
-	if err == nil {
-		servers = config.Servers
-		port = config.Port
+	if p.hasDNSUpstream() {
+		servers = p.dnsUpstreamServers
+		port = p.dnsUpstreamPort
 	} else {
-		// Fallback to public DNS if resolv.conf fails
 		servers = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
