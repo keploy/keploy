@@ -9,7 +9,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 // MockLoader implements Service. It sets up the proxy and loads mocks for a
@@ -47,30 +46,16 @@ func NewMockLoader(
 // LoadMocks fetches mocks for testSetID (filtered to testCaseName when
 // non-empty) and pushes them into the proxy.
 //
-// The function mirrors the mock-loading path inside RunTestSet:
-//  1. Creates a managed context with an errgroup for clean shutdown.
-//  2. Calls Setup to load eBPF hooks and start the proxy.
-//  3. Calls MockOutgoing to put the proxy in mock-serving mode.
-//  4. Resolves the mapping-based or timestamp-based filtering strategy.
-//  5. Fetches filtered and unfiltered mocks from MockDB.
-//  6. Calls StoreMocks to push them into the proxy.
+// Context lifetime contract: the caller owns ctx. LoadMocks does NOT
+// create an internal errgroup or cancel the context on return — that
+// would shut the proxy/hooks down the moment LoadMocks returned, which
+// defeats the "mocks loaded and serving" use case. Any goroutines the
+// instrumentation layer spawns are bound to the caller's ctx, so when
+// the caller cancels, both the proxy and the hooks tear down cleanly.
+// The caller is responsible for invoking NotifyGracefulShutdown on the
+// Instrumentation when the session ends.
 func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseName string) error {
 	r.logger.Debug("MockLoader: loading mocks", zap.String("testSetID", testSetID), zap.String("testCaseName", testCaseName))
-
-	// Build a managed context so every goroutine spawned inside this call
-	// shuts down cleanly when the caller cancels or an error occurs.
-	g, ctx := errgroup.WithContext(ctx)
-	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
-
-	defer func() {
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-			r.logger.Debug("MockLoader: failed to notify agent of graceful shutdown", zap.Error(err))
-		}
-		cancel()
-		if err := g.Wait(); err != nil {
-			r.logger.Error("MockLoader: error during shutdown", zap.Error(err))
-		}
-	}()
 
 	// Step 1 – load eBPF hooks and start the proxy.
 	if err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
