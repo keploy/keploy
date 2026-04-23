@@ -26,7 +26,7 @@ env:
   # hard-coded SHA.
   #
   # Revert to `main` (drop this key) once keploy/integrations#130 merges.
-  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'e55e3974ed70bd41f42a76609660df97819ebc5f' }}
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || '127d5c37875ba2762e3561d17e4e8501fe671afa' }}
 
 jobs:
   golangci:
