@@ -553,6 +553,39 @@ func (m *Mock) DeepCopy() *Mock {
 		c.Spec.HTTP2Resp = &http2RespCopy
 	}
 
+	// PostgresV3 spec: clone the top-level discriminator plus whichever
+	// sub-pointer is populated. Each sub-spec is copied by value; that
+	// detaches the pointer identity so async gob-write paths and other
+	// race-sensitive consumers cannot mutate the original through a
+	// shared pointer. Nested slice/map fields (e.g. Query.Response.Rows)
+	// are carried by value — they are treated as immutable after ingest
+	// on both the record and replay sides, matching how the other
+	// *Spec fields above share backing slices.
+	if m.Spec.PostgresV3 != nil {
+		pgV3Copy := *m.Spec.PostgresV3
+		if m.Spec.PostgresV3.Session != nil {
+			sessionCopy := *m.Spec.PostgresV3.Session
+			pgV3Copy.Session = &sessionCopy
+		}
+		if m.Spec.PostgresV3.Catalog != nil {
+			catalogCopy := *m.Spec.PostgresV3.Catalog
+			pgV3Copy.Catalog = &catalogCopy
+		}
+		if m.Spec.PostgresV3.Data != nil {
+			dataCopy := *m.Spec.PostgresV3.Data
+			pgV3Copy.Data = &dataCopy
+		}
+		if m.Spec.PostgresV3.Query != nil {
+			queryCopy := *m.Spec.PostgresV3.Query
+			pgV3Copy.Query = &queryCopy
+		}
+		if m.Spec.PostgresV3.Generator != nil {
+			generatorCopy := *m.Spec.PostgresV3.Generator
+			pgV3Copy.Generator = &generatorCopy
+		}
+		c.Spec.PostgresV3 = &pgV3Copy
+	}
+
 	return &c
 }
 
