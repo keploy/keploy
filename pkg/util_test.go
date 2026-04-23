@@ -1827,3 +1827,120 @@ func TestUpdateTemplateValuesFromHTTPResp_NoPlaceholder_NoOp(t *testing.T) {
 	_, foundFoo := final["X-Foo"]
 	assert.False(t, foundFoo, "must not invent a new template key from a literal header")
 }
+
+// TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-
+// pool partition. Contract:
+//   - LifetimeConnection           → startupMocks (connection-scoped reuse)
+//   - LifetimeSession              → unfilteredMocks (session-scoped reuse)
+//   - LifetimePerTest in-window    → filteredMocks
+//   - legacy metadata.type=config  → unfilteredMocks (fallback)
+//   - legacy metadata.type=connection → startupMocks (fallback)
+//   - legacy no-type per-test      → filteredMocks (legacy fallback path)
+//   - startup-init (req < firstWindowStart) under strict → startupMocks
+func TestFilterByTimeStampThreeTier(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// In-window PerTest → filtered.
+	inWindow := &models.Mock{
+		Name: "perTest-in", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Session → unfiltered.
+	session := &models.Mock{
+		Name: "session", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-10 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeSession,
+			LifetimeDerived: true,
+		},
+	}
+	// Connection → startup.
+	conn := &models.Mock{
+		Name: "conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeConnection,
+			LifetimeDerived: true,
+		},
+	}
+	// Startup-init PerTest (req < firstWindowStart) → startup.
+	startupInit := &models.Mock{
+		Name: "startup-init", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-2 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-2*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Legacy config (no Lifetime, just metadata.type=config) → unfiltered.
+	legacyConfig := &models.Mock{
+		Name: "legacy-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: firstWindowStart.Add(-20 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-20*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy connection (no Lifetime, just metadata.type=connection) → startup.
+	legacyConn := &models.Mock{
+		Name: "legacy-conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "connection"},
+			ReqTimestampMock: firstWindowStart.Add(-25 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-25*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy per-test (no Lifetime, metadata.type="mocks") — treated as PerTest.
+	legacyPerTest := &models.Mock{
+		Name: "legacy-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks"},
+			ReqTimestampMock: currentStart.Add(2 * time.Minute),
+			ResTimestampMock: currentStart.Add(2*time.Minute + time.Millisecond),
+		},
+	}
+
+	all := []*models.Mock{inWindow, session, conn, startupInit, legacyConfig, legacyConn, legacyPerTest}
+
+	filtered, unfiltered, startup := FilterByTimeStampThreeTier(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// Helper to collect names.
+	names := func(ms []*models.Mock) []string {
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return out
+	}
+
+	assert.ElementsMatch(t, []string{"perTest-in", "legacy-pertest"}, names(filtered),
+		"perTest in-window mocks land in filtered; legacy-untyped perTest falls through")
+	assert.ElementsMatch(t, []string{"session", "legacy-config"}, names(unfiltered),
+		"session-lifetime + legacy config-tagged land in unfiltered")
+	assert.ElementsMatch(t, []string{"conn", "startup-init", "legacy-conn"}, names(startup),
+		"connection-lifetime + startup-init PerTest + legacy connection-tagged land in startup")
+}

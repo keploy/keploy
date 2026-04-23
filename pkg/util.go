@@ -3104,6 +3104,203 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 	return filteredMocks, unfilteredMocks
 }
 
+// FilterByTimeStampThreeTier is the three-pool, Lifetime-authoritative
+// variant of filterByTimeStampTierAware. It elevates the startup tier
+// (LifetimeConnection) to a first-class split at the core filter level
+// so integrations that consume the pools (Postgres v3's BuildIndex,
+// MySQL's per-connID trees) can read the three tiers as disjoint slices
+// without having to re-partition from metadata["type"] themselves.
+//
+// Return slice contract:
+//   - filteredMocks:   LifetimePerTest with request-timestamp inside
+//     [afterTime, beforeTime]. These go into the per-test pool for
+//     the current test. Under strict mode, out-of-window per-test
+//     mocks are DROPPED, except startup-init (req < firstWindowStart)
+//     which lands in startupMocks instead (preserving genuine app-
+//     bootstrap traffic that fired before any test started).
+//   - unfilteredMocks: LifetimeSession. Reusable across every test in
+//     the session; never window-filtered. This is the "session" pool
+//     in three-tier parlance.
+//   - startupMocks:    LifetimeConnection (per-connection reusable,
+//     bounded by connID lifetime) + any LifetimePerTest mock whose
+//     request-timestamp predates firstWindowStart (legitimate
+//     bootstrap traffic under strict mode).
+//
+// Backward compatibility with unstamped / legacy-tagged mocks:
+//  1. metadata["type"]=="config" with no Lifetime → LifetimeSession,
+//     routed to unfilteredMocks.
+//  2. metadata["type"]=="connection" with no Lifetime → LifetimeConnection,
+//     routed to startupMocks.
+//  3. No Lifetime, no "type" tag → falls through to per-test window logic.
+//
+// Integrations that don't emit LifetimeConnection mocks (HTTP, HTTP/2,
+// gRPC, generic, Kafka, Redis data-plane, etc.) get an empty startupMocks
+// slice — safe to ignore. Integrations that DO care (Postgres v3,
+// MySQL's prepared-statement setup) consume it as an authoritative
+// "connection-scoped reusable" pool without having to re-derive the
+// classification from metadata.
+func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) (filtered, unfiltered, startup []*models.Mock) {
+	filtered = make([]*models.Mock, 0)
+	unfiltered = make([]*models.Mock, 0)
+	startup = make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) || beforeTime.Equal(time.Time{}) {
+		// No window supplied — fall back to lifetime-only partitioning
+		// so callers still get a three-way split. PerTest (and legacy-
+		// untagged) mocks return in `filtered` to match the two-slice
+		// legacy contract where the first return slice was "every mock
+		// with no effective window to apply".
+		for _, mk := range m {
+			if mk == nil {
+				continue
+			}
+			p := mk.DeepCopy()
+			lt := effectiveLifetimeForRouting(p)
+			switch lt {
+			case models.LifetimeSession:
+				p.TestModeInfo.IsFiltered = false
+				unfiltered = append(unfiltered, p)
+			case models.LifetimeConnection:
+				p.TestModeInfo.IsFiltered = false
+				startup = append(startup, p)
+			default:
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			}
+		}
+		return filtered, unfiltered, startup
+	}
+
+	strict := strictWindowEnabled(strictPerCall)
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	isNonKeploy := false
+
+	for _, mk := range m {
+		if mk == nil {
+			continue
+		}
+		p := mk.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			logger.Debug("request or response timestamp of mock is missing",
+				zap.String("mock", p.Name), zap.Bool("strict", strict))
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+			continue
+		}
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
+			continue
+		}
+
+		lt := effectiveLifetimeForRouting(p)
+		switch lt {
+		case models.LifetimeConnection:
+			p.TestModeInfo.IsFiltered = false
+			p.TestModeInfo.Lifetime = models.LifetimeConnection
+			startup = append(startup, p)
+			continue
+		case models.LifetimeSession:
+			p.TestModeInfo.IsFiltered = false
+			p.TestModeInfo.Lifetime = models.LifetimeSession
+			unfiltered = append(unfiltered, p)
+			continue
+		}
+
+		// PerTest: window containment on request timestamp.
+		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		if inWindow {
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+			continue
+		}
+
+		// Out-of-window per-test: strict drops (with startup-init
+		// preservation), lax promotes to unfiltered.
+		if strict {
+			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+				preservedStartup++
+				continue
+			}
+			droppedOutOfWindow++
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfiltered = append(unfiltered, p)
+		}
+	}
+
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+		logger.Debug("FilterByTimeStampThreeTier outcome",
+			zap.Int("dropped_out_of_window", droppedOutOfWindow),
+			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
+			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("perTest", len(filtered)),
+			zap.Int("session", len(unfiltered)),
+			zap.Int("startup", len(startup)),
+			zap.Bool("strict", strict),
+			zap.Time("after", afterTime),
+			zap.Time("before", beforeTime),
+			zap.Time("firstWindowStart", firstWindowStart))
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	return filtered, unfiltered, startup
+}
+
+// effectiveLifetimeForRouting resolves a mock's Lifetime for
+// routing purposes, applying the legacy-tag fallback when the cached
+// enum is not explicitly derived. Mirrors the "defensive fallback"
+// branch of filterByTimeStampTierAware but returns a value instead of
+// mutating the mock — the caller decides whether to stamp the result
+// onto the DeepCopy.
+//
+// Precedence:
+//  1. Explicit LifetimeDerived + non-zero Lifetime wins (the recorder
+//     stamped it at emit time; honour the authoritative classification).
+//  2. LifetimeSession / LifetimeConnection cached wins even without
+//     LifetimeDerived (legacy DeriveLifetime paths may have derived
+//     the non-zero enum without setting the bool).
+//  3. metadata["type"]=="config" → LifetimeSession.
+//  4. metadata["type"]=="connection" → LifetimeConnection.
+//  5. Anything else → LifetimePerTest (zero value).
+//
+// Item 3/4 is the backward-compat path for mocks produced before every
+// integration stamped Lifetime at emit time, AND for mocks constructed
+// inline by tests that set metadata but never called DeriveLifetime.
+func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
+	if m == nil {
+		return models.LifetimePerTest
+	}
+	// Explicit non-zero Lifetime wins regardless of LifetimeDerived.
+	// This honours recorder-stamped values AND any DeriveLifetime path
+	// that cached a non-zero enum without setting the derived bool.
+	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
+		m.TestModeInfo.Lifetime == models.LifetimeConnection {
+		return m.TestModeInfo.Lifetime
+	}
+	if m.TestModeInfo.LifetimeDerived {
+		return m.TestModeInfo.Lifetime
+	}
+	if m.Spec.Metadata != nil {
+		switch m.Spec.Metadata["type"] {
+		case "config":
+			return models.LifetimeSession
+		case "connection":
+			return models.LifetimeConnection
+		}
+	}
+	return models.LifetimePerTest
+}
+
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
 	mapping := make(map[string]bool, len(mocksPresentInMapping))
 	for _, name := range mocksPresentInMapping {

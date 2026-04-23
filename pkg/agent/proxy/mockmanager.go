@@ -902,6 +902,66 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	return results, nil
 }
 
+// SetMocksWithWindowThreeTier is the three-pool variant of
+// SetMocksWithWindow. It accepts an EXPLICIT startup pool (third
+// argument) pre-partitioned by the core filter layer (see
+// FilterByTimeStampThreeTier), in addition to the familiar
+// filtered+unfiltered pair. This lets callers that have already done
+// the Lifetime-aware partition avoid relying on SetMocksWithWindow's
+// internal firstWindowStart/BaseTime heuristic to re-derive the
+// startup tier from the union of filtered+unfiltered.
+//
+// Semantic equivalence to SetMocksWithWindow:
+//   - `filtered` lands in the per-test tree after window containment
+//     (same pre-filter the legacy entry does).
+//   - `unfiltered` lands in the session (unfiltered) tree.
+//   - `startup` is injected into the dedicated startup tree directly,
+//     BEFORE the internal BaseTime/firstWindowStart heuristic runs.
+//     The heuristic still fires so legacy callers that pass a nil
+//     startup slice still get the automatic startup-preservation
+//     behaviour for mocks inside `filtered` whose req < firstStart.
+//
+// Integrations that don't emit LifetimeConnection mocks (HTTP, generic,
+// gRPC, Kafka, etc.) can pass nil for `startup` and get behaviour
+// identical to SetMocksWithWindow.
+func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup []*models.Mock, start, end time.Time) {
+	if len(startup) == 0 {
+		// Delegate to legacy path — no pre-partitioned startup to seed.
+		m.SetMocksWithWindow(filtered, unfiltered, start, end)
+		return
+	}
+	// Run the legacy path FIRST so its internal startup tree is rebuilt
+	// with the BaseTime/firstWindowStart heuristic applied to the
+	// filtered/unfiltered inputs. Then augment the startup tree with
+	// the explicit `startup` slice by calling AddStartupMock on each —
+	// this keeps the single-writer discipline (all startup-tree inserts
+	// go through a lock-respecting path) while letting the caller
+	// contribute connection-scoped mocks that the heuristic can't
+	// derive on its own.
+	m.SetMocksWithWindow(filtered, unfiltered, start, end)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	if m.startup == nil {
+		m.startup = NewTreeDb(customComparator)
+	}
+	for idx, mk := range startup {
+		if mk == nil {
+			continue
+		}
+		if mk.TestModeInfo.SortOrder == 0 {
+			mk.TestModeInfo.SortOrder = int64(idx) + 1
+		}
+		// Tier-local key: copy TestModeInfo and stamp an ID offset.
+		// Offset by a large constant so it cannot collide with the
+		// legacy SetMocksWithWindow's startup IDs (idx 0..N).
+		startupKey := mk.TestModeInfo
+		startupKey.ID = 1_000_000 + idx
+		m.startup.insert(startupKey, mk)
+	}
+}
+
 // GetSessionMocks returns the UNION of startup-tier and session-tier
 // mocks. Wave 2 split the old "session pool" into two disjoint tiers
 // (startup: recorded before the first test window fired; session:
