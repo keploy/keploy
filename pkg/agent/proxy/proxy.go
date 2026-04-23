@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,57 @@ import (
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
+}
+
+// probeFanoutEnabled toggles [PROBE/proxy] / [PROBE/dial] structured
+// logs via KEPLOY_PROBE_FANOUT=1. The flag is read once at first use
+// and cached in an atomic so hot-path branches are a single load.
+// Used to diagnose the parallel-TLS-fanout stall (SAP + Postgres
+// concurrent handshakes) without polluting normal record runs.
+var (
+	probeFanoutOnce    sync.Once
+	probeFanoutEnabled atomic.Bool
+)
+
+func probeOn() bool {
+	probeFanoutOnce.Do(func() {
+		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
+			probeFanoutEnabled.Store(true)
+		}
+	})
+	return probeFanoutEnabled.Load()
+}
+
+// probeProxy emits a [PROBE/proxy] log tagged with a stable conn id
+// and phase name. Cheap to call when the probe is off (single atomic
+// load + early return); zero allocations on the hot disabled path.
+func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Field) {
+	if !probeOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "proxy"),
+		zap.String("phase", phase),
+		zap.Int64("connID", connID),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/proxy]", append(base, fields...)...)
+}
+
+// probeDial emits a [PROBE/dial] log for upstream dial timing.
+func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durNs int64, fields ...zap.Field) {
+	if !probeOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "dial"),
+		zap.String("phase", phase),
+		zap.Int64("connID", connID),
+		zap.String("addr", addr),
+		zap.Int64("dur_ns", durNs),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/dial]", append(base, fields...)...)
 }
 
 type Proxy struct {
@@ -897,6 +949,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
+
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
@@ -1344,7 +1398,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if isTLS {
+		probeProxy(p.logger, "tls-handshake-start", clientConnID,
+			zap.Int("srcPort", sourcePort),
+			zap.Uint32("dstPort", destInfo.Port),
+			zap.String("dstAddr", dstAddr),
+			zap.Bool("speculative", speculativeDial != nil),
+		)
+		tlsStart := time.Now()
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		probeProxy(p.logger, "tls-handshake-done", clientConnID,
+			zap.Int("srcPort", sourcePort),
+			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),
+			zap.Bool("isMTLS", isMTLS),
+			zap.Error(err),
+		)
 		if err != nil {
 			// Client-facing MITM handshake failed; abandon the
 			// speculative upstream dial so its goroutine and socket
@@ -1566,14 +1633,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						speculativeDial.abandon()
 						speculativeDial = nil
 					}
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
+					dialStart := time.Now()
 					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				} else if speculativeDial != nil && addr == speculativeDialAddr &&
 					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
 					// Fast path: the speculative dial targeted the
 					// same addr and offered a superset of the ALPN
 					// the caller now wants. Join it.
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "speculative-join"), zap.String("addr", addr))
+					joinStart := time.Now()
 					var specConn *tls.Conn
 					specConn, err = speculativeDial.join(ctx)
+					probeDial(p.logger, "speculative-join", clientConnID, addr, time.Since(joinStart).Nanoseconds(), zap.Error(err))
 					speculativeDial = nil
 					if err == nil {
 						negotiated := specConn.ConnectionState().NegotiatedProtocol
@@ -1604,7 +1677,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						speculativeDial.abandon()
 						speculativeDial = nil
 					}
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
+					dialStart := time.Now()
 					dstConn, err = tls.Dial("tcp", addr, cfg)
+					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
@@ -1623,7 +1699,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
+			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
+			dialStart := time.Now()
 			dstConn, err = net.Dial("tcp", dstAddr)
+			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
@@ -1664,6 +1743,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			break
 		}
 	}
+
+	probeProxy(p.logger, "integration-select", clientConnID,
+		zap.String("parser", string(parserType)),
+		zap.Bool("generic", generic),
+	)
 
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))

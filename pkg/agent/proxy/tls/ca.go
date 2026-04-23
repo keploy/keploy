@@ -904,6 +904,38 @@ var (
 	certCacheOnce sync.Once
 )
 
+// probeCertOnce, probeCertEnabled: see pkg/agent/proxy/proxy.go probeOn
+// for the sibling toggle. Replicated here because ca.go is a dependency
+// of proxy and cannot import it. Both gates read the same env var, so
+// they flip in lockstep across a single run.
+var (
+	probeCertOnce    sync.Once
+	probeCertEnabled atomic.Bool
+)
+
+func probeCertOn() bool {
+	probeCertOnce.Do(func() {
+		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
+			probeCertEnabled.Store(true)
+		}
+	})
+	return probeCertEnabled.Load()
+}
+
+func probeCert(logger *zap.Logger, phase, sni string, durNs int64, fields ...zap.Field) {
+	if !probeCertOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "cert"),
+		zap.String("phase", phase),
+		zap.String("sni", sni),
+		zap.Int64("dur_ns", durNs),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/cert]", append(base, fields...)...)
+}
+
 const (
 	certCacheMaxSize = 1024
 	certCacheTTL     = 24 * time.Hour
@@ -956,10 +988,16 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Check the cert cache before generating a new certificate.
 	if dstURL != "" {
 		if cached, ok := getCertCache().Get(dstURL); ok {
+			probeCert(logger, "cache-hit", dstURL, 0)
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
 			return cached, nil
 		}
 	}
+	probeCert(logger, "mint-start", dstURL, 0)
+	mintStart := time.Now()
+	defer func() {
+		probeCert(logger, "mint-done", dstURL, time.Since(mintStart).Nanoseconds())
+	}()
 
 	serverReq := &csr.CertificateRequest{
 		CN: dstURL,
