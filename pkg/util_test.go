@@ -1402,6 +1402,114 @@ func TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback(t *testing.T) {
 		"zero firstWindowStart strict mode must leave per-test unfiltered empty")
 }
 
+// TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative
+// pins the mockdb/filter-layer authoritative per-test router contract:
+// pool routing uses ONLY Lifetime + ReqTimestampMock. The recorder-
+// stamped metadata["scope"] string is informational on the wire and
+// MUST NOT influence routing. This regression-guards the debug-bundle
+// symptom where perTest-lifetime mocks with a recorder-stamped
+// scope=session (context-probe captured between test-window
+// transitions) were incorrectly dropped into the session pool.
+//
+// Contract:
+//
+//  1. mock{Lifetime=perTest, metadata.scope=session, req ∈ window} →
+//     per-test pool (filtered). The timestamp attribution wins; scope
+//     is ignored.
+//  2. mock{Lifetime=session, metadata.scope=test:N, req ∈ window} →
+//     session pool (unfiltered). Lifetime-first short-circuit wins;
+//     neither scope nor the fact that req happens to land inside the
+//     current test's window matters for the session-lifetime class.
+//  3. mock{Lifetime=connection, metadata.scope=session, req ∈ window} →
+//     session pool (unfiltered). Same lifetime-first semantics as (2).
+func TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — lifetime-first routing only exercised under strict")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	start := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Second)
+	reqInWindow := start.Add(time.Second)
+	resInWindow := reqInWindow.Add(time.Millisecond)
+
+	// Case 1: the user's exact anomaly shape — a perTest-lifetime mock
+	// with recorder-stamped scope=session, timestamp inside the window.
+	// Must land in the per-test (filtered) pool via timestamp
+	// attribution; the scope tag is noise.
+	perTestWithSessionScope := &models.Mock{
+		Name:    "pertest-scope-session-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			// The recorder stamped scope=session (context-probe
+			// thought it was between tests) AND type=mocks (semantic
+			// class classified the query as per-test). Exactly the
+			// debug-bundle's "lifetime: perTest, scope: session" shape.
+			Metadata: map[string]string{"type": "mocks", "scope": "session"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// Case 2: a session-lifetime mock stamped scope=test:N, req in
+	// window. Lifetime-first short-circuit wins — session pool.
+	sessionWithTestScope := &models.Mock{
+		Name:    "session-scope-test-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "config", "scope": "test:sap-customer360"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// Case 3: a connection-lifetime mock stamped scope=session, req in
+	// window. Lifetime-first short-circuit wins — session/unfiltered
+	// pool (MockManager seeds the per-connID pool from unfiltered).
+	connWithSessionScope := &models.Mock{
+		Name:    "connection-scope-session",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "connection", "scope": "session", "connID": "pg-conn-1"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// Case 4 (baseline sanity): an ordinary perTest-lifetime mock with
+	// no scope tag at all, req in window. Must still land in per-test.
+	// Guards against a regression where the lifetime-first branch
+	// accidentally swallows perTest traffic.
+	perTestNoScope := &models.Mock{
+		Name:    "pertest-no-scope",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "mocks"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{perTestWithSessionScope, sessionWithTestScope, connWithSessionScope, perTestNoScope}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, start, end, true, start)
+
+	assert.ElementsMatch(t,
+		[]string{"pertest-scope-session-anomaly", "pertest-no-scope"},
+		mockNames(filtered),
+		"perTest-lifetime mocks in window must land in the per-test pool irrespective of metadata[\"scope\"]")
+	assert.ElementsMatch(t,
+		[]string{"session-scope-test-anomaly", "connection-scope-session"},
+		mockNames(unfiltered),
+		"Session/Connection-lifetime mocks must land in the session pool irrespective of metadata[\"scope\"] or whether req sits inside the current window")
+}
+
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
 // including IPv4, IPv6, and hostnames, both with and without ports.
 func TestHasExplicitPort_IPv6_777(t *testing.T) {

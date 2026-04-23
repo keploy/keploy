@@ -2918,6 +2918,20 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // inverted-order timestamps get the same defensive handling as the
 // legacy path.
 //
+// Authoritative-routing contract (mockdb/filter-layer owns attribution):
+// the filter routes each mock using ONLY two signals — the derived
+// Lifetime enum and the request-timestamp. Lifetime-first: Session and
+// Connection mocks unconditionally land in the unfiltered (session)
+// pool; PerTest mocks consult the window. The recorder-stamped
+// Metadata["scope"] field is informational on the wire and is NOT
+// consulted by this function (nor by any pool-routing site in the
+// filter/mockmanager layer). A perTest-lifetime mock whose recorder
+// stamped scope=session but whose request-timestamp falls inside the
+// current [afterTime, beforeTime] window lands in the per-test pool —
+// timestamp attribution is the source of truth. This resolves the
+// "27 perTest mocks with scope=session dropped into session pool"
+// symptom the sap-demo-java debug bundle captured.
+//
 // Passing firstWindowStart == time.Time{} restores the legacy blanket-
 // drop behaviour (no startup-tier preservation). Callers that can
 // supply a real cutoff — principally the agent, via the
@@ -2973,6 +2987,51 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
+		// Lifetime-first routing (mockdb/filter-layer authoritative
+		// attribution design): Session- and Connection-lifetime mocks
+		// belong in the session/unfiltered pool REGARDLESS of whether
+		// their request-timestamp happens to fall inside the current
+		// test window. Semantics: these are cross-test reusable by
+		// contract — a BEGIN / SET / SHOW / handshake probe that was
+		// captured during test-N's window is still a session-lifetime
+		// probe; routing it into test-N's per-test pool would make it
+		// invisible to every subsequent test (per-test pools are
+		// single-test-scoped). This is load-bearing for the user's
+		// "route by lifetime + reqTimestampMock, ignore metadata.scope"
+		// design — a perTest-lifetime mock stamped scope=session by the
+		// recorder (scope is informational-only on the wire) but whose
+		// req-timestamp sits inside test-N's window still falls through
+		// to the timestamp-based in-window check below and lands in
+		// test-N's per-test pool. The metadata.scope field is NOT read
+		// for pool routing anywhere in the filter/mockmanager layer;
+		// scope and lifetime may legitimately disagree on the wire when
+		// the recorder's context-probe captured a session-scope fire
+		// inside a live test window.
+		if p.TestModeInfo.Lifetime == models.LifetimeSession ||
+			p.TestModeInfo.Lifetime == models.LifetimeConnection {
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+		// Defensive fallback: DeriveLifetime may not have run on mocks
+		// constructed inline by tests or produced by legacy ingest
+		// paths. Fall back to the raw Metadata["type"] tag so a
+		// config/connection-tagged mock still routes to the session
+		// pool even when the cached Lifetime field is the zero value
+		// (LifetimePerTest). metadata.scope is deliberately NOT
+		// consulted here.
+		if p.Spec.Metadata != nil &&
+			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
+			if p.Spec.Metadata["type"] == "config" {
+				p.TestModeInfo.Lifetime = models.LifetimeSession
+			} else {
+				p.TestModeInfo.Lifetime = models.LifetimeConnection
+			}
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+
 		// In-window = request-timestamp inside [afterTime, beforeTime].
 		// The response may straggle past beforeTime — DB/HTTP downstream
 		// responses routinely complete a few micro-to-milliseconds after
@@ -2983,6 +3042,13 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// in both modes — the strict-vs-lax difference is solely in the
 		// out-of-window handling below (strict drops, lax promotes to
 		// the cross-test config pool).
+		//
+		// Only per-test-lifetime mocks reach this predicate — session/
+		// connection-lifetime mocks short-circuited above to the session
+		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// [afterTime, beforeTime] lands in the per-test pool; outside
+		// the window it falls through to the strict/lax out-of-window
+		// handling below.
 		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
@@ -2990,43 +3056,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// Out-of-window handling differs between modes.
+		// Out-of-window handling for per-test-lifetime mocks only.
+		// Session/connection-lifetime mocks were already routed into
+		// the unfiltered pool by the lifetime-first short-circuit
+		// above, so the strict/lax divergence here applies exclusively
+		// to the perTest class that actually needs window containment.
 		if strict {
-			// Session- and connection-scoped mocks survive out of window
-			// unconditionally. Connection-scoped (LifetimeConnection, used
-			// by prepared-statement setup) is semantically reusable across
-			// tests as long as the owning connID is alive; session-scoped
-			// covers handshake, auth, heartbeats, etc. Enforcement for
-			// connection-scoped happens at connection-pool lookup time.
-			//
-			// DeriveLifetime is called at pool ingest so
-			// TestModeInfo.Lifetime is already populated when we get
-			// here; fall back to reading the tag directly only if the
-			// mock somehow skipped DeriveLifetime (defensive).
-			if p.TestModeInfo.Lifetime == models.LifetimeSession ||
-				p.TestModeInfo.Lifetime == models.LifetimeConnection {
-				p.TestModeInfo.IsFiltered = false
-				unfilteredMocks = append(unfilteredMocks, p)
-				continue
-			}
-			if p.Spec.Metadata != nil &&
-				(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
-				// Defensive fallback: mock entered filterByTimeStamp
-				// without DeriveLifetime having run. Set the cached
-				// Lifetime field here too so every downstream consumer
-				// — including matchers that read Lifetime directly —
-				// sees a consistent classification. Without this the
-				// mock would keep passing through with Lifetime =
-				// PerTest even though the tag says otherwise.
-				if p.Spec.Metadata["type"] == "config" {
-					p.TestModeInfo.Lifetime = models.LifetimeSession
-				} else {
-					p.TestModeInfo.Lifetime = models.LifetimeConnection
-				}
-				p.TestModeInfo.IsFiltered = false
-				unfilteredMocks = append(unfilteredMocks, p)
-				continue
-			}
 			// Per-test, out-of-window. Tier-aware split: startup-init
 			// (req < firstWindowStart) is preserved in the filtered slice
 			// so MockManager.SetMocksWithWindow's startup-tier partition
