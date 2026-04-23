@@ -100,9 +100,13 @@ func (mcm *MockCorrelationManager) routeMockToTest(mock *models.Mock) {
 				zap.String("testID", targetTestID),
 				zap.String("mockKind", mock.GetKind()))
 		default:
+			// Keep Error level — a dropped mock is a correctness issue for
+			// replay. Add a structured next_step so the operator has a
+			// concrete knob to turn when this fires under load.
 			mcm.logger.Error("Mock channel full, dropping mock",
 				zap.String("testID", targetTestID),
-				zap.String("mockKind", mock.GetKind()))
+				zap.String("mockKind", mock.GetKind()),
+				zap.String("next_step", "consider increasing mockChannelBufferSize or reducing concurrent test parallelism if this log recurs"))
 		}
 	}
 }
