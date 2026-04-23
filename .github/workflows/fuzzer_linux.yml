@@ -3,7 +3,7 @@ name: Fuzzer Tests On Linux
 on:
   workflow_call:
     secrets:
-      AWS_SECRET_ACCESS_KEY:
+      AZURE_STORAGE_KEY:
         required: true
       PRO_ACCESS_TOKEN:
         required: false
@@ -75,20 +75,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-      
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
+
       - name: Download and Extract Rerecord Fuzzer
         id: rerecord_fuzzer
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
         run: |
           set -euo pipefail
           KEY="releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
-          echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          echo "Downloading fuzzer from Azure Blob Storage: ${KEY}"
+          az storage blob download \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$AZURE_STORAGE_KEY" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name "$KEY" \
+            --file rerecord-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
           chmod +x ./rerecord-client ./rerecord-server
           echo "client=$(realpath ./rerecord-client)" >> $GITHUB_OUTPUT
@@ -149,19 +155,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
 
       - name: Download and Extract MySQL Fuzzer
         id: mysql_fuzzer
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
         run: |
-          set -e
+          set -euo pipefail
           KEY="releases/mysql-fuzzer/latest/mysql-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          echo "Downloading fuzzer from Azure Blob Storage: ${KEY}"
+          az storage blob download \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$AZURE_STORAGE_KEY" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name "$KEY" \
+            --file mysql-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf mysql-fuzzer-linux-amd64.tar.gz
           chmod +x ./mysql-fuzzer
           echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
@@ -220,26 +233,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-
-      - name: Install AWS CLI
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install --update
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
 
       - name: Download and Extract gRPC Fuzzer
         id: fuzzer
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
         run: |
           set -euo pipefail
           KEY="releases/grpc-fuzzer/latest/grpc-fuzzer-linux-amd64.tar.gz"
-          echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          echo "Downloading fuzzer from Azure Blob Storage: ${KEY}"
+          az storage blob download \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$AZURE_STORAGE_KEY" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name "$KEY" \
+            --file grpc-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf grpc-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
           echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
@@ -301,25 +314,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-      
-      - name: Install AWS CLI
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install --update
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
 
       - name: Download and Extract Postgres Fuzzer
         id: postgres_fuzzer
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
         run: |
-          set -e
+          set -euo pipefail
           KEY="releases/postgres-fuzzer/latest/postgres-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          echo "Downloading fuzzer from Azure Blob Storage: ${KEY}"
+          az storage blob download \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$AZURE_STORAGE_KEY" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name "$KEY" \
+            --file postgres-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf postgres-fuzzer-linux-amd64.tar.gz
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
@@ -375,19 +389,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      - name: Ensure Azure CLI is installed
+        run: command -v az || (curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash)
 
       - name: Download and Extract Mongo Fuzzer
         id: mongo_fuzzer
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
         run: |
-          set -e
+          set -euo pipefail
           KEY="releases/mongo-fuzzer/latest/mongo-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          echo "Downloading fuzzer from Azure Blob Storage: ${KEY}"
+          az storage blob download \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$AZURE_STORAGE_KEY" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --name "$KEY" \
+            --file mongo-fuzzer-linux-amd64.tar.gz \
+            --overwrite true
           tar -xzf mongo-fuzzer-linux-amd64.tar.gz
           chmod +x ./mongo-fuzzer
           echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT

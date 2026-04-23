@@ -95,4 +95,4 @@ jobs:
       runner: ${{ inputs.runner }}
       jobs-to-run: 'postgres_fuzzer,grpc_fuzzer'
     secrets:
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
