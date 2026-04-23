@@ -510,16 +510,13 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 // the ServerName from the destination address (host portion of
 // host:port in Opts.DstCfg.Addr) so the handshake uses correct SNI.
 //
-// InsecureSkipVerify is intentionally true here: keploy runs as a
-// record-mode MITM between the application and its real database.
-// The application's own trust store is the authoritative check on
-// the upstream cert; keploy sits inside the network path only to
-// observe the handshake and subsequent traffic, and has no way to
-// verify against the application's CA bundle. The same pattern is
-// used throughout keploy's MITM paths (see pkg/agent/proxy/proxy.go
-// and pkg/agent/proxy/integrations/mysql/recorder/conn.go for the
-// legacy callers). Record mode only — replay mode uses a different
-// config path.
+// Certificate verification uses the system trust store by default.
+// If the upstream's cert does not verify (e.g. self-signed), the
+// relay's TLS handshake fails and the supervisor falls through to
+// raw passthrough — the application's connection continues but the
+// mock is dropped. This is the intended trade-off: stability over
+// fidelity. Users who need to record against non-system-trust
+// upstreams should add the cert to their system store.
 func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
 	var serverName string
 	if sess.Opts.DstCfg != nil {
@@ -531,9 +528,8 @@ func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
 		}
 	}
 	return &tls.Config{
-		// #nosec G402 — MITM record mode; see function doc.
-		InsecureSkipVerify: true, // lgtm[go/disabled-certificate-check]
-		ServerName:         serverName,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
 	}
 }
 
