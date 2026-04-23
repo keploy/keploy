@@ -24,6 +24,11 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Name:         mock.Name,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Carry the per-mock format override verbatim to the wire-format
+		// doc. Empty at the in-memory level means "use whatever mockdb
+		// was configured with"; we persist it as empty too via
+		// omitempty, so non-DS recordings remain byte-identical.
+		Format: mock.Format,
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
@@ -386,6 +391,12 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Kind:         m.Kind,
 			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
+			// Propagate the per-mock format back onto the in-memory
+			// Mock so callers can inspect it (e.g. UpdateMocks, which
+			// rewrites the file and must re-emit the same Format to
+			// survive round-trips). Empty here means "fall back to the
+			// testset-level format on re-write".
+			Format: m.Format,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {

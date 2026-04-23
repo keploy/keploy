@@ -38,6 +38,21 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	// Format, when non-empty, overrides the process-wide configured
+	// on-disk format ("gob" or "yaml") for this specific mock.
+	// Recognized values are "gob" and "yaml"; any other non-empty
+	// value is treated as unset ONLY for InsertMock's three-step
+	// routing decision (recognized value → locked testset format →
+	// process default). The field itself is carried verbatim through
+	// EncodeMock / DecodeMocks, so unknown non-empty values may still
+	// round-trip on disk — they just do not influence the on-disk
+	// format choice. mockdb readers populate it back onto
+	// models.Mock.Format so formats can vary across mocks recorded in
+	// different test-set directories or sessions (required by
+	// DaemonSet per-session mockFormat), but each individual test-set
+	// directory must remain single-format. Omitempty keeps the wire
+	// footprint of existing (non-DS) recordings unchanged.
+	Format string `json:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
