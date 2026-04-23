@@ -21,9 +21,6 @@ jobs:
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
-          - name: nethttp-mysql
-            path: nethttp-mysql
-            script_dir: nethttp_mysql
         config:
           - job: record_latest_replay_build
             record_src: latest

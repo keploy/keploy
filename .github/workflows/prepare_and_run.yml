@@ -1,7 +1,9 @@
 name: Prepare Binary and Run Workflows
 on:
   pull_request:
+    branches: [main]
   push:
+    branches: [main]
 
 concurrency:
   # One group per PR / branch spanning all three platform legs. A new
