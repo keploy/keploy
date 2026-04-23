@@ -11,6 +11,7 @@ jobs:
   grpc_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -35,9 +36,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-
-      - name: Install lsof utility
-        run: sudo apt-get update && sudo apt-get install -y lsof
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -71,6 +69,7 @@ jobs:
   grpc_linux_protoscope:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -94,9 +93,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-
-      - name: Install lsof utility
-        run: sudo apt-get update && sudo apt-get install -y lsof
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -130,6 +126,7 @@ jobs:
 
   grpc_linux_secret:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -153,9 +150,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-
-      - name: Install lsof utility
-        run: sudo apt-get update && sudo apt-get install -y lsof
 
       - name: Set up Go
         uses: actions/setup-go@v6
