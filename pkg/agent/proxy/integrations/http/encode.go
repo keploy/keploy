@@ -312,11 +312,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					// the capture is still truncated — drop the partial
 					// bytes on the floor for replay safety and persist
 					// the synthesized error mock instead.
-					h.Logger.Warn("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
+					h.Logger.Error("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
 						zap.Int("partial_resp_len", len(resp)),
 						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
 						zap.String("error_class", upstreamErrorClass(err)),
-						zap.Error(err))
+						zap.Error(err),
+						zap.String("next_step", "investigate upstream stability (check connection resets, timeouts, keep-alive settings); recorded synthesized 5xx mock in place of the truncated response"))
 				}
 				enqueueMock(finalReq, synthResp, reqTimestampMock, resTimestampMock)
 				errCh <- nil
