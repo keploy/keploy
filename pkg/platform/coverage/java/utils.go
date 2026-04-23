@@ -69,10 +69,14 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 				}
 			}()
 
-			_, err = io.Copy(outFile, cliFile)
-			if err != nil {
+			const maxCopyBytes = 100 << 20
+			n, err := io.CopyN(outFile, cliFile, maxCopyBytes)
+			if err != nil && err != io.ErrUnexpectedEOF {
 				return err
 			}
+			if n == maxCopyBytes {
+				return fmt.Errorf("jacococli.jar exceeds maximum allowed size of %d bytes", maxCopyBytes)
+
 		}
 	}
 
