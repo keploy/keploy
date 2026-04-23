@@ -483,7 +483,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					realMockEntries = append(realMockEntries, realEntry)
 					correlationMap.Delete(tempID)
 				} else {
-					r.logger.Warn("Failed to correlate mock mapping",
+					r.logger.Error("Failed to correlate mock mapping",
 						zap.String("test", mapping.TestName),
 						zap.String("tempMockID", tempID))
 				}

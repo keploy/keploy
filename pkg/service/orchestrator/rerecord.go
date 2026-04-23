@@ -127,7 +127,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
-					o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
+					o.logger.Error("Failed to re-record some testcases", zap.String("testset", testSet))
 					stopReason = "failed to re-record some testcases"
 				}
 
@@ -208,7 +208,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			for _, testSet := range SelectedTests {
 				err := o.replay.DeleteTestSet(ctx, testSet)
 				if err != nil {
-					o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+					o.logger.Error("Failed to delete the testset", zap.String("testset", testSet))
 				}
 			}
 			o.logger.Info("Deleted the older testsets successfully")
@@ -545,7 +545,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 			// Persist any template changes (best-effort) after propagation
 			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
-				o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+				o.logger.Error("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
 			} else {
 				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 			}

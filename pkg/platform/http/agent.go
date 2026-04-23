@@ -1115,7 +1115,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 		if errors.Is(agentCtx.Err(), context.Canceled) {
 			a.logger.Info("Agent was stopped intentionally")
 		} else {
-			a.logger.Warn("Agent stopped unexpectedly, client operations may be affected")
+			a.logger.Error("Agent stopped unexpectedly, client operations may be affected")
 		}
 	}
 }

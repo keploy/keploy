@@ -1753,7 +1753,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		for _, err := range cleanupErrors {
 			utils.LogError(p.logger, err, "cleanup error in StopProxyServer")
 		}
-		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
+		p.logger.Error("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
 	} else {
 		p.logger.Debug("proxy stopped cleanly...")
 	}
@@ -2013,7 +2013,7 @@ func (p *Proxy) SendError(err error) {
 	select {
 	case p.errChannel <- err:
 	default:
-		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
+		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
 	}
 }
 

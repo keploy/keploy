@@ -100,7 +100,7 @@ func (mcm *MockCorrelationManager) routeMockToTest(mock *models.Mock) {
 				zap.String("testID", targetTestID),
 				zap.String("mockKind", mock.GetKind()))
 		default:
-			mcm.logger.Warn("Mock channel full, dropping mock",
+			mcm.logger.Error("Mock channel full, dropping mock",
 				zap.String("testID", targetTestID),
 				zap.String("mockKind", mock.GetKind()))
 		}
