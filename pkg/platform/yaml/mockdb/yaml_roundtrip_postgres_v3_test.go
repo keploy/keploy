@@ -175,7 +175,6 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					Class:         "APP",
 					Lifetime:      "perTest",
-					Scope:         "session",
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
@@ -269,7 +268,6 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					Class:         "APP",
 					Lifetime:      "perTest",
-					Scope:         "session",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
 					InvocationID:  "sha256:null:0",
@@ -427,5 +425,81 @@ func TestYAMLRoundTrip_PostgresV3Generator(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Spec.PostgresV3.Generator, in.Spec.PostgresV3.Generator) {
 		t.Fatalf("generator mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Generator, got.Spec.PostgresV3.Generator)
+	}
+}
+
+// TestDecodeMocks_PostgresV3_BackwardCompat_ScopeFieldIgnored pins the
+// READ-side backward compatibility contract for old recordings that
+// still stamp the retired `scope` key inside PostgresV3QuerySpec and
+// PostgresV3SessionSpec metadata. The struct no longer carries a Scope
+// field (removed after pool routing moved to lifetime-first), but
+// mocks.yaml produced by prior builds routinely contain lines like
+//
+//	spec:
+//	  postgresV3:
+//	    query:
+//	      lifetime: perTest
+//	      scope: session    # <- retired key; must load cleanly
+//	      sqlAstHash: sha256:...
+//
+// The reader path (DecodeMocks → yamlLib.Unmarshal) must accept these
+// silently — gopkg.in/yaml.v3 is non-strict by default, so unknown
+// keys are skipped and the struct fills with only the known fields.
+// If a future caller flips on Decoder.KnownFields(true) for any reason
+// this test fails LOUD.
+//
+// The fixture below mirrors a real fkppl customer360 debug-bundle
+// mocks.yaml fragment (see
+// /tmp/auto-replay-issue/debug-bundle-sap-demo-customer360-...).
+func TestDecodeMocks_PostgresV3_BackwardCompat_ScopeFieldIgnored(t *testing.T) {
+	const oldYAMLWithScope = `
+metadata:
+  type: mocks
+  class: SELECT
+  lifetime: perTest
+  scope: session
+postgresV3:
+  type: query
+  query:
+    class: SELECT
+    lifetime: perTest
+    scope: session
+    sqlAstHash: sha256:a66bf255653587dd476dfd0524632134bc0623f293ee93d2bf2666447cd2b4d1
+    sqlNormalized: "select 1"
+    invocationId: sha256:abcd:0
+    response:
+      commandComplete: "SELECT 1"
+    sideEffects: {}
+`
+	var spec yamlLib.Node
+	if err := yamlLib.Unmarshal([]byte(oldYAMLWithScope), &spec); err != nil {
+		t.Fatalf("yaml.Unmarshal fixture: %v", err)
+	}
+	doc := &pyaml.NetworkTrafficDoc{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Name:    "mock-legacy-scope",
+		Spec:    spec,
+	}
+	mocks, err := DecodeMocks([]*pyaml.NetworkTrafficDoc{doc}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("DecodeMocks returned error on legacy `scope:` recording — "+
+			"backward-compat broke. err=%v", err)
+	}
+	if len(mocks) != 1 {
+		t.Fatalf("want 1 mock, got %d", len(mocks))
+	}
+	q := mocks[0].Spec.PostgresV3
+	if q == nil || q.Query == nil {
+		t.Fatalf("Spec.PostgresV3.Query unexpectedly nil: %#v", mocks[0].Spec)
+	}
+	if q.Query.Lifetime != "perTest" {
+		t.Fatalf("Query.Lifetime: want %q, got %q", "perTest", q.Query.Lifetime)
+	}
+	if q.Query.SQLAstHash == "" {
+		t.Fatalf("Query.SQLAstHash: want non-empty, got empty — known keys stopped parsing")
+	}
+	if q.Query.InvocationID != "sha256:abcd:0" {
+		t.Fatalf("Query.InvocationID: want %q, got %q", "sha256:abcd:0", q.Query.InvocationID)
 	}
 }

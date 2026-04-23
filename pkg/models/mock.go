@@ -273,11 +273,19 @@ type PostgresV3DataSpec struct {
 
 // PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
 // replay-time index by sqlAstHash.
+//
+// Historical note: earlier recordings stamped a `scope` field
+// ("connection" / "session" / "test:<name>") alongside Class / Lifetime.
+// The field was retired after 28069e28 moved pool routing to
+// lifetime-first and pgmatch.DeriveLifetime became the single source
+// of truth. Old YAML mocks that still contain `scope: ...` continue to
+// load cleanly: gopkg.in/yaml.v3 is non-strict by default, so the
+// unknown key is silently skipped at unmarshal time. NEW recordings
+// MUST NOT re-introduce a scope field.
 type PostgresV3QuerySpec struct {
 	// Classification
 	Class      string `json:"class,omitempty" yaml:"class,omitempty" bson:"class,omitempty"`
 	Lifetime   string `json:"lifetime,omitempty" yaml:"lifetime,omitempty" bson:"lifetime,omitempty"`
-	Scope      string `json:"scope,omitempty" yaml:"scope,omitempty" bson:"scope,omitempty"`
 	SQLAstHash string `json:"sqlAstHash" yaml:"sqlAstHash" bson:"sql_ast_hash"`
 
 	// SQL

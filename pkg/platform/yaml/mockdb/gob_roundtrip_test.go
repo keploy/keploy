@@ -197,7 +197,6 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					Class:         "APP",
 					Lifetime:      "perTest",
-					Scope:         "session",
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
@@ -234,7 +233,6 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					Class:         "APP",
 					Lifetime:      "perTest",
-					Scope:         "session",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
 					InvocationID:  "sha256:null:0",
