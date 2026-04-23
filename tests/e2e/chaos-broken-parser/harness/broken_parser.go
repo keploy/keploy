@@ -43,7 +43,7 @@
 //     at that port instead of the postgres service directly, and
 //     watch the harness' logSink for:
 //
-//         "parser supervisor triggered passthrough fallback"
+//     "parser supervisor triggered passthrough fallback"
 //
 //     which recordViaSupervisor emits on FallthroughToPassthrough.
 //
