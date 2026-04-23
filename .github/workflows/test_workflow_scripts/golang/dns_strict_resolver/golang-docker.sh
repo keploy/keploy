@@ -20,7 +20,9 @@ set -Eeuo pipefail
 NETWORK=dns-strict-resolver-net
 SUBNET=172.30.0.0/16
 COREDNS_IP=172.30.0.10
+COREDNS_SECONDARY_IP=172.30.0.11
 COREDNS_NAME=dns-strict-resolver-coredns
+COREDNS_SECONDARY_NAME=dns-strict-resolver-coredns-secondary
 SAMPLE_NAME=dns-strict-resolver
 CURL_OUT=curl-output.txt
 
@@ -28,7 +30,7 @@ section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 cleanup() {
-  docker rm -f "$SAMPLE_NAME" "$COREDNS_NAME" 2>/dev/null || true
+  docker rm -f "$SAMPLE_NAME" "$COREDNS_NAME" "$COREDNS_SECONDARY_NAME" 2>/dev/null || true
   docker network rm "$NETWORK" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -45,8 +47,11 @@ dump_diagnostics() {
   echo "::group::keploy record.txt (tail 200)"
   tail -200 record.txt 2>/dev/null || echo "(record.txt missing)"
   echo "::endgroup::"
-  echo "::group::CoreDNS logs"
+  echo "::group::CoreDNS primary logs"
   docker logs "$COREDNS_NAME" 2>&1 | tail -40 || true
+  echo "::endgroup::"
+  echo "::group::CoreDNS secondary logs"
+  docker logs "$COREDNS_SECONDARY_NAME" 2>&1 | tail -40 || true
   echo "::endgroup::"
   echo "::group::sample container logs"
   docker logs "$SAMPLE_NAME" 2>&1 | tail -40 || true
@@ -64,6 +69,24 @@ check_curl_output() {
   fi
   if grep -Eq '"source_mismatches":[1-9]' "$CURL_OUT"; then
     echo "::error::source_mismatches > 0 (pre-fix Keploy behaviour). Output:"
+    cat "$CURL_OUT"
+    dump_diagnostics
+    return 1
+  fi
+  if grep -Eq '"txid_mismatches":[1-9]' "$CURL_OUT"; then
+    echo "::error::txid_mismatches > 0. Output:"
+    cat "$CURL_OUT"
+    dump_diagnostics
+    return 1
+  fi
+  if grep -q '"passed":false' "$CURL_OUT"; then
+    echo "::error::DNS regression suite failed. Output:"
+    cat "$CURL_OUT"
+    dump_diagnostics
+    return 1
+  fi
+  if ! grep -q '"passed":true' "$CURL_OUT"; then
+    echo "::error::DNS regression suite did not report passed=true. Output:"
     cat "$CURL_OUT"
     dump_diagnostics
     return 1
@@ -134,11 +157,10 @@ send_request() {
   fi
   echo "Running curl.sh..."
   chmod +x ./curl.sh
-  # Aim DNS queries at the fixture CoreDNS container rather than
-  # /etc/resolv.conf (which, under keploy's container-mode netns share,
-  # points at 127.0.0.11 / docker embedded DNS — a special iptables-
-  # managed path that does not reach cgroup/recvmsg4 on GH runners).
-  NAMESERVER="${COREDNS_IP}:53" ./curl.sh 2>&1 | tee "$CURL_OUT" || true
+  # Aim DNS queries at fixture CoreDNS containers rather than
+  # /etc/resolv.conf. SECONDARY_NAMESERVER lets /suite exercise one
+  # unconnected UDP socket sending to more than one upstream.
+  NAMESERVER="${COREDNS_IP}:53" SECONDARY_NAMESERVER="${COREDNS_SECONDARY_IP}:53" ./curl.sh 2>&1 | tee "$CURL_OUT" || true
   endsec
 }
 
@@ -153,16 +175,17 @@ docker build -t "$SAMPLE_NAME:test" .
 endsec
 
 section "Network + CoreDNS"
-# Dedicated network with a known subnet so CoreDNS can pin 172.30.0.10
-# as its IP. The sample queries this IP directly via ?nameserver= on
-# /resolve; this mirrors the Flipkart production shape (client → real
-# DNS container on a real bridge network) where the recvmsg4 SNAT fix
-# has been verified to work, rather than the GH-runner docker embedded
-# DNS path (127.0.0.11) which goes through docker-managed iptables and
-# does NOT trigger cgroup/recvmsg4 reliably.
+# Dedicated network with a known subnet so the CoreDNS fixtures can pin
+# stable IPs. The sample queries these IPs directly via ?nameserver= on
+# /suite and /resolve; this mirrors the production shape (client → real
+# DNS container on a real bridge network) where the recvmsg4 SNAT fix has
+# been verified, rather than Docker's embedded DNS path (127.0.0.11).
 docker network create --subnet "$SUBNET" "$NETWORK"
 docker run -d --rm --name "$COREDNS_NAME" --net "$NETWORK" --ip "$COREDNS_IP" \
   -v "$PWD/coredns:/etc/coredns:ro" \
+  coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
+docker run -d --rm --name "$COREDNS_SECONDARY_NAME" --net "$NETWORK" --ip "$COREDNS_SECONDARY_IP" \
+  -v "$PWD/coredns-secondary:/etc/coredns:ro" \
   coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
 sleep 2
 endsec

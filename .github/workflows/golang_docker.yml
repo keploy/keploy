@@ -62,20 +62,7 @@ jobs:
           repository: keploy/samples-go
           ref: ${{ matrix.app.samples_ref || 'main' }}
           path: samples-go
-      # dns-strict-resolver exercises a kernel path (cgroup/recvmsg4 firing
-      # on the sample's unconnected-UDP reads) that does not reliably
-      # trigger under GitHub Actions' ubuntu-latest runner + docker-in-
-      # docker cgroup shape, even though the same keploy build passes the
-      # equivalent flow end-to-end in production (K8s pod + CoreDNS
-      # bridge) and on Docker Desktop. We keep the matrix entry running
-      # so any real regression of the SNAT logic still shows up as a CI
-      # diff rather than silently rotting, and so the sample itself stays
-      # exercised, but mark this one step as continue-on-error for that
-      # app only so the GH-runner-specific attach quirk doesn't block the
-      # PR. Other matrix apps (gin-mongo, echo-sql, go-memory-load,
-      # proxy-stress-test) remain hard gates.
       - name: Run ${{ matrix.app.name }} application
-        continue-on-error: ${{ matrix.app.name == 'dns-strict-resolver' }}
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
