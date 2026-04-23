@@ -18,7 +18,17 @@ import (
 func subsKeyMatchWithOriginal(s string, mp map[string][]string) ([]string, bool) {
 	lowered := make(map[string][]string, len(mp))
 	for k, v := range mp {
-		lowered[strings.ToLower(k)] = v
+		lk := strings.ToLower(k)
+		if existing, ok := lowered[lk]; ok {
+			merged := make([]string, 0, len(existing)+len(v))
+			merged = append(merged, existing...)
+			merged = append(merged, v...)
+			lowered[lk] = merged
+		} else {
+			cp := make([]string, len(v))
+			copy(cp, v)
+			lowered[lk] = cp
+		}
 	}
 	return SubstringKeyMatch(s, lowered)
 }
