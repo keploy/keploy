@@ -339,6 +339,28 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		}
 	}
 
+	// Gate every subsequent instrumentation call on the Keploy agent
+	// actually being reachable. In sandbox / docker-compose runs the
+	// keploy container was created moments ago and its host port forward
+	// is still settling — firing MockOutgoing immediately produces a
+	// "connect: connection refused" on the agent URL. Mirrors replay's
+	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
+	if r.config != nil && r.config.Agent.AgentURI != "" {
+		agentCtx, cancel := context.WithTimeout(gCtx, 120*time.Second)
+		agentReadyCh := make(chan bool, 1)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		select {
+		case <-gCtx.Done():
+			cancel()
+			return nil, gCtx.Err()
+		case <-agentCtx.Done():
+			cancel()
+			return nil, fmt.Errorf("keploy-agent at %s did not become ready within 120s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI)
+		case <-agentReadyCh:
+		}
+		cancel()
+	}
+
 	outOpts := models.OutgoingOptions{
 		Mocking:  true,
 		Backdate: backdate,
