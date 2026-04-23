@@ -267,13 +267,20 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// res_send on the unconnected path) see the reply coming from keploy's
 	// DNS port, reject it as spoofed, and retransmit until they time out
 	// with EAI_AGAIN / "Temporary failure in name resolution".
+	//
+	// Attach is non-fatal on purpose. `cgroup/recvmsg4` requires kernel
+	// >= 5.11; if it is not available the non-strict client paths (glibc
+	// res_send's connected branch, Go's pure resolver, dig, getent) still
+	// work via the existing getpeername4 hook, so a missing recvmsg4
+	// attach is a strict-subset degradation of the pre-fix behaviour
+	// rather than a regression.
 	udp4Recv, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupUDP4Recvmsg,
 		Program: objs.K_udp4Recvmsg,
 	})
 	if err != nil {
-		h.logger.Error("failed to attach the udp4 recvmsg cgroup hook (strict DNS clients may fail with EAI_AGAIN)", zap.Error(err))
+		h.logger.Warn("failed to attach the udp4 recvmsg cgroup hook (requires kernel >= 5.11; strict DNS clients may fail with EAI_AGAIN, other clients unaffected)", zap.Error(err))
 	} else {
 		h.udp4Recvmsg = udp4Recv
 	}
@@ -313,13 +320,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.udp6Sendmsg = udp6
 	}
 
+	// IPv6 partner to udp6_sendmsg — see the equivalent comment on the
+	// udp4_recvmsg attach above for the full rationale. Same attach-is-
+	// non-fatal trade-off: strict DNS clients lose source-address rewriting
+	// if the hook is missing, but every other client path continues to
+	// work via getpeername6.
 	udp6Recv, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupUDP6Recvmsg,
 		Program: objs.K_udp6Recvmsg,
 	})
 	if err != nil {
-		h.logger.Error("failed to attach the udp6 recvmsg cgroup hook (strict DNS clients may fail with EAI_AGAIN)", zap.Error(err))
+		h.logger.Warn("failed to attach the udp6 recvmsg cgroup hook (requires kernel >= 5.11; strict DNS clients may fail with EAI_AGAIN, other clients unaffected)", zap.Error(err))
 	} else {
 		h.udp6Recvmsg = udp6Recv
 	}
