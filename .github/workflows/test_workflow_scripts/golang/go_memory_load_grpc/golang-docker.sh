@@ -14,6 +14,10 @@ LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
+# gRPC is a high-throughput protocol — CI runners cap VUs and duration to keep
+# Keploy memory within the RECORD_MEMORY_LIMIT_MB bound.
+K6_VUS="${K6_VUS:-5}"
+K6_DURATION="${K6_DURATION:-45s}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
@@ -419,6 +423,8 @@ run_loadtest() {
         -e THRESHOLD_LARGE_INSERT_P95="$THRESHOLD_LARGE_INSERT_P95" \
         -e THRESHOLD_LARGE_GET_P95="$THRESHOLD_LARGE_GET_P95" \
         -e THRESHOLD_LARGE_DELETE_P95="$THRESHOLD_LARGE_DELETE_P95" \
+        -e K6_VUS="$K6_VUS" \
+        -e K6_DURATION="$K6_DURATION" \
         k6 run /scripts/scenario.js 2>&1 | tee "$k6_log" || k6_rc=$?
 
     if [ "$k6_rc" -ne 0 ]; then
