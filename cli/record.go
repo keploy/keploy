@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -11,11 +13,13 @@ import (
 	"go.uber.org/zap"
 )
 
+var BypassRules string
+
 func init() {
 	Register("record", Record)
 }
 
-func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
@@ -41,6 +45,16 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				TestSet:  "",
 			}
 
+			if BypassRules != "" {
+				var rules []models.BypassRule
+
+				if err := json.Unmarshal([]byte(BypassRules), &rules); err != nil {
+					return fmt.Errorf("invalid --bypassRules value: %w", err)
+				}
+
+				conf.BypassRules = rules
+			}
+
 			err = record.Start(ctx, cfg)
 
 			if err != nil {
@@ -53,10 +67,18 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 	}
 
 	err := cmdConfigurator.AddFlags(cmd)
+
 	if err != nil {
 		utils.LogError(logger, err, "failed to add record flags")
 		return nil
 	}
+
+	cmd.Flags().StringVar(
+		&BypassRules,
+		"bypassRules",
+		"",
+		"JSON array for bypass rules (example: '[{\"path\":\"/health\"}]')",
+	)
 
 	return cmd
 }
