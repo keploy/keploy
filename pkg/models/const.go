@@ -69,11 +69,11 @@ var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 // state bits MockManager exposes:
 //
 //   - Active:         at least one real test window is currently set
-//                     (SetCurrentTestWindow / SetMocksWithWindow with
-//                     non-zero start+end; BaseTime staging does NOT
-//                     activate — see mockmanager.go isInitialStaging).
+//     (SetCurrentTestWindow / SetMocksWithWindow with
+//     non-zero start+end; BaseTime staging does NOT
+//     activate — see mockmanager.go isInitialStaging).
 //   - FirstTestFired: at least one real (non-BaseTime) test window has
-//                     ever been set; sticky once true.
+//     ever been set; sticky once true.
 //
 // The principal-engineer review flagged a torn-read hazard: the legacy
 // IsTestWindowActive / HasFirstTestFired accessors read under different

@@ -252,9 +252,9 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 // remotes the saving is ~one full RTT of client-facing handshake time per
 // intercepted TLS connection.
 type speculativeUpstreamTLS struct {
-	done     chan speculativeUpstreamTLSResult
-	cancel   context.CancelFunc
-	settled  sync.Once // ensures exactly one of join()/abandon() consumes done
+	done    chan speculativeUpstreamTLSResult
+	cancel  context.CancelFunc
+	settled sync.Once // ensures exactly one of join()/abandon() consumes done
 	// protos is the NextProtos slice the speculative dial offered upstream.
 	// The caller compares it against the final (post-initialBuf) desired
 	// ALPN; on mismatch the caller abandons the speculative conn and
@@ -379,17 +379,17 @@ func nextProtosSubset(want, offered []string) bool {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort, // default: 26789
-		synchronous:       opts.Agent.Synchronous,
-		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		clientClose:       make(chan bool, 1),
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
+		logger:             logger,
+		Port:               opts.ProxyPort,
+		DNSPort:            opts.DNSPort, // default: 26789
+		synchronous:        opts.Agent.Synchronous,
+		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:            &sync.Mutex{},
+		connMutex:          &sync.Mutex{},
+		DestInfo:           info,
+		clientClose:        make(chan bool, 1),
+		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
 		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:           opts.Agent.IsDocker,

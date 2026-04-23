@@ -223,4 +223,3 @@ func javaHomeFromExeLink(exeLink string) string {
 	}
 	return javaHome
 }
-
