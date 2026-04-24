@@ -100,15 +100,20 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		}
 	}
 
-	err := a.Hook(ctx, models.HookOptions{
-		Mode:          a.config.Agent.Mode,
-		IsDocker:      a.config.Agent.IsDocker,
-		EnableTesting: a.config.Agent.EnableTesting,
-		Rules:         rules,
-	})
-	if err != nil {
-		a.logger.Error("failed to hook into the app", zap.Error(err))
-		return err
+	if a.config.Agent.SkipHooks {
+		a.logger.Info("Skipping eBPF hook and proxy loading (DaemonSet orchestrator mode)")
+	} else {
+		err := a.Hook(ctx, models.HookOptions{
+			Mode:          a.config.Agent.Mode,
+			IsDocker:      a.config.Agent.IsDocker,
+			EnableTesting: a.config.Agent.EnableTesting,
+			Rules:         rules,
+			CgroupPath:    a.config.Agent.CgroupPath,
+		})
+		if err != nil {
+			a.logger.Error("failed to hook into the app", zap.Error(err))
+			return err
+		}
 	}
 
 	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
@@ -125,8 +130,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	<-ctx.Done()
-	err = errGrp.Wait()
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err := errGrp.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
 	}
@@ -219,10 +223,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	hookCfg := coreAgent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:        0,
+		IsDocker:   opts.IsDocker,
+		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		CgroupPath: opts.CgroupPath,
 	}
 
 	if coreAgent.EbpfProxyPortOverride != 0 {

@@ -296,6 +296,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
+		cmd.Flags().String("cgroup-path", "", "Explicit cgroupv2 path to attach eBPF hooks to (used by DaemonSet agent for targeting specific pods)")
+		cmd.Flags().Bool("skip-hooks", false, "Skip eBPF hook and proxy loading (used by DaemonSet orchestrator agent)")
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
@@ -1439,6 +1441,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return fmt.Errorf("failed to get pass-through-ports flag: %w", err)
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		cgroupPath, err := cmd.Flags().GetString("cgroup-path")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get cgroup-path flag")
+			return fmt.Errorf("failed to get cgroup-path flag: %w", err)
+		}
+		c.cfg.Agent.CgroupPath = cgroupPath
+
+		skipHooks, err := cmd.Flags().GetBool("skip-hooks")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get skip-hooks flag")
+			return fmt.Errorf("failed to get skip-hooks flag: %w", err)
+		}
+		c.cfg.Agent.SkipHooks = skipHooks
 
 		if cmd.Flags().Changed("memory-limit") {
 			memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
