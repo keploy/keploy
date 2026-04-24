@@ -180,20 +180,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	switch cmd.Name() {
-
-	case "upload": //for uploading mocks
-		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
-		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-
 	case "generate", "download":
-		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
-			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
-			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-			cmd.Flags().StringSlice("registry-ids", c.cfg.MockDownload.RegistryIDs, "Registry IDs for direct mock download")
-			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-			return nil
-		}
-
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
 		cmd.Flags().StringP("path", "p", ".", "Specify the path to generate/download contracts")
@@ -217,7 +204,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-	case "record", "test", "rerecord":
+	case "record", "test":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -246,7 +233,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 
-		//add rest of the uncommon flags for record, test, rerecord commands
+		// add rest of the uncommon flags for record and test commands
 		c.AddUncommonFlags(cmd)
 
 	case "report":
@@ -318,7 +305,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
-	case "test", "rerecord":
+	case "test":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
@@ -329,38 +316,28 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
+		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
-		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
-		if cmd.Name() == "rerecord" {
-			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
-			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
-			cmd.Flags().String("branch", c.cfg.ReRecord.Branch, "In which git branch to send the updated config file with new mock hash")
-			cmd.Flags().String("owner", c.cfg.ReRecord.Owner, "Git user to be referenced for commiting config change")
-		}
-		if cmd.Name() == "test" {
-			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
-			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
-			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
-			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
-			_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
-			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
-			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
-			cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
-			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
-			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
-			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
-			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
-			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
-		}
+		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
+		cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
+		cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
+		cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
+		cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
+		cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
+		cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
+		_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
+		cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
+		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
+		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
+		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
+		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 	}
 }
 
@@ -692,23 +669,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	switch cmd.Name() {
 
-	case "upload": //for uploading mocks
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
-		testSets, err := cmd.Flags().GetStringSlice("test-sets")
-		if err != nil {
-			errMsg := "failed to get the test-sets"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetSelectedTests(c.cfg, testSets)
-
 	case "report":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -844,34 +804,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
-		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
-			path, err := cmd.Flags().GetString("path")
-			if err != nil {
-				errMsg := "failed to get the path"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-			if err != nil {
-				errMsg := "failed to get the testsets"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			config.SetSelectedTests(c.cfg, testSets)
-
-			registryIDs, err := cmd.Flags().GetStringSlice("registry-ids")
-			if err != nil {
-				errMsg := "failed to get the registry-ids"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.MockDownload.RegistryIDs = registryIDs
-
-			return nil
-		}
-
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
 			errMsg := "failed to get the path"
@@ -922,18 +854,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "record", "test", "rerecord":
-
-		if cmd.Name() == "rerecord" {
-			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
-			if err != nil {
-				errMsg := "failed to get the amend-testset flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.ReRecord.AmendTestSet = updateTestSet
-		}
-
+	case "record", "test":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
@@ -1107,7 +1028,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Record.EnableSampling = enableSampling
 		}
 
-		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+		if cmd.Name() == "test" {
 			//check if the keploy folder exists
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
@@ -1158,71 +1079,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			if cmd.Name() == "rerecord" {
-				c.cfg.Test.SkipCoverage = true
-				host, err := cmd.Flags().GetString("host")
-				if err != nil {
-					errMsg := "failed to get the provided host"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.Host = host
-				port, err := cmd.Flags().GetUint32("port")
-				if err != nil {
-					errMsg := "failed to get the provided port"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.Port = port
-
-				grpcPort, err := cmd.Flags().GetUint32("grpc-port")
-				if err != nil {
-					errMsg := "failed to get the provided grpcPort"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.GRPCPort = grpcPort
-
-				ssePort, err := cmd.Flags().GetUint32("sse-port")
-				if err != nil {
-					errMsg := "failed to read --sse-port flag; ensure the value is a valid port number"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.SSEPort = ssePort
-
-				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
-				if err != nil {
-					errMsg := "failed to get the provided delay"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				c.cfg.Test.APITimeout, err = cmd.Flags().GetUint64("api-timeout")
-				if err != nil {
-					errMsg := "failed to get the provided api-timeout"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				c.cfg.Test.DisableMockUpload, err = cmd.Flags().GetBool("disableMockUpload")
-				if err != nil {
-					errMsg := "failed to get the provided disableMockUpload"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				// optional flag to show response diffs during rerecord
-				showDiff, err := cmd.Flags().GetBool("show-diff")
-				if err != nil {
-					errMsg := "failed to get the show-diff flag"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.ShowDiff = showDiff
-				return nil
-			}
-
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
 			// and not due to flakiness or our internal issue.
@@ -1235,7 +1091,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			if mustPass {
 				c.cfg.Test.SkipCoverage = true
-				c.cfg.Test.DisableMockUpload = true
 			}
 
 			// in mustpass mode, set the maxFlakyChecks count to 3 explicitly,
@@ -1444,7 +1299,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {

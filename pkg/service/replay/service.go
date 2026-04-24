@@ -46,7 +46,7 @@ type Service interface {
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
 	// UpdateTestSetTemplate persists the (possibly updated) template map for a test-set.
-	// Used during re-record to dynamically refresh values like JWTs/IDs as soon as
+	// Used during replay to dynamically refresh values like JWTs/IDs as soon as
 	// their producing API responses are observed, so subsequent test cases use the
 	// latest values rather than stale ones from the previous run.
 	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
@@ -54,9 +54,6 @@ type Service interface {
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
-
-	DownloadMocks(ctx context.Context) error
-	UploadMocks(ctx context.Context, testSets []string) error
 
 	StoreMappings(ctx context.Context, mapping *models.Mapping) error
 

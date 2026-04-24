@@ -98,48 +98,6 @@ run_templatize() {
   return "$rc"
 }
 
-run_rerecord() {
-  local idx="$1"
-  local extra_args="${2:-}"
-  local logfile="rerecord_logs${idx}.txt"
-
-  section "Rerecord #$idx (args: ${extra_args:-<none>})"
-  
-  # Start keploy rerecord in background, capture PID
-  set +e
-  "$RECORD_BIN" rerecord -c 'npm start' --disable-mapping=false $extra_args \
-    > "$logfile" 2>&1 &
-  local KEPLOY_PID=$!
-
-  # Wait + capture rc
-  wait "$KEPLOY_PID"
-  local rc=$?
-  set -e
-  echo "Rerecord #$idx exit code: $rc"
-  cat "$logfile" || true
-
-  if [[ $rc -ne 0 ]]; then
-    echo "::warning::Keploy rerecord exited non-zero (iteration $idx)"
-  else
-    echo "Rerecord completed successfully for iteration $idx"
-  fi
-
-  # Check for data races and errors
-  if grep -q "WARNING: DATA RACE" "$logfile"; then
-    echo "::error::Data race detected in $logfile"
-    exit 1
-  fi
-  if grep -q "ERROR" "$logfile"; then
-    echo "::warning::Errors found in $logfile"
-  fi
-
-  echo "== keploy artifacts after rerecord (depth 3) =="
-  find ./keploy -maxdepth 3 -type f | sort || true
-
-  endsec
-  return "$rc"
-}
-
 # ----- main -----
 
 # Load test scripts and start MongoDB container
@@ -261,8 +219,6 @@ echo "Starting MongoDB for replay operation because of global passthrough"
 docker run --name mongoDb --rm -p 27017:27017 -d mongo
 wait_for_mongo
 run_replay 1 --global-passthrough
-
-run_rerecord 1 --amend-testset
 
 section "Shutdown MongoDB before test mode"
 docker stop mongoDb || true
