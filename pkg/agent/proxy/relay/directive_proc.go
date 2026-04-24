@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -112,9 +113,26 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 
 	boundaryReadAt := time.Now()
 
+	// Atomic two-sided upgrade: run both handshakes FIRST (keeping
+	// the new *tls.Conn values in local vars), only publish the
+	// upgraded conn pointers via r.{dst,src}.Store AFTER both
+	// handshakes succeed. A naive two-step "upgrade dest, publish;
+	// upgrade client, publish" would leave the relay in a mixed state
+	// if the second handshake failed (e.g. dest already TLS-wrapped,
+	// client still cleartext) — the forwarders would then be moving
+	// TLS bytes one way and plaintext the other, corrupting any
+	// traffic in flight before the outer layer torn the sockets
+	// down. The local-then-store pattern keeps the corruption window
+	// at zero.
+	var (
+		upgradedDst net.Conn
+		upgradedSrc net.Conn
+	)
+
 	if params.DestTLSConfig != nil {
 		dst := *r.dst.Load()
-		upgraded, err := r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
+		var err error
+		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
 		if err != nil {
 			if log != nil {
 				// Debug-level: TLS upgrade failures are expected on some
@@ -137,12 +155,12 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 				Err:  fmt.Errorf("dest TLS upgrade: %w", err),
 			}
 		}
-		r.dst.Store(&upgraded)
 	}
 
 	if params.ClientTLSConfig != nil {
 		src := *r.src.Load()
-		upgraded, err := r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
+		var err error
+		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
 		if err != nil {
 			if log != nil {
 				// Debug-level: see dest-side upgrade comment above.
@@ -152,11 +170,15 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 					zap.String("next_step", "check the MITM cert chain configuration; run with KEPLOY_DISABLE_PARSING=1 to bypass parsing entirely"),
 				)
 			}
-			// We have already upgraded dest. The real client side
-			// is still cleartext. Leave the conn pointers as-is
-			// (dest upgraded, src cleartext); the caller will tear
-			// the connection down. Release pause so the forwarders
-			// exit via the subsequent read error.
+			// The dest-side handshake may have succeeded and allocated
+			// a *tls.Conn wrapper around r.dst's socket (if
+			// DestTLSConfig != nil). We never published it to
+			// r.dst.Load(), so the forwarders still see the original
+			// cleartext conn; the wrapper will be GC'd. The outer
+			// layer will tear the connection down on this error.
+			if upgradedDst != nil {
+				_ = upgradedDst.Close()
+			}
 			r.endPause()
 			return directive.Ack{
 				Kind: d.Kind,
@@ -164,7 +186,17 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 				Err:  fmt.Errorf("client TLS upgrade: %w", err),
 			}
 		}
-		r.src.Store(&upgraded)
+	}
+
+	// Both handshakes (or only those requested) succeeded. Publish
+	// atomically — the forwarders still on their pause barrier
+	// above will observe the new conns the instant we call
+	// r.endPause below. Until then, no side has seen the swap.
+	if upgradedDst != nil {
+		r.dst.Store(&upgradedDst)
+	}
+	if upgradedSrc != nil {
+		r.src.Store(&upgradedSrc)
 	}
 
 	boundaryWrittenAt := time.Now()
