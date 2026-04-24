@@ -465,9 +465,11 @@ type PostgresV3Notification struct {
 // All three fields are optional in the on-disk YAML:
 //   - OID identifies the server-side function (often
 //     lo_creat/lo_open/lo_read/lo_write/lo_close for large-object APIs)
-//   - Args preserves argument byte payloads (text or binary per
-//     ArgFormats)
-//   - Result holds the server's response bytes (int32(-1) → IsNull)
+//   - Args preserves argument values (logical Go form, see
+//     PostgresV3Cell — text or binary wire format per ArgFormats)
+//   - Result holds the server's response value (NULL → Cell.Value == nil,
+//     i.e. Cell.IsNull() == true; the wire-level int32(-1) sentinel is
+//     translated to/from this representation by the codec)
 type PostgresV3FunctionCall struct {
 	// OID — server-side function OID being invoked.
 	OID uint32 `json:"oid" yaml:"oid" bson:"oid"`
@@ -475,14 +477,17 @@ type PostgresV3FunctionCall struct {
 	// allows len=0 (all text), len=1 (broadcast), len=N (per-arg);
 	// we preserve exactly what the client sent.
 	ArgFormats []int16 `json:"argFormats,omitempty" yaml:"argFormats,omitempty" bson:"arg_formats,omitempty"`
-	// Args — ordered list of argument payloads. A NULL argument is
-	// represented by IsNull=true; non-NULL args have the raw bytes.
+	// Args — ordered list of argument values. A NULL argument is
+	// represented by Cell.Value == nil (Cell.IsNull() == true); non-
+	// NULL args carry the logical Go value chosen by the codec for
+	// the argument's OID (int64, string, []byte, etc.).
 	Args []PostgresV3Cell `json:"args,omitempty" yaml:"args,omitempty" bson:"args,omitempty"`
 	// ResultFormat — wire format of the result (0 text, 1 binary).
 	ResultFormat int16 `json:"resultFormat,omitempty" yaml:"resultFormat,omitempty" bson:"result_format,omitempty"`
-	// Result — FunctionCallResponse payload. IsNull=true represents
-	// the wire int32(-1) sentinel (NULL); Bytes carries the payload
-	// otherwise.
+	// Result — FunctionCallResponse payload. Cell.Value == nil
+	// (Cell.IsNull() == true) represents the wire int32(-1) sentinel
+	// (NULL); a non-NULL result carries the codec-chosen logical Go
+	// value for the function's return OID.
 	Result PostgresV3Cell `json:"result,omitempty" yaml:"result,omitempty" bson:"result,omitempty"`
 }
 
