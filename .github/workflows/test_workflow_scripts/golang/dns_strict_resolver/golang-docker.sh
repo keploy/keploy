@@ -196,6 +196,17 @@ rm -rf keploy/ record.txt "$CURL_OUT"
 sudo rm -f /tmp/keploy-logs.txt
 cleanup
 
+section "Generate keploy config"
+# Drop an empty-but-present keploy.yml into the working directory.
+# This matters even in record-only mode: a bare `keploy record`
+# otherwise picks up default config values some of which appear to
+# affect Keploy's DNS forwarder bootstrap (the previous run without
+# this step saw connected_udp_control flip to NXDOMAIN). Keeping
+# the file also matches what every other sample in this matrix does
+# (gin_mongo/echo_sql/etc. all run `config --generate` before record).
+"$RECORD_BIN" config --generate >/dev/null 2>&1 || true
+endsec
+
 section "Build sample image"
 docker build -t "$SAMPLE_NAME:test" .
 endsec
