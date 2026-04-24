@@ -46,7 +46,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 			db.logger.Debug("Initialized empty TestSet for missing config", zap.String("testSet", testSetID))
 		} else {
 			// If T is not *models.TestSet, log warning but continue with zero value
-			db.logger.Warn("Generic type T is not *models.TestSet, using zero value", zap.String("testSet", testSetID))
+			db.logger.Debug("Generic type T is not *models.TestSet, using zero value", zap.String("testSet", testSetID))
 		}
 	} else {
 		// Config file exists, unmarshal it
@@ -59,7 +59,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 			testSetPtr, ok := any(emptyTestSet).(T)
 			if ok {
 				config = testSetPtr
-				db.logger.Warn("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
+				db.logger.Debug("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
 			}
 		}
 	}
@@ -67,7 +67,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	// Always try to load secrets, regardless of whether config.yaml existed
 	secretValues, err := db.ReadSecret(ctx, testSetID)
 	if err != nil {
-		db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		db.logger.Debug("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
 		// Don't return error here - missing secrets shouldn't fail the config loading
 		return config, nil
 	}

@@ -1,0 +1,23 @@
+name: "Keploy CodeQL config"
+
+# Keploy is a man-in-the-middle test-data recording agent. By design, the
+# proxy path intentionally skips upstream certificate verification during
+# record mode — cert-pinning the upstream in a MITM would make traffic
+# recording impossible without shipping a per-target CA bundle, which is
+# outside Keploy's scope.
+#
+# The `go/disabled-certificate-check` rule surfaces InsecureSkipVerify
+# usage anywhere in the code. Inside the proxy package these usages are
+# both pre-existing (line ~1511 of pkg/agent/proxy/proxy.go) and part of
+# the speculative upstream TLS dial added to parallelise the handshake
+# with the MITM client handshake (line ~1319). Both are required for
+# the MITM model and are documented inline.
+#
+# Scope the suppression narrowly to the proxy package so other parts of
+# the code (agent core, CLI, mock handlers) are still audited by CodeQL
+# for the same rule.
+query-filters:
+  - exclude:
+      id: go/disabled-certificate-check
+      paths:
+        - pkg/agent/proxy/proxy.go

@@ -368,7 +368,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if setupOpts.IsDocker {
 		var ts unix.Timespec
 		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Warn("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
+			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
 		} else {
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
@@ -544,11 +544,20 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 			return structs.ProxyInfo{}, err
 		}
 
-		// Keep non-docker behavior backward-compatible with main by default:
-		// do not redirect generic IPv6 traffic to proxy unless an explicit
-		// proxy-port override is configured.
+		// Non-docker v6 redirect: when EnableIPv6Redirect is set (the
+		// default) we publish ::ffff:127.0.0.1 so the BPF cgroup program
+		// rewrites ::1 and other IPv6 destinations to the v4-mapped proxy
+		// address. Without this, modern Linux distros (glibc resolves
+		// localhost → ::1 before 127.0.0.1) would have their traffic
+		// silently bypass the proxy because the cgroup program cannot
+		// redirect to an all-zero address.
+		//
+		// The explicit cfg.Port override path kept the pre-existing
+		// behaviour (non-zero when a per-app port override was given) as
+		// a safety net; with the default flipped, that branch is now
+		// subsumed by the flag but we honour the override unconditionally.
 		var proxyIPv6 [4]uint32
-		if cfg.Port != 0 {
+		if opts.EnableIPv6Redirect || cfg.Port != 0 {
 			proxyIPv6, err = ToIPv4MappedIPv6("127.0.0.1")
 			if err != nil {
 				return structs.ProxyInfo{}, err

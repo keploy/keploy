@@ -166,6 +166,21 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	if opts.DstCfg != nil && opts.DstCfg.Addr != "" {
 		meta["destAddr"] = opts.DstCfg.Addr
 	}
+	// Map the recorder's on-disk mockType tag to the typed Lifetime
+	// enum so the filter layer's authoritative routing reads it in a
+	// single enum compare instead of probing Metadata["type"]. The
+	// three-way tag convention is unchanged (config/connection/mocks
+	// stays on the wire for backward compat); we just pre-populate
+	// TestModeInfo.Lifetime at emit time so DeriveLifetime is a no-op
+	// on ingest. Post-Lifetime-elevation contract: every MySQL recorder
+	// mock ships with a derived Lifetime.
+	lifetime := models.LifetimePerTest
+	switch mockType {
+	case "config":
+		lifetime = models.LifetimeSession
+	case "connection":
+		lifetime = models.LifetimeConnection
+	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,
@@ -177,6 +192,10 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
 			ResTimestampMock: resTimestampMock,
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        lifetime,
+			LifetimeDerived: true,
 		},
 	}
 	// Send to the mocks channel for YAML output. Use either the direct
