@@ -223,6 +223,21 @@ rm -rf keploy/ record.txt test.txt "$CURL_OUT"
 sudo rm -f /tmp/keploy-logs.txt
 cleanup
 
+section "Generate keploy config (noise)"
+# Generate a baseline keploy.yml so we can mark `elapsed_ms` as
+# noise. Without this, record-vs-replay diffs on elapsed_ms (e.g.
+# 2404 vs 2403 — same retry-timeout path, different clock sample)
+# trip the HTTP body match even though every other field is
+# byte-identical. `elapsed_ms` appears at the top level of /suite's
+# response and inside every `check.result`, so we match it
+# globally by body-key name.
+"$RECORD_BIN" config --generate >/dev/null 2>&1 || true
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i 's#global: {}#global: {"body": {"elapsed_ms": []}}#' "$config_file"
+fi
+endsec
+
 section "Build sample image"
 docker build -t "$SAMPLE_NAME:test" .
 endsec
