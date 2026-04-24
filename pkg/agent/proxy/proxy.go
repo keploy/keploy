@@ -1871,8 +1871,16 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	//    down.
 	// 2. Close the listener, stopping further Accepts.
 	// 3. Give existing parser goroutines a bounded grace window to
-	//    finish (they see ctx.Done via parserCtx and return).
-	// 4. Force-close any still-live client connections at the end.
+	//    finish naturally via activeConns WaitGroup (they see
+	//    ctx.Done via the parent context and return; their deferred
+	//    srcConn/dstConn closes fire on return).
+	// 4. Past the grace window, remaining goroutines continue to exit
+	//    asynchronously via ctx cancellation — we do NOT hold
+	//    references to their net.Conn values, which avoids
+	//    double-close races with the deferred closes above. Shutdown
+	//    is bounded by the grace timeout; stragglers are abandoned
+	//    to the parent context, not force-closed from under their
+	//    own defers.
 	//
 	// The kernel-side proxy_ready BPF gate that would prevent new
 	// connects from being redirected here once the userspace process
