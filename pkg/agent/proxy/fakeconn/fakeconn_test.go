@@ -61,6 +61,64 @@ func TestLastWrittenTimeZeroBeforeAnyChunk(t *testing.T) {
 	}
 }
 
+// TestReadStashExhaustionNotEOF pins the invariant that draining
+// the internal byte-stash does NOT surface as io.EOF to the caller.
+// bytes.Buffer.Read returns io.EOF whenever it empties the buffer,
+// which — if passed through unchanged — would make bufio.Reader /
+// io.Copy / encoding/pkg readers think the stream is finished even
+// though more chunks may still arrive on f.ch. Only the
+// channel-close path (readChunkLocked) is a genuine EOF.
+func TestReadStashExhaustionNotEOF(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	// Two chunks. The first one is larger than the Read buffer so
+	// it lands in the stash; the second one arrives later.
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("hello world")}
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("second")}
+
+	f := New(ch, nil, nil)
+
+	// First Read: pulls the chunk, returns 5 bytes, stashes "o world"
+	// (6 bytes) internally.
+	p1 := make([]byte, 5)
+	n1, err := f.Read(p1)
+	if err != nil {
+		t.Fatalf("first Read returned err = %v, want nil", err)
+	}
+	if string(p1[:n1]) != "hello" {
+		t.Fatalf("first Read data = %q, want %q", p1[:n1], "hello")
+	}
+
+	// Second Read: asks for 6 bytes; the stash has exactly 6 bytes
+	// (" world" — the bytes after "hello" in "hello world"), so
+	// bytes.Buffer.Read empties the stash and returns io.EOF. The
+	// FakeConn MUST mask that EOF because more chunks are still
+	// arriving on f.ch.
+	p2 := make([]byte, 6)
+	n2, err := f.Read(p2)
+	if err != nil {
+		t.Fatalf("stash-exhaustion Read returned err = %v, want nil (EOF must be masked)", err)
+	}
+	if string(p2[:n2]) != " world" {
+		t.Fatalf("stash-exhaustion Read data = %q, want %q", p2[:n2], " world")
+	}
+
+	// Third Read must still see the second chunk, proving the
+	// premature EOF did not terminate the caller's stream.
+	p3 := make([]byte, 16)
+	var got string
+	for len(got) < len("second") {
+		n3, err := f.Read(p3)
+		if err != nil {
+			t.Fatalf("third Read (second chunk) err = %v", err)
+		}
+		got += string(p3[:n3])
+	}
+	if got != "second"[:len(got)] {
+		t.Fatalf("second-chunk data = %q, want prefix of %q", got, "second")
+	}
+}
+
 func TestReadChunkEOFOnChannelClose(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk)

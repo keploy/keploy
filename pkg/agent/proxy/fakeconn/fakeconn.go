@@ -132,6 +132,16 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	if f.buf.Len() > 0 {
 		n, err := f.buf.Read(p)
 		f.mu.Unlock()
+		// bytes.Buffer.Read returns io.EOF whenever it drains the
+		// buffer to empty, even when we got bytes back on this call
+		// and more chunks may still arrive on f.ch. Surfacing that
+		// EOF to our caller (bufio.Reader / io.Copy / etc.) would
+		// make them treat the stream as finished prematurely. Only
+		// the channel-close path (below, via readChunkLocked) is a
+		// real EOF. Mask the stash-exhaustion EOF whenever n > 0.
+		if n > 0 && errors.Is(err, io.EOF) {
+			err = nil
+		}
 		return n, err
 	}
 	f.mu.Unlock()
