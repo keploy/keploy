@@ -7,10 +7,13 @@
 // to parse on NUL bytes / missing yaml tags), and only an actual yaml
 // marshal → unmarshal cycle exercises that path.
 //
-// The sentinel case (PostgresV3NullCell) is called out as its own test:
-// its previous value (\x00NULL\x00) was a control character that
-// gopkg.in/yaml.v3 rejects. If someone reverts the sentinel to a
-// control sequence, that test is the first to fail.
+// The NULL-cell case is called out as its own test: prior revisions
+// used string sentinels (\x00NULL\x00, then ~~KEPLOY_PG_NULL~~) that
+// repeatedly caused yaml.v3 edge-case failures. The current
+// representation uses PostgresV3Cell.IsNull + native YAML null, which
+// gives a round-trip distinction between SQL NULL and empty string
+// without escape hacks. That test is the regression canary if the
+// struct-level encoding ever slips back to a string-sentinel scheme.
 package mockdb
 
 import (
@@ -146,9 +149,9 @@ func TestYAMLRoundTrip_PostgresV3Data(t *testing.T) {
 					Table:      "customer_tag",
 					PrimaryKey: []string{"id"},
 					Columns:    []string{"id", "tag", "created_at"},
-					Rows: [][]string{
-						{"1", "vip", "2026-04-22"},
-						{"2", "churn-risk", "2026-04-22"},
+					Rows: []models.PostgresV3Cells{
+						{models.NewTextCell("1"), models.NewTextCell("vip"), models.NewTextCell("2026-04-22")},
+						{models.NewTextCell("2"), models.NewTextCell("churn-risk"), models.NewTextCell("2026-04-22")},
 					},
 					Truncated: false,
 				},
@@ -179,14 +182,14 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
 					InvocationID:  "sha256:abcd:0",
-					BindValues:    []string{"AAAAAQ=="},
+					BindValues:    models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:   []int{1},
 					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						Rows:            [][]string{{"MQ=="}},
+						Rows:            []models.PostgresV3Cells{{models.NewTextCell("1")}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
@@ -270,16 +273,20 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID:  "sha256:null:0",
-					BindValues:    []string{"AAAAAQ=="},
-					BindFormats:   []int{1},
+					InvocationID: "sha256:null:0",
+					BindValues:   models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindFormats:  []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
 						},
-						Rows: [][]string{
-							{models.PostgresV3NullCell},
-							{"aGVsbG8="},
+						// Row 0 is SQL NULL (Cell.IsNull=true), row 1 is the
+						// text "hello". The Postgres-semantic distinction
+						// between NULL and '' is the whole reason the Cell
+						// type exists.
+						Rows: []models.PostgresV3Cells{
+							{models.NullCell()},
+							{models.NewTextCell("hello")},
 						},
 						CommandComplete: "SELECT 2",
 					},
@@ -308,11 +315,13 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 		t.Fatalf("want 2 rows, got %d", len(q.Response.Rows))
 	}
 	if len(q.Response.Rows[0]) == 0 {
-		t.Fatal("Rows[0] is empty; expected the NULL sentinel cell")
+		t.Fatal("Rows[0] is empty; expected the NULL cell")
 	}
-	if q.Response.Rows[0][0] != models.PostgresV3NullCell {
-		t.Fatalf("NULL sentinel lost in yaml round-trip: got %q, want %q",
-			q.Response.Rows[0][0], models.PostgresV3NullCell)
+	if !q.Response.Rows[0][0].IsNull {
+		t.Fatalf("NULL cell lost in yaml round-trip: got %+v, want IsNull=true", q.Response.Rows[0][0])
+	}
+	if q.Response.Rows[1][0].IsNull || string(q.Response.Rows[1][0].Bytes) != "hello" {
+		t.Fatalf("Rows[1][0]: want text \"hello\", got %+v", q.Response.Rows[1][0])
 	}
 	if !reflect.DeepEqual(q, in.Spec.PostgresV3.Query) {
 		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Query, q)

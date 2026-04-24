@@ -254,21 +254,21 @@ type PostgresV3Sequence struct {
 }
 
 type PostgresV3MigrationTable struct {
-	Name    string     `json:"name" yaml:"name" bson:"name"`
-	Columns []string   `json:"columns" yaml:"columns" bson:"columns"`
-	Rows    [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Name    string             `json:"name" yaml:"name" bson:"name"`
+	Columns []string           `json:"columns" yaml:"columns" bson:"columns"`
+	Rows    []PostgresV3Cells  `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 }
 
 // PostgresV3DataSpec — one per seeded user table. Carries the row-store
 // seed for L4's transactional engine.
 type PostgresV3DataSpec struct {
-	Schema     string     `json:"schema" yaml:"schema" bson:"schema"`
-	Table      string     `json:"table" yaml:"table" bson:"table"`
-	PrimaryKey []string   `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
-	Columns    []string   `json:"columns" yaml:"columns" bson:"columns"`
-	Rows       [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	Truncated  bool       `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
-	RowLimit   int        `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
+	Schema     string             `json:"schema" yaml:"schema" bson:"schema"`
+	Table      string             `json:"table" yaml:"table" bson:"table"`
+	PrimaryKey []string           `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
+	Columns    []string           `json:"columns" yaml:"columns" bson:"columns"`
+	Rows       []PostgresV3Cells  `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Truncated  bool               `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
+	RowLimit   int                `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
 }
 
 // PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
@@ -294,11 +294,25 @@ type PostgresV3QuerySpec struct {
 	ParamOIDs         []uint32 `json:"paramOids,omitempty" yaml:"paramOids,omitempty" bson:"param_oids,omitempty"`
 	VolatilePositions []int    `json:"volatilePositions,omitempty" yaml:"volatilePositions,omitempty" bson:"volatile_positions,omitempty"`
 
-	// Invocation
-	InvocationID     string   `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
-	PrecedingTxState string   `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
-	BindValues       []string `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
-	BindFormats      []int    `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
+	// InvocationID uniquely identifies one invocation of this query
+	// within a single record-session. Format: "<connID>:<seq>" — e.g.
+	// "0:1968" for the 1968th invocation on connection 0. No hash
+	// prefix, no wall-clock timestamp: a repeat recording of
+	// identical traffic will produce identical InvocationIDs, which
+	// keeps diffs of re-recorded mocks.yaml quiet. Uniqueness is
+	// local to one recording; the <sqlAstHash, invocationId> pair is
+	// globally unique across all mocks in the same file.
+	InvocationID     string `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
+	PrecedingTxState string `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
+
+	// BindValues holds the client-supplied bind parameters for this
+	// invocation, one entry per placeholder. Cells are serialised via
+	// PostgresV3Cell so text-format binds (bindFormat 0) land as
+	// plain YAML strings (eyeballable + greppable) and binary-format
+	// binds (bindFormat 1) land as !!binary base64. NULL binds are
+	// distinguished from empty-string binds via Cell.IsNull.
+	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
+	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
 	// ResultFormats — per-column format codes the client requested at
 	// Bind time (via the Bind packet's ResultFormatCodes field).
@@ -322,29 +336,24 @@ type PostgresV3QuerySpec struct {
 
 type PostgresV3Response struct {
 	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
-	// Rows stores each row as a []string. The sentinel value
-	// PostgresV3NullCell indicates SQL NULL — chosen so it cannot
-	// collide with base64-encoded cell data (base64 output only includes
-	// [A-Za-z0-9+/=], never '~'). Non-NULL cells are the base64-encoded
-	// raw wire bytes. The sentinel-based encoding is deliberately yaml-
-	// and gob-safe: printable ASCII (no control characters that yaml.v3
-	// rejects) and []string rather than []*string (nil pointers in slice
-	// elements crash gob's encodeArray).
-	Rows            [][]string       `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	CommandComplete string           `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
-	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
+	// Rows stores each row as a []PostgresV3Cell via PostgresV3Cells.
+	// See PostgresV3Cell for the on-disk encoding rules (plain YAML
+	// string for UTF-8-safe text, !!binary for anything else, explicit
+	// native YAML null for SQL NULL). Mutually exclusive with CopyOut /
+	// CopyIn — a single Query response emits either DataRow traffic
+	// OR CopyData traffic, never both; the replay emitter enforces
+	// the invariant at wire time.
+	Rows            []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	CommandComplete string            `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
+	Error           *PostgresV3Error  `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
 
 	// CopyOut is set when the server responded with a CopyOutResponse
 	// ('H') + zero or more CopyData ('d') chunks + CopyDone ('c')
 	// sequence, as produced by COPY ... TO STDOUT / TO PROGRAM /
 	// TO '<file>' queries. Zero CopyData chunks is valid — COPY of an
 	// empty table or an empty-result expression produces no data
-	// packets between CopyOutResponse and CopyDone. The Rows field is mutually exclusive with
-	// CopyOut — real Postgres never mixes DataRow and CopyData in a
-	// single Query response, and replay must preserve that invariant.
-	// nil on non-COPY responses and on every legacy recording captured
-	// before this field existed (omitempty keeps the serialized form
-	// clean for those cases).
+	// packets between CopyOutResponse and CopyDone. nil on non-COPY
+	// responses; omitempty keeps the serialised form clean for them.
 	CopyOut *PostgresV3CopyOutPayload `json:"copyOut,omitempty" yaml:"copyOut,omitempty" bson:"copy_out,omitempty"`
 
 	// CopyIn is set when the server responded with a CopyInResponse
@@ -395,16 +404,6 @@ type PostgresV3CopyInPayload struct {
 	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
 	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
 }
-
-// PostgresV3NullCell is the sentinel string stored in
-// PostgresV3Response.Rows for SQL NULL cells. Chosen so it cannot
-// collide with base64-encoded cell data — base64 output uses only
-// [A-Za-z0-9+/=], never '~' — and so every byte of the sentinel is a
-// printable ASCII character that yaml.v3 and gob can both encode
-// without escaping. Earlier drafts used NUL bytes which gopkg.in/yaml.v3
-// rejects as control characters; '~' avoids that failure mode while
-// staying short and unambiguous.
-const PostgresV3NullCell = "~~KEPLOY_PG_NULL~~"
 
 type PostgresV3ColumnDescriptor struct {
 	Name       string `json:"name" yaml:"name" bson:"name"`

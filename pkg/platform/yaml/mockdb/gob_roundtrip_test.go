@@ -175,9 +175,9 @@ func TestRoundTrip_PostgresV3Data(t *testing.T) {
 					Table:      "customer_tag",
 					PrimaryKey: []string{"id"},
 					Columns:    []string{"id", "tag", "created_at"},
-					Rows: [][]string{
-						{"1", "vip", "2026-04-22"},
-						{"2", "churn-risk", "2026-04-22"},
+					Rows: []models.PostgresV3Cells{
+						{models.NewTextCell("1"), models.NewTextCell("vip"), models.NewTextCell("2026-04-22")},
+						{models.NewTextCell("2"), models.NewTextCell("churn-risk"), models.NewTextCell("2026-04-22")},
 					},
 					Truncated: false,
 				},
@@ -200,14 +200,20 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
-					InvocationID:  "sha256:abcd:0",
-					BindValues:    []string{"AAAAAQ=="},
-					BindFormats:   []int{1},
+					InvocationID: "sha256:abcd:0",
+					// Binary bindFormat=1 cell: the int4 value 1 on the wire
+					// (4 bytes, big-endian). Stored as a PostgresV3Cell which
+					// will serialise as !!binary in YAML because the bytes
+					// contain NULs that fail the plain-string predicate.
+					BindValues:  models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindFormats: []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						Rows:            [][]string{{"MQ=="}},
+						// One row, one text-format cell containing the literal "1".
+						// Emits as a plain YAML string in the recorded mock.
+						Rows:            []models.PostgresV3Cells{{models.NewTextCell("1")}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
@@ -235,16 +241,20 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID:  "sha256:null:0",
-					BindValues:    []string{"AAAAAQ=="},
-					BindFormats:   []int{1},
+					InvocationID: "sha256:null:0",
+					BindValues:   models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindFormats:  []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
 						},
-						Rows: [][]string{
-							{models.PostgresV3NullCell},
-							{"aGVsbG8="},
+						// Row 1 is SQL NULL, row 2 is the text "hello".
+						// The gob/yaml round-trip must distinguish NULL from
+						// empty-string — that's the whole point of the
+						// PostgresV3Cell type (see PostgresV3Cell.IsNull).
+						Rows: []models.PostgresV3Cells{
+							{models.NullCell()},
+							{models.NewTextCell("hello")},
 						},
 						CommandComplete: "SELECT 2",
 					},
