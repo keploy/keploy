@@ -3,13 +3,21 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func stubIngressPaused(t *testing.T, fn func() bool) {
@@ -194,4 +202,309 @@ func TestSerializeCapturedResponseRoundTrip(t *testing.T) {
 	if !bytes.Equal(parsedBody, respBody) {
 		t.Fatalf("expected response body %q, got %q", string(respBody), string(parsedBody))
 	}
+}
+
+// stubCaptureHook replaces the package-level CaptureHook for the duration
+// of a test so the test can observe capture calls without running the
+// full parser + yaml-persist stack.
+func stubCaptureHook(t *testing.T, fn hooksUtils.CaptureFunc) {
+	t.Helper()
+	prev := hooksUtils.CaptureHook
+	hooksUtils.CaptureHook = fn
+	t.Cleanup(func() { hooksUtils.CaptureHook = prev })
+}
+
+// TestHandleHttp1Connection_ChunkedExchangeIsCaptured is a regression test
+// for the record-time "skip chunked capture" bug that dropped 24 of every
+// 25 tests when the upstream returned Transfer-Encoding: chunked (the Go
+// net/http default when no Content-Length is set).
+//
+// The pre-fix handleHttp1Connection logged "Skipping testcase capture for
+// streaming exchange" and never called CaptureHook. After the fix, chunked
+// exchanges under the per-body capture budget are persisted normally.
+func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	// Upstream httptest server that returns a chunked response
+	// (no Content-Length => net/http picks Transfer-Encoding: chunked).
+	const upstreamBody = `{"ok":true,"id":42}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Explicitly flush before body to force chunked framing in
+		// addition to the missing Content-Length.
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(upstreamBody[:5]))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte(upstreamBody[5:]))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamAddr := strings.TrimPrefix(upstream.URL, "http://")
+
+	// Capture observed test cases (CaptureHook replaces the real
+	// dump+parse+persist pipeline for this unit test).
+	var (
+		captured   []*capturedExchange
+		capturedMu sync.Mutex
+		captureWG  sync.WaitGroup
+	)
+	captureWG.Add(1)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		defer captureWG.Done()
+		// Read request+response bodies here so the test can assert them.
+		reqBody, _ := io.ReadAll(req.Body)
+		respBody, _ := io.ReadAll(resp.Body)
+		capturedMu.Lock()
+		captured = append(captured, &capturedExchange{
+			method:   req.Method,
+			url:      req.URL.String(),
+			reqBody:  string(reqBody),
+			status:   resp.StatusCode,
+			respBody: string(respBody),
+		})
+		capturedMu.Unlock()
+	})
+
+	// Build an IngressProxyManager configured for synchronous record mode.
+	pm := &IngressProxyManager{
+		logger:       zap.NewNop(),
+		tcChan:       make(chan *models.TestCase, 4),
+		synchronous:  true,
+		samplingSem:  make(chan struct{}, 1),
+		incomingOpts: models.IncomingOptions{},
+	}
+
+	// Dial the client side via a TCP pipe. handleHttp1Connection dials
+	// upstream itself (so it needs a real TCP listener), but the client
+	// side is a loopback TCP connection we drive from the test.
+	clientListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { _ = clientListener.Close() })
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := clientListener.Accept()
+		if aerr != nil {
+			t.Logf("accept err: %v", aerr)
+			return
+		}
+		connCh <- c
+	}()
+
+	clientConn, err := net.Dial("tcp4", clientListener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial client: %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	serverConn := <-connCh
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	// Run handleHttp1Connection in a goroutine — it reads the request off
+	// serverConn, forwards to upstream, writes response back, and fires
+	// the capture goroutine.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sem := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		pm.handleHttp1Connection(ctx, serverConn, upstreamAddr, pm.logger, pm.tcChan, sem, 8080)
+	}()
+
+	// Send a plain HTTP/1.1 GET from the test "client" side. We don't
+	// need a chunked request body for this regression — the response
+	// is chunked, which is the common case. (A chunked request variant
+	// is covered by the second test below.)
+	req := "GET /resource HTTP/1.1\r\nHost: example.local\r\nConnection: close\r\n\r\n"
+	if _, werr := clientConn.Write([]byte(req)); werr != nil {
+		t.Fatalf("failed to write request: %v", werr)
+	}
+
+	// Read the full response back (handleHttp1Connection writes it).
+	respReader := bufio.NewReader(clientConn)
+	respMsg, err := http.ReadResponse(respReader, nil)
+	if err != nil {
+		t.Fatalf("failed to read response from handler: %v", err)
+	}
+	gotBody, _ := io.ReadAll(respMsg.Body)
+	respMsg.Body.Close()
+	if string(gotBody) != upstreamBody {
+		t.Fatalf("forwarded response body mismatch: want %q got %q", upstreamBody, string(gotBody))
+	}
+
+	// Wait for the capture goroutine to run.
+	captureDone := make(chan struct{})
+	go func() {
+		captureWG.Wait()
+		close(captureDone)
+	}()
+	select {
+	case <-captureDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CaptureHook was never invoked for chunked exchange — the skip bug has regressed")
+	}
+
+	<-handlerDone
+
+	capturedMu.Lock()
+	defer capturedMu.Unlock()
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 captured test case for chunked exchange, got %d", len(captured))
+	}
+	got := captured[0]
+	if got.method != http.MethodGet {
+		t.Fatalf("captured method = %q, want GET", got.method)
+	}
+	if got.status != http.StatusOK {
+		t.Fatalf("captured status = %d, want 200", got.status)
+	}
+	if got.respBody != upstreamBody {
+		t.Fatalf("captured response body = %q, want %q", got.respBody, upstreamBody)
+	}
+}
+
+// TestHandleHttp1Connection_ChunkedRequestIsCaptured covers the
+// Transfer-Encoding: chunked request side (less common than chunked
+// responses, but also dropped by the pre-fix skip branch).
+func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	const reqBody = "hello-chunked-body"
+	var gotUpstreamBody string
+	var gotUpstreamMu sync.Mutex
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotUpstreamMu.Lock()
+		gotUpstreamBody = string(b)
+		gotUpstreamMu.Unlock()
+		w.Header().Set("Content-Length", "2")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamAddr := strings.TrimPrefix(upstream.URL, "http://")
+
+	var (
+		captured  []*capturedExchange
+		mu        sync.Mutex
+		captureWG sync.WaitGroup
+	)
+	captureWG.Add(1)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		defer captureWG.Done()
+		rb, _ := io.ReadAll(req.Body)
+		rsb, _ := io.ReadAll(resp.Body)
+		mu.Lock()
+		captured = append(captured, &capturedExchange{
+			method:   req.Method,
+			url:      req.URL.String(),
+			reqBody:  string(rb),
+			status:   resp.StatusCode,
+			respBody: string(rsb),
+		})
+		mu.Unlock()
+	})
+
+	pm := &IngressProxyManager{
+		logger:       zap.NewNop(),
+		tcChan:       make(chan *models.TestCase, 4),
+		synchronous:  true,
+		samplingSem:  make(chan struct{}, 1),
+		incomingOpts: models.IncomingOptions{},
+	}
+
+	clientListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { _ = clientListener.Close() })
+
+	connCh := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := clientListener.Accept()
+		if aerr != nil {
+			return
+		}
+		connCh <- c
+	}()
+
+	clientConn, err := net.Dial("tcp4", clientListener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	serverConn := <-connCh
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sem := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		pm.handleHttp1Connection(ctx, serverConn, upstreamAddr, pm.logger, pm.tcChan, sem, 8080)
+	}()
+
+	// Construct a chunked-encoded POST request manually.
+	chunkHex := fmt.Sprintf("%x", len(reqBody))
+	raw := "POST /upload HTTP/1.1\r\n" +
+		"Host: example.local\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Connection: close\r\n" +
+		"\r\n" +
+		chunkHex + "\r\n" + reqBody + "\r\n" +
+		"0\r\n\r\n"
+	if _, werr := clientConn.Write([]byte(raw)); werr != nil {
+		t.Fatalf("failed to write chunked request: %v", werr)
+	}
+
+	respReader := bufio.NewReader(clientConn)
+	respMsg, err := http.ReadResponse(respReader, nil)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, respMsg.Body)
+	respMsg.Body.Close()
+
+	gotUpstreamMu.Lock()
+	if gotUpstreamBody != reqBody {
+		t.Fatalf("upstream received %q, want %q", gotUpstreamBody, reqBody)
+	}
+	gotUpstreamMu.Unlock()
+
+	captureDone := make(chan struct{})
+	go func() {
+		captureWG.Wait()
+		close(captureDone)
+	}()
+	select {
+	case <-captureDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CaptureHook was never invoked for chunked-request exchange — the skip bug has regressed")
+	}
+	<-handlerDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 captured test case for chunked request, got %d", len(captured))
+	}
+	if captured[0].reqBody != reqBody {
+		t.Fatalf("captured request body = %q, want %q", captured[0].reqBody, reqBody)
+	}
+}
+
+type capturedExchange struct {
+	method, url, reqBody string
+	status               int
+	respBody             string
 }

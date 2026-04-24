@@ -350,9 +350,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Request modifications for sync/sampling modes.
 		if forceCloseMode {
 			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
+				// Release the lock early for streaming exchanges so a
+				// single slow/streaming upload doesn't wedge the sync
+				// semaphore. Capture stays enabled: tee reads the
+				// already-decoded body bytes, and the downstream
+				// capture-budget check (respCapture.Truncated()) handles
+				// genuinely oversized streams.
 				releaseLock()
 				chunked = true
-				captureEnabled = false
 			} else if captureEnabled && pm.synchronous && acquiredLock {
 				mgr := syncMock.Get()
 				if !mgr.GetFirstReqSeen() {
@@ -370,8 +375,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// path returns early via handleHttp1ZeroCopy/forwardRawTCP).
 
 		// Determine whether capture is eligible for this exchange.
-		// Skip tee/buffering to avoid overhead when capture will be skipped anyway.
-		captureEligible := captureEnabled && !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+		// Chunked-encoded exchanges are still captured: the tee reads the
+		// decoded body stream, and oversized bodies are rejected later by
+		// the capture-budget check on reqCapture/respCapture.Truncated().
+		captureEligible := captureEnabled && (!pm.sampling || acquiredLock)
 
 		// Re-check memory pressure right before attaching capture buffers.
 		if captureEligible && isIngressRecordingPaused() {
@@ -428,6 +435,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Response modifications for sync/sampling modes.
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
+				// Release the sync/sampling lock early on streaming
+				// responses so a slow upstream doesn't wedge the slot,
+				// but keep capture enabled — the tee reads decoded
+				// body bytes and the capture-budget check handles
+				// genuinely oversized streams.
 				releaseLock()
 				chunked = true
 			}
@@ -437,9 +449,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		respTimestamp := time.Now()
 
-		// Re-evaluate capture eligibility after response headers (chunked may have changed).
+		// Re-evaluate capture eligibility after response headers.
 		// Also re-check memory pressure in case it started mid-exchange.
-		captureEligible = captureEnabled && !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+		captureEligible = captureEnabled && (!pm.sampling || acquiredLock)
 		if captureEligible && isIngressRecordingPaused() {
 			pressureCloseMode = true
 			captureEligible = false
@@ -480,15 +492,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		shouldCapture := captureEnabled
 		if forceCloseMode {
-			if chunked {
-				shouldCapture = false
-				logger.Debug("Skipping testcase capture for streaming exchange",
-					zap.Bool("synchronous_mode", pm.synchronous),
-					zap.Bool("sampling_mode", pm.sampling),
-					zap.Int64("request_bytes_seen", reqCapture.Total()),
-					zap.Int64("response_bytes_seen", respCapture.Total()),
-				)
-			} else if pm.sampling && !acquiredLock {
+			// Previously: chunked exchanges were dropped here outright.
+			// That caused legitimate chunked-encoded REST responses
+			// (very common for JSON APIs that omit Content-Length) to
+			// be silently skipped at record time, leading to the
+			// "1-of-25 captures" symptom on stress runs. Chunked
+			// exchanges are now captured normally; the downstream
+			// capture-budget check (reqCapture/respCapture.Truncated())
+			// rejects genuinely oversized streams.
+			if pm.sampling && !acquiredLock {
 				shouldCapture = false
 			}
 		}
@@ -502,6 +514,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.Bool("chunked_transfer", chunked),
 				zap.String("url", req.URL.String()),
 				zap.String("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),

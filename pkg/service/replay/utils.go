@@ -1,7 +1,9 @@
 package replay
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -12,12 +14,103 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
+	"go.uber.org/zap"
 
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 )
+
+// healthPollInterval is how often the --health-url probe is retried while waiting for 2xx.
+const healthPollInterval = 500 * time.Millisecond
+
+// healthProbeTimeout bounds a single GET attempt to --health-url.
+const healthProbeTimeout = 1 * time.Second
+
+// healthPoller is swapped out in tests; production wires to net/http via httpHealthPoll.
+var healthPoller = httpHealthPoll
+
+// httpHealthPoll issues a single GET to url with a short per-request timeout and reports
+// whether it returned a 2xx status. Non-2xx, transport errors, and timeouts all report false;
+// the caller decides whether to retry.
+func httpHealthPoll(ctx context.Context, url string) bool {
+	reqCtx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// waitForAppReady gates the first test on the user-application being up.
+//
+// If Test.HealthURL is empty we keep the historical behavior exactly: sleep for
+// Test.Delay seconds or until ctx is canceled.
+//
+// Otherwise we poll HealthURL every healthPollInterval (with a per-request cap
+// of healthProbeTimeout). The first 2xx unblocks immediately. If HealthPollTimeout
+// elapses with no 2xx, we log a WARN and fall back to the fixed Delay sleep so
+// operators never get stuck worse than today.
+//
+// Returns true when the caller should proceed to run tests, false only when ctx
+// was canceled (caller should treat as user abort).
+func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
+	delay := time.Duration(cfg.Test.Delay) * time.Second
+
+	if cfg.Test.HealthURL == "" {
+		select {
+		case <-time.After(delay):
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	pollCeiling := cfg.Test.HealthPollTimeout
+	if pollCeiling <= 0 {
+		pollCeiling = 60 * time.Second
+	}
+	deadline := time.Now().Add(pollCeiling)
+
+	logger.Info("polling application health endpoint before firing tests",
+		zap.String("healthUrl", cfg.Test.HealthURL),
+		zap.Duration("pollTimeout", pollCeiling),
+	)
+
+	for {
+		if healthPoller(ctx, cfg.Test.HealthURL) {
+			logger.Debug("health endpoint reported 2xx; proceeding",
+				zap.String("healthUrl", cfg.Test.HealthURL),
+			)
+			return true
+		}
+		if time.Now().After(deadline) {
+			logger.Warn("health probe timed out, falling back to fixed delay",
+				zap.String("healthUrl", cfg.Test.HealthURL),
+				zap.Duration("pollTimeout", pollCeiling),
+				zap.Duration("fallbackDelay", delay),
+			)
+			select {
+			case <-time.After(delay):
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		select {
+		case <-time.After(healthPollInterval):
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
 
 type TestReportVerdict struct {
 	total     int
