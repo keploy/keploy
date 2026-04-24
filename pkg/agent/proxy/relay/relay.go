@@ -163,6 +163,22 @@ func (r *Relay) DropCounts() (c2d, d2c uint64) {
 	return r.teeC2D.dropCount(), r.teeD2C.dropCount()
 }
 
+// PauseTees suspends further chunk delivery into the parser-facing
+// FakeConns without stopping the forwarders — every incoming byte
+// still reaches its peer on the real sockets. Used by the supervisor
+// abort path: once the parser is dead (panic / hang / mem-cap), we
+// don't want the tees to spend capacity (or spam DropXxx debug logs)
+// on a parser that will never read again. setPaused is cheap: an
+// atomic-bool swap on the hot push path, and the channel buffer
+// already has its chunks which a final close() will later GC.
+//
+// Idempotent; calling after Run has returned is a no-op because the
+// tees are already closed.
+func (r *Relay) PauseTees() {
+	r.teeC2D.setPaused(true)
+	r.teeD2C.setPaused(true)
+}
+
 // Run starts the forwarder, drain, and directive-processor goroutines
 // and blocks until both forwarders exit. Exits happen on:
 //

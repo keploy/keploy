@@ -134,8 +134,22 @@ func (p *Proxy) recordViaSupervisor(
 	go func() { relayDone <- r.Run(relayCtx) }()
 
 	sv.SessionOnAbort = func() {
-		// Unblock the parser's ClientStream/DestStream reads; the
-		// relay keeps running for passthrough drain.
+		// Pause the tees FIRST so every subsequent chunk drops
+		// cheaply via the pause fast-path (atomic-bool check) instead
+		// of falling through to the channel-full DropChannelFull
+		// branch, which also logs at Debug. On a long-lived
+		// post-abort connection the spam would otherwise be one
+		// log line per chunk for the rest of the connection.
+		//
+		// Pausing does NOT stop the real-socket forwarders — every
+		// byte still reaches its peer. The relay's raw forwarding
+		// continues until peer close; only parser-side delivery is
+		// suppressed.
+		r.PauseTees()
+
+		// Then unblock the parser's ClientStream/DestStream reads so
+		// the supervisor's cancel-select can observe the parser
+		// goroutine exiting promptly.
 		_ = r.ClientStream().Close()
 		_ = r.DestStream().Close()
 	}

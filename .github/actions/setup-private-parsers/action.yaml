@@ -12,6 +12,14 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
+    # TODO(before-merge): revert default to 'main' once this PR (#4113)
+    # + integrations#133 are both merged and integrations main carries
+    # the V2 parsers. The feature-branch default is in place only while
+    # the two-repo change is in review, so CI on #4113 builds against
+    # the matching integrations branch without every caller needing to
+    # pass `integration-ref:` explicitly. Leaving this as-is after merge
+    # would pin all downstream workflows that don't specify the input
+    # to a branch that will eventually be deleted.
     default: 'feat/v2-native-parsers'
 
 runs:

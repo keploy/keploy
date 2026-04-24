@@ -118,8 +118,12 @@ supervisor's fallback path is actually exercised. The header of
   the missing V2 packages explicitly.
 * The `go test` wrapper (`chaos_test.go`) — SKIPs by default,
   respects `KEPLOY_E2E=1` / `-tags e2e`, SKIPs again when docker is
-  unavailable. Currently fails (not skips) once docker + e2e tag are
-  present, for the same "supervisor isn't wired" reason above.
+  unavailable, and ALSO SKIPs when `KEPLOY_CHAOS_WIRING` is unset or
+  falsy. The wiring-env gate is what protects the harness from
+  failing while the supervisor hookup is still stubbed — set
+  `KEPLOY_CHAOS_WIRING=1` (along with `KEPLOY_E2E=1` and the `e2e`
+  tag) to exercise the real assertion path; a failure at that point
+  is genuine.
 
 **Follow-up checklist** to land the real test. Each item is a
 single-line edit to `harness/broken_parser.go` once the relevant
