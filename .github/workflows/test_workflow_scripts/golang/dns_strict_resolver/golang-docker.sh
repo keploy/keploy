@@ -149,6 +149,37 @@ wait_for_sample() {
   return 1
 }
 
+# Keploy spawns a "keploy-v3-<rand>" sidecar container whose own
+# /etc/resolv.conf comes from the Docker daemon (127.0.0.11). The
+# daemon's embedded resolver doesn't know the fixture domains that
+# only live in the CoreDNS zone file, so Keploy's DNS forwarder ends
+# up returning NXDOMAIN for alpha/beta/gamma.keploy.test. Point its
+# resolv.conf at the fixture CoreDNS directly so the forwarder walks
+# through to CoreDNS and gets the real A records. Runs only while
+# Keploy is up; the container is thrown away at the end of the job
+# anyway, so we're not leaving stale state behind.
+point_keploy_at_fixture_dns() {
+  local target_ip="${1:-$COREDNS_IP}"
+  local kp=""
+  for i in {1..30}; do
+    kp=$(docker ps --format '{{.Names}}' | grep -m1 '^keploy-v3-' || true)
+    if [ -n "$kp" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$kp" ]; then
+    echo "::warning::keploy-v3-* sidecar never appeared; skipping resolv.conf override"
+    return 0
+  fi
+  echo "Pointing $kp resolv.conf at fixture CoreDNS $target_ip"
+  if ! docker exec "$kp" sh -c "printf 'nameserver %s\n' '$target_ip' > /etc/resolv.conf" 2>/dev/null; then
+    echo "::warning::failed to rewrite /etc/resolv.conf inside $kp"
+    return 0
+  fi
+  docker exec "$kp" cat /etc/resolv.conf 2>/dev/null || true
+}
+
 send_request() {
   section "Sending Requests"
   if ! wait_for_sample; then
@@ -205,6 +236,8 @@ KEPLOY_PID=$!
 echo "Keploy record started (pid=$KEPLOY_PID)"
 endsec
 
+point_keploy_at_fixture_dns
+
 send_request
 
 section "Verify Record Mode"
@@ -227,6 +260,8 @@ section "Start Replay"
   --container-name "$SAMPLE_NAME" \
   --delay 15 \
   --generateGithubActions=false 2>&1 | tee test.txt || true
+# Replay mode serves recorded mocks, so Keploy's DNS forwarder is
+# typically not hit. No resolv.conf override needed here.
 check_for_errors test.txt
 check_test_report
 endsec
