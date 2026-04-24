@@ -524,8 +524,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// without chunked TE). Reporting both lets operators tell
 			// "chunked JSON API response" apart from "unknown-length
 			// upload" when triaging capture-budget trips.
+			//
+			// The message deliberately does NOT say "while streaming" — a
+			// large fixed Content-Length body can also trip this branch
+			// (streaming_exchange=false, chunked_transfer=false). The two
+			// booleans report how the body was framed; the message just
+			// reports the budget trip.
 			chunkedTransfer := isChunked(req.TransferEncoding) || isChunked(resp.TransferEncoding)
-			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
+			logger.Debug("Skipping HTTP capture because body exceeded capture budget",
 				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
