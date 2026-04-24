@@ -24,8 +24,8 @@ func TestWriteRejected(t *testing.T) {
 func TestReadFromChunks(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk, 2)
-	ch <- Chunk{Dir: FromClient, Bytes: []byte("foo"), ReadAt: time.Unix(1, 0)}
-	ch <- Chunk{Dir: FromClient, Bytes: []byte("bar"), ReadAt: time.Unix(2, 0)}
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("foo"), ReadAt: time.Unix(1, 0), WrittenAt: time.Unix(1, 500)}
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("bar"), ReadAt: time.Unix(2, 0), WrittenAt: time.Unix(2, 500)}
 	close(ch)
 
 	f := New(ch, nil, nil)
@@ -44,10 +44,20 @@ func TestReadFromChunks(t *testing.T) {
 	if got := string(buf[:total]); got != "foobar" {
 		t.Errorf("Read result = %q, want %q", got, "foobar")
 	}
-	got := f.LastReadTime()
-	want := time.Unix(2, 0)
-	if !got.Equal(want) {
+	if got, want := f.LastReadTime(), time.Unix(2, 0); !got.Equal(want) {
 		t.Errorf("LastReadTime = %v, want %v", got, want)
+	}
+	if got, want := f.LastWrittenTime(), time.Unix(2, 500); !got.Equal(want) {
+		t.Errorf("LastWrittenTime = %v, want %v", got, want)
+	}
+}
+
+func TestLastWrittenTimeZeroBeforeAnyChunk(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk)
+	f := New(ch, nil, nil)
+	if got := f.LastWrittenTime(); !got.IsZero() {
+		t.Errorf("LastWrittenTime before any chunk = %v, want zero", got)
 	}
 }
 

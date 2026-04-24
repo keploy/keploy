@@ -49,14 +49,15 @@ type FakeConn struct {
 	ch     <-chan Chunk
 	logger logger
 
-	mu           sync.Mutex
-	buf          bytes.Buffer
-	bufReadAt    time.Time // source ReadAt of bytes currently in buf
-	bufWrittenAt time.Time // source WrittenAt of bytes currently in buf
-	bufDir       Direction // source direction of bytes currently in buf
-	lastReadNano atomic.Int64
-	closed       atomic.Bool
-	closeCh      chan struct{}
+	mu              sync.Mutex
+	buf             bytes.Buffer
+	bufReadAt       time.Time // source ReadAt of bytes currently in buf
+	bufWrittenAt    time.Time // source WrittenAt of bytes currently in buf
+	bufDir          Direction // source direction of bytes currently in buf
+	lastReadNano    atomic.Int64
+	lastWrittenNano atomic.Int64
+	closed          atomic.Bool
+	closeCh         chan struct{}
 
 	deadlineMu        sync.Mutex
 	deadline          time.Time
@@ -202,6 +203,9 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 		if !c.ReadAt.IsZero() {
 			f.lastReadNano.Store(c.ReadAt.UnixNano())
 		}
+		if !c.WrittenAt.IsZero() {
+			f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+		}
 		return c, nil
 	}
 	f.mu.Unlock()
@@ -218,6 +222,9 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 				return Chunk{}, io.EOF
 			}
 			f.lastReadNano.Store(c.ReadAt.UnixNano())
+			if !c.WrittenAt.IsZero() {
+				f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+			}
 			return c, nil
 		case <-f.closeCh:
 			return Chunk{}, ErrClosed
@@ -245,6 +252,20 @@ func (f *FakeConn) Write(p []byte) (int, error) {
 // delivered Chunk, or the zero time if no Chunk has been delivered.
 func (f *FakeConn) LastReadTime() time.Time {
 	n := f.lastReadNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// LastWrittenTime returns the WrittenAt timestamp of the most recently
+// delivered Chunk, or the zero time if no Chunk has been delivered or
+// no chunk carried a non-zero WrittenAt. Parsers that need response-
+// side semantics (time the relay handed the byte off to the real peer)
+// should prefer this over LastReadTime for consistency with other V2
+// recorders that anchor ResTimestampMock to chunk.WrittenAt.
+func (f *FakeConn) LastWrittenTime() time.Time {
+	n := f.lastWrittenNano.Load()
 	if n == 0 {
 		return time.Time{}
 	}
