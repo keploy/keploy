@@ -136,7 +136,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			logger.Error("invalid --health-url; falling back to fixed delay",
 				zap.String("healthUrl", healthURL),
 				zap.String("reason", reason),
-				zap.String("nextStep", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", healthURL)+" — fix it or omit to use --delay only"),
+				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", healthURL)+" — fix it or omit to use --delay only"),
 			)
 			healthURL = "" // fall through to the empty-URL / fixed-delay branch below
 		}

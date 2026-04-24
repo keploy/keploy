@@ -340,7 +340,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		reqTimestamp := time.Now()
 
-		var chunked bool = false
+		// streamingExchange tracks whether EITHER side (request or response)
+		// lacked a concrete Content-Length or used Transfer-Encoding:
+		// chunked. This covers the full "no upfront size known" superset
+		// that needs early lock release. At the debug log site below we
+		// also report the narrower 'chunked_transfer' bit separately so
+		// operators can distinguish true chunked encoding from simple
+		// unknown-length streams — the flag name used to be 'chunked',
+		// which conflated the two.
+		var streamingExchange bool = false
 		// pressureCloseMode unifies forceCloseMode with memory pressure.
 		// When true, expected close errors are handled gracefully (DEBUG level),
 		// the sampling lock is released early, and the loop exits after one exchange.
@@ -357,7 +365,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// checks on the request/response capture buffers handle
 				// genuinely oversized streams.
 				releaseLock()
-				chunked = true
+				streamingExchange = true
 			} else if captureEnabled && pm.synchronous && acquiredLock {
 				mgr := syncMock.Get()
 				if !mgr.GetFirstReqSeen() {
@@ -441,7 +449,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// body bytes and the capture-budget check handles
 				// genuinely oversized streams.
 				releaseLock()
-				chunked = true
+				streamingExchange = true
 			}
 
 			resp.Close = true
@@ -510,11 +518,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if shouldCapture && (reqCapture.Truncated() || respCapture.Truncated()) {
+			// chunked_transfer is the narrower bit (actual Transfer-Encoding:
+			// chunked on either side). streaming_exchange is the superset
+			// that also captures unknown-length streams (Content-Length == -1
+			// without chunked TE). Reporting both lets operators tell
+			// "chunked JSON API response" apart from "unknown-length
+			// upload" when triaging capture-budget trips.
+			chunkedTransfer := isChunked(req.TransferEncoding) || isChunked(resp.TransferEncoding)
 			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
 				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
-				zap.Bool("chunked_transfer", chunked),
+				zap.Bool("streaming_exchange", streamingExchange),
+				zap.Bool("chunked_transfer", chunkedTransfer),
 				zap.String("url", req.URL.String()),
 				zap.String("method", req.Method),
 				zap.Int("status_code", resp.StatusCode),
