@@ -225,10 +225,12 @@ func (s *Session) IsMockIncomplete() bool {
 //     the send is not yet ready, cancellation causes EmitMock to return
 //     ctx.Err(). If ctx is ALREADY cancelled AND the send is also ready
 //     (e.g. s.Mocks is buffered with spare capacity), Go's select is
-//     free to pick either case — the mock may still be emitted and
-//     EmitMock may return nil. Once the send case wins, delivery is
-//     guaranteed; callers that want a strict "no emit past cancel"
-//     barrier must probe ctx.Err() themselves before calling EmitMock.
+//     free to pick either case — the outcome is non-deterministic:
+//     EmitMock may emit the mock and return nil, OR it may pick the
+//     ctx.Done() arm and return ctx.Err() without emitting. Once the
+//     send case wins, delivery is guaranteed; callers that want a
+//     strict "no emit past cancel" barrier must probe ctx.Err()
+//     themselves before calling EmitMock.
 //
 //   - SyncMock path (RouteMocksViaSyncMock=true): ctx is checked ONCE
 //     before calling mgr.AddMock. If ctx was already cancelled,

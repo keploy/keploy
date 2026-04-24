@@ -353,10 +353,13 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 // TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched pins
 // the RouteMocksViaSyncMock=true path by asserting the negative:
 // when the flag is on, Session.Mocks must NOT receive anything,
-// and OnPendingCleared must still fire. That combination can only
-// be produced by the syncMock branch — the other branches either
-// push to Session.Mocks or only fire OnPendingCleared when Mocks
-// is nil.
+// and OnPendingCleared must still fire. Under this test's setup —
+// session not marked incomplete, RouteMocksViaSyncMock=true, Mocks
+// non-nil — that combination identifies the syncMock branch. Note
+// that the incomplete-mock drop path would also produce "Mocks
+// untouched + OnPendingCleared fired" if the session were marked
+// incomplete, so the invariant is conditional on the clean-session
+// precondition this test sets up.
 //
 // Earlier iterations of this test rebound the package-singleton
 // syncMock's outChan via SetOutputChannel(...). That touched a
