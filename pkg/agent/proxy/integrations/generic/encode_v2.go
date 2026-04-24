@@ -125,6 +125,15 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 			// Clear the incomplete flag so the next cycle has a fresh
 			// chance, matching EmitMock's own reset semantics.
 			sess.MarkMockComplete()
+			// Clear pending work — the parser has consumed the input
+			// even though the mock is being abandoned. Without this
+			// the hang watchdog stays armed on the supervisor side
+			// and can fire spurious aborts after the connection goes
+			// idle. EmitMock's drop path does the same; this early
+			// return would skip it if we didn't replicate it here.
+			if sess.OnPendingCleared != nil {
+				sess.OnPendingCleared()
+			}
 			return
 		}
 

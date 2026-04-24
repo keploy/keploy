@@ -200,6 +200,10 @@ func (p *Proxy) recordViaSupervisor(
 		}
 		return result.Err
 	}
+	logger.Debug("V2 parser recorded outgoing message successfully",
+		zap.String("parser", string(parserType)),
+		zap.String("status", result.Status.String()),
+	)
 	return nil
 }
 

@@ -213,7 +213,16 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	if s.mockIncomplete.Load() {
 		// Drop silently and reset so the next mock in this cycle gets
 		// a fresh chance. Matches invariant I4 in PLAN.md.
+		//
+		// Still clear pending work — the parser has consumed the input
+		// even though the mock is being abandoned. Leaving pending
+		// armed would cause the hang watchdog to fire after the
+		// connection goes idle, producing spurious aborts after a
+		// benign drop (memory pressure, chunk gate, short write).
 		s.mockIncomplete.Store(false)
+		if s.OnPendingCleared != nil {
+			s.OnPendingCleared()
+		}
 		return nil
 	}
 

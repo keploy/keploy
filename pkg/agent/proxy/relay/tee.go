@@ -144,10 +144,13 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		return false
 	}
 	n := int64(len(c.Bytes))
-	// Reserve capacity optimistically, then undo on channel-full.
-	// Reading bytes then adding is not atomic w.r.t. the drain
-	// goroutine, but the worst case is an over- or under-count of
-	// one chunk; the cap is a soft limit by contract.
+	// Check the per-conn byte cap before attempting to send. The
+	// accounting is lazy: t.bytes is only incremented after the
+	// staging-send succeeds (see t.bytes.Add(n) below), so there is
+	// nothing to "undo" on the drop paths. The load-then-compare is
+	// not atomic w.r.t. the drain goroutine, but the worst case is
+	// an over- or under-count of one chunk; the cap is a soft limit
+	// by contract.
 	if t.bytes.Load()+n > t.cap {
 		t.drop(DropPerConnCap)
 		return false

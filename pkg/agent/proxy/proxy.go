@@ -1783,7 +1783,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					return err
 				}
-				logger.Debug("successfully recorded outgoing message via V2 path", zap.String("ParserType", string(parserType)))
+				// Outcome-specific logging lives inside recordViaSupervisor
+				// (success vs. fallthrough-to-passthrough look the same
+				// from this layer — both return nil error — but mean
+				// different things for the mocks captured). Here we only
+				// know the record path completed without a caller-visible
+				// error; the parser outcome was already logged.
+				logger.Debug("V2 record path returned", zap.String("ParserType", string(parserType)))
 				break
 			}
 

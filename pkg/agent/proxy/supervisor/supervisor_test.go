@@ -288,6 +288,40 @@ func TestSessionEmitMockRespectsIncomplete(t *testing.T) {
 	}
 }
 
+// TestSessionEmitMockDropPathClearsPending pins the invariant that
+// dropping a mock due to IsMockIncomplete() still calls
+// OnPendingCleared. Otherwise the supervisor's hang watchdog stays
+// armed after a benign drop (chunk gate, memory pressure, short
+// write) and eventually fires a spurious abort after the connection
+// goes idle.
+func TestSessionEmitMockDropPathClearsPending(t *testing.T) {
+	t.Parallel()
+	var pendingCleared int
+	sess := &Session{
+		Mocks:            make(chan *models.Mock, 1),
+		Ctx:              context.Background(),
+		Logger:           zaptest.NewLogger(t),
+		OnPendingCleared: func() { pendingCleared++ },
+	}
+
+	sess.MarkMockIncomplete("chunk_gate")
+	if err := sess.EmitMock(&models.Mock{Name: "drop-me"}); err != nil {
+		t.Fatalf("EmitMock returned err: %v", err)
+	}
+	if pendingCleared != 1 {
+		t.Fatalf("OnPendingCleared calls on drop path = %d, want 1", pendingCleared)
+	}
+
+	// Sanity: the normal emit path also fires OnPendingCleared, so a
+	// subsequent successful emit increments the counter.
+	if err := sess.EmitMock(&models.Mock{Name: "kept"}); err != nil {
+		t.Fatalf("EmitMock: %v", err)
+	}
+	if pendingCleared != 2 {
+		t.Fatalf("OnPendingCleared calls after successful emit = %d, want 2", pendingCleared)
+	}
+}
+
 func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 	t.Parallel()
 	// Unbuffered channel nobody reads → EmitMock would block forever
