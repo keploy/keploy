@@ -58,10 +58,11 @@ type FakeConn struct {
 	closed       atomic.Bool
 	closeCh      chan struct{}
 
-	deadlineMu sync.Mutex
-	deadline   time.Time
-	deadlineCh chan struct{}
-	deadlineT  *time.Timer
+	deadlineMu        sync.Mutex
+	deadline          time.Time
+	deadlineCh        chan struct{}
+	deadlineT         *time.Timer
+	deadlineChangedCh chan struct{} // closed each time SetReadDeadline updates state
 
 	local  net.Addr
 	remote net.Addr
@@ -202,9 +203,12 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 	}
 	f.mu.Unlock()
 
-	// Check deadline up front; if already passed, return immediately.
-	dlCh := f.currentDeadlineCh()
+	// Re-fetch the deadline channel on each iteration so concurrent
+	// SetReadDeadline calls take effect on this in-flight read. The
+	// changed-notification channel (closed by SetReadDeadline) wakes
+	// the select; we then loop and reload both channels.
 	for {
+		dlCh, changedCh := f.currentDeadlineChans()
 		select {
 		case c, ok := <-f.ch:
 			if !ok {
@@ -216,6 +220,8 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 			return Chunk{}, ErrClosed
 		case <-dlCh:
 			return Chunk{}, ErrDeadlineExceeded
+		case <-changedCh:
+			// deadline changed; loop and re-fetch.
 		}
 	}
 }
@@ -275,7 +281,8 @@ func (f *FakeConn) SetDeadline(t time.Time) error {
 
 // SetReadDeadline sets the deadline for future Read/ReadChunk calls.
 // A zero t clears the deadline. Safe to call from a different goroutine
-// than the reader.
+// than the reader — a blocked Read/ReadChunk picks up the new deadline
+// on the next loop iteration via the deadlineChangedCh broadcast below.
 func (f *FakeConn) SetReadDeadline(t time.Time) error {
 	f.deadlineMu.Lock()
 	defer f.deadlineMu.Unlock()
@@ -285,6 +292,15 @@ func (f *FakeConn) SetReadDeadline(t time.Time) error {
 		f.deadlineT = nil
 	}
 	f.deadline = t
+
+	// Notify any in-flight Read/ReadChunk that the deadline changed
+	// so it can re-fetch deadlineCh on the next loop iteration. The
+	// previous channel is closed (not nil'd) to atomically unblock
+	// every waiter; a fresh channel replaces it for subsequent waiters.
+	if f.deadlineChangedCh != nil {
+		close(f.deadlineChangedCh)
+	}
+	f.deadlineChangedCh = make(chan struct{})
 
 	if t.IsZero() {
 		f.deadlineCh = nil
@@ -305,12 +321,18 @@ func (f *FakeConn) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline is a no-op; Write always errors.
 func (f *FakeConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-// currentDeadlineCh returns the deadline channel for the current
-// deadline state. A nil returned channel means "no deadline."
-func (f *FakeConn) currentDeadlineCh() <-chan struct{} {
+// currentDeadlineChans returns both the active deadline channel
+// (nil if no deadline) and the change-notification channel that
+// fires the next time SetReadDeadline updates state. Callers should
+// re-invoke after the changed channel closes so the new deadline
+// takes effect on already-blocked Read/ReadChunk calls.
+func (f *FakeConn) currentDeadlineChans() (deadline, changed <-chan struct{}) {
 	f.deadlineMu.Lock()
 	defer f.deadlineMu.Unlock()
-	return f.deadlineCh
+	if f.deadlineChangedCh == nil {
+		f.deadlineChangedCh = make(chan struct{})
+	}
+	return f.deadlineCh, f.deadlineChangedCh
 }
 
 // placeholderAddr is returned from LocalAddr/RemoteAddr when no

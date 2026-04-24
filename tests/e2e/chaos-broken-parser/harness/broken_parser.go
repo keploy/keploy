@@ -55,18 +55,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
 )
 
-// errChaosNotYetWired is returned under the chaos build tag until the
-// V2 supervisor/relay/fakeconn packages land. It surfaces as a clear
-// "stub hasn't been replaced yet" message instead of a cryptic nil-
-// pointer panic when the follow-up forgets to finish the migration.
-var errChaosNotYetWired = errors.New(
-	"chaos broken-parser wiring not yet implemented on this branch — " +
-		"see broken_parser.go header for the TODO checklist",
-)
+// errChaosNotYetWired is declared alongside the stub in
+// broken_parser_stub.go so main.go can reference it unconditionally
+// (no build-tag dance at the call site). The tagged path here still
+// returns it until the in-process V2 proxy wiring lands — the
+// harness treats that case as "skip the supervisor-fallback
+// assertion" rather than a failure.
 
 // startBrokenParserProxyIfEnabled registers the panicking Postgres
 // parser and starts an in-process keploy proxy on an ephemeral port.

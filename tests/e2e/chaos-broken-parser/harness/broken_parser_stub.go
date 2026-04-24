@@ -10,7 +10,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+)
+
+// errChaosNotYetWired is declared in both the default and tagged
+// builds so main.go can reference it without a build-tag dance.
+// On the default build it is never returned (the stub returns nil);
+// on the tagged build the stub broken_parser.go returns it until the
+// in-process V2 proxy wiring lands.
+var errChaosNotYetWired = errors.New(
+	"chaos broken-parser in-process proxy wiring not yet implemented — " +
+		"see broken_parser.go header for the TODO checklist",
 )
 
 // startBrokenParserProxyIfEnabled is the no-op path. See

@@ -917,7 +917,10 @@ func RecoverWithoutClose(logger *zap.Logger) {
 	}
 
 	if r := recover(); r != nil {
-		logger.Error("Recovered from panic in parser")
+		logger.Error("Recovered from panic in parser",
+			zap.Any("panic", r),
+			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_NEW_RELAY=off to force the legacy path for this parser until the root cause is fixed"),
+		)
 		utils.HandleRecovery(logger, r, "Recovered from panic")
 		// Flush only on the panic path so the happy path (defer
 		// running on clean return) doesn't pay the flush cost.

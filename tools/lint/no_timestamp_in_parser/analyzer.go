@@ -145,11 +145,24 @@ func collectSuppressLines(tf *token.File, groups []*ast.CommentGroup) map[int]bo
 	out := make(map[int]bool)
 	for _, g := range groups {
 		for _, c := range g.List {
-			text := strings.TrimSpace(c.Text)
-			// Accept both "// allow:time.Now" and any line comment that
-			// starts with that marker (tolerate trailing context, e.g.
-			// "// allow:time.Now  -- boot-time splash log").
-			if !strings.HasPrefix(text, "// allow:time.Now") {
+			raw := c.Text
+			text := strings.TrimSpace(raw)
+			var inner string
+			switch {
+			case strings.HasPrefix(text, "//"):
+				// Line comment: `// allow:time.Now ...`
+				inner = strings.TrimSpace(strings.TrimPrefix(text, "//"))
+			case strings.HasPrefix(text, "/*") && strings.HasSuffix(text, "*/"):
+				// Block comment: `/* allow:time.Now ... */` (single-
+				// or multi-line; ast.Comment.Text includes the outer
+				// delimiters). Strip both delimiters before matching.
+				inner = strings.TrimSpace(text[2 : len(text)-2])
+			default:
+				continue
+			}
+			// Accept any marker-prefixed form (tolerate trailing
+			// context like "allow:time.Now  -- boot-time splash log").
+			if !strings.HasPrefix(inner, "allow:time.Now") {
 				continue
 			}
 			endLine := tf.Position(c.End()).Line
