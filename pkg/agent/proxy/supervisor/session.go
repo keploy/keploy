@@ -221,9 +221,14 @@ func (s *Session) IsMockIncomplete() bool {
 // Context cancellation semantics differ between the two delivery paths:
 //
 //   - Direct-channel path (RouteMocksViaSyncMock=false, s.Mocks bound):
-//     fully honours Ctx — EmitMock's select blocks on `s.Mocks <- m`
-//     vs `<-ctx.Done()` and returns ctx.Err() on cancel. Once the send
-//     wins, delivery is guaranteed; the caller never races backpressure.
+//     EmitMock selects between `s.Mocks <- m` and `<-ctx.Done()`. While
+//     the send is not yet ready, cancellation causes EmitMock to return
+//     ctx.Err(). If ctx is ALREADY cancelled AND the send is also ready
+//     (e.g. s.Mocks is buffered with spare capacity), Go's select is
+//     free to pick either case — the mock may still be emitted and
+//     EmitMock may return nil. Once the send case wins, delivery is
+//     guaranteed; callers that want a strict "no emit past cancel"
+//     barrier must probe ctx.Err() themselves before calling EmitMock.
 //
 //   - SyncMock path (RouteMocksViaSyncMock=true): ctx is checked ONCE
 //     before calling mgr.AddMock. If ctx was already cancelled,
