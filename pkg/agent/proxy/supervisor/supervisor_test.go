@@ -366,7 +366,10 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 // and produce flaky timeouts. (Cross-package `go test ./...` runs
 // each package in its own binary, so the race was strictly
 // intra-package.) Asserting on the local Session.Mocks channel
-// keeps the test entirely within this Session instance.
+// avoids rebinding that global outChan — the syncMock manager's
+// other state (buffered mocks, firstReqSeen) is still touched
+// because RouteMocksViaSyncMock=true routes through it, but none
+// of that state is read by this test's assertions.
 func TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched(t *testing.T) {
 	t.Parallel()
 
