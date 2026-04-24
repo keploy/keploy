@@ -94,37 +94,60 @@ runs:
         # head_ref is set on pull_request events (the PR branch name);
         # empty on push events. We use it to auto-pair cross-repo
         # feature branches that share a name between keploy and
-        # keploy/integrations — see the paired-branch fallback below.
+        # keploy/integrations.
         GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
+        # PR body, used to discover an explicit `Integration-Ref:` tag
+        # for cross-repo PRs whose branch names don't match (the common
+        # case — keploy feature branches follow `feat/*` while
+        # integrations uses `<topic>-features` / etc.).
+        PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-        # Cross-repo branch pairing: on a PR whose branch name exists in
-        # keploy/integrations, prefer that branch over the default
-        # `integration-ref`. Lets a feature that spans both repos
-        # (e.g. models schema change in keploy + parser update in
-        # integrations) CI against the matching branch without forcing
-        # operators to flip `vars.INTEGRATION_REF` for the review window.
-        # Falls through to the configured INTEGRATION_REF when:
-        #   - the event has no head_ref (push to main, workflow_dispatch)
-        #   - head_ref equals INTEGRATION_REF (no-op, avoid double fetch)
-        #   - the matching branch doesn't exist in integrations
-        # `go get` failure on the first attempt is consumed silently
-        # because the INTEGRATION_REF fetch below is the authoritative
-        # one; any real error there still aborts the step.
-        PAIRED_FETCHED=0
-        if [ -n "$GITHUB_HEAD_REF_VAL" ] && [ "$GITHUB_HEAD_REF_VAL" != "$INTEGRATION_REF" ]; then
-          echo "Trying paired integrations branch: $GITHUB_HEAD_REF_VAL"
-          if GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${GITHUB_HEAD_REF_VAL} 2>/dev/null; then
-            echo "✓ Paired integrations branch fetched"
-            PAIRED_FETCHED=1
-          else
-            echo "No paired branch in integrations (or fetch failed); falling back to INTEGRATION_REF=${INTEGRATION_REF}"
+        # Cross-repo integrations-ref resolution order (first hit wins):
+        #
+        #   1. `Integration-Ref: <branch-or-sha>` line in the PR body —
+        #      explicit opt-in for cross-repo CI pairing. Case-insensitive
+        #      label so `INTEGRATION-REF:` / `integration-ref:` also
+        #      match. Anything up to whitespace/newline is the ref.
+        #   2. PR head branch name (github.head_ref) — auto-paired when
+        #      both repos use the same branch name for a feature.
+        #   3. The configured `integration-ref` input (wired from
+        #      vars.INTEGRATION_REF || 'main' at the workflow level).
+        #
+        # Each step runs `go get`; the first one to succeed short-
+        # circuits. Failures in (1) and (2) are swallowed — the
+        # authoritative fetch is (3), which propagates any real error.
+        FETCHED=0
+        try_fetch() {
+          local ref="$1"
+          local source="$2"
+          [ -z "$ref" ] && return 1
+          [ "$ref" = "$INTEGRATION_REF" ] && return 1  # skip duplicate fetch
+          echo "Trying integrations@${ref} (from ${source})"
+          if GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${ref} 2>/dev/null; then
+            echo "✓ Fetched integrations@${ref}"
+            FETCHED=1
+            return 0
           fi
+          echo "  ✗ fetch failed for ${ref}; continuing"
+          return 1
+        }
+
+        # Step 1: PR body override.
+        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[Ii]ntegration-[Rr]ef:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '[:space:]' || true)"
+        if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
+          try_fetch "$BODY_REF" "PR body Integration-Ref" || true
         fi
 
-        if [ "$PAIRED_FETCHED" != "1" ]; then
-          echo "Fetching private integrations dependency via SSH..."
+        # Step 2: head-branch auto-pair.
+        if [ "$FETCHED" != "1" ]; then
+          try_fetch "$GITHUB_HEAD_REF_VAL" "github.head_ref" || true
+        fi
+
+        # Step 3: authoritative fall-through. Propagates errors.
+        if [ "$FETCHED" != "1" ]; then
+          echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
           GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
         fi
 
@@ -149,6 +172,7 @@ runs:
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
         GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
+        PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         # Use per-run config when isolation is active, otherwise fall back to --global
         if ($env:GIT_CONFIG_GLOBAL) {
@@ -158,22 +182,36 @@ runs:
         }
 
         $env:GOPRIVATE = "github.com/keploy/integrations"
-        $PairedFetched = $false
+        $Fetched = $false
 
-        # Cross-repo branch pairing (see non-Windows step above for rationale).
-        if ($env:GITHUB_HEAD_REF_VAL -and $env:GITHUB_HEAD_REF_VAL -ne $env:INTEGRATION_REF) {
-          Write-Host "Trying paired integrations branch: $env:GITHUB_HEAD_REF_VAL"
-          go get "github.com/keploy/integrations@$env:GITHUB_HEAD_REF_VAL" 2>$null
+        function Try-Fetch([string]$Ref, [string]$Source) {
+          if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
+          if ($Ref -eq $env:INTEGRATION_REF) { return $false }
+          Write-Host "Trying integrations@$Ref (from $Source)"
+          go get "github.com/keploy/integrations@$Ref" 2>$null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Paired integrations branch fetched"
-            $PairedFetched = $true
-          } else {
-            Write-Host "No paired branch in integrations (or fetch failed); falling back to INTEGRATION_REF=$env:INTEGRATION_REF"
+            Write-Host "Fetched integrations@$Ref"
+            return $true
+          }
+          Write-Host "  fetch failed for $Ref; continuing"
+          return $false
+        }
+
+        # Resolution order: PR body Integration-Ref → head_ref → input.
+        # See the non-Windows step for the full rationale.
+        $BodyRef = $null
+        if ($env:PR_BODY) {
+          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*integration-ref\s*:' } | Select-Object -First 1
+          if ($line) {
+            $BodyRef = ($line -replace '^[^:]+:\s*', '' -replace '\s', '')
           }
         }
 
-        if (-not $PairedFetched) {
-          Write-Host "Fetching private integrations dependency via SSH..."
+        if ($BodyRef) { $Fetched = Try-Fetch $BodyRef "PR body Integration-Ref" }
+        if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }
+
+        if (-not $Fetched) {
+          Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
           go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
           if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }
         }
