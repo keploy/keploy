@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -123,6 +124,24 @@ type Session struct {
 	// Typically wired to supervisor.ClearPendingWork by the dispatcher.
 	// Nil is safe.
 	OnPendingCleared func()
+
+	// RouteMocksViaSyncMock, when true, makes EmitMock deliver the
+	// mock via the package-singleton syncMock.SyncMockManager
+	// (AddMock) instead of directly sending on s.Mocks. Production
+	// recordViaSupervisor sets this to true so the V2 path gets the
+	// same firstReqSeen session-window buffering, lifetime
+	// derivation, and drop accounting that legacy parsers enjoy —
+	// without it, V2-recorded mocks captured before the first app
+	// test request fall outside the session window and are lost at
+	// replay.
+	//
+	// Tests that wire a bare mocks channel and want to observe the
+	// emitted mocks directly should leave this false (default) so
+	// the direct-channel fallback below still fires. The two paths
+	// both run the OnMockRecorded hook chain and the ClientConnID
+	// / monotonic-timestamp normalisation — they only differ on the
+	// final handoff.
+	RouteMocksViaSyncMock bool
 
 	// --- Internal bookkeeping ---
 
@@ -249,6 +268,35 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	s.hookMu.Unlock()
 	if hook != nil {
 		hook(m)
+	}
+
+	// Route through the package-singleton SyncMockManager when the
+	// caller opts in. Legacy parsers (http, mysql, generic, etc.)
+	// call syncMock.AddMock because it does:
+	//
+	//   1. Lifetime derivation from Metadata["type"] (session vs
+	//      per-test), stamped onto TestModeInfo.Lifetime.
+	//   2. firstReqSeen buffering — mocks captured BEFORE the first
+	//      app test request are treated as "session" scope and
+	//      re-delivered on every replay; mocks after belong to the
+	//      currently-active test window. Dispatchers that skip this
+	//      will emit per-test mocks even for startup-phase traffic,
+	//      and replay against a recording loses them because the
+	//      session window is empty.
+	//   3. Memory-pause gating and drop counters.
+	//
+	// Tests that wire a bare s.Mocks channel and want to observe
+	// emitted mocks directly leave RouteMocksViaSyncMock false so
+	// the direct-channel fallback below runs. Production
+	// recordViaSupervisor sets it true.
+	if s.RouteMocksViaSyncMock {
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.AddMock(m)
+			if s.OnPendingCleared != nil {
+				s.OnPendingCleared()
+			}
+			return nil
+		}
 	}
 
 	if s.Mocks == nil {

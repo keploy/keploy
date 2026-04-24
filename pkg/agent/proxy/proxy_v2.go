@@ -88,6 +88,16 @@ func (p *Proxy) recordViaSupervisor(
 		DestConnID:       fmt.Sprint(destConnID),
 		Opts:             opts,
 		OnPendingCleared: sv.ClearPendingWork,
+		// Route EmitMock through syncMock.AddMock so V2 parsers pick
+		// up the same firstReqSeen session-window buffering, lifetime
+		// derivation, and drop accounting that legacy parsers (http,
+		// mysql, generic) get. Without this, V2-recorded mocks
+		// captured before the first app test request bypass the
+		// session window and are lost at replay — the symptom that
+		// broke postgres e2e record-build-replay-build runs in
+		// integrations#133 (the app's startup DB queries never found
+		// their mocks).
+		RouteMocksViaSyncMock: true,
 		// Legacy fields kept populated so a migrated parser can still
 		// consult them for fields we haven't promoted yet. The parser
 		// must not touch Ingress/Egress net.Conn values on the V2 path.
