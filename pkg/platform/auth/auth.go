@@ -80,19 +80,19 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for authentication")
-		return "", false, "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("error marshaling request body for authentication: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for authentication")
-		return "", false, "", fmt.Errorf("error creating request for authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("error creating request for authentication: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		return "", false, "", fmt.Errorf("failed to authenticate: %s", err.Error())
+		return "", false, "", fmt.Errorf("failed to authenticate: %w", err)
 	}
 
 	defer func() {
@@ -105,10 +105,10 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 	var respBody models.AuthResp
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
-		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
+		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %w", err)
 	}
 
-	if res.StatusCode != 200 || res.StatusCode >= 300 {
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
 		return "", false, "", fmt.Errorf("failed to authenticate: %s", respBody.Error)
 	}
 
