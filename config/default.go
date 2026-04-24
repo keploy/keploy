@@ -22,6 +22,8 @@ port: 0
 proxyPort: 16789
 incomingProxyPort: %d
 dnsPort: 26789
+mysqlPorts:
+  - 3306
 debug: false
 disableANSI: false
 disableTele: false

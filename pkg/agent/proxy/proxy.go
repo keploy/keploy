@@ -49,6 +49,11 @@ type Proxy struct {
 	Port    uint32
 	DNSPort uint32
 
+	// mysqlPorts holds the set of destination ports that should be routed through
+	// the MySQL integration. Populated from config.Config.MySQLPorts at construction
+	// time and treated as read-only afterwards, so no synchronization is required.
+	mysqlPorts map[uint32]struct{}
+
 	DestInfo     agent.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
 
@@ -118,6 +123,11 @@ func isNetworkClosedErr(err error) bool {
 		strings.Contains(errStr, "forcibly closed by the remote host")
 }
 
+// defaultMySQLPort is used when the configuration does not supply any
+// MySQL-compatible ports. It preserves the historical behaviour of routing
+// port 3306 through the MySQL integration.
+const defaultMySQLPort uint32 = 3306
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
@@ -136,9 +146,39 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		mysqlPorts:        buildMySQLPortSet(opts.MySQLPorts),
 	}
 
 	return proxy
+}
+
+// buildMySQLPortSet converts the configured list of MySQL ports into a lookup
+// set. If the caller provided no ports, the historical default (3306) is used
+// so that existing deployments continue to work without any config changes.
+func buildMySQLPortSet(ports []uint32) map[uint32]struct{} {
+	set := make(map[uint32]struct{}, len(ports)+1)
+	for _, p := range ports {
+		if p == 0 {
+			continue
+		}
+		set[p] = struct{}{}
+	}
+	if len(set) == 0 {
+		set[defaultMySQLPort] = struct{}{}
+	}
+	return set
+}
+
+// isMySQLPort reports whether the given destination port should be routed
+// through the MySQL integration. The set of ports is sourced from config at
+// construction time, which lets users add MySQL-wire-compatible databases
+// (e.g. TiDB on 4000) without any code changes.
+func (p *Proxy) isMySQLPort(port uint32) bool {
+	if len(p.mysqlPorts) == 0 {
+		return port == defaultMySQLPort
+	}
+	_, ok := p.mysqlPorts[port]
+	return ok
 }
 
 // buildRecordSession constructs a RecordSession for a parser in record mode.
@@ -639,8 +679,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 || destInfo.Port == 4000{
+	// Route through the MySQL integration when the destination port matches
+	// one of the configured MySQL/DB ports (see config.Config.MySQLPorts).
+	if p.isMySQLPort(destInfo.Port) {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {

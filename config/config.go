@@ -23,6 +23,11 @@ type Config struct {
 	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
 	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	// MySQLPorts lists destination ports that should be routed through the
+	// MySQL integration (record/replay). This allows supporting MySQL-wire-compatible
+	// databases running on non-standard ports (e.g. TiDB on 4000) without code changes.
+	// Defaults to [3306] via the default config; any ports added here are treated as MySQL/DB ports.
+	MySQLPorts            []uint32            `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
