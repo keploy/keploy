@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -515,6 +513,10 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
+func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+	// Decode URL-encoded template placeholders (e.g., %7B becomes {)
+	if strings.Contains(tc.HTTPReq.URL, "%7B") {
+func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, configPort uint32) (*models.GrpcResp, error) {
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, cfg SimulationConfig) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
@@ -522,6 +524,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			tc.HTTPReq.URL = decoded
 		}
 	}
+
+	// Render template values in the test case before simulation
+	if err := RenderTestCaseTemplates(tc, logger); err != nil {
+		return nil, err
 	// Render any template values in the test case before simulation
 	templateData := buildTemplateDataSnapshot()
 	if len(templateData) > 0 {
