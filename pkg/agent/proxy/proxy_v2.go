@@ -70,37 +70,55 @@ func (p *Proxy) recordViaSupervisor(
 	})
 	defer sv.Close()
 
-	// Build the relay. It owns srcConn/dstConn for the duration of its
-	// Run call but never closes them. The caller's deferred Close still
-	// runs on handleConnection return.
-	r := relay.New(relay.Config{
-		Logger: logger,
-		// MemoryGuardCheck defaults to memoryguard.IsRecordingPaused.
-		// PerConnCap / TeeChanBuf defaulted.
-		TLSUpgradeFn: newProxyTLSUpgradeFn(&srcConn, &dstConn, logger),
-		BumpActivity: sv.BumpActivity,
-	}, srcConn, dstConn)
-
-	// Parser-facing session carries the FakeConns and directive channels
-	// from the relay plus the legacy fields that un-migrated parser
-	// paths still consult. Ctx is overwritten by Supervisor.Run with the
-	// supervised lifetime context.
+	// Parser-facing session is constructed before the relay so its
+	// MarkMockIncomplete / ClearPendingWork hooks can be wired into
+	// the relay's tee callbacks below. ClientStream/DestStream and
+	// the directive channels are patched in after r := relay.New().
+	// Ctx is overwritten by Supervisor.Run with the supervised
+	// lifetime context.
 	svSess := &supervisor.Session{
-		ClientStream: r.ClientStream(),
-		DestStream:   r.DestStream(),
-		Directives:   r.Directives(),
-		Acks:         r.Acks(),
-		Mocks:        mocks,
-		Logger:       logger,
-		ClientConnID: fmt.Sprint(clientConnID),
-		DestConnID:   fmt.Sprint(destConnID),
-		Opts:         opts,
+		Mocks:            mocks,
+		Logger:           logger,
+		ClientConnID:     fmt.Sprint(clientConnID),
+		DestConnID:       fmt.Sprint(destConnID),
+		Opts:             opts,
+		OnPendingCleared: sv.ClearPendingWork,
 		// Legacy fields kept populated so a migrated parser can still
 		// consult them for fields we haven't promoted yet. The parser
 		// must not touch Ingress/Egress net.Conn values on the V2 path.
 		TLSUpgrader: nil,
 		ErrGroup:    errGrp,
 	}
+
+	// Build the relay. It owns srcConn/dstConn for the duration of its
+	// Run call but never closes them. The caller's deferred Close still
+	// runs on handleConnection return.
+	//
+	// OnMarkMockIncomplete wires the relay's drop signals (memoryguard
+	// pressure / per-conn cap / channel full / write error / short
+	// write / KindAbortMock directive) to the session's incomplete
+	// flag so EmitMock drops any mock whose underlying tee chunks were
+	// lost. Without this wiring partial mocks could still ship despite
+	// the documented invariant I4 in PLAN.md.
+	//
+	// OnClientChunkTeed wires the relay's per-chunk "client bytes
+	// delivered to parser" signal to the supervisor's pending-work
+	// flag so the activity watchdog can distinguish an idle
+	// connection (no pending requests) from a parser that received
+	// bytes but isn't emitting a mock (hang candidate). EmitMock's
+	// OnPendingCleared clears the flag after each successful emit.
+	r := relay.New(relay.Config{
+		Logger:               logger,
+		TLSUpgradeFn:         newProxyTLSUpgradeFn(&srcConn, &dstConn, logger),
+		BumpActivity:         sv.BumpActivity,
+		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		OnClientChunkTeed:    sv.MarkPendingWork,
+	}, srcConn, dstConn)
+
+	svSess.ClientStream = r.ClientStream()
+	svSess.DestStream = r.DestStream()
+	svSess.Directives = r.Directives()
+	svSess.Acks = r.Acks()
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the

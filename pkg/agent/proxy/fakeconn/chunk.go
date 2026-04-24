@@ -44,6 +44,13 @@ type Chunk struct {
 
 // IsZero reports whether c is the zero Chunk value. Useful for
 // channel consumers that receive a Chunk after a close-without-value.
+//
+// We intentionally exclude Dir from the predicate: Direction's zero
+// value happens to be FromClient (`iota` starts at 0), so a genuine
+// empty client-side chunk (e.g. a probe with zero bytes and no
+// timestamps — unusual but possible during teardown) would otherwise
+// be misclassified as zero. A chunk with any of bytes, ReadAt,
+// WrittenAt, or SeqNo set is non-zero regardless of Dir.
 func (c Chunk) IsZero() bool {
-	return c.Dir == 0 && c.Bytes == nil && c.ReadAt.IsZero() && c.WrittenAt.IsZero() && c.SeqNo == 0
+	return c.Bytes == nil && c.ReadAt.IsZero() && c.WrittenAt.IsZero() && c.SeqNo == 0
 }

@@ -13,35 +13,41 @@ reference appears inside a parser record file.
 
 ## Scope
 
-The analyzer inspects, and only inspects, files matching either:
+The analyzer inspects, and only inspects, V2 record-path files — files
+that adopted the chunk-timestamp contract. Two matchers:
 
-- `**/recorder/*.go`   (any Go file under a `recorder/` directory)
-- `encode*.go`         (any file whose basename begins with `encode`)
+- `*_v2.go`               (any file whose basename ends with `_v2.go`,
+  e.g. `record_v2.go`, `encode_v2.go`, `query_v2.go`)
+- `**/recorder_v2/*.go`   (any Go file under a `recorder_v2/` subpackage,
+  reserved for parsers that split their V2 logic out)
 
 and excludes `*_test.go` from the scan.
 
-In practice this maps to:
-
-- `pkg/agent/proxy/integrations/**/recorder/*.go`
-- `pkg/agent/proxy/integrations/**/encode*.go`
+The older, legacy `encode.go` / `record.go` files (e.g.
+`pkg/agent/proxy/integrations/generic/encode.go`,
+`pkg/agent/proxy/integrations/http/encode.go`) use `time.Now()`
+extensively and are **deliberately out of scope**. Their behaviour is
+the pre-V2 anti-pattern PLAN.md documents as what the V2 architecture
+replaces; retrofitting them would produce a flood of false positives.
 
 ## Allowlist
 
 Within scope, two opt-outs exist:
 
-1. **File-level:** files named `record_legacy*.go` are exempt entirely. The
-   legacy record path predates invariant I5 and will be retired, not fixed.
-2. **Line-level:** any single call site can be suppressed by placing the
-   exact marker `// allow:time.Now` on the line immediately above the call.
-   Intended only for log and telemetry sites where wall-clock time is the
-   point, e.g.:
+1. **File-level:** files named `record_legacy*.go` are exempt entirely.
+   Use only for files whose name signals the legacy origin explicitly.
+2. **Line- or block-level:** any single call site can be suppressed
+   by placing the exact marker `// allow:time.Now` (or a block
+   comment `/* allow:time.Now … */`) on the line immediately above
+   the call. Intended only for log and telemetry sites where
+   wall-clock time is the point, e.g.:
 
    ```go
    // allow:time.Now
    log.Info("handler boot", zap.Time("at", time.Now()))
    ```
 
-Tests (`*_test.go`) under `recorder/` are out of scope by construction — the
+Tests (`*_test.go`) are out of scope by construction — the
 `_test.go` suffix exits the scope check before the rule applies.
 
 ## Running locally

@@ -117,6 +117,13 @@ type Session struct {
 	// front-of-chain so an outer hook's annotations are preserved.
 	OnMockRecorded PostRecordHook
 
+	// OnPendingCleared is called by EmitMock after a successful
+	// emit so the supervisor can release "pending work" state — the
+	// parser has visibly made progress on the request in flight.
+	// Typically wired to supervisor.ClearPendingWork by the dispatcher.
+	// Nil is safe.
+	OnPendingCleared func()
+
 	// --- Internal bookkeeping ---
 
 	mockIncomplete   atomic.Bool
@@ -236,6 +243,9 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	}
 
 	if s.Mocks == nil {
+		if s.OnPendingCleared != nil {
+			s.OnPendingCleared()
+		}
 		return nil
 	}
 	ctx := s.Ctx
@@ -243,10 +253,16 @@ func (s *Session) EmitMock(m *models.Mock) error {
 		// A session without a bound ctx can still send; we just
 		// don't gate on cancellation.
 		s.Mocks <- m
+		if s.OnPendingCleared != nil {
+			s.OnPendingCleared()
+		}
 		return nil
 	}
 	select {
 	case s.Mocks <- m:
+		if s.OnPendingCleared != nil {
+			s.OnPendingCleared()
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

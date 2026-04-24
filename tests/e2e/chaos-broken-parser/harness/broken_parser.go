@@ -7,12 +7,15 @@
 // It stands up an in-process keploy proxy with a synthetic Postgres
 // parser that panics on its first chunk read. The supervisor in
 // pkg/agent/proxy/supervisor/ is expected to recover the panic and
-// flip FallthroughToPassthrough so recordViaSupervisor invokes
-// p.globalPassThrough(ctx, srcConn, dstConn). The application
-// (psql-client sidecar) continues to see a working database
-// connection because the raw byte relay in pkg/agent/proxy/relay/
-// forwards the client's queries unchanged to the real Postgres
-// container.
+// return FallthroughToPassthrough so recordViaSupervisor KEEPS the
+// relay running for raw byte forwarding until the peer closes.
+// (recordViaSupervisor intentionally does NOT call globalPassThrough
+// on the fallback path — cancelling the relay first would introduce
+// a stall during the handoff. See pkg/agent/proxy/proxy_v2.go:
+// "the relay keeps forwarding client↔dest bytes end-to-end".)
+// The application (psql-client sidecar) continues to see a working
+// database connection because the relay's forwarder goroutines
+// remain active after the parser exits.
 //
 // -----------------------------------------------------------------
 // STATUS ON THIS BRANCH (feat/proxy-v2-foundation):

@@ -92,6 +92,14 @@ type Config struct {
 	// KindAbortMock directive. The reason string is the same value
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
+
+	// OnClientChunkTeed is invoked after each successful tee of a
+	// client-to-dest chunk into the parser's FakeConn. Callers wire
+	// this to the supervisor's MarkPendingWork so the activity
+	// watchdog can distinguish "parser has no work" (connection is
+	// idle between requests) from "parser has a request in flight
+	// but isn't emitting a mock" (hang candidate). Nil is safe.
+	OnClientChunkTeed func()
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

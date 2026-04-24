@@ -356,7 +356,18 @@ func (r *Relay) forward(
 				WrittenAt: writtenAt,
 				SeqNo:     seq.Add(1),
 			}
-			t.push(chunk)
+			teed := t.push(chunk)
+			// On a successful client→dest tee, signal the supervisor
+			// that a request chunk is in flight and awaiting a mock
+			// emission. This is the "pending work" signal the hang
+			// watchdog needs to distinguish an idle connection (no
+			// pending requests) from a parser that received bytes
+			// but isn't making progress. Drops on the tee don't
+			// trigger the signal — they already mark the mock
+			// incomplete via OnMarkMockIncomplete.
+			if teed && dir == fakeconn.FromClient && r.cfg.OnClientChunkTeed != nil {
+				r.cfg.OnClientChunkTeed()
+			}
 
 			if werr != nil {
 				// The write failure means the opposite peer has

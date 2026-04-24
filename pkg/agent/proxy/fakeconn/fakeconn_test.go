@@ -222,7 +222,7 @@ func TestPartialReadStashesRemainder(t *testing.T) {
 
 type captureLogger struct{ warns int }
 
-func (c *captureLogger) Warn(string, ...any) { c.warns++ }
+func (c *captureLogger) Debug(string, ...any) { c.warns++ }
 
 func TestWriteLoggerInvoked(t *testing.T) {
 	t.Parallel()
@@ -231,6 +231,6 @@ func TestWriteLoggerInvoked(t *testing.T) {
 	_, _ = f.Write([]byte("x"))
 	_, _ = f.Write([]byte("y"))
 	if log.warns != 2 {
-		t.Errorf("logger.Warn called %d times, want 2", log.warns)
+		t.Errorf("logger.Debug called %d times, want 2", log.warns)
 	}
 }

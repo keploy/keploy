@@ -74,10 +74,12 @@ Why this matters:
   window is comparing against.
 
 Enforcement: `tools/lint/no_timestamp_in_parser/` rejects `time.Now()`,
-`time.Since()`, `time.Until()` calls inside files under
-`**/recorder/*.go` and `**/encode*.go`. Log-line and telemetry use
-can opt out with `// allow:time.Now` on the preceding line. Tests are
-exempt.
+`time.Since()`, `time.Until()` calls inside V2 record-path files
+(`*_v2.go` and files under `**/recorder_v2/`). Legacy `encode.go`
+and `record.go` files predate the V2 chunk-timestamp contract and
+are deliberately out of scope. Log-line and telemetry sites within
+scope can opt out with `// allow:time.Now` (line or block comment)
+on the preceding line. Tests are exempt.
 
 ## Serialization and monotonic time
 

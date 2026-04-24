@@ -71,15 +71,18 @@ type FakeConn struct {
 // logger is the minimal surface FakeConn needs from the outside
 // world. Zero-value-safe — nil is treated as no-op.
 type logger interface {
-	// Warn is called on protocol violations (e.g. Write attempts).
-	// Parsers shouldn't be hitting this path; when they do we want
-	// a record of it.
-	Warn(msg string, kv ...any)
+	// Debug is called on parser-side protocol violations (e.g.
+	// Write attempts). The returned error is the primary signal;
+	// the log just records the misuse site. Debug-level is
+	// appropriate because callers that don't check Write's error
+	// already have a loud bug, and this codebase reserves Warn for
+	// operator-actionable conditions.
+	Debug(msg string, kv ...any)
 }
 
 type nopLogger struct{}
 
-func (nopLogger) Warn(string, ...any) {}
+func (nopLogger) Debug(string, ...any) {}
 
 // New constructs a FakeConn. ch is the relay-owned Chunk channel;
 // localAddr and remoteAddr are returned from LocalAddr/RemoteAddr
@@ -228,10 +231,13 @@ func (f *FakeConn) readChunkLocked() (Chunk, error) {
 
 // Write always returns (0, [ErrFakeConnNoWrite]). It exists solely
 // to satisfy io.Writer / net.Conn interface shapes that parsers
-// consume. Parsers must not call it. A logger Warn is emitted when
-// called so the bug surfaces in logs.
+// consume. Parsers must not call it. The returned error is the
+// primary "this should never happen" signal; a Debug-level log
+// accompanies it so operators grepping for parser misuse can find
+// the site, but Warn-level would be overkill because the error
+// return is already loud during testing.
 func (f *FakeConn) Write(p []byte) (int, error) {
-	f.logger.Warn("fakeconn: Write attempted by parser", "bytes", len(p))
+	f.logger.Debug("fakeconn: Write attempted by parser", "bytes", len(p))
 	return 0, ErrFakeConnNoWrite
 }
 
