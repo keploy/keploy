@@ -1,6 +1,8 @@
 package models
 
 import (
+	"bytes"
+	"reflect"
 	"testing"
 
 	yamlLib "gopkg.in/yaml.v3"
@@ -61,5 +63,156 @@ invocationId: inv-1
 	}
 	if spec.InvocationID != "inv-1" {
 		t.Fatalf("InvocationID: want %q, got %q", "inv-1", spec.InvocationID)
+	}
+}
+
+// TestPostgresV3Response_CopyOut_RoundTrip pins the YAML serialization
+// contract for the server-side COPY ... TO STDOUT response shape added
+// to support the Postgres wire-features sample (integrations PR #134).
+// The replay path in keploy/integrations needs to reconstruct the exact
+// CopyOutResponse header + every CopyData packet body the server
+// produced, in arrival order; the test walks a recording containing a
+// binary-mode, two-column COPY of three rows — including a row whose
+// body contains NUL bytes and a row containing 0xFF — and asserts the
+// marshal → unmarshal → re-marshal cycle preserves every byte.
+//
+// Why [][]byte rather than a single concatenated []byte: packet
+// boundaries are observable on the wire, and drivers that stream
+// CopyOut rely on the boundaries to frame the stdout stream. Storing
+// per-packet slices keeps the replay emitter honest.
+func TestPostgresV3Response_CopyOut_RoundTrip(t *testing.T) {
+	orig := PostgresV3Response{
+		CommandComplete: "COPY 3",
+		CopyOut: &PostgresV3CopyOutPayload{
+			OverallFormat:     1, // binary
+			ColumnFormatCodes: []uint16{1, 1},
+			Data: [][]byte{
+				{0x00, 0x00, 0x00, 0x02, 'a', '\x00', 'b'},
+				{0xFF, 0xFE, 0xFD, 0x00, 0x01, 0x02},
+				{}, // empty packet — valid per protocol
+			},
+		},
+	}
+
+	firstPass, err := yamlLib.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("yaml.Marshal orig: %v", err)
+	}
+
+	var decoded PostgresV3Response
+	if err := yamlLib.Unmarshal(firstPass, &decoded); err != nil {
+		t.Fatalf("yaml.Unmarshal first pass: %v", err)
+	}
+
+	if decoded.CopyOut == nil {
+		t.Fatalf("CopyOut: want non-nil, got nil — YAML round-trip dropped the whole payload")
+	}
+	if decoded.CopyOut.OverallFormat != orig.CopyOut.OverallFormat {
+		t.Fatalf("OverallFormat: want %d, got %d", orig.CopyOut.OverallFormat, decoded.CopyOut.OverallFormat)
+	}
+	if !reflect.DeepEqual(decoded.CopyOut.ColumnFormatCodes, orig.CopyOut.ColumnFormatCodes) {
+		t.Fatalf("ColumnFormatCodes: want %v, got %v", orig.CopyOut.ColumnFormatCodes, decoded.CopyOut.ColumnFormatCodes)
+	}
+	if len(decoded.CopyOut.Data) != len(orig.CopyOut.Data) {
+		t.Fatalf("Data length: want %d, got %d", len(orig.CopyOut.Data), len(decoded.CopyOut.Data))
+	}
+	for i, got := range decoded.CopyOut.Data {
+		want := orig.CopyOut.Data[i]
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Data[%d]: want %x, got %x — binary payload corrupted on YAML round-trip", i, want, got)
+		}
+	}
+
+	// Re-marshal must be byte-identical to the first pass: catches
+	// accidental per-call marshal nondeterminism (map iteration order,
+	// new omitempty footguns, etc.).
+	secondPass, err := yamlLib.Marshal(&decoded)
+	if err != nil {
+		t.Fatalf("yaml.Marshal decoded: %v", err)
+	}
+	if !bytes.Equal(firstPass, secondPass) {
+		t.Fatalf("re-marshal drift:\nfirst:\n%s\nsecond:\n%s", firstPass, secondPass)
+	}
+}
+
+// TestPostgresV3Response_BackwardCompat_NoCopyFields asserts every
+// existing recording — captured before CopyOut/CopyIn existed — still
+// unmarshals into the extended PostgresV3Response with both Copy
+// fields left nil. This is the gate that stops the upstream schema
+// bump from silently invalidating every mock file on disk.
+func TestPostgresV3Response_BackwardCompat_NoCopyFields(t *testing.T) {
+	// Shape of a legacy recording: RowDescription + Rows +
+	// CommandComplete only. Also includes an old tombstone key
+	// (`scope: session`) to match the style of real legacy fragments.
+	const legacyYAML = `
+rowDescription:
+  - name: id
+    typeOid: 23
+rows:
+  - - "1"
+  - - "2"
+commandComplete: "SELECT 2"
+`
+
+	var resp PostgresV3Response
+	if err := yamlLib.Unmarshal([]byte(legacyYAML), &resp); err != nil {
+		t.Fatalf("yaml.Unmarshal legacy recording returned error: %v", err)
+	}
+	if resp.CopyOut != nil {
+		t.Fatalf("CopyOut: want nil on legacy recording, got %+v", resp.CopyOut)
+	}
+	if resp.CopyIn != nil {
+		t.Fatalf("CopyIn: want nil on legacy recording, got %+v", resp.CopyIn)
+	}
+	if resp.CommandComplete != "SELECT 2" {
+		t.Fatalf("CommandComplete: want %q, got %q — unknown-field handling broke existing parsing", "SELECT 2", resp.CommandComplete)
+	}
+	if len(resp.Rows) != 2 {
+		t.Fatalf("Rows length: want 2, got %d — legacy shape dropped", len(resp.Rows))
+	}
+}
+
+// TestPostgresV3Response_CopyIn_RoundTrip covers the COPY ... FROM
+// STDIN direction: only the server's CopyInResponse header is
+// persisted; the client-produced CopyData is intentionally not stored
+// (see PostgresV3CopyInPayload doc). Pinning the tiny shape keeps
+// replay emitters honest — a drift from `uint16` to `int16` on the
+// format codes would be wire-incompatible and this test flags it.
+func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
+	orig := PostgresV3Response{
+		CommandComplete: "COPY 10",
+		CopyIn: &PostgresV3CopyInPayload{
+			OverallFormat:     0, // text
+			ColumnFormatCodes: []uint16{0},
+		},
+	}
+
+	buf, err := yamlLib.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var decoded PostgresV3Response
+	if err := yamlLib.Unmarshal(buf, &decoded); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if decoded.CopyIn == nil {
+		t.Fatalf("CopyIn: want non-nil, got nil")
+	}
+	if decoded.CopyIn.OverallFormat != 0 {
+		t.Fatalf("OverallFormat: want 0, got %d", decoded.CopyIn.OverallFormat)
+	}
+	if !reflect.DeepEqual(decoded.CopyIn.ColumnFormatCodes, []uint16{0}) {
+		t.Fatalf("ColumnFormatCodes: want [0], got %v", decoded.CopyIn.ColumnFormatCodes)
+	}
+	// Cross-contract invariant: when CopyIn is set, the recorded mock
+	// MUST NOT also carry Rows or CopyOut — the Postgres protocol
+	// never interleaves CopyIn with row-producing traffic on the same
+	// Query response. The test pins this at the struct level so a
+	// future migrator cannot accidentally produce malformed recordings.
+	if decoded.Rows != nil {
+		t.Fatalf("Rows: want nil alongside CopyIn, got %v", decoded.Rows)
+	}
+	if decoded.CopyOut != nil {
+		t.Fatalf("CopyOut: want nil alongside CopyIn, got %+v", decoded.CopyOut)
 	}
 }

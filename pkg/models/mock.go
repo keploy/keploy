@@ -333,6 +333,65 @@ type PostgresV3Response struct {
 	Rows            [][]string       `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 	CommandComplete string           `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
 	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
+
+	// CopyOut is set when the server responded with a CopyOutResponse
+	// ('H') + one or more CopyData ('d') chunks + CopyDone ('c')
+	// sequence, as produced by COPY ... TO STDOUT / TO PROGRAM /
+	// TO '<file>' queries. The Rows field is mutually exclusive with
+	// CopyOut — real Postgres never mixes DataRow and CopyData in a
+	// single Query response, and replay must preserve that invariant.
+	// nil on non-COPY responses and on every legacy recording captured
+	// before this field existed (omitempty keeps the serialized form
+	// clean for those cases).
+	CopyOut *PostgresV3CopyOutPayload `json:"copyOut,omitempty" yaml:"copyOut,omitempty" bson:"copy_out,omitempty"`
+
+	// CopyIn is set when the server responded with a CopyInResponse
+	// ('G'), signalling that it is ready to receive client-streamed
+	// data via CopyData/CopyDone (COPY ... FROM STDIN). Only the
+	// server-side "ready" metadata is persisted — the client's
+	// subsequent CopyData payload is not replayed back, since the
+	// replay side stands in as the server and the real client will
+	// resend its own bytes. nil on non-COPY responses.
+	CopyIn *PostgresV3CopyInPayload `json:"copyIn,omitempty" yaml:"copyIn,omitempty" bson:"copy_in,omitempty"`
+}
+
+// PostgresV3CopyOutPayload captures a full server-side CopyOut burst:
+// the CopyOutResponse header plus the ordered list of CopyData chunks
+// the backend produced, terminated by an implicit CopyDone. The raw
+// bytes are stored as []byte slices — yaml.v3 base64-encodes byte
+// slices automatically, so non-printable bytes and NULs round-trip
+// without sentinel games. Each element of Data is exactly one wire
+// CopyData ('d') packet's body, preserved in arrival order, because
+// clients observe packet boundaries when streaming the output.
+type PostgresV3CopyOutPayload struct {
+	// OverallFormat mirrors the first byte of CopyOutResponse. 0 = text
+	// mode (psql \COPY default), 1 = binary mode. Required so the replay
+	// emitter reproduces the header exactly — drivers branch on this.
+	OverallFormat byte `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
+	// ColumnFormatCodes mirrors the per-column format array from
+	// CopyOutResponse. len == 0 is valid (COPY of a tableless expression
+	// can produce no columns). Each code is 0 = text or 1 = binary. We
+	// use uint16 to match the wire encoding exactly.
+	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
+	// Data is the ordered list of CopyData packet bodies the server
+	// produced between CopyOutResponse and CopyDone. Each []byte is one
+	// packet's payload bytes (NOT concatenated); preserving packet
+	// boundaries matches what a real client's wire read loop would see.
+	// An empty / nil slice represents a COPY that produced zero rows.
+	Data [][]byte `json:"data,omitempty" yaml:"data,omitempty" bson:"data,omitempty"`
+}
+
+// PostgresV3CopyInPayload captures only the CopyInResponse header —
+// format + per-column format codes. During replay the server side
+// emits CopyInResponse, then reads and discards whatever CopyData the
+// client produces, then closes the sub-protocol with a CommandComplete
+// + ReadyForQuery derived from the invocation's CommandComplete /
+// txTransition fields. The client-produced bytes themselves are not
+// persisted because they are re-generated on every replay by the
+// client under test.
+type PostgresV3CopyInPayload struct {
+	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
+	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
 }
 
 // PostgresV3NullCell is the sentinel string stored in
