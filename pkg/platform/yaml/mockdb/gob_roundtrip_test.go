@@ -109,10 +109,12 @@ func TestRoundTrip_Postgres(t *testing.T) {
 // Spec (Type + one populated sub-pointer). Each sub-type still needs to
 // round-trip through gob byte-for-byte so the replayer's BuildIndex
 // doesn't see partial or missing fields after a save-load cycle. The
-// NULL-cell sentinel case is separated out because its handling is easy
-// to regress (was originally \x00NULL\x00, which gopkg.in/yaml.v3 rejects
-// as a control character — the printable form must keep round-tripping
-// through both gob AND yaml paths).
+// NULL-cell case is separated out because its handling is easy to
+// regress: NULL is now flagged via PostgresV3Cell.IsNull (no string
+// sentinel — earlier revisions tried \x00NULL\x00 and then a printable
+// string sentinel, both retired), so the encoding must keep
+// distinguishing SQL NULL from an empty string across both gob AND
+// yaml paths.
 
 func TestRoundTrip_PostgresV3Session(t *testing.T) {
 	roundTrip(t, "PostgresV3Session", &models.Mock{
@@ -200,7 +202,7 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
-					InvocationID:  "sha256:abcd:0",
+					InvocationID:  "0:0",
 					// Binary bindFormat=1 cell: the int4 value 1 on the wire
 					// (4 bytes, big-endian). Stored as a PostgresV3Cell which
 					// will serialise as !!binary in YAML because the bytes
@@ -223,13 +225,14 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 	})
 }
 
-// TestRoundTrip_PostgresV3Query_NullCellSentinel exercises the NULL-cell
-// code path specifically — previous revisions used \x00NULL\x00 which
-// the yaml encoder accepts in gob mode but rejects in yaml mode; the
-// current printable sentinel must survive both. Keep this test even
-// once we have wider coverage: it's cheap and catches regressions in
-// one line.
-func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
+// TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker exercises the NULL-cell
+// code path specifically. The current encoding uses PostgresV3Cell.IsNull as
+// the in-memory marker and a native YAML null on disk (no string sentinel) —
+// previous revisions used \x00NULL\x00 and then a printable sentinel; both
+// were retired. This test must keep distinguishing SQL NULL from an empty
+// string across both gob and yaml round-trips, which is the whole purpose
+// of the PostgresV3Cell type.
+func TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 	roundTrip(t, "PostgresV3QueryNullCell", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
 		Kind:    models.PostgresV3,
@@ -241,14 +244,14 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID:  "sha256:null:0",
+					InvocationID:  "0:0",
 					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
 						},
-						// Row 1 is SQL NULL, row 2 is the text "hello".
+						// Row 0 is SQL NULL, row 1 is the text "hello".
 						// The gob/yaml round-trip must distinguish NULL from
 						// empty-string — that's the whole point of the
 						// PostgresV3Cell type (see PostgresV3Cell.IsNull).

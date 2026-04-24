@@ -295,13 +295,17 @@ type PostgresV3QuerySpec struct {
 	VolatilePositions []int    `json:"volatilePositions,omitempty" yaml:"volatilePositions,omitempty" bson:"volatile_positions,omitempty"`
 
 	// InvocationID uniquely identifies one invocation of this query
-	// within a single record-session. Format: "<connID>:<seq>" — e.g.
-	// "0:1968" for the 1968th invocation on connection 0. No hash
-	// prefix, no wall-clock timestamp: a repeat recording of
-	// identical traffic will produce identical InvocationIDs, which
-	// keeps diffs of re-recorded mocks.yaml quiet. Uniqueness is
-	// local to one recording; the <sqlAstHash, invocationId> pair is
-	// globally unique across all mocks in the same file.
+	// within a single record-session. Recorders should emit the
+	// canonical "<connID>:<seq>" form — e.g. "0:1968" for the 1968th
+	// invocation on connection 0. No hash prefix, no wall-clock
+	// timestamp: a repeat recording of identical traffic will produce
+	// identical InvocationIDs, which keeps diffs of re-recorded
+	// mocks.yaml quiet. The field is stored as a plain string and is
+	// not validated, so older or non-canonical values (e.g. legacy
+	// "sha256:..." forms) still load cleanly for backward compatibility.
+	// Uniqueness is local to one recording; the <sqlAstHash,
+	// invocationId> pair is globally unique across all mocks in the
+	// same file.
 	InvocationID     string `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
 	PrecedingTxState string `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
 

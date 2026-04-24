@@ -181,7 +181,7 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
-					InvocationID:  "sha256:abcd:0",
+					InvocationID:  "0:0",
 					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:   []int{1},
 					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
@@ -220,7 +220,7 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					SQLAstHash:    "sha256:shape",
 					SQLNormalized: "select 1",
-					InvocationID:  "sha256:shape:0",
+					InvocationID:  "0:0",
 				},
 			},
 		},
@@ -256,12 +256,15 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 	}
 }
 
-// TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel — the reason this
-// sub-type gets a dedicated yaml test. The original sentinel used NUL
-// bytes which yaml.v3 rejects outright; a future revert to any
-// control-byte-based sentinel must fail here first rather than
-// silently at record time when mocks.yaml becomes unwritable.
-func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
+// TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker — the reason
+// this sub-type gets a dedicated yaml test. The current encoding marks
+// SQL NULL via PostgresV3Cell.IsNull and emits a native YAML null on
+// disk (no string sentinel). Earlier revisions used NUL-byte and then
+// printable string sentinels; both were retired. A future regression
+// that re-introduces a string- or control-byte-based sentinel must
+// fail here first rather than silently at record time when mocks.yaml
+// becomes unwritable.
+func TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
 		Kind:    models.PostgresV3,
@@ -273,7 +276,7 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID:  "sha256:null:0",
+					InvocationID:  "0:0",
 					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
