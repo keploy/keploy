@@ -91,15 +91,66 @@ func (c PostgresV3Cell) IsNull() bool {
 // explicitly because yaml.v3's any-wrapped []byte goes through the
 // generic slice encoder and produces a sequence-of-ints instead of
 // the binary tag).
+//
+// String values get routed through yamlSafeStringNode so the emitter
+// never picks a block-scalar style for content that would re-parse
+// back as invalid YAML — yaml.v3 has a long-standing bug where
+// strings starting with "\n\t" or containing embedded tabs emit as
+// `|4-` block scalars whose content tab disrupts indent detection
+// when the scalar lives inside a sequence (the shape PostgresV3Cells
+// produces), so the same mock file the recorder just wrote back fails
+// to load on replay. Routing strings through a double-quoted scalar
+// sidesteps the bug and is stable across yaml.v3 versions.
 func (c PostgresV3Cell) MarshalYAML() (any, error) {
-	if b, ok := c.Value.([]byte); ok {
+	switch v := c.Value.(type) {
+	case []byte:
 		return &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Tag:   "!!binary",
-			Value: base64.StdEncoding.EncodeToString(b),
+			Value: base64.StdEncoding.EncodeToString(v),
 		}, nil
+	case string:
+		if stringNeedsDoubleQuoted(v) {
+			return &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Style: yaml.DoubleQuotedStyle,
+				Value: v,
+			}, nil
+		}
+		return v, nil
 	}
 	return c.Value, nil
+}
+
+// stringNeedsDoubleQuoted reports whether yaml.v3's plain/block style
+// heuristic would mis-emit a round-trip-unsafe representation for s.
+// The known landmines — reproduced in isolation against yaml.v3 v3.0.1
+// — are strings that contain an embedded tab character, because the
+// emitter picks a literal block scalar (`|…`) for anything with
+// embedded newlines and then writes the tab byte verbatim on a
+// continuation line; inside a sequence the reparser then complains
+// "found a tab character where an indentation space is expected".
+// Strings with a leading whitespace byte hit a similar indent-indicator
+// race. Forcing double-quoted style escapes those characters as \t / \n
+// and makes the emitted YAML cleanly re-parseable.
+func stringNeedsDoubleQuoted(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	switch s[len(s)-1] {
+	case ' ', '\t':
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\t' {
+			return true
+		}
+	}
+	return false
 }
 
 // UnmarshalYAML decodes a YAML node into Value. Tag-driven type

@@ -381,6 +381,57 @@ func TestPostgresV3Cell_LegacyNullSentinel_DecodedAsNull(t *testing.T) {
 	}
 }
 
+// yaml.v3 v3.0.1 has an emitter bug for plain strings containing
+// embedded tab characters: when the string also has a newline, the
+// emitter picks a literal block scalar (`|4-`) and writes the tab byte
+// verbatim on a continuation line, which the parser then refuses with
+// "found a tab character where an indentation space is expected" once
+// the scalar lives inside a sequence (the shape our Rows uses).
+// PostgresV3Cell.MarshalYAML has to route those strings through a
+// double-quoted scalar instead; this test pins the fix by running a
+// catalogue of known-problematic values through a full sequence-of-
+// cells round-trip — the exact shape mocks.yaml stores for a row.
+func TestPostgresV3Cell_RowRoundTrip_TabInStringSurvives(t *testing.T) {
+	tricky := []string{
+		"\thello",                  // leading tab
+		"hello\tworld",             // embedded tab
+		"\n\thello",                // leading newline + tab — the echo-sql failure
+		"line1\n\tline2\n\tline3",  // block-scalar with tabs
+		"trailing\t",               // trailing tab
+		" leading space",           // leading whitespace
+		"trailing space ",          // trailing whitespace
+		"plain no weirdness",       // baseline (should still round-trip)
+		"",                         // empty string (distinct from NULL)
+	}
+
+	row := make(PostgresV3Cells, len(tricky))
+	for i, s := range tricky {
+		row[i] = NewValueCell(s)
+	}
+
+	buf, err := yaml.Marshal(row)
+	if err != nil {
+		t.Fatalf("Marshal row with tab-bearing strings: %v", err)
+	}
+	var decoded PostgresV3Cells
+	if err := yaml.Unmarshal(buf, &decoded); err != nil {
+		t.Fatalf("Unmarshal re-read failed (yaml.v3 emitter regression?): %v\n--YAML--\n%s", err, buf)
+	}
+	if len(decoded) != len(tricky) {
+		t.Fatalf("cell count: got %d, want %d", len(decoded), len(tricky))
+	}
+	for i, want := range tricky {
+		got, ok := decoded[i].Value.(string)
+		if !ok {
+			t.Errorf("cell[%d] Value type: got %T, want string (value=%v)", i, decoded[i].Value, decoded[i].Value)
+			continue
+		}
+		if got != want {
+			t.Errorf("cell[%d] round-trip: got %q, want %q", i, got, want)
+		}
+	}
+}
+
 // yaml.v3 folds long !!binary scalars onto continuation lines and the
 // embedded whitespace bleeds into node.Value; base64.StdEncoding
 // rejects that, so UnmarshalYAML strips it before decoding. This test
