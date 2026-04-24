@@ -579,8 +579,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
-	// Centralized template update: if response body present and templates exist, update them.
-	if len(respBody) > 0 {
+	// Centralized template update: walk the response body and headers to refresh template values.
+	// NOTE: header-only updates are important for e.g. listmonk where the login 302 has an empty
+	// body but carries a fresh Set-Cookie: session=... that every subsequent test consumes.
+	if len(respBody) > 0 || len(resp.Header) > 0 {
 		templateValuesMu.Lock()
 		defer templateValuesMu.Unlock()
 		prevTemplatedValues := cloneStringAnyMap(utils.TemplatizedValues)
@@ -1853,7 +1855,310 @@ func updateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 	} else {
 		logger.Debug("response body or templated body is not JSON, skipping body path-based template updates", zap.Bool("templatedIsJSON", templatedIsJSON), zap.Bool("actualIsJSON", actualIsJSON))
 	}
+
+	// --- 2. Handle response header updates ---
+	// The record-side (pkg/service/tools/templatize.go buildValueIndexV2) can rewrite
+	// header values (including Set-Cookie sub-components and "Authorization: Bearer <tok>")
+	// into {{.VarName}} placeholders. At replay time the live server sends fresh values
+	// for those same headers — we must pull them out so downstream test cases that
+	// consume the placeholder (e.g. Cookie: session={{.session}}) render the live value.
+	if updateTemplateValuesFromHeaders(logger, templatedResponse.Header, resp.Header, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
+		changed = true
+	}
 	return changed
+}
+
+// updateTemplateValuesFromHeaders walks the recorded (templated) response headers side-by-side
+// with the live response headers. For each recorded header value that carries a {{.Var}}
+// placeholder it extracts the corresponding live substring and writes it into
+// currentTemplatedValues[Var]. Returns true if any template was updated.
+//
+// It mirrors the record-side decomposition performed in
+// pkg/service/tools/templatize.go buildValueIndexV2:
+//   - Set-Cookie lines are split into per-cookie name=value pairs; the placeholder lives in
+//     the value slot (`name={{.var}}; Path=/; HttpOnly`).
+//   - `Authorization: Bearer {{.token}}` has the Bearer prefix stripped before extracting.
+//   - Every other header is handled generically by substring-between-literals extraction.
+func updateTemplateValuesFromHeaders(
+	logger *zap.Logger,
+	templatedHeaders map[string]string,
+	liveHeaders map[string]string,
+	placeholderRe *regexp.Regexp,
+	currentTemplatedValues, prevTemplatedValues map[string]interface{},
+) bool {
+	changed := false
+	if len(templatedHeaders) == 0 || len(liveHeaders) == 0 {
+		return false
+	}
+
+	// Case-insensitive lookup into the live header map (HTTP header names are
+	// case-insensitive per RFC 7230 and our yaml map can preserve either casing).
+	liveByLower := make(map[string]string, len(liveHeaders))
+	for k, v := range liveHeaders {
+		liveByLower[strings.ToLower(k)] = v
+	}
+
+	for name, templatedVal := range templatedHeaders {
+		if !placeholderRe.MatchString(templatedVal) {
+			continue
+		}
+		liveVal, ok := liveByLower[strings.ToLower(name)]
+		if !ok || liveVal == "" {
+			continue
+		}
+
+		switch {
+		case strings.EqualFold(name, "Set-Cookie"):
+			if updateTemplatesFromSetCookie(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
+				changed = true
+			}
+		case strings.EqualFold(name, "Authorization") && strings.HasPrefix(strings.TrimSpace(templatedVal), "Bearer "):
+			tmplToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(templatedVal), "Bearer "))
+			liveToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(liveVal), "Bearer "))
+			if liveToken == "" {
+				continue
+			}
+			if updateTemplateFromTokenized(logger, tmplToken, liveToken, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header.Authorization") {
+				changed = true
+			}
+		default:
+			if updateTemplateFromTokenized(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header."+name) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// updateTemplatesFromSetCookie splits both recorded and live Set-Cookie blobs into per-cookie
+// lines, matches them by cookie name, and extracts the live value for each cookie whose
+// recorded value was a placeholder.
+func updateTemplatesFromSetCookie(
+	logger *zap.Logger,
+	templatedVal, liveVal string,
+	placeholderRe *regexp.Regexp,
+	currentTemplatedValues, prevTemplatedValues map[string]interface{},
+) bool {
+	changed := false
+	tmplLines := splitSetCookieLines(templatedVal)
+	liveLines := splitSetCookieLines(liveVal)
+	if len(tmplLines) == 0 || len(liveLines) == 0 {
+		return false
+	}
+
+	liveByName := make(map[string]string, len(liveLines))
+	for _, ln := range liveLines {
+		name, val := splitSetCookieNV(ln)
+		if name == "" {
+			continue
+		}
+		liveByName[name] = val
+	}
+
+	for _, ln := range tmplLines {
+		name, tmplCookieVal := splitSetCookieNV(ln)
+		if name == "" || !placeholderRe.MatchString(tmplCookieVal) {
+			continue
+		}
+		liveCookieVal, ok := liveByName[name]
+		if !ok || liveCookieVal == "" {
+			continue
+		}
+		if updateTemplateFromTokenized(logger, tmplCookieVal, liveCookieVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "Set-Cookie."+name) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// updateTemplateFromTokenized handles a single "templated value vs live value" pair where
+// the templated value contains one or more {{.VarName}} placeholders. It supports:
+//   - Whole-value placeholder: "{{.var}}" -> var = liveVal
+//   - Prefix/suffix literal wrapping: "trace-{{.id}}-v1" -> id = substring between literals
+//   - Multi-placeholder values are best-effort: they only update when the literal separators
+//     between placeholders can unambiguously split the live value.
+func updateTemplateFromTokenized(
+	logger *zap.Logger,
+	templatedVal, liveVal string,
+	placeholderRe *regexp.Regexp,
+	currentTemplatedValues, prevTemplatedValues map[string]interface{},
+	debugPath string,
+) bool {
+	trim := strings.TrimSpace(templatedVal)
+	matches := placeholderRe.FindAllStringSubmatchIndex(templatedVal, -1)
+	if len(matches) == 0 {
+		return false
+	}
+
+	// Fast path: the entire (trimmed) templated value is a single placeholder.
+	if len(matches) == 1 && strings.HasPrefix(trim, "{{") && strings.HasSuffix(trim, "}}") {
+		inner := placeholderRe.FindStringSubmatch(trim)
+		if len(inner) < 2 {
+			return false
+		}
+		keys := extractTemplateKeys(inner[1])
+		if len(keys) != 1 {
+			return false
+		}
+		return applyTemplateUpdate(logger, keys[0], strings.TrimSpace(liveVal), currentTemplatedValues, prevTemplatedValues, debugPath)
+	}
+
+	// General path: split the templated value into alternating literals & placeholders,
+	// then use each literal as an anchor in liveVal to carve out each live substitution.
+	type segment struct {
+		isPlaceholder bool
+		literal       string // only set when !isPlaceholder
+		key           string // only set when isPlaceholder
+	}
+	var segs []segment
+	cursor := 0
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		if start > cursor {
+			segs = append(segs, segment{literal: templatedVal[cursor:start]})
+		}
+		innerMatch := placeholderRe.FindStringSubmatch(templatedVal[start:end])
+		if len(innerMatch) < 2 {
+			cursor = end
+			continue
+		}
+		keys := extractTemplateKeys(innerMatch[1])
+		if len(keys) != 1 {
+			cursor = end
+			continue
+		}
+		segs = append(segs, segment{isPlaceholder: true, key: keys[0]})
+		cursor = end
+	}
+	if cursor < len(templatedVal) {
+		segs = append(segs, segment{literal: templatedVal[cursor:]})
+	}
+
+	// Walk live value consuming segments.
+	changed := false
+	pos := 0
+	for i, s := range segs {
+		if !s.isPlaceholder {
+			if !strings.HasPrefix(liveVal[pos:], s.literal) {
+				// Literal mismatch — bail out; we can't trust the alignment.
+				return changed
+			}
+			pos += len(s.literal)
+			continue
+		}
+		// placeholder: consume up to the next literal (or end-of-string).
+		var nextLit string
+		if i+1 < len(segs) && !segs[i+1].isPlaceholder {
+			nextLit = segs[i+1].literal
+		}
+		var extracted string
+		if nextLit == "" {
+			extracted = liveVal[pos:]
+			pos = len(liveVal)
+		} else {
+			idx := strings.Index(liveVal[pos:], nextLit)
+			if idx < 0 {
+				return changed
+			}
+			extracted = liveVal[pos : pos+idx]
+			pos += idx
+		}
+		if extracted == "" {
+			continue
+		}
+		if applyTemplateUpdate(logger, s.key, extracted, currentTemplatedValues, prevTemplatedValues, debugPath) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// applyTemplateUpdate writes key=value into currentTemplatedValues, but only when the key
+// already exists (we never invent new template vars at replay time) and the value is
+// actually different from the previous one.
+func applyTemplateUpdate(
+	logger *zap.Logger,
+	key, value string,
+	currentTemplatedValues, prevTemplatedValues map[string]interface{},
+	debugPath string,
+) bool {
+	if _, ok := currentTemplatedValues[key]; !ok {
+		return false
+	}
+	prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
+	if prevStr == value {
+		return false
+	}
+	logger.Debug("updating template value from header",
+		zap.String("key", key),
+		zap.String("path", debugPath),
+		zap.String("old_value", prevStr),
+		zap.String("new_value", value),
+	)
+	currentTemplatedValues[key] = value
+	return true
+}
+
+// splitSetCookieLines decomposes a yaml-stored Set-Cookie header into individual cookie lines.
+// Mirrors the record-side splitSetCookie in pkg/service/tools/templatize.go — kept as a small,
+// duplicated helper here to avoid importing a service package into pkg/util.go.
+func splitSetCookieLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	if strings.Contains(s, "\n") {
+		lines := strings.Split(s, "\n")
+		out := make([]string, 0, len(lines))
+		for _, ln := range lines {
+			if ln = strings.TrimSpace(ln); ln != "" {
+				out = append(out, ln)
+			}
+		}
+		return out
+	}
+	raw := strings.Split(s, ",")
+	if len(raw) == 1 {
+		return []string{strings.TrimSpace(raw[0])}
+	}
+	out := []string{strings.TrimSpace(raw[0])}
+	for _, token := range raw[1:] {
+		t := strings.TrimSpace(token)
+		name, _, hasEq := strings.Cut(t, "=")
+		startsName := hasEq && name != "" && isCookieNameStart(name)
+		if startsName {
+			out = append(out, t)
+		} else {
+			out[len(out)-1] = out[len(out)-1] + "," + token
+		}
+	}
+	return out
+}
+
+func isCookieNameStart(name string) bool {
+	if name == "" {
+		return false
+	}
+	r := rune(name[0])
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '$'
+}
+
+// splitSetCookieNV extracts the cookie name and value (pre-attribute) from a single Set-Cookie
+// line. E.g. "session=abc123; Path=/; HttpOnly" -> ("session", "abc123"). Mirrors the
+// record-side splitSetCookieNameValue.
+func splitSetCookieNV(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+	head := line
+	if i := strings.IndexByte(line, ';'); i >= 0 {
+		head = line[:i]
+	}
+	name, val, ok := strings.Cut(head, "=")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(val)
 }
 
 // traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
@@ -2362,8 +2667,17 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 	return resp.StatusCode == http.StatusOK
 }
 
-func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
-	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+// FilterTcsMocks applies the per-test time-window filter to candidate
+// mocks. Pass strict=true for Option-1 containment (out-of-window
+// non-config mocks are dropped instead of promoted to the cross-test
+// config pool); pass strict=false for legacy Option-2 behaviour. Note
+// that Go has no default parameter values — callers resolve the
+// effective strict value from config.Test.StrictMockWindow (ships
+// true by default) combined with the KEPLOY_STRICT_MOCK_WINDOW env
+// override, via strictWindowEnabled. This function only sees the
+// resolved strict flag.
+func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
+	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime, strict)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2372,8 +2686,77 @@ func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, a
 	return filteredMocks
 }
 
-func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+// FilterPerTestAndLaxPromoted splits per-test candidate mocks into two
+// slices using filterByTimeStamp:
+//
+//   - perTestInWindow  — mocks whose request-timestamp is inside
+//     [afterTime, beforeTime]. These go into the per-test pool for
+//     the current test.
+//   - promotedToSession — mocks that filterByTimeStamp's lax branch
+//     moved to its "unfiltered" return slice because they are out-of-
+//     window (but neither strict-dropped nor invalid-order dropped).
+//     They represent the pre-Phase-2 kind-fallback's "reuse across
+//     tests" semantic — fixture queries recorded in test 1 that
+//     every subsequent test legitimately re-issues.
+//
+// Under strict mode the second slice is always empty (strict drops
+// rather than promotes). Under lax mode callers should append the
+// promoted slice to the session pool passed to the proxy so cross-
+// test fixture reuse keeps working for suites that relied on the
+// old kind-fallback's implicit promotion.
+//
+// Both slices are sorted by request-timestamp for deterministic
+// matcher ordering.
+func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) ([]*models.Mock, []*models.Mock) {
+	return FilterPerTestAndLaxPromotedTierAware(ctx, logger, m, afterTime, beforeTime, strict, time.Time{})
+}
+
+// FilterPerTestAndLaxPromotedTierAware is the tier-aware variant of
+// FilterPerTestAndLaxPromoted. It accepts firstWindowStart (the earliest
+// test window start observed by the agent's MockManager, or zero before
+// any real test has fired) so the strict gate can preserve per-test
+// startup-init mocks (req < firstWindowStart) in the returned perTestIn
+// slice instead of dropping them. MockManager.SetMocksWithWindow's
+// startup-tier partition then routes those preserved mocks into the
+// dedicated startup tree, and the v3 tier-aware dispatcher reaches them
+// via GetStartupMocks.
+//
+// Passing firstWindowStart == time.Time{} reproduces the legacy blanket-
+// drop contract (strict mode drops every per-test mock outside the
+// current window, regardless of whether the mock predates the first
+// test). Legacy callers that don't know firstWindowStart can keep
+// calling FilterPerTestAndLaxPromoted unchanged.
+func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+
+	sort.SliceStable(perTestInWindow, func(i, j int) bool {
+		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
+	})
+	sort.SliceStable(promotedToSession, func(i, j int) bool {
+		return promotedToSession[i].Spec.ReqTimestampMock.Before(promotedToSession[j].Spec.ReqTimestampMock)
+	})
+
+	return perTestInWindow, promotedToSession
+}
+
+// FilterConfigMocks applies the per-test time-window filter to the config
+// mock pool. Pass strict=true for Option-1 containment (out-of-window
+// non-config mocks are dropped); pass strict=false for legacy Option-2.
+// See FilterTcsMocks for the env / config precedence that determines
+// the runtime-effective value.
+func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool) []*models.Mock {
+	return FilterConfigMocksTierAware(ctx, logger, m, afterTime, beforeTime, strict, time.Time{})
+}
+
+// FilterConfigMocksTierAware is the tier-aware variant of
+// FilterConfigMocks. Identical to FilterConfigMocks except it threads
+// firstWindowStart through to filterByTimeStampTierAware. Used by the
+// agent's UpdateMockParams so startup-init entries in the unfiltered
+// (config) pool are kept in the filtered return slice (via the
+// tier-aware strict branch) and reach MockManager.SetMocksWithWindow
+// where the startup-tier partition sorts them correctly.
+func FilterConfigMocksTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -2410,7 +2793,153 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 	return append(filteredMocks, unfilteredMocks...)
 }
 
-func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
+// strictWindowEnvOverride holds the result of one-time env-var parsing
+// at process start. Env var KEPLOY_STRICT_MOCK_WINDOW=1|true|yes|on
+// enables strict containment process-wide, overriding the per-call
+// flag plumbed via MockFilterParams (both routes OR together).
+// KEPLOY_STRICT_MOCK_WINDOW=0|false|no|off explicitly disables it,
+// overriding the per-call flag too — this is the escape hatch for
+// users who need to turn off strict mode after the Phase 2.5 default
+// flip (see config.Test.StrictMockWindow in config.go) without
+// editing keploy.yaml.
+//
+// Evaluated ONCE at package init — changing the env var later in the
+// same process has no effect. Tests that need to exercise the env
+// path must set the variable before the binary starts; in-process
+// tests should drive the per-call bool instead, which is both
+// simpler and deterministic.
+var strictWindowEnvOverride = func() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_STRICT_MOCK_WINDOW")))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
+// strictWindowEnvExplicitOff reports whether the env var was set to a
+// disabling value. Used so KEPLOY_STRICT_MOCK_WINDOW=0 can force
+// strict off even when the per-call flag says true or the config
+// default has flipped.
+var strictWindowEnvExplicitOff = func() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("KEPLOY_STRICT_MOCK_WINDOW")))
+	switch v {
+	case "0", "false", "no", "off":
+		return true
+	}
+	return false
+}()
+
+// IsStrictMockWindow reports whether strict mock-window containment is
+// effectively enabled — either via the per-call flag (from
+// config.Test.StrictMockWindow / MockFilterParams.StrictMockWindow) or the
+// process-wide KEPLOY_STRICT_MOCK_WINDOW env override. Exposed so the
+// agent's UpdateMockParams can log the effective state (covering both
+// opt-in routes) without duplicating the env-parsing logic.
+func IsStrictMockWindow(perCall bool) bool {
+	return strictWindowEnabled(perCall)
+}
+
+// strictWindowEnabled returns true when strict containment should apply.
+//
+// Strict mode ships ON by default (config/default.go
+// StrictMockWindow: true) now that every stateful-protocol recorder
+// classifies mocks finely enough for legitimate cross-test sharing
+// to be encoded as session/connection lifetime. Opting out is
+// available via config.Test.StrictMockWindow: false or the
+// KEPLOY_STRICT_MOCK_WINDOW=0 env override for older recordings
+// that still rely on the legacy lax behaviour.
+//
+// Precedence implemented here (perCall is the already-resolved
+// effective call-site decision — config.Test.StrictMockWindow has
+// already been OR-ed in by the caller):
+//   - If the env var is explicitly set to a disabling value
+//     (KEPLOY_STRICT_MOCK_WINDOW=0), strict is DISABLED unconditionally.
+//     This wins over the per-call/config decision so users who hit
+//     problems with new recordings can opt out instantly without
+//     editing config or redeploying callers.
+//   - Otherwise, strict follows perCall; an enabling env var can also
+//     force it on even if perCall was false.
+//
+// In practice, opting out of strict mode is done either by:
+//   - setting KEPLOY_STRICT_MOCK_WINDOW=0 in env, or
+//   - setting test.strictMockWindow: false in keploy.yaml (which
+//     flows through perCall).
+//
+// When strict:
+//   - per-test (LifetimePerTest) mocks must have their request
+//     timestamp inside the outer test's [req,res] window
+//   - out-of-window per-test mocks are DROPPED instead of promoted to
+//     the cross-test pool (stops the cross-test bleed bug)
+//   - session (LifetimeSession) and connection (LifetimeConnection)
+//     mocks are NEVER dropped — their visibility is bounded by
+//     test-set / connID lifetime rather than the per-test window.
+//
+// Lax (opt-out) preserves pre-unification behaviour: out-of-window
+// per-test mocks remain visible via the unfiltered pool so
+// scoring-based matchers can still pick them up.
+func strictWindowEnabled(perCall bool) bool {
+	// Explicit env-var disable wins over everything else — escape
+	// hatch for users whose recordings predate full Phase 2
+	// classification coverage.
+	if strictWindowEnvExplicitOff {
+		return false
+	}
+	return perCall || strictWindowEnvOverride
+}
+
+func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampTierAware(nil, logger, m, afterTime, beforeTime, strictPerCall, time.Time{})
+}
+
+// filterByTimeStampTierAware is the tier-aware form of filterByTimeStamp.
+// It accepts firstWindowStart — the earliest test window start the agent's
+// MockManager has observed — so the strict gate can distinguish the two
+// out-of-window classes a per-test mock can fall into:
+//
+//   - Startup-init (req < firstWindowStart): genuine app-bootstrap traffic
+//     recorded before any test fired (Flyway migrations, Hibernate init,
+//     HikariCP pool warm-up, listmonk's cacheUsers SELECT). Under the
+//     legacy blanket-drop semantics these were incorrectly treated as
+//     bleed; under tier-aware semantics they are PRESERVED in the
+//     filtered slice so MockManager.SetMocksWithWindow can route them
+//     into the startup tree (its own scan for req < firstStart picks
+//     them up and rebuilds the startup tier — see pkg/agent/proxy/
+//     mockmanager.go's SetMocksWithWindow).
+//
+//   - Stale previous-test (firstWindowStart <= req < afterTime, OR
+//     req > beforeTime): real cross-test bleed. These are DROPPED under
+//     strict mode, same as before — this is the containment guarantee
+//     strictMockWindow exists to provide.
+//
+// Session- and connection-scoped mocks are kept unconditionally (they
+// span tests by definition; their visibility is bounded by test-set /
+// connID lifetime, not the per-test window). Mocks with zero or
+// inverted-order timestamps get the same defensive handling as the
+// legacy path.
+//
+// Authoritative-routing contract (mockdb/filter-layer owns attribution):
+// the filter routes each mock using ONLY two signals — the derived
+// Lifetime enum and the request-timestamp. Lifetime-first: Session and
+// Connection mocks unconditionally land in the unfiltered (session)
+// pool; PerTest mocks consult the window. The recorder-stamped
+// Metadata["scope"] field is informational on the wire and is NOT
+// consulted by this function (nor by any pool-routing site in the
+// filter/mockmanager layer). A perTest-lifetime mock whose recorder
+// stamped scope=session but whose request-timestamp falls inside the
+// current [afterTime, beforeTime] window lands in the per-test pool —
+// timestamp attribution is the source of truth. This resolves the
+// "27 perTest mocks with scope=session dropped into session pool"
+// symptom the sap-demo-java debug bundle captured.
+//
+// Passing firstWindowStart == time.Time{} restores the legacy blanket-
+// drop behaviour (no startup-tier preservation). Callers that can
+// supply a real cutoff — principally the agent, via the
+// FirstWindowStartReader optional extension on *Proxy — should thread
+// it through. Third-party Proxy implementations that don't implement
+// the reader fall through to the zero-time behaviour and remain
+// functionally identical to the pre-fix blanket-drop contract.
+func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -2423,7 +2952,9 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 		return m, unfilteredMocks
 	}
 
+	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -2436,29 +2967,338 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			isNonKeploy = true
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
-			logger.Debug("request or response timestamp of mock is missing")
+			logger.Debug("request or response timestamp of mock is missing",
+				zap.String("mock", p.Name), zap.Bool("strict", strict))
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		// Prefer mocks whose request started during the test-case window.
-		// Response timestamps can trail the captured test-case response by a few
-		// microseconds, especially for the last outgoing dependency call in a test.
-		// Using the request-start time keeps those mocks in the filtered set while
-		// still excluding stale mocks from earlier test cases.
-		if !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime) {
+		// Defensive sanity check: if the response-timestamp is BEFORE the
+		// request-timestamp the recording is inconsistent (clock skew,
+		// serialisation bug, or file corruption). Skip it — keeping such
+		// a mock in either pool risks confusing downstream scoring.
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
+			continue
+		}
+
+		// Lifetime-first routing (mockdb/filter-layer authoritative
+		// attribution design): Session- and Connection-lifetime mocks
+		// belong in the session/unfiltered pool REGARDLESS of whether
+		// their request-timestamp happens to fall inside the current
+		// test window. Semantics: these are cross-test reusable by
+		// contract — a BEGIN / SET / SHOW / handshake probe that was
+		// captured during test-N's window is still a session-lifetime
+		// probe; routing it into test-N's per-test pool would make it
+		// invisible to every subsequent test (per-test pools are
+		// single-test-scoped). This is load-bearing for the user's
+		// "route by lifetime + reqTimestampMock, ignore metadata.scope"
+		// design — a perTest-lifetime mock stamped scope=session by the
+		// recorder (scope is informational-only on the wire) but whose
+		// req-timestamp sits inside test-N's window still falls through
+		// to the timestamp-based in-window check below and lands in
+		// test-N's per-test pool. The metadata.scope field is NOT read
+		// for pool routing anywhere in the filter/mockmanager layer;
+		// scope and lifetime may legitimately disagree on the wire when
+		// the recorder's context-probe captured a session-scope fire
+		// inside a live test window.
+		if p.TestModeInfo.Lifetime == models.LifetimeSession ||
+			p.TestModeInfo.Lifetime == models.LifetimeConnection {
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+		// Defensive fallback: DeriveLifetime may not have run on mocks
+		// constructed inline by tests or produced by legacy ingest
+		// paths. Fall back to the raw Metadata["type"] tag so a
+		// config/connection-tagged mock still routes to the session
+		// pool even when the cached Lifetime field is the zero value
+		// (LifetimePerTest). metadata.scope is deliberately NOT
+		// consulted here.
+		if p.Spec.Metadata != nil &&
+			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
+			if p.Spec.Metadata["type"] == "config" {
+				p.TestModeInfo.Lifetime = models.LifetimeSession
+			} else {
+				p.TestModeInfo.Lifetime = models.LifetimeConnection
+			}
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+			continue
+		}
+
+		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// The response may straggle past beforeTime — DB/HTTP downstream
+		// responses routinely complete a few micro-to-milliseconds after
+		// the outer test response is captured. The cross-test bleed bug
+		// strict mode protects against is caused by out-of-window REQUESTS
+		// (a different test's data mock getting reused here), not by
+		// in-flight responses landing late. Checking req is sufficient
+		// in both modes — the strict-vs-lax difference is solely in the
+		// out-of-window handling below (strict drops, lax promotes to
+		// the cross-test config pool).
+		//
+		// Only per-test-lifetime mocks reach this predicate — session/
+		// connection-lifetime mocks short-circuited above to the session
+		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// [afterTime, beforeTime] lands in the per-test pool; outside
+		// the window it falls through to the strict/lax out-of-window
+		// handling below.
+		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		p.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, p)
+
+		// Out-of-window handling for per-test-lifetime mocks only.
+		// Session/connection-lifetime mocks were already routed into
+		// the unfiltered pool by the lifetime-first short-circuit
+		// above, so the strict/lax divergence here applies exclusively
+		// to the perTest class that actually needs window containment.
+		if strict {
+			// Per-test, out-of-window. Tier-aware split: startup-init
+			// (req < firstWindowStart) is preserved in the filtered slice
+			// so MockManager.SetMocksWithWindow's startup-tier partition
+			// routes it into the startup tree. Genuine stale cross-test
+			// bleed (firstWindowStart <= req < afterTime, or req >
+			// beforeTime) is dropped — the strictMockWindow guarantee.
+			//
+			// When firstWindowStart is zero we have no cutoff yet (either
+			// the agent hasn't observed a real test window on this
+			// MockManager, or the caller didn't thread the value through).
+			// In that case fall back to the legacy blanket-drop contract
+			// so the behaviour is strictly no worse than before.
+			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				preservedStartup++
+				continue
+			}
+			droppedOutOfWindow++
+		} else {
+			// Legacy: anything out-of-window goes to the unfiltered pool
+			// (where parsers may still pick it up as a fallback).
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+		}
+	}
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
+			zap.Int("dropped_out_of_window", droppedOutOfWindow),
+			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
+			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Bool("strict", strict),
+			zap.Time("after", afterTime),
+			zap.Time("before", beforeTime),
+			zap.Time("firstWindowStart", firstWindowStart))
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filteredMocks, unfilteredMocks
+}
+
+// FilterByTimeStampThreeTier is the three-pool, Lifetime-authoritative
+// variant of filterByTimeStampTierAware. It elevates the startup tier
+// (LifetimeConnection) to a first-class split at the core filter level
+// so integrations that consume the pools (Postgres v3's BuildIndex,
+// MySQL's per-connID trees) can read the three tiers as disjoint slices
+// without having to re-partition from metadata["type"] themselves.
+//
+// Return slice contract:
+//   - filteredMocks:   LifetimePerTest with request-timestamp inside
+//     [afterTime, beforeTime]. These go into the per-test pool for
+//     the current test. Under strict mode, out-of-window per-test
+//     mocks are DROPPED, except startup-init (req < firstWindowStart)
+//     which lands in startupMocks instead (preserving genuine app-
+//     bootstrap traffic that fired before any test started).
+//   - unfilteredMocks: LifetimeSession. Reusable across every test in
+//     the session; never window-filtered. This is the "session" pool
+//     in three-tier parlance.
+//   - startupMocks:    LifetimeConnection (per-connection reusable,
+//     bounded by connID lifetime) + any LifetimePerTest mock whose
+//     request-timestamp predates firstWindowStart (legitimate
+//     bootstrap traffic under strict mode).
+//
+// Backward compatibility with unstamped / legacy-tagged mocks:
+//  1. metadata["type"]=="config" with no Lifetime → LifetimeSession,
+//     routed to unfilteredMocks.
+//  2. metadata["type"]=="connection" with no Lifetime → LifetimeConnection,
+//     routed to startupMocks.
+//  3. No Lifetime, no "type" tag → falls through to per-test window logic.
+//
+// Integrations that don't emit LifetimeConnection mocks (HTTP, HTTP/2,
+// gRPC, generic, Kafka, Redis data-plane, etc.) get an empty startupMocks
+// slice — safe to ignore. Integrations that DO care (Postgres v3,
+// MySQL's prepared-statement setup) consume it as an authoritative
+// "connection-scoped reusable" pool without having to re-derive the
+// classification from metadata.
+func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) (filtered, unfiltered, startup []*models.Mock) {
+	filtered = make([]*models.Mock, 0)
+	unfiltered = make([]*models.Mock, 0)
+	startup = make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) || beforeTime.Equal(time.Time{}) {
+		// No window supplied — fall back to lifetime-only partitioning
+		// so callers still get a three-way split. PerTest (and legacy-
+		// untagged) mocks return in `filtered` to match the two-slice
+		// legacy contract where the first return slice was "every mock
+		// with no effective window to apply".
+		for _, mk := range m {
+			if mk == nil {
+				continue
+			}
+			p := mk.DeepCopy()
+			lt := effectiveLifetimeForRouting(p)
+			switch lt {
+			case models.LifetimeSession:
+				p.TestModeInfo.IsFiltered = false
+				unfiltered = append(unfiltered, p)
+			case models.LifetimeConnection:
+				p.TestModeInfo.IsFiltered = false
+				startup = append(startup, p)
+			default:
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			}
+		}
+		return filtered, unfiltered, startup
+	}
+
+	strict := strictWindowEnabled(strictPerCall)
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	isNonKeploy := false
+
+	for _, mk := range m {
+		if mk == nil {
+			continue
+		}
+		p := mk.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			logger.Debug("request or response timestamp of mock is missing",
+				zap.String("mock", p.Name), zap.Bool("strict", strict))
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+			continue
+		}
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
+			logger.Debug("mock has response timestamp before request timestamp; dropping",
+				zap.String("mock", p.Name),
+				zap.Time("req", p.Spec.ReqTimestampMock),
+				zap.Time("res", p.Spec.ResTimestampMock))
+			droppedInvalidOrder++
+			continue
+		}
+
+		lt := effectiveLifetimeForRouting(p)
+		switch lt {
+		case models.LifetimeConnection:
+			p.TestModeInfo.IsFiltered = false
+			p.TestModeInfo.Lifetime = models.LifetimeConnection
+			startup = append(startup, p)
+			continue
+		case models.LifetimeSession:
+			p.TestModeInfo.IsFiltered = false
+			p.TestModeInfo.Lifetime = models.LifetimeSession
+			unfiltered = append(unfiltered, p)
+			continue
+		}
+
+		// PerTest: window containment on request timestamp.
+		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		if inWindow {
+			p.TestModeInfo.IsFiltered = true
+			filtered = append(filtered, p)
+			continue
+		}
+
+		// Out-of-window per-test: strict drops (with startup-init
+		// preservation), lax promotes to unfiltered.
+		if strict {
+			if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+				preservedStartup++
+				continue
+			}
+			droppedOutOfWindow++
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfiltered = append(unfiltered, p)
+		}
+	}
+
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+		logger.Debug("FilterByTimeStampThreeTier outcome",
+			zap.Int("dropped_out_of_window", droppedOutOfWindow),
+			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
+			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("perTest", len(filtered)),
+			zap.Int("session", len(unfiltered)),
+			zap.Int("startup", len(startup)),
+			zap.Bool("strict", strict),
+			zap.Time("after", afterTime),
+			zap.Time("before", beforeTime),
+			zap.Time("firstWindowStart", firstWindowStart))
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	return filtered, unfiltered, startup
+}
+
+// effectiveLifetimeForRouting resolves a mock's Lifetime for
+// routing purposes, applying the legacy-tag fallback when the cached
+// enum is not explicitly derived. Mirrors the "defensive fallback"
+// branch of filterByTimeStampTierAware but returns a value instead of
+// mutating the mock — the caller decides whether to stamp the result
+// onto the DeepCopy.
+//
+// Precedence:
+//  1. Explicit LifetimeDerived + non-zero Lifetime wins (the recorder
+//     stamped it at emit time; honour the authoritative classification).
+//  2. LifetimeSession / LifetimeConnection cached wins even without
+//     LifetimeDerived (legacy DeriveLifetime paths may have derived
+//     the non-zero enum without setting the bool).
+//  3. metadata["type"]=="config" → LifetimeSession.
+//  4. metadata["type"]=="connection" → LifetimeConnection.
+//  5. Anything else → LifetimePerTest (zero value).
+//
+// Item 3/4 is the backward-compat path for mocks produced before every
+// integration stamped Lifetime at emit time, AND for mocks constructed
+// inline by tests that set metadata but never called DeriveLifetime.
+func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
+	if m == nil {
+		return models.LifetimePerTest
+	}
+	// Explicit non-zero Lifetime wins regardless of LifetimeDerived.
+	// This honours recorder-stamped values AND any DeriveLifetime path
+	// that cached a non-zero enum without setting the derived bool.
+	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
+		m.TestModeInfo.Lifetime == models.LifetimeConnection {
+		return m.TestModeInfo.Lifetime
+	}
+	if m.TestModeInfo.LifetimeDerived {
+		return m.TestModeInfo.Lifetime
+	}
+	if m.Spec.Metadata != nil {
+		switch m.Spec.Metadata["type"] {
+		case "config":
+			return models.LifetimeSession
+		case "connection":
+			return models.LifetimeConnection
+		}
+	}
+	return models.LifetimePerTest
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {

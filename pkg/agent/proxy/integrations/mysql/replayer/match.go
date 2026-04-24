@@ -166,6 +166,48 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	return nil
 }
 
+// hasConfigTag returns true when the mock's raw Spec.Metadata["type"]
+// equals "config". Nil-map safe. Used as a defensive fallback
+// alongside TestModeInfo.Lifetime so mocks that reached the matcher
+// without DeriveLifetime having run still classify correctly.
+func hasConfigTag(m *models.Mock) bool {
+	return m != nil && m.Spec.Metadata != nil && m.Spec.Metadata["type"] == "config"
+}
+
+// isSessionReusableCommandMock reports whether a session/config-tagged
+// mock is eligible for dispatch at command phase. Returns true for
+// any single-request mock whose first packet header is a COM_*
+// command type — this covers both the narrow input-independent
+// allowlist (COM_PING/STATISTICS/DEBUG/RESET_CONNECTION, tagged as
+// "config" by the recorder and routed to session pool for pre-first-
+// test survival) AND lax-mode kind-fallback-promoted data queries
+// (COM_QUERY etc., promoted to session under 9b18de8d's
+// pre-Phase-2-compat branch so they stay reusable across tests).
+//
+// EXCLUDES multi-request handshake bundles (len > 1) — those are
+// matched at handshake time and should not spuriously match at
+// command phase.
+//
+// The Header.Type is whatever the recorder stamped; for command-
+// phase packets it's always a COM_* string. Non-command packets
+// (OK/ERR/EOF payloads, handshake response elements) never land
+// here because they're embedded inside the bundle, not first-
+// request headers.
+func isSessionReusableCommandMock(mock *models.Mock) bool {
+	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+		return false
+	}
+	hdr := mock.Spec.MySQLRequests[0].PacketBundle.Header
+	if hdr == nil {
+		return false
+	}
+	// Accept any COM_*-prefixed packet type at command phase. Using
+	// the string prefix rather than an allowlist lets us cover new
+	// commands introduced by the MySQL server without matcher edits,
+	// and it keeps the check O(1).
+	return strings.HasPrefix(hdr.Type, "COM_")
+}
+
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, string, string, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
@@ -186,16 +228,78 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		return nil, false, "", "", io.EOF
 	}
 
-	// Single fetch; no struct copies (see MockManager changes)
-	unfiltered, err := mockDb.GetUnFilteredMocks()
+	// Fetch THREE pools and merge. Under strict-mode default and the
+	// post-Phase-2 Lifetime routing, data mocks (tag="mocks" →
+	// LifetimePerTest) land in the per-test pool rather than the
+	// session pool — pre-unification the whole unfiltered tree
+	// contained everything so GetSessionMocks was enough; now we need
+	// to explicitly pull per-test mocks too or COM_PING/data queries
+	// disappear from the matcher's view.
+	//
+	// Order: per-test FIRST, session, connection. Per-test mocks are
+	// the most specific for the current test and should win ties;
+	// session and connection follow as fallbacks for reusable traffic.
+	perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, false, "", "", ctx.Err()
 		}
-		utils.LogError(logger, err, "failed to get unfiltered mocks")
+		utils.LogError(logger, err, "failed to get per-test mocks")
 		return nil, false, "", "", err
 	}
-	if len(unfiltered) == 0 {
+	sessionMocks, err := mockDb.GetSessionMocks()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, false, "", "", ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to get session mocks")
+		return nil, false, "", "", err
+	}
+
+	// Unification Phase 2.5: prepared-statement setup mocks are tagged
+	// type=connection by the recorder (see
+	// pkg/agent/proxy/integrations/mysql/recorder/query.go) and live in
+	// their own per-connID pool. Fetch them explicitly here so
+	// buildRecordedPrepIndex can include them; GetConnectionMocks
+	// returns an empty slice when no connection-scoped mocks exist, so
+	// this is a no-op for apps that don't use PREPARE.
+	connID := ""
+	if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			connID = s
+		}
+	}
+	var connectionMocks []*models.Mock
+	if connID != "" {
+		cm, cerr := mockDb.GetConnectionMocks(connID)
+		if cerr != nil {
+			// Hard-fail for prepared-statement traffic: without the
+			// connection pool we can't resolve PREPARE↔EXECUTE pairs
+			// and the later "no matching mock" would mask the real
+			// root cause. Other command types tolerate the failure
+			// (connection pool is advisory for them) — log + continue.
+			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+				utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
+				return nil, false, "", "", fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
+			}
+			logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
+				zap.String("connID", connID),
+				zap.Error(cerr))
+		} else {
+			connectionMocks = cm
+		}
+	}
+
+	// Merge pools with per-test FIRST so a per-test data query wins over
+	// a session-level catch-all when both happen to match. Connection-
+	// scoped setups come last so buildRecordedPrepIndex / stmtMocks
+	// naturally pick them up without needing a new priority order.
+	pool := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks)+len(connectionMocks))
+	pool = append(pool, perTestMocks...)
+	pool = append(pool, sessionMocks...)
+	pool = append(pool, connectionMocks...)
+
+	if len(pool) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
 		return nil, false, "", "", fmt.Errorf("no mysql mocks found")
 	}
@@ -203,12 +307,20 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// remove this block
 	// get all the mock names that has type com-exec
 	stmtMocks := []string{}
-	for _, mock := range unfiltered {
+	for _, mock := range pool {
 		if mock.Kind != models.MySQL {
 			continue
 		}
-		if mock.Spec.Metadata["type"] == "config" {
-			continue // command-phase only wants data mocks
+		// Skip session-tier config mocks at command-phase — they were
+		// matched at handshake. Connection-scoped (prepared-statement
+		// setup) mocks are KEPT here so the prepared-statement index
+		// below picks them up and executes can match their setups
+		// across test-window boundaries.
+		if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+			(mock.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(mock)) {
+			if !isSessionReusableCommandMock(mock) {
+				continue
+			}
 		}
 		for _, mockReq := range mock.Spec.MySQLRequests {
 			if mockReq.PacketBundle.Header.Type == sCOM_STMT_EXEC {
@@ -218,7 +330,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks
-	recordedPrepByConn := buildRecordedPrepIndex(unfiltered)
+	recordedPrepByConn := buildRecordedPrepIndex(pool)
 
 	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
 		var allEntries []string
@@ -240,13 +352,23 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		bestPartialQuery string       // query of the closest partial match
 	)
 
-	// Single pass: filter & match on the fly.
-	for _, mock := range unfiltered {
+	// Single pass: filter & match on the fly. Iterates the merged pool
+	// (unfiltered + connection-scoped) so prepared-statement executes
+	// find their setups even when the setup was recorded in a
+	// different test's window.
+	for _, mock := range pool {
 		if mock.Kind != models.MySQL {
 			continue
 		}
-		if mock.Spec.Metadata["type"] == "config" {
-			continue // command-phase only wants data mocks
+		// Session-tier handshake/auth mocks were matched at the
+		// command prologue; skip them at command phase. Connection-
+		// scoped (prepared-statement setup) mocks ARE retained —
+		// they're how COM_STMT_EXEC finds its matching prepare.
+		if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+			(mock.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(mock)) {
+			if !isSessionReusableCommandMock(mock) {
+				continue // command-phase only wants data + connection mocks + session-reusable commands
+			}
 		}
 		for _, mockReq := range mock.Spec.MySQLRequests {
 			select {
@@ -553,7 +675,9 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, 0
 	}
 
-	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
+	if actual.Header != nil && actual.Header.Header != nil &&
+		expected.Header != nil && expected.Header.Header != nil &&
+		actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
 		if expectedQuery == actualQuery {
 			matchCount++
@@ -967,18 +1091,65 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 	return matchCount
 }
 
-// The same function is used in http parser as well, If you find this useful you can extract it to a common package
-// and delete the duplicate code.
-// updateMock processes the matched mock based on its filtered status.
+// updateMock processes the matched mock based on its Lifetime. Per-test
+// mocks are CONSUMED on match (DeleteFilteredMock); session / connection
+// mocks are RETAINED and updated in place (UpdateUnFilteredMock).
+//
+// Pre-Phase-2, every MySQL mock lived in the unfiltered/session tree
+// (via the legacy kind-fallback) and update-in-place was the only
+// correct path. Post-Phase-2, data mocks tagged "mocks" land in the
+// per-test tree; calling UpdateUnFilteredMock on them returns false
+// because the mock isn't in m.unfiltered — surfacing as a spurious
+// "failed to update matched mock" error after a successful match.
+//
+// Defensive fallback: if Lifetime is still the zero value (a mock that
+// somehow reached the matcher without DeriveLifetime having run) AND
+// the raw tag says "config", treat as session. This mirrors the
+// matcher's session-skip check for consistency.
+// Concurrency note: matchedMock is a shared pointer from the mock
+// pool. See the HTTP equivalent in pkg/agent/proxy/integrations/http/
+// match.go for the rationale — we build a fresh copy and mutate the
+// copy rather than the pool pointer, so concurrent goroutines that
+// match the same session-lifetime mock don't race on TestModeInfo.
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-	if !updated {
-		logger.Debug("failed to update matched mock")
+	updatedMock := *matchedMock
+	updatedMock.TestModeInfo.IsFiltered = false
+	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+
+	lifetime := updatedMock.TestModeInfo.Lifetime
+	rawConfig := false
+	if updatedMock.Spec.Metadata != nil {
+		rawConfig = updatedMock.Spec.Metadata["type"] == "config"
 	}
-	return updated
+	isSessionOrConnection := lifetime == models.LifetimeSession ||
+		lifetime == models.LifetimeConnection ||
+		(lifetime == models.LifetimePerTest && rawConfig)
+
+	if isSessionOrConnection {
+		updated := mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+		if !updated {
+			logger.Debug("failed to update matched session/connection mock",
+				zap.String("mock", updatedMock.Name),
+				zap.Stringer("lifetime", lifetime))
+		}
+		return updated
+	}
+
+	// Per-test: consume via DeleteFilteredMock. Fallback to
+	// UpdateUnFilteredMock if the mock has been staged into the
+	// session pool during the initial pre-first-test window (see
+	// SetMocksWithWindow's isInitialStaging branch) — the mock is
+	// still classified as LifetimePerTest but physically lives in
+	// the session tree until the first real test's re-partition.
+	if mockDb.DeleteFilteredMock(*matchedMock) {
+		return true
+	}
+	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
+		return true
+	}
+	logger.Debug("failed to delete or update matched per-test mock",
+		zap.String("mock", updatedMock.Name))
+	return false
 }
 
 // printable strips non-printable bytes (common in legacy mocks)
@@ -1042,10 +1213,20 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 		if m == nil || m.Kind != models.MySQL {
 			continue
 		}
-		if m.Spec.Metadata["type"] == "config" {
+		// MySQL matcher now reads the typed Lifetime with a defensive
+		// fallback to the raw metadata tag. This handles both the
+		// fully-migrated path (DeriveLifetime has run, Lifetime is
+		// set) and the edge case where a mock reached the pool
+		// without DeriveLifetime having set Lifetime — the raw tag
+		// still says config so we skip it correctly.
+		if m.TestModeInfo.Lifetime == models.LifetimeSession ||
+			(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
 			continue
 		}
-		connID := m.Spec.Metadata["connID"]
+		connID := ""
+		if m.Spec.Metadata != nil {
+			connID = m.Spec.Metadata["connID"]
+		}
 
 		// Check if we have at least one response
 		if len(m.Spec.MySQLResponses) == 0 {

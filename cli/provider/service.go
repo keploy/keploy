@@ -10,7 +10,6 @@ import (
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v3/pkg/service/utgen"
 	"go.uber.org/zap"
 )
 
@@ -41,8 +40,6 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping(ctx)
 
 	switch cmd {
-	case "gen":
-		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report", "sanitize", "diff":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	case "agent":

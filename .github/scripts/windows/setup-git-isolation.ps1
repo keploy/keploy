@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 # because git config --unset-all returns exit code 5 when a key is not found,
 # which is expected/benign. We use explicit $LASTEXITCODE checks instead.
 
-$isoDir = Join-Path $env:USERPROFILE $IsoRoot $env:GITHUB_RUN_ID
+$isoDir = Join-Path (Join-Path $env:USERPROFILE $IsoRoot) $env:GITHUB_RUN_ID
 New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
 
 # --- Liveness marker for cleanup to detect active runs ---
