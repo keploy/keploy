@@ -306,6 +306,15 @@ func evaluate(cfg *Config, sink *logSink, successes, failures int, wiringMissing
 // so the queries flow through keploy's fakeconn pipeline.
 func driveQueries(ctx context.Context, cfg *Config) (successes, failures int) {
 	var okCount, failCount atomic.Int64
+	// Single reusable Ticker for the inter-query spacing. Matches the
+	// repo's polling-loop convention and avoids allocating a fresh
+	// timer per iteration via time.After. Spacing == 0 disables the
+	// ticker entirely.
+	var spacing *time.Ticker
+	if cfg.QuerySpacing > 0 {
+		spacing = time.NewTicker(cfg.QuerySpacing)
+		defer spacing.Stop()
+	}
 	for i := 0; i < cfg.QueryCount; i++ {
 		if ctx.Err() != nil {
 			break
@@ -339,11 +348,11 @@ func driveQueries(ctx context.Context, cfg *Config) (successes, failures int) {
 		} else {
 			okCount.Add(1)
 		}
-		if cfg.QuerySpacing > 0 {
+		if spacing != nil {
 			select {
 			case <-ctx.Done():
 				return int(okCount.Load()), int(failCount.Load())
-			case <-time.After(cfg.QuerySpacing):
+			case <-spacing.C:
 			}
 		}
 	}
@@ -384,6 +393,8 @@ func composeDown(ctx context.Context, cfg *Config) error {
 // silently ignore --wait.
 func waitForPostgres(ctx context.Context, cfg *Config) error {
 	deadline := time.Now().Add(cfg.BringUpTimeout)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -402,7 +413,7 @@ func waitForPostgres(ctx context.Context, cfg *Config) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(1 * time.Second):
+		case <-tick.C:
 		}
 	}
 }

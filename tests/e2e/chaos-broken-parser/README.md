@@ -81,9 +81,7 @@ PASS: parser panic did not break DB connection; passthrough fallback observed
 
 ## Status on this branch (`feat/proxy-v2-foundation`)
 
-The V2 supervisor + relay + fakeconn packages referenced by the
-`broken_parser.go` file **do not exist yet** on this branch. The
-spec names:
+The V2 infrastructure the chaos test exercises — all of:
 
 * `pkg/agent/proxy/fakeconn/` — parsers read `Chunks` from here.
 * `pkg/agent/proxy/supervisor/` — the panic firewall.
@@ -93,21 +91,26 @@ spec names:
   parsers opt in via `IsV2() bool`.
 * `pkg/agent/proxy/v2_integration_test.go` — the matching unit test.
 
-…but only `globalPassThrough` exists on `feat/proxy-v2-foundation` as
-of the time this scaffolding landed. The task spec was explicit that,
-in that state, the right move is to ship the test scaffolding with a
-clearly-marked stub so a follow-up can finish it without a second
-round of spec archaeology.
+— is landed on this branch as part of this PR.
+
+What is **not** yet landed is the in-process proxy instantiation
+inside `broken_parser.go`. The chaos test needs it to stand up a
+keploy proxy on an ephemeral port, register a synthetic "panics on
+first chunk" Postgres parser at the top of `p.integrationsPriority`,
+and retarget the compose-driven queries through that port so the
+supervisor's fallback path is actually exercised. The header of
+`broken_parser.go` carries the TODO checklist for that follow-up.
 
 **What compiles cleanly today:**
 
 * The harness itself (`go run ./tests/e2e/chaos-broken-parser/harness/`)
   — brings up compose, drives queries, tails logs, evaluates the
   pass/fail predicate. Queries flow **directly** to the postgres
-  sidecar, not through a keploy proxy. This currently FAILS the
-  supervisor-fallback assertion (correctly — no supervisor, no
-  fallback) so it reports as a controlled failure rather than a
-  false-positive pass.
+  sidecar, not through a keploy proxy. The chaos Go test wrapper
+  skips cleanly (`KEPLOY_CHAOS_WIRING` env var gates it); running
+  the harness binary directly reports the "wiring missing" marker
+  in its log and skips the supervisor-fallback assertion rather
+  than producing a false violation.
 * The chaos-tagged parser stub
   (`go run -tags chaos_broken_parser ./tests/e2e/chaos-broken-parser/harness/`)
   — same as above but also returns `errChaosNotYetWired` from

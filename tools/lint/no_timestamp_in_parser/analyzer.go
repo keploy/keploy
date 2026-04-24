@@ -7,13 +7,20 @@
 // time.Now() during record captures scheduler/decoder latency instead of the
 // actual wire event time, which is a subtle correctness bug.
 //
-// Scope (files the analyzer inspects):
-//   - pkg/agent/proxy/integrations/**/recorder/*.go (excluding *_test.go)
-//   - pkg/agent/proxy/integrations/**/encode*.go    (excluding *_test.go)
+// Scope (files the analyzer inspects) — V2 record-path files ONLY:
+//   - any *_v2.go file (record_v2.go, encode_v2.go, query_v2.go, etc.)
+//   - any .go file under a recorder_v2/ directory (reserved for future
+//     parsers that split V2 logic into a subpackage)
+//
+// The legacy encode.go / record.go files in pkg/agent/proxy/integrations/
+// are deliberately out of scope — they predate the V2 chunk-timestamp
+// contract and use time.Now() extensively. Retrofitting the rule there
+// would produce a flood of false positives and conflict with the
+// documented pre-V2 behaviour.
 //
 // Allowlist (files/lines the analyzer skips within scope):
-//   - *_test.go under recorder/                    — tests are fine
-//   - record_legacy*.go under recorder/            — legacy path predates the rule
+//   - *_test.go                                    — tests are fine
+//   - record_legacy*.go                            — legacy path predates the rule
 //   - any call site with the magic comment `// allow:time.Now` on the line
 //     immediately above                            — log/telemetry opt-out
 package notimestampinparser
@@ -101,13 +108,27 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-// inScope reports whether filename falls within the analyzer's scope:
-//   - any .go file under a "recorder/" directory (excluding _test.go), or
-//   - any encode*.go file (excluding _test.go).
+// inScope reports whether filename falls within the analyzer's scope.
+// The rule only applies to V2 record-path files; legacy encode.go / record.go
+// files continue to use time.Now() (that behaviour is documented in PLAN.md
+// as the pre-V2 anti-pattern the new architecture replaces, not something
+// to be retrofitted).
 //
-// The check is path-substring based so it works for both real production
-// paths (pkg/agent/proxy/integrations/<proto>/recorder/foo.go) and testdata
-// paths used by analysistest (testdata/src/<pkg>/recorder/foo.go).
+// Two matchers:
+//   - any *_v2.go file anywhere under pkg/agent/proxy/integrations/ or
+//     pkg/**/(postgres|mongo|http2|kafka|redis|hbase|pulsar|sqs|grpcV2)/
+//     — the canonical V2 parser file naming across this and sibling repos
+//     (record_v2.go, encode_v2.go, query_v2.go, etc.).
+//   - any .go file under a recorder_v2/ directory (reserved for future
+//     parsers that want a separate subpackage).
+//
+// The older "any encode*.go" pattern was too broad — legacy encode.go files
+// in integrations/generic and integrations/http use time.Now() legitimately
+// and must not be flagged. Narrowing to *_v2.go scopes the rule precisely
+// to the files that adopted the chunk-timestamp contract.
+//
+// Matching is path-substring based so analysistest's testdata/src/<pkg>/
+// layout works the same as real production paths.
 func inScope(filename string) bool {
 	base := filepath.Base(filename)
 	if !strings.HasSuffix(base, ".go") {
@@ -119,10 +140,10 @@ func inScope(filename string) bool {
 	// Normalise to forward slashes so Windows-style separators don't defeat
 	// the substring match. (Cheap; no-op on POSIX.)
 	norm := filepath.ToSlash(filename)
-	if strings.Contains(norm, "/recorder/") {
+	if strings.HasSuffix(base, "_v2.go") {
 		return true
 	}
-	if strings.HasPrefix(base, "encode") {
+	if strings.Contains(norm, "/recorder_v2/") {
 		return true
 	}
 	return false
