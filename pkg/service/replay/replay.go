@@ -619,7 +619,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+		r.logger.Debug("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	r.completeTestReportMu.RLock()
