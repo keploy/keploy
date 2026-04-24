@@ -98,9 +98,21 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		zap.Duration("pollTimeout", pollCeiling),
 	)
 
+	// Derive a single deadline ctx for the ENTIRE poll window. This is what
+	// makes pollCeiling a true upper bound: every probe — including the
+	// immediate one below and each ticker-driven retry — inherits the
+	// remaining ceiling via context. httpHealthPoll still applies its own
+	// healthProbeTimeout per request, but context.WithTimeout takes whichever
+	// expires first, so a small pollCeiling (e.g. 100ms) cannot be exceeded
+	// by a probe's 1s per-request cap. We keep the caller ctx as the parent
+	// so user-initiated cancel still unblocks instantly.
+	pollCtx, pollCancel := context.WithTimeout(ctx, pollCeiling)
+	defer pollCancel()
+
 	// Probe once immediately so a fast-ready app doesn't pay the first tick's
-	// healthPollInterval of latency.
-	if healthPoller(ctx, cfg.Test.HealthURL) {
+	// healthPollInterval of latency. The probe inherits pollCtx, so even this
+	// first attempt is bounded by the remaining poll ceiling.
+	if healthPoller(pollCtx, cfg.Test.HealthURL) {
 		logger.Debug("health endpoint reported 2xx; proceeding",
 			zap.String("healthUrl", cfg.Test.HealthURL),
 		)
@@ -109,18 +121,21 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 
 	ticker := time.NewTicker(healthPollInterval)
 	defer ticker.Stop()
-	ceiling := time.NewTimer(pollCeiling)
-	defer ceiling.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			// Parent ctx canceled by the user — treat as abort, distinct
+			// from the pollCtx deadline branch below which is a normal
+			// fallback-to-fixed-delay path.
 			return false
-		case <-ceiling.C:
-			// Health probe never returned 2xx inside pollCeiling. Downgraded
-			// from Warn per repo logging guidelines; the message still tells
-			// operators exactly which knobs to turn.
-			logger.Info("health probe timed out, falling back to fixed delay — set KEPLOY_HEALTH_URL to an endpoint that returns 2xx sooner, or raise --health-poll-timeout",
+		case <-pollCtx.Done():
+			// pollCeiling elapsed with no 2xx. If ctx was also canceled we
+			// would have taken the branch above; reaching here means the
+			// deadline fired on its own. Downgraded from Warn per repo
+			// logging guidelines; the message still tells operators exactly
+			// which knobs to turn.
+			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
 				zap.String("healthUrl", cfg.Test.HealthURL),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
@@ -132,7 +147,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 				return false
 			}
 		case <-ticker.C:
-			if healthPoller(ctx, cfg.Test.HealthURL) {
+			if healthPoller(pollCtx, cfg.Test.HealthURL) {
 				logger.Debug("health endpoint reported 2xx; proceeding",
 					zap.String("healthUrl", cfg.Test.HealthURL),
 				)

@@ -708,12 +708,15 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// BEFORE binding our own listener on p.DNSPort. This MUST happen
 	// here (not lazily on first query) because in Kubernetes sidecar
 	// deployments the injector rewrites the app container's resolv.conf
-	// to point at 127.0.0.1:26789 — if we ever pick those up as our
-	// "upstream" we forward queries back to ourselves. The sidecar's
-	// own /etc/resolv.conf still points at CoreDNS at this point, so
-	// the snapshot we take here is the correct set of real upstream
-	// resolvers. Errors are non-fatal: on failure the forwarder
-	// simply falls back to the legacy default response.
+	// nameserver entry to 127.0.0.1 and redirects DNS traffic to the
+	// agent's port 26789 via iptables/eBPF (resolv.conf itself has no
+	// port syntax — standard `nameserver` lines are IP-only). If we
+	// ever pick that loopback entry up as our "upstream" we forward
+	// queries back to ourselves. The sidecar's own /etc/resolv.conf
+	// still points at CoreDNS at this point, so the snapshot we take
+	// here is the correct set of real upstream resolvers. Errors are
+	// non-fatal: on failure the forwarder simply falls back to the
+	// legacy default response.
 	p.captureDNSUpstream()
 
 	// start the TCP DNS server

@@ -508,10 +508,13 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// Prefer the upstream resolver list captured once at proxy
 	// startup (see captureDNSUpstream). This is critical in sidecar
 	// deployments where the app-container resolv.conf has been
-	// rewritten to point at 127.0.0.1:26789 — re-reading the file
-	// here would either (a) discover the loopback entry and forward
-	// queries back at ourselves, or (b) discover nothing at all.
-	// Capturing once at startup pins the REAL cluster resolvers.
+	// rewritten so the `nameserver` entry is 127.0.0.1 and DNS
+	// traffic is redirected to the agent's port 26789 via iptables/
+	// eBPF (resolv.conf entries themselves are IP-only and carry no
+	// port). Re-reading the file here would either (a) discover the
+	// loopback entry and forward queries back at ourselves, or
+	// (b) discover nothing at all. Capturing once at startup pins
+	// the REAL cluster resolvers.
 	//
 	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
 	// rare local-dev case where the proxy runs outside a cluster AND
