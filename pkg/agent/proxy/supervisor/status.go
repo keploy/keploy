@@ -14,9 +14,6 @@ const (
 	StatusHung
 	// StatusMemCap means the parser's per-connection memory cap was exceeded.
 	StatusMemCap
-	// StatusAborted means the parser sent a KindAbortMock directive and
-	// exited cleanly afterwards.
-	StatusAborted
 	// StatusCanceled means the outer context was cancelled before the
 	// parser returned.
 	StatusCanceled
@@ -35,8 +32,6 @@ func (s Status) String() string {
 		return "hung"
 	case StatusMemCap:
 		return "mem_cap"
-	case StatusAborted:
-		return "aborted"
 	case StatusCanceled:
 		return "canceled"
 	default:
@@ -54,7 +49,12 @@ type Result struct {
 	Status Status
 
 	// Err is the parser's returned error, or a wrapped panic value.
-	// It is nil for StatusOK and StatusAborted.
+	// It is nil for StatusOK. For StatusCanceled and StatusMemCap it
+	// may also be nil: the parser can return cleanly inside the grace
+	// window after the supervisor has already decided to cancel, and
+	// memCapExceeded is a sticky flag that wins over a nil return.
+	// Callers that branch on Err must not assume non-OK implies
+	// non-nil.
 	Err error
 
 	// FallthroughToPassthrough is true when the caller should hand
