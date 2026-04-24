@@ -474,10 +474,16 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		caJavaHome:         opts.Agent.CAJavaHome,
 		dnsCache:           newDNSCache(),
 		recordedDNSMocks:   newRecordedDNSMocksCache(),
-		// 2 s is long enough to absorb a single UDP retransmit against
-		// CoreDNS (~500 ms default) while keeping app-side lookup
-		// latency bounded if the upstream is hard-down. Tuned to match
-		// the task spec ("~2s"); override via exposed helper in tests.
+		// dnsForwardTimeout is the per-forward deadline for upstream DNS
+		// exchanges. 2 s is long enough to absorb a single UDP retransmit
+		// against CoreDNS (~500 ms default) while keeping app-side lookup
+		// latency bounded if the upstream is hard-down. Tuned to match the
+		// task spec ("~2s"). Tests override by assigning to this field
+		// directly on the Proxy struct; see
+		// pkg/agent/proxy/dns_forward_test.go (newProxyWithUpstream). The
+		// field is package-private, so sibling _test.go files have
+		// legitimate direct access and we intentionally do not expose a
+		// setter helper for a one-line test-only override.
 		dnsForwardTimeout: 2 * time.Second,
 	}
 

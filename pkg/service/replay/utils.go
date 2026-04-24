@@ -60,6 +60,34 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// validateHealthURL checks that s is a syntactically usable HTTP(S) URL for
+// http.NewRequestWithContext — i.e. it has a scheme of http or https and a
+// non-empty host. We intentionally keep validation purely syntactic: no DNS
+// resolution, no TCP dial, no HEAD probe. The poll loop is what actually
+// confirms reachability; this function only exists to fail fast on operator
+// typos (missing scheme, "not-a-url", stray whitespace) so we don't burn the
+// whole HealthPollTimeout window on errors that will never succeed.
+//
+// Returns ("", true) when the URL is usable, and (reason, false) otherwise
+// with a short human-readable reason the caller can surface to the operator.
+func validateHealthURL(s string) (string, bool) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err.Error(), false
+	}
+	switch u.Scheme {
+	case "http", "https":
+	case "":
+		return "missing scheme (expected http:// or https://)", false
+	default:
+		return "unsupported scheme " + fmt.Sprintf("%q", u.Scheme) + " (expected http or https)", false
+	}
+	if u.Host == "" {
+		return "missing host", false
+	}
+	return "", true
+}
+
 // waitForAppReady gates the first test on the user-application being up.
 //
 // If Test.HealthURL is empty we keep the historical behavior exactly: sleep for
@@ -87,6 +115,23 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		case <-ctx.Done():
 			return false
 		}
+	}
+
+	// Fail fast on a malformed --health-url instead of burning the entire
+	// HealthPollTimeout window on http.NewRequestWithContext errors that
+	// will never succeed. Common mistakes: missing scheme ("localhost:8080"),
+	// stray whitespace, "not-a-url". net/url.Parse is deliberately lenient,
+	// so we also require a non-empty scheme (http/https) and host — matching
+	// what net/http's transport actually needs to dial. No DNS, no dial here:
+	// just syntactic validation so the operator gets actionable feedback now
+	// rather than after 60s of silent retries.
+	if reason, ok := validateHealthURL(cfg.Test.HealthURL); !ok {
+		logger.Error("invalid --health-url; skipping health probe",
+			zap.String("healthUrl", cfg.Test.HealthURL),
+			zap.String("reason", reason),
+			zap.String("nextStep", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", cfg.Test.HealthURL)),
+		)
+		return false
 	}
 
 	pollCeiling := cfg.Test.HealthPollTimeout

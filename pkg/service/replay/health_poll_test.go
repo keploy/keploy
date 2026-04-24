@@ -200,6 +200,111 @@ func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
 	}
 }
 
+// TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL locks in the
+// fast-fail path for malformed --health-url inputs. Without the URL
+// validation at the top of waitForAppReady, http.NewRequestWithContext
+// inside httpHealthPoll would return an error on every probe and we
+// would burn the entire HealthPollTimeout window (default 60s) plus
+// the fixed Delay before returning — with zero actionable feedback to
+// the operator. The fix: validate scheme + host up front and return
+// immediately so a typo surfaces in milliseconds.
+//
+// To prove we never enter the poll loop we also swap out healthPoller
+// with a stub that fails the test if called; if the pre-loop
+// validation regresses this stub catches it even when the time-based
+// bound would pass for other reasons.
+func TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL(t *testing.T) {
+	orig := healthPoller
+	healthPoller = func(_ context.Context, _ string) bool {
+		t.Fatalf("healthPoller must not be called when HealthURL is malformed — pre-loop validation should short-circuit")
+		return false
+	}
+	defer func() { healthPoller = orig }()
+
+	// HealthPollTimeout is large on purpose: if the validation regresses
+	// and we fall into the poll loop, elapsed balloons and the <100ms
+	// assertion below fires. Delay is also large so the fallback sleep
+	// (if it ever runs) is visible to the assertion.
+	cfg := newCfg("not-a-url", 30*time.Second)
+	cfg.Test.Delay = 10
+
+	core, logs := observer.New(zap.ErrorLevel)
+	logger := zap.New(core)
+
+	start := time.Now()
+	ok := waitForAppReady(context.Background(), logger, cfg)
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatalf("expected waitForAppReady to return false on malformed URL, got true")
+	}
+	// The key win: fail fast. 100ms is generous for an in-process
+	// url.Parse + scheme/host check; anything close to the poll
+	// ceiling or fallback delay indicates the pre-loop guard is gone.
+	if elapsed >= 100*time.Millisecond {
+		t.Fatalf("expected <100ms fast-fail on malformed URL, elapsed=%v (did the validation regress?)", elapsed)
+	}
+
+	// Operator-facing log: must mention --health-url so grepping a CI log
+	// actually tells the operator what to fix. Without this, the failure
+	// mode is "keploy just returned false" with no context.
+	var foundLog bool
+	for _, entry := range logs.All() {
+		if strings.Contains(entry.Message, "invalid --health-url") {
+			foundLog = true
+			break
+		}
+	}
+	if !foundLog {
+		t.Fatalf("expected ERROR log mentioning 'invalid --health-url', entries=%v", logs.All())
+	}
+}
+
+// TestWaitForAppReady_MalformedURL_TableDriven covers the set of
+// malformed inputs we explicitly want to reject at the boundary: no
+// scheme, non-http scheme, empty host after scheme, and outright
+// garbage. Each must return false in well under 100ms. If any one of
+// these slips past validation and into the poll loop, the bug surfaces
+// as either a timeout-sized elapsed or a healthPoller call.
+func TestWaitForAppReady_MalformedURL_TableDriven(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"missing scheme", "localhost:8080/health"},
+		{"bare host no scheme", "example.com"},
+		{"scheme but no host", "http://"},
+		{"ftp scheme not supported", "ftp://example.com/health"},
+		{"garbage", "not a url at all"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			orig := healthPoller
+			healthPoller = func(_ context.Context, _ string) bool {
+				t.Fatalf("healthPoller must not be called for malformed URL %q", c.url)
+				return false
+			}
+			defer func() { healthPoller = orig }()
+
+			cfg := newCfg(c.url, 10*time.Second)
+			cfg.Test.Delay = 5
+			logger := zap.NewNop()
+
+			start := time.Now()
+			ok := waitForAppReady(context.Background(), logger, cfg)
+			elapsed := time.Since(start)
+
+			if ok {
+				t.Fatalf("expected false for malformed URL %q, got true", c.url)
+			}
+			if elapsed >= 100*time.Millisecond {
+				t.Fatalf("expected <100ms fast-fail for %q, elapsed=%v", c.url, elapsed)
+			}
+		})
+	}
+}
+
 // TestWaitForAppReady_CtxCanceled verifies ctx cancellation is honored during
 // the poll loop — caller should see false so it can return TestSetStatusUserAbort.
 func TestWaitForAppReady_CtxCanceled(t *testing.T) {
