@@ -387,11 +387,14 @@ func TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched(t *testing.T) {
 	}
 
 	// Direct channel must remain empty — the syncMock route should
-	// have returned before touching it.
+	// have returned before touching it. EmitMock is synchronous, so
+	// a non-blocking receive is enough: anything it was going to
+	// send on Mocks would already be buffered by the time EmitMock
+	// returned.
 	select {
 	case got := <-directCh:
 		t.Fatalf("mock leaked to Session.Mocks when RouteMocksViaSyncMock=true: %+v", got)
-	case <-time.After(100 * time.Millisecond):
+	default:
 		// expected: nothing delivered.
 	}
 
@@ -428,10 +431,12 @@ func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+	// Non-blocking receive: EmitMock is synchronous, so if it had
+	// written to directCh it would already be readable.
 	select {
 	case got := <-directCh:
 		t.Fatalf("mock leaked to Session.Mocks after ctx cancel: %+v", got)
-	case <-time.After(100 * time.Millisecond):
+	default:
 		// expected: no delivery.
 	}
 }
