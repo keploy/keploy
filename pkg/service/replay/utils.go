@@ -143,8 +143,13 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	}
 
 	if healthURL == "" {
+		// NewTimer + defer Stop so a ctx cancel releases the timer
+		// immediately instead of leaving it scheduled until `delay`
+		// fires — matters under large --delay and repeated aborts.
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
 		select {
-		case <-time.After(delay):
+		case <-timer.C:
 			return true
 		case <-ctx.Done():
 			return false
@@ -212,8 +217,10 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
 			)
+			fallbackTimer := time.NewTimer(delay)
+			defer fallbackTimer.Stop()
 			select {
-			case <-time.After(delay):
+			case <-fallbackTimer.C:
 				return true
 			case <-ctx.Done():
 				return false

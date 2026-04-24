@@ -302,7 +302,12 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = clientConn.Close() })
 
-	serverConn := <-connCh
+	var serverConn net.Conn
+	select {
+	case serverConn = <-connCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for accept goroutine to deliver serverConn")
+	}
 	t.Cleanup(func() { _ = serverConn.Close() })
 
 	// Run handleHttp1Connection in a goroutine — it reads the request off
@@ -446,7 +451,12 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 		t.Fatalf("failed to dial: %v", err)
 	}
 	t.Cleanup(func() { _ = clientConn.Close() })
-	serverConn := <-connCh
+	var serverConn net.Conn
+	select {
+	case serverConn = <-connCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for accept goroutine to deliver serverConn")
+	}
 	t.Cleanup(func() { _ = serverConn.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

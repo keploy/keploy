@@ -21,17 +21,22 @@ var resolvConfPath = "/etc/resolv.conf"
 // as the app container's resolver — see the call site in StartProxy
 // for the ordering rationale.
 //
-// A loopback nameserver is filtered out ONLY when its port matches
-// the proxy's own DNS listen port (p.DNSPort) — that combination is
-// the unambiguous self-forward case: the k8s injector rewrote
-// resolv.conf to 127.0.0.1 and redirected traffic to our listener, so
-// forwarding there would loop and hang the app's query for
-// dnsForwardTimeout on every miss. Loopback nameservers at OTHER
-// ports (e.g. systemd-resolved on 127.0.0.53:53 or dnsmasq on
-// 127.0.0.1:5353) are legitimate real resolvers and MUST be kept —
-// dropping them in environments where /etc/resolv.conf is entirely
-// loopback would leave dnsUpstreamServers empty and silently disable
-// forward-on-miss.
+// A loopback nameserver is filtered out ONLY when the effective
+// resolver port in use matches the proxy's own DNS listen port
+// (p.DNSPort) — that combination is the unambiguous self-forward
+// case: the k8s injector rewrote resolv.conf to a loopback address
+// and redirected traffic to our listener, so forwarding there would
+// loop and hang the app's query for dnsForwardTimeout on every miss.
+//
+// Note: resolv.conf `nameserver` lines cannot carry a port; the port
+// comes from an `options` directive (or defaults to 53). A loopback
+// resolver listening on ANY non-proxy port — e.g. systemd-resolved
+// (typically listens on 53 at a loopback address) or a local dnsmasq
+// instance bound to a non-default port — is a legitimate real
+// resolver and MUST be kept. Dropping loopback resolvers
+// unconditionally would leave dnsUpstreamServers empty in
+// environments where resolv.conf is entirely loopback, silently
+// disabling forward-on-miss.
 //
 // A nil / empty result is acceptable. The forwarder handles that by
 // returning "no upstream configured" and letting the caller fall back
