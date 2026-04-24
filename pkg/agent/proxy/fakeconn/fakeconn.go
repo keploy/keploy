@@ -51,6 +51,9 @@ type FakeConn struct {
 
 	mu           sync.Mutex
 	buf          bytes.Buffer
+	bufReadAt    time.Time // source ReadAt of bytes currently in buf
+	bufWrittenAt time.Time // source WrittenAt of bytes currently in buf
+	bufDir       Direction // source direction of bytes currently in buf
 	lastReadNano atomic.Int64
 	closed       atomic.Bool
 	closeCh      chan struct{}
@@ -134,11 +137,16 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	}
 
 	// Copy as much as fits; stash the remainder in the buffer for
-	// the next Read.
+	// the next Read. The source chunk's timestamps are captured so
+	// a later ReadChunk call that drains the stash returns them
+	// intact (documented contract on ReadChunk).
 	n := copy(p, chunk.Bytes)
 	if n < len(chunk.Bytes) {
 		f.mu.Lock()
 		f.buf.Write(chunk.Bytes[n:])
+		f.bufReadAt = chunk.ReadAt
+		f.bufWrittenAt = chunk.WrittenAt
+		f.bufDir = chunk.Dir
 		f.mu.Unlock()
 	}
 	return n, nil
@@ -168,22 +176,38 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 }
 
 func (f *FakeConn) readChunkLocked() (Chunk, error) {
+	// First, drain any residual bytes stashed by a prior Read into a
+	// synthetic Chunk carrying the source chunk's timestamps. This
+	// preserves the documented ReadChunk contract when the caller
+	// mixes Read and ReadChunk on the same FakeConn.
+	f.mu.Lock()
+	if f.buf.Len() > 0 {
+		out := make([]byte, f.buf.Len())
+		_, _ = f.buf.Read(out)
+		c := Chunk{
+			Dir:       f.bufDir,
+			Bytes:     out,
+			ReadAt:    f.bufReadAt,
+			WrittenAt: f.bufWrittenAt,
+		}
+		// Clear stash metadata so a subsequent stash overwrites cleanly.
+		f.bufReadAt = time.Time{}
+		f.bufWrittenAt = time.Time{}
+		f.bufDir = 0
+		f.mu.Unlock()
+		if !c.ReadAt.IsZero() {
+			f.lastReadNano.Store(c.ReadAt.UnixNano())
+		}
+		return c, nil
+	}
+	f.mu.Unlock()
+
 	// Check deadline up front; if already passed, return immediately.
 	dlCh := f.currentDeadlineCh()
 	for {
 		select {
 		case c, ok := <-f.ch:
 			if !ok {
-				// Channel closed: drain any buffered bytes into a
-				// synthetic final chunk so no byte is lost.
-				f.mu.Lock()
-				if f.buf.Len() > 0 {
-					out := make([]byte, f.buf.Len())
-					_, _ = f.buf.Read(out)
-					f.mu.Unlock()
-					return Chunk{Bytes: out}, nil
-				}
-				f.mu.Unlock()
 				return Chunk{}, io.EOF
 			}
 			f.lastReadNano.Store(c.ReadAt.UnixNano())

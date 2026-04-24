@@ -916,10 +916,11 @@ func RecoverWithoutClose(logger *zap.Logger) {
 		return
 	}
 
-	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser")
 		utils.HandleRecovery(logger, r, "Recovered from panic")
+		// Flush only on the panic path so the happy path (defer
+		// running on clean return) doesn't pay the flush cost.
 		sentry.Flush(time.Second * 2)
 	}
 }

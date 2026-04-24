@@ -18,7 +18,6 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -121,11 +120,17 @@ func (p *Proxy) recordViaSupervisor(
 	// Adapter: the parser's RecordOutgoing takes *integrations.RecordSession
 	// but the supervisor's ParserFunc takes *supervisor.Session. Build a
 	// RecordSession whose V2 field points at the supervisor.Session.
+	//
+	// On the V2 path, Ingress/Egress/TLSUpgrader are intentionally nil so
+	// that a parser bug that reaches for the legacy fields surfaces as an
+	// obvious nil panic (which the supervisor catches) rather than a
+	// silent misuse of sockets the relay owns. ErrGroup remains populated
+	// because the legacy integration helper layer (ReadBytes, etc.) still
+	// retrieves it via context.Value in shared code; once every parser
+	// migrates off that accessor the field will be set to nil here as
+	// well.
 	result := sv.Run(ctx, func(parserCtx context.Context, sv2sess *supervisor.Session) error {
 		recSess := &integrations.RecordSession{
-			// Parsers on V2 must NOT touch Ingress/Egress/TLSUpgrader/
-			// ErrGroup; leaving them nil keeps a bug loud. The V2
-			// surface is the only legal one on this path.
 			Ingress:      nil,
 			Egress:       nil,
 			Mocks:        mocks,
@@ -140,33 +145,34 @@ func (p *Proxy) recordViaSupervisor(
 		return parser.RecordOutgoing(parserCtx, recSess)
 	}, svSess)
 
-	// Stop the relay and drain any error. ctx cancellation above is
-	// idempotent. The relay returns cleanly once both forwarders exit
-	// (either on conn close by the caller or on ctx cancel here).
+	if result.FallthroughToPassthrough {
+		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
+			zap.String("parser", string(parserType)),
+			zap.String("status", result.Status.String()),
+			zap.Error(result.Err),
+			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
+		)
+		// Crucial invariant (I1): the relay keeps forwarding client↔dest
+		// bytes end-to-end during the fallback. We do NOT cancel it here
+		// — cancelling would introduce a gap between the relay stopping
+		// and any replacement read loop starting, exactly the kind of
+		// stall the V2 architecture is meant to eliminate.
+		//
+		// SessionOnAbort has already closed the FakeConns so no further
+		// tee chunks reach the parser side (no partial mocks, I4). The
+		// relay's forwarder goroutines continue draining srcConn/dstConn
+		// until either peer closes the connection, which triggers a
+		// normal Run exit.
+		<-relayDone
+		return nil
+	}
+
+	// Non-fallthrough path: parser returned normally or with an error.
+	// Cancel the relay and drain.
 	relayCancel()
 	relayErr := <-relayDone
 	if relayErr != nil && !errors.Is(relayErr, context.Canceled) {
 		logger.Debug("relay exited with error", zap.Error(relayErr))
-	}
-
-	if result.FallthroughToPassthrough {
-		logger.Warn("parser supervisor triggered passthrough fallback",
-			zap.String("parser", string(parserType)),
-			zap.String("status", result.Status.String()),
-			zap.Error(result.Err),
-		)
-		// globalPassThrough opens a raw copy between srcConn and dstConn.
-		// NOTE: bytes the relay already consumed before the fallback
-		// are irrecoverable; the relay drained them into the tee where
-		// the parser either processed them or dropped them. Protocols
-		// with mid-stream framing may observe corruption on the very
-		// next bytes. This is the documented trade-off in PLAN.md §3.3:
-		// stability over fidelity. Clients retry or surface errors.
-		if err := p.globalPassThrough(ctx, srcConn, dstConn); err != nil {
-			utils.LogError(logger, err, "globalPassThrough after supervisor fallback failed")
-			return err
-		}
-		return nil
 	}
 
 	if result.Err != nil {

@@ -1749,12 +1749,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
-	// Process-wide kill switch: if parsing has been disabled via env var,
-	// SIGUSR1, or admin endpoint, skip all parser dispatch and hand the
-	// connection to globalPassThrough. Existing connections whose parsers
-	// are already running are unaffected; this only gates new dispatch.
-	if util.DefaultKillSwitch.Enabled() {
-		logger.Debug("parsing kill switch tripped; routing to passthrough",
+	// Record-mode parsing kill switch: if record-time parsing has been
+	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin
+	// endpoint, skip parser dispatch and hand the connection to
+	// globalPassThrough. Existing connections whose parsers are already
+	// running are unaffected; this only gates new dispatch.
+	//
+	// MODE_TEST is intentionally NOT gated here — the kill switch is a
+	// record-time stability escape hatch only; replay must continue to
+	// match mocks regardless of record-time kill-switch state.
+	if rule.Mode == models.MODE_RECORD && util.DefaultKillSwitch.Enabled() {
+		logger.Debug("record-mode parsing kill switch tripped; routing to passthrough",
 			zap.String("parser", string(parserType)), zap.Bool("generic", generic))
 		return p.globalPassThrough(parserCtx, srcConn, dstConn)
 	}

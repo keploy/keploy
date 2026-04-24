@@ -117,7 +117,18 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 		upgraded, err := r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
 		if err != nil {
 			if log != nil {
-				log.Warn("relay: dest-side TLS upgrade failed", zap.Error(err))
+				// Debug-level: TLS upgrade failures are expected on some
+				// environments (self-signed dest certs, TLS-optional
+				// servers, parser probing behaviour). The supervisor's
+				// FallthroughToPassthrough signal already surfaces the
+				// condition; an actionable error is returned in the Ack
+				// and the parser decides whether to mark the mock
+				// incomplete. No operator log action is needed.
+				log.Debug("relay: dest-side TLS upgrade failed",
+					zap.Error(err),
+					zap.String("directive_reason", d.Reason),
+					zap.String("next_step", "if the upstream uses a self-signed or private-CA cert, add it to the system trust store or run with KEPLOY_NEW_RELAY=off to fall back to the legacy parser path"),
+				)
 			}
 			r.endPause()
 			return directive.Ack{
@@ -134,7 +145,12 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 		upgraded, err := r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
 		if err != nil {
 			if log != nil {
-				log.Warn("relay: client-side TLS upgrade failed", zap.Error(err))
+				// Debug-level: see dest-side upgrade comment above.
+				log.Debug("relay: client-side TLS upgrade failed",
+					zap.Error(err),
+					zap.String("directive_reason", d.Reason),
+					zap.String("next_step", "check the MITM cert chain configuration; run with KEPLOY_DISABLE_PARSING=1 to bypass parsing entirely"),
+				)
 			}
 			// We have already upgraded dest. The real client side
 			// is still cleartext. Leave the conn pointers as-is

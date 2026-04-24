@@ -9,8 +9,11 @@ import (
 )
 
 // envDisableParsing is the environment variable consulted by
-// [NewFromEnv]. Exported only as a constant so tests and admin
-// tooling can reference it without hard-coding the string.
+// [NewFromEnv]. It is a package-local constant so the name is
+// defined in exactly one place; tests and admin tooling inside this
+// package reference it directly, external code hard-codes the
+// string (it is part of the user-facing config surface and not
+// expected to change).
 const envDisableParsing = "KEPLOY_DISABLE_PARSING"
 
 // KillSwitch is a process-wide flag that disables parser dispatch

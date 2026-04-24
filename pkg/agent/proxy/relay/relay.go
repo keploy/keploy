@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -442,14 +443,19 @@ func (r *Relay) nudgeDeadline(c *net.Conn) {
 
 // isBenignNetErr returns true for errors that are expected during
 // normal connection teardown and should not be surfaced as the relay's
-// return value. That includes io.ErrClosedPipe, the "use of closed
-// connection" text, and net.Error with Timeout()==true produced by our
-// own ctx-cancel nudge.
+// return value. That includes io.ErrClosedPipe, the "io: read/write
+// on closed pipe" text produced by net.Pipe, the "use of closed
+// network connection" text produced by the stdlib net package's
+// unexported errors, and net.Error with Timeout()==true produced by
+// our own ctx-cancel nudge.
 func isBenignNetErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
 	// Timeout() == true means ctx was cancelled and we nudged the
@@ -459,9 +465,11 @@ func isBenignNetErr(err error) bool {
 	if errors.As(err, &nerr) && nerr.Timeout() {
 		return true
 	}
-	// net package returns errors with "use of closed network connection"
-	// as an unexported type; match on the string as a last resort.
-	if err.Error() == "io: read/write on closed pipe" {
+	// String fallback for errors that predate net.ErrClosed (and for
+	// net.Pipe's io.ErrClosedPipe-equivalent message).
+	msg := err.Error()
+	if strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "io: read/write on closed pipe") {
 		return true
 	}
 	return false

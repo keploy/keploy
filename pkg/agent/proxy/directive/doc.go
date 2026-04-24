@@ -6,7 +6,7 @@
 // Postgres SSLRequest and MySQL CLIENT_SSL), parsers send a
 // [Directive] on a channel owned by the [supervisor], which forwards
 // the request to the [relay], executes it on the real sockets, and
-// returns a [DirectiveAck] to the parser.
+// returns an [Ack] to the parser.
 //
 // The choreography keeps parsers ignorant of TLS state, socket
 // handles, and relay timing. Every parser uses the same directive
