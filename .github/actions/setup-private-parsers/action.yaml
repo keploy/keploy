@@ -91,11 +91,42 @@ runs:
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
+        # head_ref is set on pull_request events (the PR branch name);
+        # empty on push events. We use it to auto-pair cross-repo
+        # feature branches that share a name between keploy and
+        # keploy/integrations — see the paired-branch fallback below.
+        GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        # Cross-repo branch pairing: on a PR whose branch name exists in
+        # keploy/integrations, prefer that branch over the default
+        # `integration-ref`. Lets a feature that spans both repos
+        # (e.g. models schema change in keploy + parser update in
+        # integrations) CI against the matching branch without forcing
+        # operators to flip `vars.INTEGRATION_REF` for the review window.
+        # Falls through to the configured INTEGRATION_REF when:
+        #   - the event has no head_ref (push to main, workflow_dispatch)
+        #   - head_ref equals INTEGRATION_REF (no-op, avoid double fetch)
+        #   - the matching branch doesn't exist in integrations
+        # `go get` failure on the first attempt is consumed silently
+        # because the INTEGRATION_REF fetch below is the authoritative
+        # one; any real error there still aborts the step.
+        PAIRED_FETCHED=0
+        if [ -n "$GITHUB_HEAD_REF_VAL" ] && [ "$GITHUB_HEAD_REF_VAL" != "$INTEGRATION_REF" ]; then
+          echo "Trying paired integrations branch: $GITHUB_HEAD_REF_VAL"
+          if GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${GITHUB_HEAD_REF_VAL} 2>/dev/null; then
+            echo "✓ Paired integrations branch fetched"
+            PAIRED_FETCHED=1
+          else
+            echo "No paired branch in integrations (or fetch failed); falling back to INTEGRATION_REF=${INTEGRATION_REF}"
+          fi
+        fi
+
+        if [ "$PAIRED_FETCHED" != "1" ]; then
+          echo "Fetching private integrations dependency via SSH..."
+          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        fi
 
         echo "Creating extraparsers.go (platform-independent)..."
         mkdir -p pkg/agent/proxy
@@ -117,6 +148,7 @@ runs:
       shell: pwsh
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
+        GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
       run: |
         # Use per-run config when isolation is active, otherwise fall back to --global
         if ($env:GIT_CONFIG_GLOBAL) {
@@ -125,9 +157,26 @@ runs:
           git config --global url."git@github.com:".insteadOf "https://github.com/"
         }
 
-        Write-Host "Fetching private integrations dependency via SSH..."
         $env:GOPRIVATE = "github.com/keploy/integrations"
-        go get "github.com/keploy/integrations@${{ inputs.integration-ref }}"
+        $PairedFetched = $false
+
+        # Cross-repo branch pairing (see non-Windows step above for rationale).
+        if ($env:GITHUB_HEAD_REF_VAL -and $env:GITHUB_HEAD_REF_VAL -ne $env:INTEGRATION_REF) {
+          Write-Host "Trying paired integrations branch: $env:GITHUB_HEAD_REF_VAL"
+          go get "github.com/keploy/integrations@$env:GITHUB_HEAD_REF_VAL" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Paired integrations branch fetched"
+            $PairedFetched = $true
+          } else {
+            Write-Host "No paired branch in integrations (or fetch failed); falling back to INTEGRATION_REF=$env:INTEGRATION_REF"
+          }
+        }
+
+        if (-not $PairedFetched) {
+          Write-Host "Fetching private integrations dependency via SSH..."
+          go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
+          if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }
+        }
 
         Write-Host "Creating extraparsers.go..."
         New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
