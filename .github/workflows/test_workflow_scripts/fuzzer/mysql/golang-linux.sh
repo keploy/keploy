@@ -206,7 +206,7 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
+REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true

@@ -72,7 +72,7 @@ sleep 10
 
 # --- 3. Stop Recording ---
 section "Stop Recording"
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
+REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 if [ -n "$REC_PID" ]; then

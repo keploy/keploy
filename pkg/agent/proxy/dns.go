@@ -88,6 +88,33 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
+// shouldCacheDNSResponse reports whether a DNS resolution result is
+// eligible for the per-proxy dnsCache.
+//
+// Only real upstream responses are cached (FromUpstream == true), in
+// both record and test modes. Replayed-mock responses and
+// synthetic/fallback responses are intentionally NOT cached: mock
+// responses already come from an in-memory store and adding another
+// layer only complicates invalidation, and caching a fallback would
+// pin it for 30 s after transient upstream failures.
+//
+// Record-mode caching is safe against duplicate DNS-mock emission
+// because a cache hit short-circuits before resolveUncachedDNSResponse
+// is called — which is the only site that invokes recordDNSMock. As a
+// second line of defense recordDNSMock has its own (name, qtype)
+// dedupe tracker (p.recordedDNSMocks), so even if the cache were
+// bypassed the mock stream would still see each query at most once.
+// A 30 s TTL is short enough to pick up DNS record changes during a
+// long recording session yet long enough to amortise repeated
+// resolutions from client libraries that open one TCP connection per
+// request.
+func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
+	if !resp.FromUpstream {
+		return false
+	}
+	return mode == models.MODE_TEST || mode == models.MODE_RECORD
+}
+
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
@@ -147,9 +174,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if !found {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// Only cache real mock responses in test mode.
-			// Never cache synthetic/fallback responses, and never cache in record mode.
-			if mode == models.MODE_TEST && resp.FromUpstream {
+			if shouldCacheDNSResponse(mode, resp) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
@@ -188,7 +213,44 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
 				return resp
 			}
-			// Send mock not found error if we couldn't match any DNS mock.
+		}
+		// Mock miss (or mocking disabled). Before falling back to a
+		// synthetic/NXDOMAIN response, try forwarding to the cluster's
+		// real resolver (typically CoreDNS). This is the fix for the
+		// sap-demo / mysql.svc.cluster.local case: cluster-internal
+		// hostnames are not — and should not be — recorded as mocks, so
+		// a miss in replay mode is the expected shape for in-cluster
+		// DB / cache / queue connections. Faking them with the proxy's
+		// 127.0.0.1 (the legacy default) steers the app at the wrong
+		// IP and crashes the DB driver.
+		//
+		// When mocking is explicitly disabled the operator's intent is
+		// "use real traffic", so forwarding is even more clearly the
+		// right behaviour than returning a synthetic proxy IP.
+		//
+		// If the forward succeeds we return the real answer as
+		// FromUpstream so the outer cache layer retains it for the
+		// usual 30 s — subsequent queries don't hit the network.
+		// If the forward fails we fall through to the existing
+		// "mock not found" path: same error, same log line, same
+		// NXDOMAIN / synthetic fallback. Forwarding is strictly
+		// additive.
+		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+			p.logger.Debug("DNS mock miss resolved via upstream forward",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Int("rcode", fwdResp.Rcode),
+				zap.Int("answers", len(fwdResp.Answer)))
+			return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+		} else if fwdErr != nil {
+			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Error(fwdErr))
+		}
+		if mockingEnabled {
+			// Send mock not found error if we couldn't match any DNS
+			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
 				zap.String("query", question.Name),
@@ -252,9 +314,39 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	case dns.TypeAAAA:
-		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
-		// clients prefer an unreachable ::1 destination in IPv4-only environments.
-		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		// When EnableIPv6Redirect is set, the BPF cgroup program rewrites
+		// v6 destinations (including ::1) to the v4-mapped proxy address,
+		// so it is safe — and in fact required on modern Linux distros
+		// where glibc prefers ::1 over 127.0.0.1 — to answer AAAA with
+		// the proxy's v6 address. Mirror the TypeA path symmetrically.
+		//
+		// With the flag disabled we preserve the legacy behaviour of
+		// returning an empty AAAA answer: synthesising ::1 in a v4-only
+		// environment (no v6 redirect) would point clients at an
+		// unreachable destination.
+		if p.EnableIPv6Redirect {
+			proxyIP6 := net.ParseIP(p.IP6)
+			if proxyIP6 == nil {
+				// Fallback to v4-mapped ::ffff:<IP4> if p.IP6 is not a
+				// valid address (defensive — p.IP6 is hard-coded to ::1
+				// in New() today but could be overridden in docker mode).
+				if v4 := net.ParseIP(p.IP4); v4 != nil {
+					proxyIP6 = v4.To16()
+				}
+			}
+			if proxyIP6 != nil {
+				p.logger.Debug("synthesising AAAA answer for proxy v6 redirect", zap.String("proxy_ip6", proxyIP6.String()))
+				resp.Answer = []dns.RR{&dns.AAAA{
+					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: proxyIP6,
+				}}
+				return resp
+			}
+			// fall through to empty AAAA response if we could not build an answer
+			p.logger.Debug("could not build AAAA answer; returning empty AAAA response")
+			return resp
+		}
+		p.logger.Debug("AAAA synthesis disabled; returning empty AAAA response")
 		return resp
 
 	case dns.TypeSRV:
@@ -295,7 +387,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	default:
-		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
+		p.logger.Debug("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 		return resp
 	}
 }
@@ -420,15 +512,27 @@ func generateDNSDedupeKey(question dns.Question) string {
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
-	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	// Prefer the upstream resolver list captured once at proxy
+	// startup (see captureDNSUpstream). This is critical in sidecar
+	// deployments where the app-container resolv.conf has been
+	// rewritten so the `nameserver` entry is 127.0.0.1 and DNS
+	// traffic is redirected to the agent's port 26789 via iptables/
+	// eBPF (resolv.conf entries themselves are IP-only and carry no
+	// port). Re-reading the file here would either (a) discover the
+	// loopback entry and forward queries back at ourselves, or
+	// (b) discover nothing at all. Capturing once at startup pins
+	// the REAL cluster resolvers.
+	//
+	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
+	// rare local-dev case where the proxy runs outside a cluster AND
+	// resolv.conf is entirely missing — the forwarder treats this as
+	// "no upstream" and we would otherwise be stuck.
 	var servers []string
 	port := "53"
-
-	if err == nil {
-		servers = config.Servers
-		port = config.Port
+	if p.hasDNSUpstream() {
+		servers = p.dnsUpstreamServers
+		port = p.dnsUpstreamPort
 	} else {
-		// Fallback to public DNS if resolv.conf fails
 		servers = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
@@ -549,14 +653,35 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		zap.Int("rcode", in.Rcode),
 	)
 
-	if session.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.SetOutputChannel(session.MC)
+	// DNS is a separate key-value map, not a streaming parser; each
+	// (name, qtype) unique query is captured exactly once via the
+	// p.recordedDNSMocks dedupe above, independent of whether the
+	// first app request has been seen. Route every DNS mock through
+	// SyncMockManager so its outChanMu also guards the send against
+	// a concurrent CloseOutChan during proxy shutdown — a bare
+	// `session.MC <- mock` here would race the close.
+	//
+	// SendConfigMock is the bypass-buffering path: unlike AddMock
+	// it does not observe firstReqSeen, matching the original async
+	// behavior of always forwarding immediately. The Synchronous
+	// path keeps AddMock so its session-level ordering (startup
+	// buffer then flush) stays intact.
+	//
+	// SetOutputChannel is safe to call on every DNS mock because it
+	// is now idempotent: a same-pointer re-bind (this hot path) is
+	// a no-op, and a post-Close same-pointer call deliberately does
+	// NOT reset outChanClosed — see SetOutputChannel's doc. DNS
+	// needs to be able to bind the channel the first time a query
+	// arrives, which may precede the first TCP connection that
+	// otherwise triggers proxy.buildRecordSession's SetOutputChannel.
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(session.MC)
+		if session.Synchronous {
 			mgr.AddMock(mock)
-			return resp, nil
+		} else {
+			mgr.SendConfigMock(mock)
 		}
 	}
-	session.MC <- mock
 	return resp, nil
 }
 

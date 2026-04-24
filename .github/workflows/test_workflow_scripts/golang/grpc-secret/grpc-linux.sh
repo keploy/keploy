@@ -66,7 +66,7 @@ wait_for_port_release() {
 
     echo "Waiting for port ${port} to be released..."
     for ((i=0; i<timeout_seconds; i++)); do
-        if ! lsof -tiTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port ${port} is free"
             return 0
         fi
@@ -74,7 +74,7 @@ wait_for_port_release() {
     done
 
     echo "Port ${port} is still in use after ${timeout_seconds}s"
-    lsof -iTCP:"${port}" -sTCP:LISTEN -Pn || true
+    ss -ltnp | grep ":${port} " || true
     return 1
 }
 

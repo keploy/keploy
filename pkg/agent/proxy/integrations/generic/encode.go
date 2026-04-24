@@ -126,6 +126,23 @@ func forwardBidirectional(clientConn, destConn net.Conn) error {
 // createGenericMocksAsync reads captured data from both channels and creates
 // mock entries based on request-response alternation. Runs in a background
 // goroutine — never blocks the forwarding path.
+//
+// Exchange-boundary detection: a request-response pair is flushed to the
+// syncMock buffer the instant the first response chunk arrives, not when
+// the next request starts. Flushing on "next request" is too late for
+// pooled connections — the next request can be seconds away (mongo driver
+// checkout/heartbeat pools), by which point the enterprise capture has
+// already run ResolveRange for the test and the 7-second buffer cutoff in
+// syncMock.ResolveRange discards the pending mock. The consequence was
+// that in static-dedup mode every test after the first recorded zero
+// mocks.
+//
+// The tradeoff: a server reply split into multiple TCP read chunks lands
+// as a single mock here (only the first chunk), with trailing chunks
+// dropped. For the protocols generic is a fallback for (mongo wire,
+// various binary RPC), responses are almost always a single write and
+// therefore one io.Copy chunk. A future protocol-aware parser should
+// supersede generic where framing matters.
 func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, destCh <-chan []byte) {
 	var genericRequests []models.Payload
 	var genericResponses []models.Payload
@@ -153,6 +170,17 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				ResTimestampMock: resTimestampMock,
 				Metadata:         metadata,
 			},
+			// Generic TCP has no well-defined protocol for the recorder to
+			// classify commands against; the legacy recorder tags every
+			// exchange Metadata["type"]="config" which DeriveLifetime
+			// previously resolved to LifetimeSession. Stamp that explicitly
+			// so the filter layer's authoritative routing (Lifetime-first,
+			// metadata.type fallback) short-circuits on a single enum
+			// compare — no map probe, no kind fallback.
+			TestModeInfo: models.TestModeInfo{
+				Lifetime:        models.LifetimeSession,
+				LifetimeDerived: true,
+			},
 		}
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.AddMock(mock)
@@ -171,9 +199,21 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				clientCh = nil
 				continue
 			}
-			// New request after response — previous exchange complete.
+			// Back-stop for the rare case where the previous completed
+			// request/response exchange was not flushed when its first
+			// response chunk arrived. When the next client chunk shows
+			// up, flush that already-paired exchange before starting a
+			// new one. The common case is flushed below on the first
+			// response chunk, so this branch is normally a no-op.
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				flushMock()
+			}
+			// Starting a brand-new exchange: drop any orphaned response
+			// chunks from a previous multi-chunk server reply whose
+			// head chunk was already flushed, and reset the request
+			// timestamp to this request's arrival time.
+			if len(genericRequests) == 0 {
+				genericResponses = nil
 				reqTimestampMock = time.Now()
 			}
 			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
@@ -184,11 +224,21 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				destCh = nil
 				continue
 			}
-			if prevChunkWasReq {
-				reqTimestampMock = time.Now()
-			}
 			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
 			resTimestampMock = time.Now()
+
+			// Flush the moment the first response chunk for an
+			// outstanding request arrives. This makes the mock visible
+			// to the syncMock buffer BEFORE the enterprise capture's
+			// ResolveRange call fires for the current test, which in
+			// static-dedup mode is what associates the mock with the
+			// right test window. Waiting any longer (for the next
+			// client chunk or an idle timer) misses the window on
+			// pooled connections where the next request is seconds
+			// away.
+			if prevChunkWasReq && len(genericRequests) > 0 {
+				flushMock()
+			}
 			prevChunkWasReq = false
 		}
 	}
