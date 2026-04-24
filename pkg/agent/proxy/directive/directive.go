@@ -105,16 +105,13 @@ type Directive struct {
 // ClientStream/DestStream is plaintext from the upgraded session."
 //
 // On failure (OK=false), Err is populated with the root cause.
-// The directive package itself does not abort anything — the relay
-// just returns this Ack; whether to mark the mock incomplete, fall
-// through to passthrough, or retry is the parser's call (with
-// supervisor/dispatcher cooperation). The conventional flow used
-// by migrated parsers is: on OK=false, call
-// session.MarkMockIncomplete(reason) and return the wrapped error;
-// the supervisor then sees the non-nil return and
-// FallthroughToPassthrough routing kicks in at the dispatcher
-// layer. Subsequent reads on ClientStream/DestStream return
-// EOF/ErrClosed once the relay closes the FakeConns.
+// The directive package itself implies no particular follow-on
+// action: the relay returns this Ack, and higher layers decide
+// whether to mark the mock incomplete, propagate the error, retry,
+// continue forwarding, or do something else. Any supervisor,
+// dispatcher, fallthrough, cancellation, or subsequent stream
+// closure/read behavior is implementation-specific and must not be
+// inferred from OK=false alone.
 type Ack struct {
 	Kind              Kind
 	OK                bool
