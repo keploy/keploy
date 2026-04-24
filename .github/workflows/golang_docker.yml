@@ -21,11 +21,6 @@ jobs:
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
-          - name: dns-strict-resolver
-            path: dns-strict-resolver
-            script_dir: dns_strict_resolver
-            # samples-go branch pin — drop once samples-go#223 merges.
-            samples_ref: feat/dns-strict-resolver-sample
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -60,7 +55,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
-          ref: ${{ matrix.app.samples_ref || 'main' }}
+          ref: main
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:
