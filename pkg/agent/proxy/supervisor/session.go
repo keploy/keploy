@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -118,8 +119,10 @@ type Session struct {
 
 	// --- Internal bookkeeping ---
 
-	mockIncomplete atomic.Bool
-	hookMu         sync.Mutex
+	mockIncomplete   atomic.Bool
+	hookMu           sync.Mutex
+	lastReqMu        sync.Mutex
+	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
 }
 
 // AddPostRecordHook adds h to the front of the session's post-record chain
@@ -207,6 +210,24 @@ func (s *Session) EmitMock(m *models.Mock) error {
 		return nil
 	}
 
+	// Propagate the session's ClientConnID onto the mock when the
+	// parser didn't already set it. This matches the documented
+	// contract on Session.ClientConnID and removes a common source
+	// of per-parser boilerplate. Parsers that want to override (e.g.
+	// a wrapper tagging a composite connection ID) can still assign
+	// m.ConnectionID before calling EmitMock.
+	if m.ConnectionID == "" && s.ClientConnID != "" {
+		m.ConnectionID = s.ClientConnID
+	}
+
+	// Enforce per-session ReqTimestampMock monotonicity (I5). In
+	// debug builds, a regression panics the test so parser bugs
+	// surface immediately; in prod the timestamp is clamped up to
+	// lastReq + 1ns so the matcher's ordering invariant still holds.
+	// The clamp is strictly within the same connection; sessions
+	// across connections are independent.
+	s.enforceReqMonotonic(m)
+
 	s.hookMu.Lock()
 	hook := s.OnMockRecorded
 	s.hookMu.Unlock()
@@ -231,3 +252,48 @@ func (s *Session) EmitMock(m *models.Mock) error {
 		return ctx.Err()
 	}
 }
+
+// enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least
+// s.lastReqTimestamp + 1ns when a regression is detected, and
+// updates the session's last-seen timestamp. In debug builds we
+// panic instead so regressions surface during testing. Thread-safe:
+// holds lastReqMu while comparing + writing back.
+//
+// Zero-valued ReqTimestampMock values pass through untouched
+// (parsers that haven't populated them, e.g. tests with pre-built
+// minimal mocks, shouldn't trigger the clamp).
+func (s *Session) enforceReqMonotonic(m *models.Mock) {
+	req := m.Spec.ReqTimestampMock
+	if req.IsZero() {
+		return
+	}
+	s.lastReqMu.Lock()
+	defer s.lastReqMu.Unlock()
+	if s.lastReqTimestamp.IsZero() {
+		s.lastReqTimestamp = req
+		return
+	}
+	if req.Before(s.lastReqTimestamp) {
+		clamped := s.lastReqTimestamp.Add(time.Nanosecond)
+		if debugMonotonic.Load() {
+			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
+		}
+		m.Spec.ReqTimestampMock = clamped
+		req = clamped
+	}
+	s.lastReqTimestamp = req
+}
+
+// debugMonotonic, when true, causes enforceReqMonotonic to panic on
+// an out-of-order emission instead of clamping — surfacing parser
+// bugs loudly in test binaries. Production builds leave this false
+// so a timestamp regression silently clamps rather than crashing
+// the agent; the clamp preserves matcher correctness either way.
+// Tests that want strict checking set it via SetDebugMonotonic.
+var debugMonotonic atomic.Bool
+
+// SetDebugMonotonic toggles debug-build monotonicity enforcement.
+// When enabled, EmitMock panics on an out-of-order ReqTimestampMock
+// instead of clamping. Intended for test binaries; production should
+// leave it disabled.
+func SetDebugMonotonic(v bool) { debugMonotonic.Store(v) }

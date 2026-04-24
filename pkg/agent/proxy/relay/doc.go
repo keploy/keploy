@@ -24,7 +24,10 @@
 // real sockets on parser misbehavior or on its own Run returning — it
 // only reads and writes them. Callers close them at connection end.
 //
-// This package is Phase 2 scaffolding per PLAN.md and is not yet wired
-// into handleConnection; it compiles and is fully unit-tested in
-// isolation so that the wiring PR is small and reviewable.
+// This package is wired into the record path via the V2 dispatcher
+// (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
+// (those implementing integrations.IntegrationsV2 with IsV2()==true)
+// run inside a supervisor attached to a Relay; legacy parsers
+// continue on the pre-V2 path unchanged. The KEPLOY_NEW_RELAY=off
+// env var forces legacy routing for all parsers as a rollback knob.
 package relay

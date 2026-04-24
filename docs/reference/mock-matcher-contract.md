@@ -92,25 +92,32 @@ in the local process zone for consistency with the test harness's
 
 ## Ordering guarantee
 
-The supervisor provides per-session monotonicity for `ReqTimestampMock`:
+The supervisor enforces per-session monotonicity for `ReqTimestampMock`
+inside `Session.EmitMock`. The implementation holds a short
+`sync.Mutex` around a `lastReqTimestamp` field and on every emit:
 
-```go
-// supervisor/session.go (simplified)
-func (s *Session) EmitMock(m *models.Mock) error {
-    // ... internal: if m.Spec.ReqTimestampMock < s.lastReq,
-    // clamp to s.lastReq + 1ns and log at debug.
-}
-```
+- If the mock's `ReqTimestampMock` is zero, pass through (parsers or
+  test mocks without a populated timestamp bypass the clamp).
+- If it is strictly earlier than `lastReqTimestamp`, clamp it up to
+  `lastReqTimestamp + 1ns`. The matcher's ordering invariant holds
+  either way; the clamp only corrects parser-internal reordering
+  harmlessly.
+- When `supervisor.SetDebugMonotonic(true)` is called (typically by
+  test binaries), a regression panics instead of clamps so parser
+  bugs surface immediately. Production leaves it off.
 
-In debug builds, a regression (out-of-order emission) panics the test.
-In production, it silently clamps. Parsers should not rely on the
-clamp; emitting ordered mocks is the parser's responsibility.
+Parsers should not rely on the clamp to hide ordering bugs — it is a
+correctness backstop, not a substitute for emitting ordered mocks.
 
 ## Connection tagging
 
 `ConnectionID` must be stable across all mocks emitted by a single
 `Session`. In the V2 path, `Session.ClientConnID` is the canonical
-source; parsers should carry it through as-is into each emitted mock.
+source; `EmitMock` propagates it onto `mock.ConnectionID` when the
+parser has not already populated the field. Parsers that need to
+override (e.g. a wrapper parser tagging a composite ID) can still
+assign `m.ConnectionID` explicitly before calling `EmitMock`.
+
 The matcher uses connection tagging for protocols where state is
 connection-scoped (e.g. MySQL prepared statements, Postgres extended
 query protocol).
