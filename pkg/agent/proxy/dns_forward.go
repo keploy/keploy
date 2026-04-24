@@ -77,7 +77,7 @@ func (p *Proxy) captureDNSUpstream() {
 	}
 	p.dnsUpstreamServers = filtered
 	p.dnsUpstreamPort = nsPort
-	p.logger.Info("captured upstream DNS resolvers for forward-on-miss",
+	p.logger.Debug("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
 		zap.String("port", p.dnsUpstreamPort))
 }
