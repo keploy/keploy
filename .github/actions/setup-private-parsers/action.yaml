@@ -12,6 +12,17 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
+    # Default back to 'main' so downstream workflows that don't pass
+    # integration-ref explicitly stay pinned to a stable ref after
+    # this PR merges. Cross-repo CI during review (where we want the
+    # proxy-v2-foundation build to pick up feat/v2-native-parsers in
+    # the integrations repo) is wired via the repo-level
+    # `vars.INTEGRATION_REF` variable — see the
+    # `INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}` env
+    # lines at the top of prepare_and_run*.yml / golangci-lint.yml.
+    # Set that repo variable to feat/v2-native-parsers during the
+    # review window; unset it (or it falls back to 'main') after
+    # merge — no action.yaml changes needed.
     default: 'main'
 
 runs:
@@ -23,15 +34,32 @@ runs:
         go-version-file: go.mod
         cache: ${{ inputs.go-cache }}
 
-    # --- Linux/macOS: Add Known Hosts ---
+    # --- Add Known Hosts (all OSes) ---
+    #
+    # Hard-code GitHub's published SSH host keys instead of running
+    # `ssh-keyscan github.com`. The Windows runner's bundled OpenSSH
+    # can't complete the GitHub-side KEX negotiation since GitHub
+    # started offering `sntrup761x25519-sha512@openssh.com` — the
+    # client aborts with `choose_kex: unsupported KEX method ...`
+    # and the step exits 1. Pinning to GitHub's documented
+    # fingerprints (see https://docs.github.com/en/authentication/
+    # keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+    # is also stronger from a supply-chain standpoint — we never
+    # trust whatever `ssh-keyscan` hands back from the wire.
+    #
+    # If GitHub rotates a key, update the literals here. Keys last
+    # rotated 2023-03-24 (RSA) — others are long-lived.
     - name: Add GitHub to known hosts (non-Windows)
       if: runner.os != 'Windows'
       shell: bash
       run: |
         mkdir -p ~/.ssh
-        ssh-keyscan github.com >> ~/.ssh/known_hosts
+        cat <<'EOF' >> ~/.ssh/known_hosts
+        github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+        github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+        github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+        EOF
 
-    # --- Windows: Add Known Hosts ---
     # Skip when GIT_SSH_COMMAND is already set (per-run isolation handles known_hosts)
     - name: Add GitHub to known hosts (Windows)
       if: runner.os == 'Windows' && !env.GIT_SSH_COMMAND
@@ -41,8 +69,15 @@ runs:
         if (-not (Test-Path -Path $sshDir)) {
             New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
         }
-        # Using ascii ensures no BOM issues with SSH
-        ssh-keyscan github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii -Append
+        $knownHosts = Join-Path $sshDir "known_hosts"
+        # Hard-coded GitHub host keys — see non-Windows step for rationale.
+        # Ascii encoding avoids BOM issues with OpenSSH's parser.
+        $keys = @(
+          "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+          "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+          "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
+        )
+        $keys | Out-File -FilePath $knownHosts -Encoding ascii -Append
 
     # --- SSH Agent (Common) ---
     - name: Load Private SSH Key
@@ -70,6 +105,9 @@ runs:
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
         	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
+        	// v3 — deterministic Postgres record/replay; registers at
+        	// priority 110 so new recordings pick it up over v2.
+        	_ "github.com/keploy/integrations/pkg/postgres/v3"
         )
         EOF
 
@@ -100,6 +138,8 @@ runs:
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
+        	_ "github.com/keploy/integrations/pkg/postgres/v3"
         )
         "@
 

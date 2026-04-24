@@ -170,6 +170,17 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				ResTimestampMock: resTimestampMock,
 				Metadata:         metadata,
 			},
+			// Generic TCP has no well-defined protocol for the recorder to
+			// classify commands against; the legacy recorder tags every
+			// exchange Metadata["type"]="config" which DeriveLifetime
+			// previously resolved to LifetimeSession. Stamp that explicitly
+			// so the filter layer's authoritative routing (Lifetime-first,
+			// metadata.type fallback) short-circuits on a single enum
+			// compare — no map probe, no kind fallback.
+			TestModeInfo: models.TestModeInfo{
+				Lifetime:        models.LifetimeSession,
+				LifetimeDerived: true,
+			},
 		}
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.AddMock(mock)

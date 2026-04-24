@@ -39,6 +39,8 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  healthUrl: ""
+  healthPollTimeout: 60s
   host: "localhost"
   port: 0
   grpcPort: 0
@@ -134,6 +136,11 @@ func New() *Config {
 	if err != nil {
 		panic(err)
 	}
+	// Defaults for fields whose Go zero value is not the desired default.
+	// EnableIPv6Redirect defaults to true so ::1 traffic is redirected to
+	// the proxy on modern Linux distros where glibc resolves localhost to
+	// ::1 first. Setting it false in config is the opt-in rollback knob.
+	config.Agent.EnableIPv6Redirect = true
 	return config
 }
 
