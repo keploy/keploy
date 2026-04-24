@@ -358,3 +358,51 @@ func TestPostgresV3Cell_RawValue_YAMLtoGobRoundtrip(t *testing.T) {
 		t.Errorf("gob round-trip mismatch: %+v", raw2)
 	}
 }
+
+// Pre-PostgresV3Cell recordings encoded SQL NULL as the printable
+// string "~~KEPLOY_PG_NULL~~" inside [][]string Rows. When the new
+// binary loads those mocks for replay the sentinel must translate back
+// to a proper NULL — otherwise every legacy NULL cell silently turns
+// into a real text string, breaking row-level comparisons.
+func TestPostgresV3Cell_LegacyNullSentinel_DecodedAsNull(t *testing.T) {
+	for _, body := range []string{
+		// Double-quoted: yaml.v3 tags as !!str.
+		"\"~~KEPLOY_PG_NULL~~\"\n",
+		// Plain untagged scalar — same path, different tag branch.
+		"~~KEPLOY_PG_NULL~~\n",
+	} {
+		var c PostgresV3Cell
+		if err := yaml.Unmarshal([]byte(body), &c); err != nil {
+			t.Fatalf("legacy null sentinel %q unmarshal: %v", body, err)
+		}
+		if !c.IsNull() {
+			t.Errorf("legacy null sentinel %q: Value=%v (type %T), want NULL", body, c.Value, c.Value)
+		}
+	}
+}
+
+// yaml.v3 folds long !!binary scalars onto continuation lines and the
+// embedded whitespace bleeds into node.Value; base64.StdEncoding
+// rejects that, so UnmarshalYAML strips it before decoding. This test
+// feeds a hand-wrapped payload to pin the fix.
+func TestPostgresV3Cell_BinaryWithFoldedWhitespace_Decodes(t *testing.T) {
+	// yaml-authored payload with a real line wrap inside the scalar —
+	// identical in effect to what yaml.v3 emits for long binary cells.
+	// The original bytes are the 12-byte sequence below; base64 is
+	// "AAECAwQFBgcICQoL", wrapped at position 6 across two lines. With
+	// the `|` indicator the newline becomes whitespace in the scalar.
+	body := "!!binary |\n  AAECAwQF\n  BgcICQoL\n"
+
+	var c PostgresV3Cell
+	if err := yaml.Unmarshal([]byte(body), &c); err != nil {
+		t.Fatalf("folded !!binary unmarshal: %v", err)
+	}
+	got, ok := c.Value.([]byte)
+	if !ok {
+		t.Fatalf("folded !!binary: Value=%v (type %T), want []byte", c.Value, c.Value)
+	}
+	want := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B}
+	if !bytes.Equal(got, want) {
+		t.Errorf("folded !!binary decode: got %x, want %x", got, want)
+	}
+}

@@ -203,11 +203,12 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
 					InvocationID:  "0:0",
-					// Binary bindFormat=1 cell: the int4 value 1 on the wire
-					// (4 bytes, big-endian). Stored as a PostgresV3Cell which
-					// will serialise as !!binary in YAML because the bytes
-					// contain NULs that fail the plain-string predicate.
-					BindValues:  models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					// One binary-format bind (bindFormat=1) for the bigint
+					// $1 placeholder. Under the logical-value cell schema
+					// the bind is stored as int64(1); the format code says
+					// the client sent it on the wire in binary, which the
+					// replayer reconstructs via the codec at Bind time.
+					BindValues:  models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats: []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
@@ -244,8 +245,13 @@ func TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
+					ParamOIDs:     []uint32{20},
 					InvocationID:  "0:0",
-					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					// Logical int64 bind for the bigint $1 placeholder —
+					// see the matching comment in the non-NULL variant of
+					// this test for why we keep it in logical form even
+					// though BindFormats records binary on the wire.
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{

@@ -310,11 +310,17 @@ type PostgresV3QuerySpec struct {
 	PrecedingTxState string `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
 
 	// BindValues holds the client-supplied bind parameters for this
-	// invocation, one entry per placeholder. Cells are serialised via
-	// PostgresV3Cell so text-format binds (bindFormat 0) land as
-	// plain YAML strings (eyeballable + greppable) and binary-format
-	// binds (bindFormat 1) land as !!binary base64. NULL binds are
-	// distinguished from empty-string binds via Cell.IsNull.
+	// invocation, one entry per placeholder. Cells are stored as
+	// logical Go values (int64, float64, string, bool, time.Time, []byte,
+	// or PostgresV3CellRaw for unknown OIDs) irrespective of the wire
+	// format the client used; PostgresV3Cell.MarshalYAML picks the
+	// appropriate scalar tag per value so common types stay eyeballable
+	// and greppable in mocks.yaml while bytea and raw-OID payloads land
+	// as !!binary. NULL binds are distinguished from empty-string binds
+	// via Cell.IsNull. BindFormats records the client's per-placeholder
+	// format flag (0=text, 1=binary) so the replayer can re-encode the
+	// logical value on the wire in the form the live client expects,
+	// regardless of which form the recorder originally captured.
 	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 

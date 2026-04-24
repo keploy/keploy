@@ -135,7 +135,12 @@ runs:
         }
 
         # Step 1: PR body override.
-        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[Ii]ntegration-[Rr]ef:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '[:space:]' || true)"
+        # Tolerant matcher: accept the tag anywhere on a line — optional
+        # leading whitespace or a list marker ("- ", "* ", "> ") — and
+        # case-insensitive on both the "Integration" and "Ref" halves so
+        # common markdown rendering variants and hand-edited PR bodies
+        # still pair correctly.
+        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '[:space:]' || true)"
         if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
           try_fetch "$BODY_REF" "PR body Integration-Ref" || true
         fi
@@ -201,7 +206,11 @@ runs:
         # See the non-Windows step for the full rationale.
         $BodyRef = $null
         if ($env:PR_BODY) {
-          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*integration-ref\s*:' } | Select-Object -First 1
+          # Tolerant matcher: accept the tag with optional leading
+          # whitespace or a list marker ("- ", "* ", "> "), mirroring
+          # the non-Windows branch. Keeps the cross-repo pairing
+          # working when reviewers edit PR bodies by hand.
+          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*([-*>]\s+)?integration-ref\s*:' } | Select-Object -First 1
           if ($line) {
             $BodyRef = ($line -replace '^[^:]+:\s*', '' -replace '\s', '')
           }

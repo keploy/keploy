@@ -182,7 +182,12 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
 					InvocationID:  "0:0",
-					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					// Logical int64 bind for the bigint $1 — BindFormats
+					// records that the wire format was binary; the cell
+					// itself stays in logical form so the replayer can
+					// re-encode it to match whatever format the live
+					// client selects at Bind time.
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
 					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 					Response: &models.PostgresV3Response{
@@ -276,8 +281,9 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
+					ParamOIDs:     []uint32{20},
 					InvocationID:  "0:0",
-					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{

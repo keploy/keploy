@@ -27,6 +27,7 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
+	"strings"
 	"time"
 
 	yaml "gopkg.in/yaml.v3"
@@ -52,10 +53,21 @@ type PostgresV3Cell struct {
 	//   bytea           → []byte
 	//   uuid            → string (canonical 8-4-4-4-12 form)
 	//   json/jsonb      → string (canonical UTF-8 JSON)
-	//   unknown OIDs    → *codec.RawValue (format-tagged bytes;
-	//                     format drift not transcoded without codec).
+	//   unknown OIDs    → PostgresV3CellRaw (format-tagged bytes,
+	//                     carried through the mock as-is; the codec
+	//                     shim on the integration side duck-types on
+	//                     RawBytesAndFormat and re-emits without
+	//                     transcoding across text ↔ binary since no
+	//                     codec is registered for the OID).
 	Value any
 }
+
+// legacyNullSentinel is the printable string that pre-PostgresV3Cell
+// recordings wrote into [][]string Rows to denote SQL NULL. New
+// recordings never emit this string (NULL goes through native YAML
+// null / Cell.IsNull); UnmarshalYAML translates it back to nil so
+// legacy mocks keep distinguishing NULL from empty-string.
+const legacyNullSentinel = "~~KEPLOY_PG_NULL~~"
 
 // NullCell returns a cell representing SQL NULL.
 func NullCell() PostgresV3Cell {
@@ -135,6 +147,19 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 			c.Value = f
 			return nil
 		case "!!str":
+			// Legacy pre-PostgresV3Cell recordings stored SQL NULL as
+			// the printable sentinel "~~KEPLOY_PG_NULL~~" inside the
+			// [][]string Rows shape (earlier revisions used
+			// "\x00NULL\x00", but yaml.v3 rejects NUL bytes so the
+			// printable form shipped). When the new binary reads those
+			// old mocks for backward compatibility, translate the
+			// sentinel back to a proper NULL — otherwise every legacy
+			// NULL cell would collapse to a real string of the
+			// sentinel's text, corrupting row-level comparisons.
+			if node.Value == legacyNullSentinel {
+				c.Value = nil
+				return nil
+			}
 			c.Value = node.Value
 			return nil
 		case "!!binary":
@@ -143,7 +168,19 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 			// with "cannot unmarshal !!binary into []uint8" because
 			// the resolver doesn't round-trip its own tag into a
 			// concrete Go type. Decode the base64 ourselves.
-			b, err := base64.StdEncoding.DecodeString(node.Value)
+			//
+			// yaml.v3 folds long !!binary payloads onto continuation
+			// lines, and the emitter keeps the embedded newlines in
+			// node.Value when the line exceeds ~80 columns. StdEncoding
+			// rejects those, so strip ASCII whitespace (space, tab,
+			// CR, LF) before decoding. yaml.v3 itself never inserts
+			// anything outside that set into the scalar, and real
+			// base64 payloads never contain those characters either.
+			raw := node.Value
+			if strings.ContainsAny(raw, " \t\r\n") {
+				raw = stripBase64Whitespace(raw)
+			}
+			b, err := base64.StdEncoding.DecodeString(raw)
 			if err != nil {
 				return fmt.Errorf("PostgresV3Cell: !!binary base64 decode: %w", err)
 			}
@@ -162,6 +199,13 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 		// YAML 1.2. yaml.v3 has no exported PlainStyle constant; style
 		// value 0 is the "no explicit style" (plain) encoding.
 		if node.Value == "" && node.Style == 0 {
+			c.Value = nil
+			return nil
+		}
+		// Legacy NULL sentinel (see !!str branch above) when the node
+		// came through un-tagged — e.g. read from a bare `- ~~KEPLOY_PG_NULL~~`
+		// entry in a legacy Rows fixture. Same translation applies.
+		if node.Value == legacyNullSentinel {
 			c.Value = nil
 			return nil
 		}
@@ -215,6 +259,24 @@ func isPostgresV3CellRawNode(node *yaml.Node) bool {
 		}
 	}
 	return seenFormat && seenBytes
+}
+
+// stripBase64Whitespace removes space / tab / CR / LF from s. Used to
+// un-fold !!binary payloads the yaml.v3 emitter wraps across multiple
+// lines for long scalars; StdEncoding.DecodeString can't tolerate the
+// embedded whitespace but the character set we strip is disjoint from
+// the base64 alphabet so no legitimate payload byte is lost.
+func stripBase64Whitespace(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			b = append(b, s[i])
+		}
+	}
+	return string(b)
 }
 
 // Gob round-trip — the recorder sidecar streams mocks to the agent
