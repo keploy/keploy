@@ -60,6 +60,29 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// sanitizeHealthURL returns a log-safe rendering of a --health-url value.
+// The raw string is operator-supplied and can legitimately carry secrets:
+// basic-auth userinfo (e.g. https://user:pw@host/healthz), API tokens in
+// the query string (...?token=abc), or session fragments. Emitting any of
+// those to zap fields would leak them into structured log sinks, tailing
+// aggregators, and error-reporting backends. We strip userinfo, query,
+// and fragment; scheme + host + path is enough signal to diagnose a
+// misconfigured poll target.
+//
+// On unparseable input we return a fixed placeholder — the operator
+// already gets the raw reason via the separate "reason" field in the
+// invalid-URL Error log, so we don't need to echo the raw string back.
+func sanitizeHealthURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return "<unparseable-health-url-redacted>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 // validateHealthURL checks that s is a syntactically usable HTTP(S) URL for
 // http.NewRequestWithContext — i.e. it has a scheme of http or https and a
 // non-empty host. We intentionally keep validation purely syntactic: no DNS
@@ -134,9 +157,9 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	if healthURL != "" {
 		if reason, ok := validateHealthURL(healthURL); !ok {
 			logger.Error("invalid --health-url; falling back to fixed delay",
-				zap.String("healthUrl", healthURL),
+				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
 				zap.String("reason", reason),
-				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", healthURL)+" — fix it or omit to use --delay only"),
+				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host — fix it or omit to use --delay only"),
 			)
 			healthURL = "" // fall through to the empty-URL / fixed-delay branch below
 		}
@@ -162,7 +185,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	}
 
 	logger.Info("polling application health endpoint before firing tests",
-		zap.String("healthUrl", cfg.Test.HealthURL),
+		zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
 		zap.Duration("pollTimeout", pollCeiling),
 	)
 
@@ -182,7 +205,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	// first attempt is bounded by the remaining poll ceiling.
 	if healthPoller(pollCtx, cfg.Test.HealthURL) {
 		logger.Debug("health endpoint reported 2xx; proceeding",
-			zap.String("healthUrl", cfg.Test.HealthURL),
+			zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
 		)
 		return true
 	}
@@ -213,7 +236,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// repo logging guidelines; the message still tells operators
 			// exactly which knobs to turn.
 			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
-				zap.String("healthUrl", cfg.Test.HealthURL),
+				zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
 			)
@@ -228,7 +251,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		case <-ticker.C:
 			if healthPoller(pollCtx, cfg.Test.HealthURL) {
 				logger.Debug("health endpoint reported 2xx; proceeding",
-					zap.String("healthUrl", cfg.Test.HealthURL),
+					zap.String("healthUrl", sanitizeHealthURL(cfg.Test.HealthURL)),
 				)
 				return true
 			}
