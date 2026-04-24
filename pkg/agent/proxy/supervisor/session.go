@@ -218,9 +218,29 @@ func (s *Session) IsMockIncomplete() bool {
 // is dropped on the floor and the incomplete flag is cleared, matching
 // the "partial mocks are dropped" invariant).
 //
-// EmitMock honours context cancellation: if Ctx is done before the
-// send succeeds, Ctx.Err() is returned. The caller's post-record hook
-// chain runs synchronously before the send so wrappers can annotate.
+// Context cancellation semantics differ between the two delivery paths:
+//
+//   - Direct-channel path (RouteMocksViaSyncMock=false, s.Mocks bound):
+//     fully honours Ctx — EmitMock's select blocks on `s.Mocks <- m`
+//     vs `<-ctx.Done()` and returns ctx.Err() on cancel. Once the send
+//     wins, delivery is guaranteed; the caller never races backpressure.
+//
+//   - SyncMock path (RouteMocksViaSyncMock=true): ctx is checked ONCE
+//     before calling mgr.AddMock. If ctx was already cancelled,
+//     EmitMock returns ctx.Err() without touching the manager. If ctx
+//     cancels AFTER the AddMock call starts, AddMock runs to completion
+//     (buffers the mock, or blocks in its own bounded sendToOutChan
+//     up to sendBudget) and EmitMock returns nil. AddMock may also
+//     drop the mock under backpressure/memory-pause without signalling
+//     the caller — the drop is recorded on the manager's drop counter
+//     instead. This is a deliberate asymmetry: the syncMock manager
+//     owns its own lifecycle so best-effort delivery with ctx-probe
+//     on entry is the cleanest fit; forcing ctx through would
+//     require threading it into every AddMock call site in the legacy
+//     record path too.
+//
+// Caller's post-record hook chain (OnMockRecorded) runs synchronously
+// before either delivery branch so wrappers can annotate.
 //
 // It is safe to call EmitMock with a nil session (returns nil); this
 // matches the defensive shape of RecordSession call sites. A nil m is
@@ -291,17 +311,18 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
 		if mgr := syncMock.Get(); mgr != nil {
-			// Honour s.Ctx cancellation on this path too.
-			// syncMock.AddMock itself does not observe s.Ctx — it
-			// takes its own mutex, may sit in sendToOutChan up to
-			// the manager's internal sendBudget, and never returns
-			// an error. Without this pre-check the caller would see
-			// EmitMock return nil even after the parser's context
-			// was cancelled, breaking the "EmitMock honours Ctx"
-			// contract documented above. Match the behaviour of the
-			// direct-channel path below (returns ctx.Err() on
-			// cancellation) so both routings look identical to the
-			// parser.
+			// Best-effort ctx probe. syncMock.AddMock doesn't
+			// observe s.Ctx — it takes its own mutex and may sit
+			// in sendToOutChan up to the manager's internal
+			// sendBudget without signalling cancellation back to
+			// us. A pre-check at least catches the "already
+			// cancelled" case so we don't spend AddMock's bounded
+			// wait on work the parser already abandoned. Post-call
+			// cancellation during AddMock's send is documented as
+			// a semantic difference from the direct-channel branch
+			// (see the EmitMock doc comment above); forcing full
+			// ctx-honoring into AddMock would require threading
+			// ctx through every legacy record-path call site too.
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
 					return err
