@@ -65,9 +65,12 @@ func (k Kind) String() string {
 // The relay processes the two configs in order: DestTLSConfig first
 // (keploy acts as TLS client to the real destination), then
 // ClientTLSConfig (keploy acts as TLS server to the real client,
-// presenting the MITM cert). If either side's handshake fails, the
-// ack's OK is false and the parser is expected to accept that the
-// rest of the connection becomes passthrough.
+// presenting the MITM cert). A handshake failure is reported via the
+// ack (OK=false, Err populated); how the caller handles that — mark
+// the mock incomplete, fall through to raw passthrough, retry,
+// propagate the error — is a higher-layer policy choice that the
+// directive package itself does not dictate. See the Ack doc below
+// for the general contract.
 //
 // A nil config for either side means "do not upgrade that side" —
 // useful if the parser knows one peer is already on TLS or does
