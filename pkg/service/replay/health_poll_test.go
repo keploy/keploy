@@ -153,6 +153,49 @@ func TestWaitForAppReady_EmptyURLUsesFixedDelay(t *testing.T) {
 	}
 }
 
+// TestWaitForAppReady_CtxCanceledAtCeiling is the round-3 select-race
+// guard. pollCtx is derived from ctx, so when the parent ctx is canceled
+// at (or after) the poll ceiling both ctx.Done() and pollCtx.Done() are
+// ready simultaneously — Go's select may pick either. If the pollCtx
+// branch wins, the old code fell through to the fixed-delay fallback and
+// returned true, incorrectly letting replay proceed after a user abort.
+// The fix is to check ctx.Err() inside the pollCtx branch and return
+// false when the parent context has been canceled. To reliably exercise
+// that branch we set HealthPollTimeout == cancel delay so the two wakeups
+// are tied; the assertion must hold regardless of which branch select
+// picks.
+func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	// 50ms poll ceiling + 50ms cancel => both ctx.Done() and
+	// pollCtx.Done() become ready at ~the same moment.
+	cfg := newCfg(srv.URL, 50*time.Millisecond)
+	cfg.Test.Delay = 10 // if the bug regresses, fallback sleep returns true after 10s
+
+	logger := zap.NewNop()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	ok := waitForAppReady(ctx, logger, cfg)
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatalf("expected waitForAppReady to return false on user abort at ceiling boundary, got true (fell through to fallback)")
+	}
+	// If the bug regresses, elapsed would be ~10s (poll ceiling + full
+	// Delay fallback). A comfortable ceiling of 2s catches that.
+	if elapsed > 2*time.Second {
+		t.Fatalf("ctx cancel should abort without fallback sleep; elapsed=%v suggests the fixed-delay branch ran", elapsed)
+	}
+}
+
 // TestWaitForAppReady_CtxCanceled verifies ctx cancellation is honored during
 // the poll loop — caller should see false so it can return TestSetStatusUserAbort.
 func TestWaitForAppReady_CtxCanceled(t *testing.T) {

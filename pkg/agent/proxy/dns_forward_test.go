@@ -366,11 +366,16 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 }
 
 // TestCaptureDNSUpstream_ReadsResolvConf verifies the startup
-// capture reads a resolv.conf file and correctly filters loopback
-// entries. Uses a temp file + the package-level resolvConfPath hook.
+// capture reads a resolv.conf file and correctly filters
+// self-referential loopback entries (loopback at the proxy's own DNS
+// listen port). Uses a temp file + the package-level resolvConfPath
+// hook.
 func TestCaptureDNSUpstream_ReadsResolvConf(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "resolv.conf")
+	// resolv.conf has no port syntax — nameserver lines are IP-only
+	// and the default port is 53. With p.DNSPort == 53, the 127.0.0.1
+	// entry is self-referential and must be dropped.
 	content := "nameserver 10.96.0.10\nnameserver 127.0.0.1\nsearch cluster.local\noptions ndots:5\n"
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatalf("write temp resolv.conf: %v", err)
@@ -380,17 +385,84 @@ func TestCaptureDNSUpstream_ReadsResolvConf(t *testing.T) {
 	resolvConfPath = path
 	defer func() { resolvConfPath = orig }()
 
-	p := &Proxy{logger: zap.NewNop()}
+	// Simulate the self-forward condition: proxy is listening on port
+	// 53 (same as default resolv.conf port), so the loopback entry
+	// would loop back into us.
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 53}
 	p.captureDNSUpstream()
 
 	if len(p.dnsUpstreamServers) != 1 {
-		t.Fatalf("dnsUpstreamServers = %v; want exactly [10.96.0.10] after loopback filter", p.dnsUpstreamServers)
+		t.Fatalf("dnsUpstreamServers = %v; want exactly [10.96.0.10] after self-forward filter", p.dnsUpstreamServers)
 	}
 	if p.dnsUpstreamServers[0] != "10.96.0.10" {
 		t.Errorf("dnsUpstreamServers[0] = %q; want 10.96.0.10", p.dnsUpstreamServers[0])
 	}
 	if p.dnsUpstreamPort != "53" {
 		t.Errorf("dnsUpstreamPort = %q; want 53", p.dnsUpstreamPort)
+	}
+}
+
+// TestCaptureDNSUpstream_KeepsNonSelfLoopback is the round-3 fix
+// check: a resolv.conf that lists ONLY a loopback resolver (common in
+// pods behind systemd-resolved at 127.0.0.53 or a local dnsmasq) must
+// leave the upstream list non-empty so forward-on-miss still works.
+// The previous filter dropped every IsLoopback() entry and silently
+// disabled forwarding in those environments.
+func TestCaptureDNSUpstream_KeepsNonSelfLoopback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "resolv.conf")
+	content := "nameserver 127.0.0.1\nsearch cluster.local\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write temp resolv.conf: %v", err)
+	}
+
+	orig := resolvConfPath
+	resolvConfPath = path
+	defer func() { resolvConfPath = orig }()
+
+	// Proxy listens on 26789 — resolv.conf's implied port is 53, so
+	// 127.0.0.1:53 is NOT our own listener and must be kept.
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789}
+	p.captureDNSUpstream()
+
+	if len(p.dnsUpstreamServers) != 1 {
+		t.Fatalf("dnsUpstreamServers = %v; want [127.0.0.1] (loopback at non-self port must be kept)", p.dnsUpstreamServers)
+	}
+	if p.dnsUpstreamServers[0] != "127.0.0.1" {
+		t.Errorf("dnsUpstreamServers[0] = %q; want 127.0.0.1", p.dnsUpstreamServers[0])
+	}
+	if !p.hasDNSUpstream() {
+		t.Errorf("hasDNSUpstream() = false; expected true so forward-on-miss still fires in loopback-only resolv.conf environments")
+	}
+}
+
+// TestCaptureDNSUpstream_DropsSelfReferentialLoopback is the explicit
+// anti-loop guardrail: when resolv.conf's implied port (53) matches
+// the proxy's own DNS listen port, the loopback entry IS our own
+// listener and forwarding there would loop. Confirm that specific
+// case is still filtered alongside a non-loopback entry.
+func TestCaptureDNSUpstream_DropsSelfReferentialLoopback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "resolv.conf")
+	content := "nameserver 10.0.0.53\nnameserver ::1\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write temp resolv.conf: %v", err)
+	}
+
+	orig := resolvConfPath
+	resolvConfPath = path
+	defer func() { resolvConfPath = orig }()
+
+	// Proxy listens on 53 (the default resolv.conf port). ::1:53 is
+	// self-referential and must be dropped; 10.0.0.53 must be kept.
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 53}
+	p.captureDNSUpstream()
+
+	if len(p.dnsUpstreamServers) != 1 {
+		t.Fatalf("dnsUpstreamServers = %v; want [10.0.0.53] only (IPv6 loopback self-ref dropped)", p.dnsUpstreamServers)
+	}
+	if p.dnsUpstreamServers[0] != "10.0.0.53" {
+		t.Errorf("dnsUpstreamServers[0] = %q; want 10.0.0.53", p.dnsUpstreamServers[0])
 	}
 }
 

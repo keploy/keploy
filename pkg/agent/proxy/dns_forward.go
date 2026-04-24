@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/miekg/dns"
@@ -20,14 +21,17 @@ var resolvConfPath = "/etc/resolv.conf"
 // as the app container's resolver — see the call site in StartProxy
 // for the ordering rationale.
 //
-// Loopback nameservers are filtered out because forwarding to 127.x
-// (or ::1) almost certainly means forwarding back into the very DNS
-// server this forwarder is trying to escape — which would hang the
-// app's query for dnsForwardTimeout on every miss. This filter is
-// defensive: in the current k8s injection model the sidecar
-// container's resolv.conf is untouched, but belts-and-braces against
-// future deployment modes where the injector runs against the whole
-// pod.
+// A loopback nameserver is filtered out ONLY when its port matches
+// the proxy's own DNS listen port (p.DNSPort) — that combination is
+// the unambiguous self-forward case: the k8s injector rewrote
+// resolv.conf to 127.0.0.1 and redirected traffic to our listener, so
+// forwarding there would loop and hang the app's query for
+// dnsForwardTimeout on every miss. Loopback nameservers at OTHER
+// ports (e.g. systemd-resolved on 127.0.0.53:53 or dnsmasq on
+// 127.0.0.1:5353) are legitimate real resolvers and MUST be kept —
+// dropping them in environments where /etc/resolv.conf is entirely
+// loopback would leave dnsUpstreamServers empty and silently disable
+// forward-on-miss.
 //
 // A nil / empty result is acceptable. The forwarder handles that by
 // returning "no upstream configured" and letting the caller fall back
@@ -44,24 +48,35 @@ func (p *Proxy) captureDNSUpstream() {
 		return
 	}
 
+	// resolv.conf has no port syntax per RFC — config.Port is populated
+	// from an "options" line or defaults to "53". We compare by string
+	// to avoid parsing surprises (leading zeros, etc.).
+	nsPort := config.Port
+	if nsPort == "" {
+		nsPort = "53"
+	}
+	selfPort := strconv.FormatUint(uint64(p.DNSPort), 10)
+
 	filtered := make([]string, 0, len(config.Servers))
 	for _, s := range config.Servers {
 		ip := net.ParseIP(s)
 		if ip == nil {
 			continue
 		}
-		if ip.IsLoopback() {
-			p.logger.Debug("dropping loopback upstream resolver from forwarder list",
-				zap.String("server", s))
+		// Only drop loopback when it points at our own listener.
+		// Anything else (systemd-resolved, dnsmasq, etc.) is a real
+		// resolver we can legitimately forward to.
+		if ip.IsLoopback() && nsPort == selfPort {
+			p.logger.Debug("dropping self-referential loopback upstream resolver from forwarder list",
+				zap.String("server", s),
+				zap.String("port", nsPort),
+				zap.String("proxyDNSPort", selfPort))
 			continue
 		}
 		filtered = append(filtered, s)
 	}
 	p.dnsUpstreamServers = filtered
-	p.dnsUpstreamPort = config.Port
-	if p.dnsUpstreamPort == "" {
-		p.dnsUpstreamPort = "53"
-	}
+	p.dnsUpstreamPort = nsPort
 	p.logger.Info("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
 		zap.String("port", p.dnsUpstreamPort))

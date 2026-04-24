@@ -70,9 +70,10 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 // elapses with no 2xx, we log an INFO telling the operator what to tune and fall
 // back to the fixed Delay sleep so operators never get stuck worse than today.
 //
-// The poll cadence uses a single time.Ticker plus a single time.Timer for the
-// ceiling (pattern: pkg/util.go WaitForPort). This avoids per-iteration timer
-// allocation from time.After and gives deterministic teardown via defer Stop.
+// The poll cadence uses a single time.Ticker, and the overall poll ceiling is
+// enforced by a derived context with timeout observed through Done(). This
+// avoids per-iteration timer allocation from time.After and gives deterministic
+// teardown via defer Stop / defer cancel.
 //
 // Returns true when the caller should proceed to run tests, false only when ctx
 // was canceled (caller should treat as user abort).
@@ -130,11 +131,20 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// fallback-to-fixed-delay path.
 			return false
 		case <-pollCtx.Done():
-			// pollCeiling elapsed with no 2xx. If ctx was also canceled we
-			// would have taken the branch above; reaching here means the
-			// deadline fired on its own. Downgraded from Warn per repo
-			// logging guidelines; the message still tells operators exactly
-			// which knobs to turn.
+			// pollCtx is derived from ctx, so a user cancel also fires
+			// this branch. Since select picks a ready case
+			// non-deterministically, we cannot rely on the ctx.Done()
+			// branch above to win the race — explicitly disambiguate
+			// here. If the parent ctx is canceled we treat the wakeup
+			// as a user abort and return false instead of falling
+			// through to the fixed-delay fallback (which would return
+			// true and incorrectly proceed to run tests).
+			if ctx.Err() != nil {
+				return false
+			}
+			// pollCeiling elapsed with no 2xx. Downgraded from Warn per
+			// repo logging guidelines; the message still tells operators
+			// exactly which knobs to turn.
 			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
 				zap.String("healthUrl", cfg.Test.HealthURL),
 				zap.Duration("pollTimeout", pollCeiling),
