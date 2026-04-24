@@ -364,6 +364,29 @@ type PostgresV3Response struct {
 	// replay side stands in as the server and the real client will
 	// resend its own bytes. nil on non-COPY responses.
 	CopyIn *PostgresV3CopyInPayload `json:"copyIn,omitempty" yaml:"copyIn,omitempty" bson:"copy_in,omitempty"`
+
+	// Notices holds NoticeResponse ('N') messages the server emitted
+	// while answering this invocation. Postgres interleaves notices
+	// with any command response (e.g. "NOTICE: relation already
+	// exists, skipping" after CREATE TABLE IF NOT EXISTS). ORMs and
+	// drivers that surface NOTICE/WARNING to the caller depend on
+	// these being replayed back, so we persist them rather than
+	// silently drop them. Ordering matches wire arrival. nil/omit
+	// when the invocation produced no notices.
+	Notices []PostgresV3Notice `json:"notices,omitempty" yaml:"notices,omitempty" bson:"notices,omitempty"`
+}
+
+// PostgresV3Notice is one NoticeResponse ('N') message. Wire format
+// mirrors ErrorResponse — same field codes (S/V/C/M/D/H/P/W) but
+// severity is always one of NOTICE/WARNING/INFO/DEBUG/LOG rather than
+// ERROR/FATAL/PANIC. Only the fields we observe in practice are
+// persisted; unused fields stay empty/omit to keep the YAML lean.
+type PostgresV3Notice struct {
+	Severity string `json:"severity,omitempty" yaml:"severity,omitempty" bson:"severity,omitempty"`
+	Code     string `json:"code,omitempty" yaml:"code,omitempty" bson:"code,omitempty"`
+	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
+	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
+	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
 }
 
 // PostgresV3CopyOutPayload captures a full server-side CopyOut burst:
