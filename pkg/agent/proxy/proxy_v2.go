@@ -88,8 +88,9 @@ func (p *Proxy) recordViaSupervisor(
 		DestConnID:       fmt.Sprint(destConnID),
 		Opts:             opts,
 		OnPendingCleared: sv.ClearPendingWork,
-		// Route EmitMock through syncMock.AddMock so V2 parsers pick
-		// up the same firstReqSeen session-window buffering, lifetime
+		// Route EmitMock through the SyncMockManager (obtained via
+		// syncMock.Get(), then mgr.AddMock) so V2 parsers pick up the
+		// same firstReqSeen session-window buffering, lifetime
 		// derivation, and drop accounting that legacy parsers (http,
 		// mysql, generic) get. Without this, V2-recorded mocks
 		// captured before the first app test request bypass the

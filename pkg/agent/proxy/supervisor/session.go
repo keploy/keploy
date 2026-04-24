@@ -297,7 +297,8 @@ func (s *Session) EmitMock(m *models.Mock) error {
 
 	// Route through the package-singleton SyncMockManager when the
 	// caller opts in. Legacy parsers (http, mysql, generic, etc.)
-	// call syncMock.AddMock because it does:
+	// call (*SyncMockManager).AddMock — obtained via syncMock.Get() —
+	// because it does:
 	//
 	//   1. Lifetime derivation from Metadata["type"] (session vs
 	//      per-test), stamped onto TestModeInfo.Lifetime.
@@ -316,18 +317,20 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
 		if mgr := syncMock.Get(); mgr != nil {
-			// Best-effort ctx probe. syncMock.AddMock doesn't
+			// Best-effort ctx probe. mgr.AddMock (the SyncMock
+			// manager method obtained from syncMock.Get()) doesn't
 			// observe s.Ctx — it takes its own mutex and may sit
 			// in sendToOutChan up to the manager's internal
 			// sendBudget without signalling cancellation back to
 			// us. A pre-check at least catches the "already
-			// cancelled" case so we don't spend AddMock's bounded
-			// wait on work the parser already abandoned. Post-call
-			// cancellation during AddMock's send is documented as
-			// a semantic difference from the direct-channel branch
-			// (see the EmitMock doc comment above); forcing full
-			// ctx-honoring into AddMock would require threading
-			// ctx through every legacy record-path call site too.
+			// cancelled" case so we don't spend mgr.AddMock's
+			// bounded wait on work the parser already abandoned.
+			// Post-call cancellation during mgr.AddMock's send is
+			// documented as a semantic difference from the
+			// direct-channel branch (see the EmitMock doc comment
+			// above); forcing full ctx-honoring into AddMock would
+			// require threading ctx through every legacy
+			// record-path call site too.
 			if ctx := s.Ctx; ctx != nil {
 				if err := ctx.Err(); err != nil {
 					return err
