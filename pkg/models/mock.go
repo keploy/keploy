@@ -335,9 +335,11 @@ type PostgresV3Response struct {
 	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
 
 	// CopyOut is set when the server responded with a CopyOutResponse
-	// ('H') + one or more CopyData ('d') chunks + CopyDone ('c')
+	// ('H') + zero or more CopyData ('d') chunks + CopyDone ('c')
 	// sequence, as produced by COPY ... TO STDOUT / TO PROGRAM /
-	// TO '<file>' queries. The Rows field is mutually exclusive with
+	// TO '<file>' queries. Zero CopyData chunks is valid — COPY of an
+	// empty table or an empty-result expression produces no data
+	// packets between CopyOutResponse and CopyDone. The Rows field is mutually exclusive with
 	// CopyOut — real Postgres never mixes DataRow and CopyData in a
 	// single Query response, and replay must preserve that invariant.
 	// nil on non-COPY responses and on every legacy recording captured

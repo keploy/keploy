@@ -142,8 +142,12 @@ func TestPostgresV3Response_CopyOut_RoundTrip(t *testing.T) {
 // bump from silently invalidating every mock file on disk.
 func TestPostgresV3Response_BackwardCompat_NoCopyFields(t *testing.T) {
 	// Shape of a legacy recording: RowDescription + Rows +
-	// CommandComplete only. Also includes an old tombstone key
-	// (`scope: session`) to match the style of real legacy fragments.
+	// CommandComplete only. Also includes the retired `scope:`
+	// tombstone key real fkppl debug-bundle fragments still carry, so
+	// this test asserts both (a) the new optional Copy fields default
+	// to nil on old mocks and (b) yaml.v3's lenient unknown-field
+	// handling still holds on PostgresV3Response — a switch to
+	// Decoder.KnownFields(true) downstream would fail this test loudly.
 	const legacyYAML = `
 rowDescription:
   - name: id
@@ -152,6 +156,7 @@ rows:
   - - "1"
   - - "2"
 commandComplete: "SELECT 2"
+scope: session
 `
 
 	var resp PostgresV3Response
@@ -204,15 +209,25 @@ func TestPostgresV3Response_CopyIn_RoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(decoded.CopyIn.ColumnFormatCodes, []uint16{0}) {
 		t.Fatalf("ColumnFormatCodes: want [0], got %v", decoded.CopyIn.ColumnFormatCodes)
 	}
-	// Cross-contract invariant: when CopyIn is set, the recorded mock
-	// MUST NOT also carry Rows or CopyOut — the Postgres protocol
-	// never interleaves CopyIn with row-producing traffic on the same
-	// Query response. The test pins this at the struct level so a
-	// future migrator cannot accidentally produce malformed recordings.
+	// Serialization-stability check. The fixture set only CopyIn, so
+	// omitempty on Rows and CopyOut should keep both out of the
+	// emitted YAML and the re-decoded struct zero on those paths.
+	// This is NOT a schema-level mutual-exclusion guard — nothing in
+	// the struct today stops a caller from populating Rows + CopyIn
+	// simultaneously and marshaling that malformed shape. Enforcing
+	// the wire-level invariant (CopyIn and row-producing traffic
+	// never coexist on the same Query response) is the recorder's
+	// job in integrations; a misbehaving recorder would emit an
+	// invalid mock and this test would still pass. See the
+	// TODO(validation) below if we ever add struct-level validation.
 	if decoded.Rows != nil {
-		t.Fatalf("Rows: want nil alongside CopyIn, got %v", decoded.Rows)
+		t.Fatalf("Rows: omitempty should have kept this nil on the CopyIn-only fixture, got %v", decoded.Rows)
 	}
 	if decoded.CopyOut != nil {
-		t.Fatalf("CopyOut: want nil alongside CopyIn, got %+v", decoded.CopyOut)
+		t.Fatalf("CopyOut: omitempty should have kept this nil on the CopyIn-only fixture, got %+v", decoded.CopyOut)
 	}
+	// TODO(validation): once a Validate() method or a custom
+	// UnmarshalYAML lands on PostgresV3Response, add a separate test
+	// that feeds a malformed fixture carrying BOTH Rows and CopyIn
+	// and asserts the validator rejects it.
 }
