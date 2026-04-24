@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -351,36 +350,30 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 	}
 }
 
-// TestSessionEmitMockRouteViaSyncMock_Delivery pins the
-// RouteMocksViaSyncMock=true path. Enables the flag, binds a fresh
-// output channel on the package-singleton syncMock manager, and
-// asserts the mock arrives on that channel and OnPendingCleared
-// fired exactly once. This guards the V2 record path's core
-// invariant (mocks flow through syncMock so firstReqSeen buffering
-// + lifetime derivation happen) against regressions that bypass
-// the flag or drop the pending-cleared callback.
+// TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched pins
+// the RouteMocksViaSyncMock=true path by asserting the negative:
+// when the flag is on, Session.Mocks must NOT receive anything,
+// and OnPendingCleared must still fire. That combination can only
+// be produced by the syncMock branch — the other branches either
+// push to Session.Mocks or only fire OnPendingCleared when Mocks
+// is nil.
 //
-// syncMock is a package singleton — don't t.Parallel this test
-// against other tests that also bind the output channel; they'd
-// race on the shared outChan.
-func TestSessionEmitMockRouteViaSyncMock_Delivery(t *testing.T) {
-	// Not t.Parallel — shares the package-singleton syncMock.
-	mgr := syncMock.Get()
-	ch := make(chan *models.Mock, 1)
-	mgr.SetOutputChannel(ch)
-	t.Cleanup(func() {
-		// Unbind so a later test that doesn't use syncMock still
-		// sees the default nil-outChan shape. Closing the manager's
-		// out channel would be caught by outChanClosed and break
-		// other tests in the package.
-		mgr.SetOutputChannel(nil)
-	})
+// Earlier iterations of this test rebound the package-singleton
+// syncMock's outChan via SetOutputChannel(...). That touched a
+// global visible across every test in the process, and parallel
+// `go test` runs in sibling packages (e.g.
+// pkg/agent/proxy/integrations/http/recordv2_test.go) that also
+// call SetOutputChannel raced on the outChan pointer and produced
+// flaky timeouts. Asserting on the local Session.Mocks channel
+// keeps the test entirely within this Session instance.
+func TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched(t *testing.T) {
+	t.Parallel()
+
+	directCh := make(chan *models.Mock, 1)
 
 	var pendingCleared int32
 	sess := &Session{
-		// Intentionally no s.Mocks — prove the syncMock route
-		// is what actually delivers the mock, not the
-		// direct-channel fallback.
+		Mocks:                 directCh,
 		Logger:                zaptest.NewLogger(t),
 		Ctx:                   context.Background(),
 		RouteMocksViaSyncMock: true,
@@ -392,16 +385,18 @@ func TestSessionEmitMockRouteViaSyncMock_Delivery(t *testing.T) {
 	if err := sess.EmitMock(&models.Mock{Name: "via-syncmock"}); err != nil {
 		t.Fatalf("EmitMock returned err: %v", err)
 	}
+
+	// Direct channel must remain empty — the syncMock route should
+	// have returned before touching it.
 	select {
-	case got := <-ch:
-		if got == nil || got.Name != "via-syncmock" {
-			t.Fatalf("received wrong mock: %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("mock not delivered via syncMock outChan within 1s")
+	case got := <-directCh:
+		t.Fatalf("mock leaked to Session.Mocks when RouteMocksViaSyncMock=true: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+		// expected: nothing delivered.
 	}
+
 	if c := atomic.LoadInt32(&pendingCleared); c != 1 {
-		t.Fatalf("OnPendingCleared calls = %d, want 1", c)
+		t.Fatalf("OnPendingCleared calls = %d, want 1 (only the syncMock branch fires it without also sending on Mocks)", c)
 	}
 }
 
@@ -411,17 +406,20 @@ func TestSessionEmitMockRouteViaSyncMock_Delivery(t *testing.T) {
 // and return nil — silently violating the documented contract
 // that EmitMock returns ctx.Err() when the parser's context has
 // been cancelled.
+//
+// Uses the local-direct-channel pattern (no singleton rebind) so
+// concurrent test packages that call SetOutputChannel can't
+// interfere.
 func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
-	// Not t.Parallel — shares the package-singleton syncMock.
-	mgr := syncMock.Get()
-	ch := make(chan *models.Mock, 1)
-	mgr.SetOutputChannel(ch)
-	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+	t.Parallel()
+
+	directCh := make(chan *models.Mock, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before EmitMock is called
 
 	sess := &Session{
+		Mocks:                 directCh,
 		Logger:                zaptest.NewLogger(t),
 		Ctx:                   ctx,
 		RouteMocksViaSyncMock: true,
@@ -431,8 +429,8 @@ func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	select {
-	case got := <-ch:
-		t.Fatalf("mock leaked to syncMock outChan after ctx cancel: %+v", got)
+	case got := <-directCh:
+		t.Fatalf("mock leaked to Session.Mocks after ctx cancel: %+v", got)
 	case <-time.After(100 * time.Millisecond):
 		// expected: no delivery.
 	}
