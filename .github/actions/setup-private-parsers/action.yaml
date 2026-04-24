@@ -12,6 +12,17 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
+    # Default back to 'main' so downstream workflows that don't pass
+    # integration-ref explicitly stay pinned to a stable ref after
+    # this PR merges. Cross-repo CI during review (where we want the
+    # proxy-v2-foundation build to pick up feat/v2-native-parsers in
+    # the integrations repo) is wired via the repo-level
+    # `vars.INTEGRATION_REF` variable — see the
+    # `INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}` env
+    # lines at the top of prepare_and_run*.yml / golangci-lint.yml.
+    # Set that repo variable to feat/v2-native-parsers during the
+    # review window; unset it (or it falls back to 'main') after
+    # merge — no action.yaml changes needed.
     default: 'main'
 
 runs:

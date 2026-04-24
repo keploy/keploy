@@ -890,6 +890,45 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("java.home not found in command output")
 }
 
+// RecoverWithoutClose catches a panic in a parser goroutine, logs
+// it, reports it to Sentry, and returns. Unlike [Recover] it does
+// NOT close any connections — parsers in the new architecture do
+// not hold real sockets and the relay is responsible for socket
+// lifecycle. Call sites:
+//
+//	defer pUtil.RecoverWithoutClose(logger)
+//
+// The recovered panic value (if any) is swallowed; the enclosing
+// function returns with whatever named return value it had (or
+// zero value). If you need to transform the panic into a returned
+// error, wrap this in a named-return-value defer that sets err.
+func RecoverWithoutClose(logger *zap.Logger) {
+	if logger == nil {
+		// Mirror Recover's safe-fallback behaviour: the enclosing
+		// function is already unwinding and the caller asked us to
+		// swallow the panic, so the least-bad thing we can do
+		// without a logger is announce ourselves on stderr (stdout
+		// is reserved for CLI output and writing there from library
+		// code can corrupt tool-parseable streams) and still
+		// recover() so the goroutine doesn't crash the process.
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, Emoji+"Recovered from panic in parser (no logger available)")
+		}
+		return
+	}
+
+	if r := recover(); r != nil {
+		logger.Error("Recovered from panic in parser",
+			zap.Any("panic", r),
+			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_NEW_RELAY=off to force the legacy path for this parser until the root cause is fixed"),
+		)
+		utils.HandleRecovery(logger, r, "Recovered from panic")
+		// Flush only on the panic path so the happy path (defer
+		// running on clean return) doesn't pay the flush cost.
+		sentry.Flush(time.Second * 2)
+	}
+}
+
 // Recover recovers from a panic in any parser and logs the stack trace to Sentry.
 // It also closes the client and destination connection.
 func Recover(logger *zap.Logger, client, dest net.Conn) {

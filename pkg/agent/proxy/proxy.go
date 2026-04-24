@@ -125,8 +125,14 @@ type Proxy struct {
 	connMutex *sync.Mutex
 	ipMutex   *sync.Mutex
 	// channel to mark client connection as closed
-	clientClose       chan bool
-	clientConnections []net.Conn
+	clientClose chan bool
+
+	// activeConns tracks outgoing handleConnection goroutines so
+	// shutdown can wait for them to finish naturally (drain grace)
+	// before tearing listeners down. Count-only — connections close
+	// themselves via their own defers / context cancellation; we do
+	// not need references to force-close them.
+	activeConns sync.WaitGroup
 
 	Listener net.Listener
 
@@ -954,7 +960,20 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			// Track the connection BEFORE spawning the goroutine to
+			// close the Add-vs-Wait race that sync.WaitGroup's
+			// contract forbids. If Add ran inside the goroutine
+			// (i.e. after clientConnErrGrp.Go returns), a concurrent
+			// StopProxyServer calling waitForConnDrain -> Wait could
+			// observe count=0 and return before this connection's
+			// goroutine registered itself — the shutdown would
+			// then proceed as if there were no in-flight work, and
+			// the late Add could trigger "sync: WaitGroup misuse"
+			// panics in some interleavings. Done() still runs in
+			// the goroutine's deferred cleanup.
+			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
+				defer p.activeConns.Done()
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
@@ -980,6 +999,9 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	// activeConns.Add/Done are paired at the goroutine-spawn site
+	// in the accept loop (see caller) to avoid the "Add concurrent
+	// with Wait" race sync.WaitGroup documents as a misuse.
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
@@ -1799,10 +1821,53 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
+	// Record-mode parsing kill switch: if record-time parsing has been
+	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin
+	// endpoint, skip parser dispatch and hand the connection to
+	// globalPassThrough. Existing connections whose parsers are already
+	// running are unaffected; this only gates new dispatch.
+	//
+	// MODE_TEST is intentionally NOT gated here — the kill switch is a
+	// record-time stability escape hatch only; replay must continue to
+	// match mocks regardless of record-time kill-switch state.
+	if rule.Mode == models.MODE_RECORD && util.DefaultKillSwitch.Enabled() {
+		logger.Debug("record-mode parsing kill switch tripped; routing to passthrough",
+			zap.String("parser", string(parserType)), zap.Bool("generic", generic))
+		return p.globalPassThrough(parserCtx, srcConn, dstConn)
+	}
+
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
+			// V2 path: parsers that have been migrated to the supervisor +
+			// relay + FakeConn architecture declare it via IntegrationsV2.
+			// The dispatcher routes them through recordViaSupervisor which
+			// isolates parser panics/hangs and falls through to passthrough
+			// on failure. The legacy path below is preserved for parsers
+			// that have not yet migrated.
+			if v2, ok := matchedParser.(integrations.IntegrationsV2); ok && v2.IsV2() && !newRelayDisabled() {
+				if err := p.recordViaSupervisor(parserCtx, srcConn, dstConn, matchedParser, parserType, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts); err != nil {
+					if isNetworkClosedErr(err) {
+						logger.Debug("V2 record path: connection closed", zap.Error(err))
+					} else {
+						utils.LogError(logger, err, "V2 record path failed",
+							zap.String("parser", string(parserType)),
+							zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path for this parser while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
+						)
+					}
+					return err
+				}
+				// Outcome-specific logging lives inside recordViaSupervisor
+				// (success vs. fallthrough-to-passthrough look the same
+				// from this layer — both return nil error — but mean
+				// different things for the mocks captured). Here we only
+				// know the record path completed without a caller-visible
+				// error; the parser outcome was already logged.
+				logger.Debug("V2 record path returned", zap.String("ParserType", string(parserType)))
+				break
+			}
+
 			// Create TLSUpgrader in handleConnection scope so it holds pointers to
 			// the real srcConn/dstConn variables (not copies in buildRecordSession).
 			var upgrader models.TLSUpgrader
@@ -1859,22 +1924,60 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	<-ctx.Done()
 
 	p.logger.Info("stopping proxy server...")
-	var cleanupErrors []error
-	p.connMutex.Lock()
-	for _, clientConn := range p.clientConnections {
-		if err := clientConn.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
 
-		}
-	}
-	p.clientConnections = nil
-	p.connMutex.Unlock()
+	// Coordinated shutdown sequence (PLAN.md §3.7, partial I8).
+	//
+	// 1. Trip the parsing kill switch first. Any connection still in
+	//    flight between Accept and parser dispatch is routed to raw
+	//    globalPassThrough instead of a parser — so we don't start a
+	//    parser goroutine for a connection that's about to be torn
+	//    down.
+	// 2. Close the listener, stopping further Accepts.
+	// 3. Give existing parser goroutines a bounded grace window to
+	//    finish naturally via activeConns WaitGroup (they see
+	//    ctx.Done via the parent context and return; their deferred
+	//    srcConn/dstConn closes fire on return).
+	// 4. Past the grace window, remaining goroutines continue to exit
+	//    asynchronously via ctx cancellation — we do NOT hold
+	//    references to their net.Conn values, which avoids
+	//    double-close races with the deferred closes above. Shutdown
+	//    is bounded by the grace timeout; stragglers are abandoned
+	//    to the parent context, not force-closed from under their
+	//    own defers.
+	//
+	// The kernel-side proxy_ready BPF gate that would prevent new
+	// connects from being redirected here once the userspace process
+	// is unhealthy requires BPF source changes (the source is not in
+	// this repo) and is tracked as deferred work in PLAN.md.
+	util.DefaultKillSwitch.Trip()
+	defer util.DefaultKillSwitch.Reset()
+
+	var cleanupErrors []error
 	if p.Listener != nil {
 		if err := p.Listener.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close listener: %w", err))
 		}
 		p.Listener = nil
 	}
+
+	// Drain grace: let in-flight parsers finish naturally before we
+	// pull the rug on their client connections. 5 seconds is long
+	// enough for typical request/response cycles but short enough
+	// that shutdown doesn't hang indefinitely on a stuck parser.
+	const drainGrace = 5 * time.Second
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainGrace)
+	defer drainCancel()
+	p.waitForConnDrain(drainCtx)
+
+	// Any connections still in flight after the grace window have
+	// already received parent-context cancellation (propagated into
+	// the per-connection parserCtx in handleConnection). Their own
+	// deferred srcConn/dstConn closes run on return. We intentionally
+	// do NOT keep a shared slice of net.Conn values: that requires
+	// tracking lifecycle hooks we don't own reliably, and the
+	// WaitGroup + ctx cancellation combination already covers the
+	// "stuck parser eventually exits" case without double-close
+	// races on the real sockets.
 	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
 		if err := p.stopDNSServers(ctx); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))

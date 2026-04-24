@@ -41,6 +41,28 @@ type Integrations interface {
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
+// IntegrationsV2 is the optional capability interface implemented by
+// parsers that have been migrated to the supervisor + relay + FakeConn
+// architecture (see PLAN.md at the repository root).
+//
+// The dispatcher in handleConnection performs a type assertion against
+// this interface. Parsers that satisfy it and return true from IsV2()
+// are run under the supervisor with a supervisor.Session attached via
+// RecordSession.V2; their RecordOutgoing must consume V2.ClientStream,
+// V2.DestStream, and V2.Directives rather than the legacy Ingress /
+// Egress / TLSUpgrader fields.
+//
+// Parsers that do not satisfy this interface continue on the legacy
+// path unchanged; migration is parser-by-parser and additive.
+type IntegrationsV2 interface {
+	Integrations
+	// IsV2 reports that this parser consumes RecordSession.V2 and is
+	// safe to run under supervisor.Run. A parser may return false
+	// dynamically (e.g. if a required config is missing) to opt out
+	// on a per-instance basis.
+	IsV2() bool
+}
+
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }
