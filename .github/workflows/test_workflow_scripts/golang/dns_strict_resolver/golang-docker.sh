@@ -127,33 +127,6 @@ check_curl_output() {
   echo "curl output passes hard-gated /suite assertions."
 }
 
-check_test_report() {
-  if [ ! -d "./keploy/reports" ]; then
-    echo "::error::Test report directory not found"
-    return 1
-  fi
-  local latest_report_dir
-  latest_report_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)
-  if [ -z "$latest_report_dir" ]; then
-    echo "::error::No test run directory found in ./keploy/reports/"
-    return 1
-  fi
-  local all_passed=true
-  for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-    [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-    local test_set_name test_status
-    test_set_name=$(basename "$report_file" -report.yaml)
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-    echo "Status for ${test_set_name}: $test_status"
-    if [ "$test_status" != "PASSED" ]; then
-      all_passed=false
-      echo "::error::Test set ${test_set_name} failed with status: ${test_status}"
-    fi
-  done
-  [ "$all_passed" = true ] || return 1
-  echo "All tests passed in reports."
-}
-
 wait_for_sample() {
   echo "Waiting for $SAMPLE_NAME /health to respond..."
   for i in {1..60}; do
@@ -219,24 +192,9 @@ send_request() {
 
 # --- Main ---
 
-rm -rf keploy/ record.txt test.txt "$CURL_OUT"
+rm -rf keploy/ record.txt "$CURL_OUT"
 sudo rm -f /tmp/keploy-logs.txt
 cleanup
-
-section "Generate keploy config (noise)"
-# Generate a baseline keploy.yml so we can mark `elapsed_ms` as
-# noise. Without this, record-vs-replay diffs on elapsed_ms (e.g.
-# 2404 vs 2403 — same retry-timeout path, different clock sample)
-# trip the HTTP body match even though every other field is
-# byte-identical. `elapsed_ms` appears at the top level of /suite's
-# response and inside every `check.result`, so we match it
-# globally by body-key name.
-"$RECORD_BIN" config --generate >/dev/null 2>&1 || true
-config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i 's#global: {}#global: {"body": {"elapsed_ms": []}}#' "$config_file"
-fi
-endsec
 
 section "Build sample image"
 docker build -t "$SAMPLE_NAME:test" .
@@ -290,25 +248,12 @@ docker rm -f "$SAMPLE_NAME" 2>/dev/null || true
 echo "Recording stopped."
 endsec
 
-section "Start Replay"
-# --apiTimeout=60 and --delay 20: /suite issues multiple strict
-# unconnected-UDP queries that each retry for 2-3s when cgroup/recvmsg4
-# doesn't fire (the runner quirk documented in the samples-go runSuite
-# comment). End-to-end /suite latency on this runner is ~10-15s;
-# Keploy's default per-request apiTimeout is well below that, which
-# shows up as "context deadline exceeded" on every replay of the
-# /suite testcase. 60s gives the request room to come back. --delay
-# 20 matches gin_mongo / proxy-stress-test — the sample's container
-# needs a little more start-up time than the default 10s before
-# Keploy starts dispatching the recorded requests.
-"$REPLAY_BIN" test \
-  -c "docker run -p 8086:8086 --rm --net $NETWORK --name $SAMPLE_NAME $SAMPLE_NAME:test" \
-  --container-name "$SAMPLE_NAME" \
-  --apiTimeout 60 \
-  --delay 20 \
-  --generateGithubActions=false 2>&1 | tee test.txt || true
-# Replay mode serves recorded mocks, so Keploy's DNS forwarder is
-# typically not hit. No resolv.conf override needed here.
-check_for_errors test.txt
-check_test_report
-endsec
+# This harness intentionally stops after record. The bug
+# keploy/keploy#4092 / keploy/ebpf#97 fixes is a record-path
+# regression: strict DNS clients see the reply's source as
+# keploy_dns_port instead of the advertised nameserver while Keploy
+# is recording and surface EAI_AGAIN ("Temporary failure in name
+# resolution") to the app. Replay is not in scope here — Keploy's
+# mock-match would symmetrise the CI's runner quirk across both
+# halves anyway and obscure whether the record side is actually
+# doing the right thing.
