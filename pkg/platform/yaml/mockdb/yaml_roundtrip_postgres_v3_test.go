@@ -424,6 +424,89 @@ func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
 	}
 }
 
+// TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive reproduces the
+// echo-sql pipeline failure on this branch: when a recorded mock
+// contains a string field with embedded tabs or a leading newline,
+// yaml.v3 v3.0.1 emits a literal block scalar (`|N-`) whose
+// indentation indicator races with the surrounding sequence offset
+// and the same document fails to re-parse with "found a tab character
+// where an indentation space is expected". sanitizeYAMLStringNodes
+// rewrites those scalars to DoubleQuotedStyle in EncodeMock; this
+// test pins the contract by feeding the suspect shapes through every
+// PostgresV3 string field that can carry user-controlled text.
+func TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive(t *testing.T) {
+	tabSQL := "SELECT\n\tid,\n\tname\nFROM\n\tcustomer_tag\nWHERE\n\tid = $1"
+	leadingNlTab := "\n\thello"
+	tabbedNotice := "Multi-line notice:\n\tdetail with tab\n\tmore detail"
+
+	in := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					SQLAstHash:    "sha256:tab",
+					SQLNormalized: tabSQL, // multiline SQL with tabs
+					ParamOIDs:     []uint32{20},
+					InvocationID:  "0:0",
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
+					BindFormats:   []int{1},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+							{Name: "tag", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+						},
+						// Cell values that a real DB column could legitimately
+						// return — markdown / templated text often has these.
+						Rows: []models.PostgresV3Cells{
+							{models.NewValueCell(int64(1)), models.NewValueCell(leadingNlTab)},
+							{models.NewValueCell(int64(2)), models.NewValueCell("plain")},
+						},
+						CommandComplete: "SELECT 2",
+						Notices: []models.PostgresV3Notice{
+							{Severity: "NOTICE", Code: "00000", Message: tabbedNotice, Detail: leadingNlTab},
+						},
+					},
+					SideEffects: &models.PostgresV3SideEffects{},
+				},
+			},
+		},
+	}
+
+	got := yamlRoundTrip(t, "PostgresV3-TabBearing", in)
+	if got.Spec.PostgresV3 == nil {
+		t.Fatal("expected non-nil PostgresV3 spec")
+	}
+	q := got.Spec.PostgresV3.Query
+	if q == nil {
+		t.Fatal("expected non-nil Query spec")
+	}
+	if q.SQLNormalized != tabSQL {
+		t.Errorf("SQLNormalized lost data:\n got %q\nwant %q", q.SQLNormalized, tabSQL)
+	}
+	if q.Response == nil {
+		t.Fatal("Response went nil after round-trip")
+	}
+	if len(q.Response.Rows) != 2 {
+		t.Fatalf("Rows: want 2, got %d", len(q.Response.Rows))
+	}
+	if s, _ := q.Response.Rows[0][1].Value.(string); s != leadingNlTab {
+		t.Errorf("Rows[0][1] (leading nl+tab cell) = %q, want %q", s, leadingNlTab)
+	}
+	if len(q.Response.Notices) != 1 {
+		t.Fatalf("Notices: want 1, got %d", len(q.Response.Notices))
+	}
+	if q.Response.Notices[0].Message != tabbedNotice {
+		t.Errorf("Notice.Message = %q, want %q", q.Response.Notices[0].Message, tabbedNotice)
+	}
+	if q.Response.Notices[0].Detail != leadingNlTab {
+		t.Errorf("Notice.Detail = %q, want %q", q.Response.Notices[0].Detail, leadingNlTab)
+	}
+}
+
 func TestYAMLRoundTrip_PostgresV3Generator(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",

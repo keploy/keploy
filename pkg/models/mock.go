@@ -419,6 +419,30 @@ type PostgresV3Notice struct {
 	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
 }
 
+// MarshalYAML routes Notice's free-form text fields through
+// PostgresV3SafeString so the on-disk YAML never picks the literal
+// block-scalar style for content that yaml.v3's parser then rejects
+// inside a sequence (Notices live in PostgresV3Response.Notices,
+// which is the offending shape). Field types stay `string` so JSON,
+// gob, BSON, and direct Go-to-Go comparisons keep working — the
+// alias is YAML-side only.
+func (n PostgresV3Notice) MarshalYAML() (any, error) {
+	type alias struct {
+		Severity PostgresV3SafeString `yaml:"severity,omitempty"`
+		Code     PostgresV3SafeString `yaml:"code,omitempty"`
+		Message  PostgresV3SafeString `yaml:"message,omitempty"`
+		Detail   PostgresV3SafeString `yaml:"detail,omitempty"`
+		Hint     PostgresV3SafeString `yaml:"hint,omitempty"`
+	}
+	return alias{
+		Severity: PostgresV3SafeString(n.Severity),
+		Code:     PostgresV3SafeString(n.Code),
+		Message:  PostgresV3SafeString(n.Message),
+		Detail:   PostgresV3SafeString(n.Detail),
+		Hint:     PostgresV3SafeString(n.Hint),
+	}, nil
+}
+
 // PostgresV3Notification is one NotificationResponse ('A') message
 // (async LISTEN/NOTIFY delivery). Wire layout: int32 backendPID +
 // cstring channel + cstring payload. We persist all three so the
@@ -517,6 +541,27 @@ type PostgresV3Error struct {
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
 	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
 	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
+}
+
+// MarshalYAML — see PostgresV3Notice.MarshalYAML. Same rationale: SQL
+// errors carry server-formatted multi-line detail/hint strings that
+// can include tabs (e.g. constraint diagnostic listings), so the YAML
+// emit needs the safe-string wrapper to stay round-trippable.
+func (e PostgresV3Error) MarshalYAML() (any, error) {
+	type alias struct {
+		Severity PostgresV3SafeString `yaml:"severity,omitempty"`
+		Code     PostgresV3SafeString `yaml:"code,omitempty"`
+		Message  PostgresV3SafeString `yaml:"message,omitempty"`
+		Detail   PostgresV3SafeString `yaml:"detail,omitempty"`
+		Hint     PostgresV3SafeString `yaml:"hint,omitempty"`
+	}
+	return alias{
+		Severity: PostgresV3SafeString(e.Severity),
+		Code:     PostgresV3SafeString(e.Code),
+		Message:  PostgresV3SafeString(e.Message),
+		Detail:   PostgresV3SafeString(e.Detail),
+		Hint:     PostgresV3SafeString(e.Hint),
+	}, nil
 }
 
 type PostgresV3SideEffects struct {

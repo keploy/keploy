@@ -122,17 +122,70 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 	return c.Value, nil
 }
 
+// PostgresV3SafeString wraps string for fields that may carry text
+// containing embedded newlines, tabs, or other whitespace that yaml.v3
+// v3.0.1's emitter mishandles when the value lives inside a sequence
+// or nested mapping. The custom MarshalYAML routes problematic values
+// through a DoubleQuotedStyle scalar (escapes \t / \n) so the document
+// the recorder writes always re-parses on the replayer side. Use this
+// type for any v3 schema field that holds free-form server- or user-
+// generated content (SQL text, NoticeResponse messages, user-supplied
+// table data going into mocks). Fields like enum-like Severity / Code
+// don't strictly need it but using it consistently across the Notice
+// shape keeps the type contract uniform.
+type PostgresV3SafeString string
+
+// MarshalYAML emits the string with DoubleQuotedStyle when the value
+// would trip yaml.v3's plain/block-style emitter; otherwise emits as
+// a plain scalar so common short values stay greppable.
+func (s PostgresV3SafeString) MarshalYAML() (any, error) {
+	v := string(s)
+	if stringNeedsDoubleQuoted(v) {
+		return &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Style: yaml.DoubleQuotedStyle,
+			Value: v,
+		}, nil
+	}
+	return v, nil
+}
+
+// UnmarshalYAML accepts both plain and quoted scalars — the on-disk
+// shape is just a string, only the WRITE side cares about styling.
+func (s *PostgresV3SafeString) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil {
+		*s = ""
+		return nil
+	}
+	*s = PostgresV3SafeString(node.Value)
+	return nil
+}
+
 // stringNeedsDoubleQuoted reports whether yaml.v3's plain/block style
 // heuristic would mis-emit a round-trip-unsafe representation for s.
-// The known landmines — reproduced in isolation against yaml.v3 v3.0.1
-// — are strings that contain an embedded tab character, because the
-// emitter picks a literal block scalar (`|…`) for anything with
-// embedded newlines and then writes the tab byte verbatim on a
-// continuation line; inside a sequence the reparser then complains
-// "found a tab character where an indentation space is expected".
-// Strings with a leading whitespace byte hit a similar indent-indicator
-// race. Forcing double-quoted style escapes those characters as \t / \n
-// and makes the emitted YAML cleanly re-parseable.
+// Reproduced in isolation against yaml.v3 v3.0.1, the landmines are:
+//
+//   - any string containing an embedded newline picks a literal block
+//     scalar (|…) whose continuation-line indentation indicator
+//     yaml.v3 itself sometimes mis-computes inside a sequence (the
+//     shape PostgresV3Cells produces), so the same document fails to
+//     re-parse with "did not find expected key" or "found a tab
+//     character where an indentation space is expected";
+//
+//   - strings starting with whitespace (space/tab/newline/CR) trip
+//     the indent-indicator race even when single-line, because the
+//     plain-style scanner chops the leading whitespace and the parser
+//     then can't recover the original;
+//
+//   - strings with a trailing space or tab lose the trailing byte
+//     under plain style (yaml.v3 trims them).
+//
+// Forcing double-quoted style escapes \t / \n / leading-whitespace as
+// C-style sequences and makes the emitted YAML round-trip cleanly,
+// regardless of whether the scalar lives at the top level or under a
+// sequence. The trade-off is readability — quoted strings are slightly
+// noisier than plain — but those strings already had control bytes,
+// so the loss is small in practice.
 func stringNeedsDoubleQuoted(s string) bool {
 	if s == "" {
 		return false
@@ -146,7 +199,8 @@ func stringNeedsDoubleQuoted(s string) bool {
 		return true
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\t' {
+		switch s[i] {
+		case '\t', '\n', '\r':
 			return true
 		}
 	}
