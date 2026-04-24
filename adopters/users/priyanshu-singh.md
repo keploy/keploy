@@ -3,7 +3,8 @@
 ## What I am testing with Keploy
 - Backend REST APIs built with Node.js and NestJS
 - Integration testing of microservices with PostgreSQL and Redis
-
+- Tested on a NestJS Finance API with JWT auth, RBAC, Bull Queue and WebSockets
+- Reference: [github.com/dev-priyanshu15](https://github.com/dev-priyanshu15)
 ## Why I chose Keploy
 - Automatic test generation without writing boilerplate
 - Built-in mocking saves setup time during CI/CD
