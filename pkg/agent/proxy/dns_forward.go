@@ -121,7 +121,10 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	// to the caller's existing default response path so we don't
 	// accidentally start answering DNSSEC queries we can't sign.
 	if !isForwardableQType(question.Qtype) {
-		return nil, fmt.Errorf("qtype %s not forwarded", dns.TypeToString[question.Qtype])
+		if qtypeName, ok := dns.TypeToString[question.Qtype]; ok && qtypeName != "" {
+			return nil, fmt.Errorf("qtype %s not forwarded", qtypeName)
+		}
+		return nil, fmt.Errorf("qtype %d not forwarded", question.Qtype)
 	}
 
 	// dns.Client.Timeout is the per-exchange wall-clock cap. We also

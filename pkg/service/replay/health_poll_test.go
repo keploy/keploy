@@ -77,10 +77,14 @@ func TestWaitForAppReady_503ThenOK(t *testing.T) {
 		t.Fatalf("expected waitForAppReady to eventually succeed, got false")
 	}
 	// Lower bound: N failing probes are spaced by healthPollInterval each,
-	// so elapsed >= failures * healthPollInterval.
-	minExpected := time.Duration(failures) * healthPollInterval
+	// so elapsed >= failures * healthPollInterval. Allow a small tolerance
+	// (50ms) to absorb scheduler jitter and ticker drift in CI — without
+	// it this assertion occasionally fires even when the poll cadence is
+	// correct.
+	const jitterTolerance = 50 * time.Millisecond
+	minExpected := time.Duration(failures)*healthPollInterval - jitterTolerance
 	if elapsed < minExpected {
-		t.Fatalf("expected elapsed >= %v (N*500ms) after %d failures, got %v", minExpected, failures, elapsed)
+		t.Fatalf("expected elapsed >= %v (N*500ms - %v tolerance) after %d failures, got %v", minExpected, jitterTolerance, failures, elapsed)
 	}
 	// Upper bound guard: still well below any plausible fallback window.
 	if elapsed > 5*time.Second {

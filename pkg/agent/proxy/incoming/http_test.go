@@ -351,7 +351,11 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 		t.Fatal("CaptureHook was never invoked for chunked exchange — the skip bug has regressed")
 	}
 
-	<-handlerDone
+	select {
+	case <-handlerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleHttp1Connection did not return within 3s; inspect the handler's ctx/EOF handling")
+	}
 
 	capturedMu.Lock()
 	defer capturedMu.Unlock()
@@ -491,7 +495,11 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("CaptureHook was never invoked for chunked-request exchange — the skip bug has regressed")
 	}
-	<-handlerDone
+	select {
+	case <-handlerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HTTP handler did not finish after the chunked-request exchange; inspect the handler shutdown path")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

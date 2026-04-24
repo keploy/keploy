@@ -213,37 +213,44 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
 				return resp
 			}
-			// Mock miss. Before falling back to a synthetic/NXDOMAIN
-			// response, try forwarding to the cluster's real resolver
-			// (typically CoreDNS). This is the fix for the sap-demo /
-			// mysql.svc.cluster.local case: cluster-internal hostnames
-			// are not — and should not be — recorded as mocks, so a
-			// miss in replay mode is the expected shape for in-cluster
-			// DB / cache / queue connections. Faking them with the
-			// proxy's 127.0.0.1 (the legacy default) steers the app at
-			// the wrong IP and crashes the DB driver.
-			//
-			// If the forward succeeds we return the real answer as
-			// FromUpstream so the outer cache layer retains it for the
-			// usual 30 s — subsequent queries don't hit the network.
-			// If the forward fails we fall through to the existing
-			// "mock not found" path: same error, same log line, same
-			// NXDOMAIN / synthetic fallback. Forwarding is strictly
-			// additive.
-			if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
-				p.logger.Debug("DNS mock miss resolved via upstream forward",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-					zap.Int("rcode", fwdResp.Rcode),
-					zap.Int("answers", len(fwdResp.Answer)))
-				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
-			} else if fwdErr != nil {
-				p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-					zap.Error(fwdErr))
-			}
-			// Send mock not found error if we couldn't match any DNS mock.
+		}
+		// Mock miss (or mocking disabled). Before falling back to a
+		// synthetic/NXDOMAIN response, try forwarding to the cluster's
+		// real resolver (typically CoreDNS). This is the fix for the
+		// sap-demo / mysql.svc.cluster.local case: cluster-internal
+		// hostnames are not — and should not be — recorded as mocks, so
+		// a miss in replay mode is the expected shape for in-cluster
+		// DB / cache / queue connections. Faking them with the proxy's
+		// 127.0.0.1 (the legacy default) steers the app at the wrong
+		// IP and crashes the DB driver.
+		//
+		// When mocking is explicitly disabled the operator's intent is
+		// "use real traffic", so forwarding is even more clearly the
+		// right behaviour than returning a synthetic proxy IP.
+		//
+		// If the forward succeeds we return the real answer as
+		// FromUpstream so the outer cache layer retains it for the
+		// usual 30 s — subsequent queries don't hit the network.
+		// If the forward fails we fall through to the existing
+		// "mock not found" path: same error, same log line, same
+		// NXDOMAIN / synthetic fallback. Forwarding is strictly
+		// additive.
+		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+			p.logger.Debug("DNS mock miss resolved via upstream forward",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Int("rcode", fwdResp.Rcode),
+				zap.Int("answers", len(fwdResp.Answer)))
+			return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+		} else if fwdErr != nil {
+			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Error(fwdErr))
+		}
+		if mockingEnabled {
+			// Send mock not found error if we couldn't match any DNS
+			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
 				zap.String("query", question.Name),
