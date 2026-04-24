@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -347,6 +348,93 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("EmitMock did not return after ctx cancel (deadlock)")
+	}
+}
+
+// TestSessionEmitMockRouteViaSyncMock_Delivery pins the
+// RouteMocksViaSyncMock=true path. Enables the flag, binds a fresh
+// output channel on the package-singleton syncMock manager, and
+// asserts the mock arrives on that channel and OnPendingCleared
+// fired exactly once. This guards the V2 record path's core
+// invariant (mocks flow through syncMock so firstReqSeen buffering
+// + lifetime derivation happen) against regressions that bypass
+// the flag or drop the pending-cleared callback.
+//
+// syncMock is a package singleton — don't t.Parallel this test
+// against other tests that also bind the output channel; they'd
+// race on the shared outChan.
+func TestSessionEmitMockRouteViaSyncMock_Delivery(t *testing.T) {
+	// Not t.Parallel — shares the package-singleton syncMock.
+	mgr := syncMock.Get()
+	ch := make(chan *models.Mock, 1)
+	mgr.SetOutputChannel(ch)
+	t.Cleanup(func() {
+		// Unbind so a later test that doesn't use syncMock still
+		// sees the default nil-outChan shape. Closing the manager's
+		// out channel would be caught by outChanClosed and break
+		// other tests in the package.
+		mgr.SetOutputChannel(nil)
+	})
+
+	var pendingCleared int32
+	sess := &Session{
+		// Intentionally no s.Mocks — prove the syncMock route
+		// is what actually delivers the mock, not the
+		// direct-channel fallback.
+		Logger:                zaptest.NewLogger(t),
+		Ctx:                   context.Background(),
+		RouteMocksViaSyncMock: true,
+		OnPendingCleared: func() {
+			atomic.AddInt32(&pendingCleared, 1)
+		},
+	}
+
+	if err := sess.EmitMock(&models.Mock{Name: "via-syncmock"}); err != nil {
+		t.Fatalf("EmitMock returned err: %v", err)
+	}
+	select {
+	case got := <-ch:
+		if got == nil || got.Name != "via-syncmock" {
+			t.Fatalf("received wrong mock: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("mock not delivered via syncMock outChan within 1s")
+	}
+	if c := atomic.LoadInt32(&pendingCleared); c != 1 {
+		t.Fatalf("OnPendingCleared calls = %d, want 1", c)
+	}
+}
+
+// TestSessionEmitMockRouteViaSyncMock_HonorsCtx pins the ctx-cancel
+// behaviour on the syncMock routing path. Without the pre-check,
+// EmitMock would call mgr.AddMock (which does not observe s.Ctx)
+// and return nil — silently violating the documented contract
+// that EmitMock returns ctx.Err() when the parser's context has
+// been cancelled.
+func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
+	// Not t.Parallel — shares the package-singleton syncMock.
+	mgr := syncMock.Get()
+	ch := make(chan *models.Mock, 1)
+	mgr.SetOutputChannel(ch)
+	t.Cleanup(func() { mgr.SetOutputChannel(nil) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before EmitMock is called
+
+	sess := &Session{
+		Logger:                zaptest.NewLogger(t),
+		Ctx:                   ctx,
+		RouteMocksViaSyncMock: true,
+	}
+	err := sess.EmitMock(&models.Mock{Name: "should-be-cancelled"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	select {
+	case got := <-ch:
+		t.Fatalf("mock leaked to syncMock outChan after ctx cancel: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no delivery.
 	}
 }
 

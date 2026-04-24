@@ -291,6 +291,22 @@ func (s *Session) EmitMock(m *models.Mock) error {
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
 		if mgr := syncMock.Get(); mgr != nil {
+			// Honour s.Ctx cancellation on this path too.
+			// syncMock.AddMock itself does not observe s.Ctx — it
+			// takes its own mutex, may sit in sendToOutChan up to
+			// the manager's internal sendBudget, and never returns
+			// an error. Without this pre-check the caller would see
+			// EmitMock return nil even after the parser's context
+			// was cancelled, breaking the "EmitMock honours Ctx"
+			// contract documented above. Match the behaviour of the
+			// direct-channel path below (returns ctx.Err() on
+			// cancellation) so both routings look identical to the
+			// parser.
+			if ctx := s.Ctx; ctx != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			mgr.AddMock(m)
 			if s.OnPendingCleared != nil {
 				s.OnPendingCleared()
