@@ -353,8 +353,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// Release the lock early for streaming exchanges so a
 				// single slow/streaming upload doesn't wedge the sync
 				// semaphore. Capture stays enabled: tee reads the
-				// already-decoded body bytes, and the downstream
-				// capture-budget check (respCapture.Truncated()) handles
+				// already-decoded body bytes, and downstream capture-budget
+				// checks on the request/response capture buffers handle
 				// genuinely oversized streams.
 				releaseLock()
 				chunked = true

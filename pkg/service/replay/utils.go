@@ -90,8 +90,11 @@ func validateHealthURL(s string) (string, bool) {
 
 // waitForAppReady gates the first test on the user-application being up.
 //
-// If Test.HealthURL is empty we keep the historical behavior exactly: sleep for
-// Test.Delay seconds or until ctx is canceled.
+// If Test.HealthURL is empty (or syntactically invalid) we keep the historical
+// behavior exactly: sleep for Test.Delay seconds or until ctx is canceled. An
+// invalid HealthURL also logs at ERROR so operators see the misconfig, but it
+// is NOT a fatal failure — the fixed-delay path runs so replay never regresses
+// vs the pre-health-url behavior.
 //
 // Otherwise we poll HealthURL every healthPollInterval (with a per-request cap
 // of healthProbeTimeout). The first 2xx unblocks immediately. If HealthPollTimeout
@@ -104,20 +107,15 @@ func validateHealthURL(s string) (string, bool) {
 // teardown via defer Stop / defer cancel.
 //
 // Returns true when the caller should proceed to run tests, false only when ctx
-// was canceled (caller should treat as user abort).
+// was canceled (caller should treat as user abort). Specifically, an invalid
+// HealthURL does NOT cause a false return — callers rely on this contract to
+// disambiguate user abort from misconfiguration (see replay.go classification).
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
-	if cfg.Test.HealthURL == "" {
-		select {
-		case <-time.After(delay):
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
+	healthURL := cfg.Test.HealthURL
 
-	// Fail fast on a malformed --health-url instead of burning the entire
+	// Fail gracefully on a malformed --health-url instead of burning the entire
 	// HealthPollTimeout window on http.NewRequestWithContext errors that
 	// will never succeed. Common mistakes: missing scheme ("localhost:8080"),
 	// stray whitespace, "not-a-url". net/url.Parse is deliberately lenient,
@@ -125,13 +123,32 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	// what net/http's transport actually needs to dial. No DNS, no dial here:
 	// just syntactic validation so the operator gets actionable feedback now
 	// rather than after 60s of silent retries.
-	if reason, ok := validateHealthURL(cfg.Test.HealthURL); !ok {
-		logger.Error("invalid --health-url; skipping health probe",
-			zap.String("healthUrl", cfg.Test.HealthURL),
-			zap.String("reason", reason),
-			zap.String("nextStep", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", cfg.Test.HealthURL)),
-		)
-		return false
+	//
+	// On invalid URL we fall back to the fixed-delay path (same as the
+	// empty-URL branch) rather than returning false. Returning false here
+	// would be classified by callers as TestSetStatusUserAbort + context
+	// cancellation, which is a behavior regression vs the pre-health-url
+	// fixed-delay sleep. The ERROR log still fires so operators see the
+	// misconfig, and the contract of "false only on ctx cancel" stays
+	// truthful for callers (see replay.go classification of the return).
+	if healthURL != "" {
+		if reason, ok := validateHealthURL(healthURL); !ok {
+			logger.Error("invalid --health-url; falling back to fixed delay",
+				zap.String("healthUrl", healthURL),
+				zap.String("reason", reason),
+				zap.String("nextStep", "--health-url must be a full URL with scheme (http:// or https://) and host; got "+fmt.Sprintf("%q", healthURL)+" — fix it or omit to use --delay only"),
+			)
+			healthURL = "" // fall through to the empty-URL / fixed-delay branch below
+		}
+	}
+
+	if healthURL == "" {
+		select {
+		case <-time.After(delay):
+			return true
+		case <-ctx.Done():
+			return false
+		}
 	}
 
 	pollCeiling := cfg.Test.HealthPollTimeout

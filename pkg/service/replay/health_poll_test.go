@@ -200,33 +200,35 @@ func TestWaitForAppReady_CtxCanceledAtCeiling(t *testing.T) {
 	}
 }
 
-// TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL locks in the
-// fast-fail path for malformed --health-url inputs. Without the URL
-// validation at the top of waitForAppReady, http.NewRequestWithContext
-// inside httpHealthPoll would return an error on every probe and we
-// would burn the entire HealthPollTimeout window (default 60s) plus
-// the fixed Delay before returning — with zero actionable feedback to
-// the operator. The fix: validate scheme + host up front and return
-// immediately so a typo surfaces in milliseconds.
+// TestWaitForAppReady_MalformedURL_FallsBackToDelay locks in the
+// invalid-URL behavior: the poll is skipped, we log at ERROR so
+// operators see the misconfig, and we fall through to the fixed-delay
+// path (same as an empty HealthURL). Crucially we must NOT return
+// false — callers classify false as TestSetStatusUserAbort +
+// context.Canceled, which would misreport a config typo as a user
+// abort. Instead we return true after sleeping Test.Delay, matching
+// the pre-health-url behavior so replay is never worse than before.
 //
 // To prove we never enter the poll loop we also swap out healthPoller
-// with a stub that fails the test if called; if the pre-loop
-// validation regresses this stub catches it even when the time-based
-// bound would pass for other reasons.
-func TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL(t *testing.T) {
+// with a stub that fails the test if called; that guards against the
+// validation regressing back into the poll path even if the timing
+// bound happens to pass for unrelated reasons.
+func TestWaitForAppReady_MalformedURL_FallsBackToDelay(t *testing.T) {
 	orig := healthPoller
 	healthPoller = func(_ context.Context, _ string) bool {
-		t.Fatalf("healthPoller must not be called when HealthURL is malformed — pre-loop validation should short-circuit")
+		t.Fatalf("healthPoller must not be called when HealthURL is malformed — validation should fall through to the fixed-delay branch")
 		return false
 	}
 	defer func() { healthPoller = orig }()
 
-	// HealthPollTimeout is large on purpose: if the validation regresses
-	// and we fall into the poll loop, elapsed balloons and the <100ms
-	// assertion below fires. Delay is also large so the fallback sleep
-	// (if it ever runs) is visible to the assertion.
+	// Delay is the observable lower bound for the fallback sleep;
+	// keep it small to keep the test quick but large enough that
+	// scheduler jitter cannot make elapsed land above it by accident.
+	// HealthPollTimeout is large on purpose: if the fallback ever
+	// regresses back into the poll loop, the healthPoller stub above
+	// would catch it first.
 	cfg := newCfg("not-a-url", 30*time.Second)
-	cfg.Test.Delay = 10
+	cfg.Test.Delay = 1
 
 	core, logs := observer.New(zap.ErrorLevel)
 	logger := zap.New(core)
@@ -235,19 +237,21 @@ func TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL(t *testing.T) {
 	ok := waitForAppReady(context.Background(), logger, cfg)
 	elapsed := time.Since(start)
 
-	if ok {
-		t.Fatalf("expected waitForAppReady to return false on malformed URL, got true")
+	if !ok {
+		t.Fatalf("expected waitForAppReady to return true on malformed URL (falls through to fixed-delay path), got false — callers would misclassify this as user abort")
 	}
-	// The key win: fail fast. 100ms is generous for an in-process
-	// url.Parse + scheme/host check; anything close to the poll
-	// ceiling or fallback delay indicates the pre-loop guard is gone.
-	if elapsed >= 100*time.Millisecond {
-		t.Fatalf("expected <100ms fast-fail on malformed URL, elapsed=%v (did the validation regress?)", elapsed)
+	// Lower bound: we must have actually slept Test.Delay seconds.
+	// Allow a small jitter tolerance so ticker/timer drift doesn't
+	// make this flake on loaded CI runners.
+	const jitterTolerance = 50 * time.Millisecond
+	minExpected := time.Duration(cfg.Test.Delay)*time.Second - jitterTolerance
+	if elapsed < minExpected {
+		t.Fatalf("expected elapsed >= %v (Delay fallback), got %v — did we skip the fixed-delay sleep?", minExpected, elapsed)
 	}
 
 	// Operator-facing log: must mention --health-url so grepping a CI log
 	// actually tells the operator what to fix. Without this, the failure
-	// mode is "keploy just returned false" with no context.
+	// mode is "keploy silently ran fixed delay" with no context.
 	var foundLog bool
 	for _, entry := range logs.All() {
 		if strings.Contains(entry.Message, "invalid --health-url") {
@@ -263,9 +267,10 @@ func TestWaitForAppReady_MalformedURL_FailsFastOnInvalidURL(t *testing.T) {
 // TestWaitForAppReady_MalformedURL_TableDriven covers the set of
 // malformed inputs we explicitly want to reject at the boundary: no
 // scheme, non-http scheme, empty host after scheme, and outright
-// garbage. Each must return false in well under 100ms. If any one of
-// these slips past validation and into the poll loop, the bug surfaces
-// as either a timeout-sized elapsed or a healthPoller call.
+// garbage. Each must fall through to the fixed-delay branch (return
+// true, sleep Test.Delay, never invoke the poller) rather than
+// returning false — callers classify false as user abort, so a
+// misconfigured URL must NOT be reported that way.
 func TestWaitForAppReady_MalformedURL_TableDriven(t *testing.T) {
 	cases := []struct {
 		name string
@@ -288,18 +293,20 @@ func TestWaitForAppReady_MalformedURL_TableDriven(t *testing.T) {
 			defer func() { healthPoller = orig }()
 
 			cfg := newCfg(c.url, 10*time.Second)
-			cfg.Test.Delay = 5
+			// Delay=0 keeps the table fast; the empty-URL/fixed-delay
+			// branch still returns true on an immediately-fired
+			// time.After(0), which is exactly what we want to assert
+			// here. The "did we actually sleep Test.Delay" lower-bound
+			// check lives in the dedicated test above; this table's
+			// job is to exhaustively prove every malformed shape
+			// routes to the fixed-delay branch and returns true.
+			cfg.Test.Delay = 0
 			logger := zap.NewNop()
 
-			start := time.Now()
 			ok := waitForAppReady(context.Background(), logger, cfg)
-			elapsed := time.Since(start)
 
-			if ok {
-				t.Fatalf("expected false for malformed URL %q, got true", c.url)
-			}
-			if elapsed >= 100*time.Millisecond {
-				t.Fatalf("expected <100ms fast-fail for %q, elapsed=%v", c.url, elapsed)
+			if !ok {
+				t.Fatalf("expected true (fall through to fixed-delay) for malformed URL %q, got false — callers would misclassify this as user abort", c.url)
 			}
 		})
 	}
