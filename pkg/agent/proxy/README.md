@@ -68,8 +68,11 @@ Split responsibilities:
     session are silently dropped so partial mocks never reach storage.
 - **`proxy_v2.go::recordViaSupervisor`** — dispatcher entry for V2
   parsers. Builds the relay + supervisor + session, invokes the
-  parser, and on `FallthroughToPassthrough` drops the parser and
-  hands the real sockets to `globalPassThrough`. User traffic
+  parser, and on `FallthroughToPassthrough` drops the parser while
+  **keeping the existing relay forwarding raw bytes on the real
+  sockets until peer close** — it deliberately does not call
+  `globalPassThrough`, which would introduce a read-loop gap
+  (exactly the stall V2 was designed to eliminate). User traffic
   continues regardless of parser state.
 
 ## Safety invariants
@@ -80,7 +83,7 @@ Numbered to match `PLAN.md` at the repo root.
 |---|-----------|-------------|
 | I1 | Transparent forwarding: every byte reaches its peer in order, or the connection is torn down by the peer's own timeout — never by keploy. | Split ownership. Relay is sole writer. FakeConn.Write is a runtime error. |
 | I2 | Parser failures are local: panics / hangs / OOM in a parser never affect other connections, and never affect the faulting connection's byte path. | Supervisor panic firewall + activity watchdog + memory cap. |
-| I3 | Fallback always available: any connection can drop to raw passthrough at any instant. | `recordViaSupervisor` routes `FallthroughToPassthrough` results to `globalPassThrough`. |
+| I3 | Fallback always available: any connection can drop to raw passthrough at any instant. | On `FallthroughToPassthrough`, `recordViaSupervisor` drops the parser but keeps the existing relay forwarding raw bytes end-to-end until peer close — no handoff gap, no replacement read loop. |
 | I4 | Partial mocks are dropped. | `MarkMockIncomplete` + `EmitMock` gate. Chunk-drop in the tee sets the flag. |
 | I5 | Timestamp monotonicity per connection. | `Chunk.ReadAt` / `Chunk.WrittenAt` stamped at the syscall boundary in the relay; parsers must read these, never call `time.Now()` themselves. Lint rule at `tools/lint/no_timestamp_in_parser/` enforces. |
 | I6 | Bounded resources per connection. | `Config.PerConnCap` on the relay tee. Supervisor tracks parser-owned bytes. |

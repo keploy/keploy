@@ -114,7 +114,7 @@ func (p *Proxy) recordViaSupervisor(
 	// OnPendingCleared clears the flag after each successful emit.
 	r := relay.New(relay.Config{
 		Logger:               logger,
-		TLSUpgradeFn:         newProxyTLSUpgradeFn(&srcConn, &dstConn, logger),
+		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
 		BumpActivity:         sv.BumpActivity,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
@@ -225,8 +225,9 @@ func (p *Proxy) recordViaSupervisor(
 //
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
-// fn only performs the handshake and returns the new net.Conn.
-func newProxyTLSUpgradeFn(srcPtr, dstPtr *net.Conn, logger *zap.Logger) relay.TLSUpgradeFn {
+// fn only performs the handshake and returns the new net.Conn —
+// hence it does not need the caller's *net.Conn handles.
+func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
