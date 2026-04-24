@@ -365,6 +365,12 @@ type PostgresV3Response struct {
 	// resend its own bytes. nil on non-COPY responses.
 	CopyIn *PostgresV3CopyInPayload `json:"copyIn,omitempty" yaml:"copyIn,omitempty" bson:"copy_in,omitempty"`
 
+	// CopyBoth is set when the server responded with a
+	// CopyBothResponse ('W'), which puts the connection in
+	// bidirectional COPY mode (logical replication / pg_basebackup).
+	// Mutually exclusive with Rows/CopyOut/CopyIn. nil otherwise.
+	CopyBoth *PostgresV3CopyBothPayload `json:"copyBoth,omitempty" yaml:"copyBoth,omitempty" bson:"copy_both,omitempty"`
+
 	// Notices holds NoticeResponse ('N') messages the server emitted
 	// while answering this invocation. Postgres interleaves notices
 	// with any command response (e.g. "NOTICE: relation already
@@ -374,6 +380,26 @@ type PostgresV3Response struct {
 	// silently drop them. Ordering matches wire arrival. nil/omit
 	// when the invocation produced no notices.
 	Notices []PostgresV3Notice `json:"notices,omitempty" yaml:"notices,omitempty" bson:"notices,omitempty"`
+
+	// Notifications captures NotificationResponse ('A') messages —
+	// async LISTEN/NOTIFY deliveries the server injected into the
+	// response stream. These are connection-scoped in PG (a
+	// NotificationResponse can arrive between any two bundles), but
+	// the capture attaches them to whichever invocation is currently
+	// in flight; replay re-emits them before CommandComplete on the
+	// same invocation. Notifications that arrive when no invocation
+	// is pending (true async between-command delivery) are dropped
+	// — supporting those would require a connection-level sideband
+	// and a separate injection scheduler the replayer does not yet
+	// have. nil/omit when this invocation observed none.
+	Notifications []PostgresV3Notification `json:"notifications,omitempty" yaml:"notifications,omitempty" bson:"notifications,omitempty"`
+
+	// FunctionCall captures a legacy fastpath FunctionCall ('F') +
+	// FunctionCallResponse ('V') exchange. Mutually exclusive with
+	// Rows / CopyOut / CopyIn — an invocation is either a SQL query
+	// or a fastpath function invocation, never both. nil/omit on
+	// non-FunctionCall invocations.
+	FunctionCall *PostgresV3FunctionCall `json:"functionCall,omitempty" yaml:"functionCall,omitempty" bson:"function_call,omitempty"`
 }
 
 // PostgresV3Notice is one NoticeResponse ('N') message. Wire format
@@ -387,6 +413,49 @@ type PostgresV3Notice struct {
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
 	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
 	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
+}
+
+// PostgresV3Notification is one NotificationResponse ('A') message
+// (async LISTEN/NOTIFY delivery). Wire layout: int32 backendPID +
+// cstring channel + cstring payload. We persist all three so the
+// replay can reproduce what the real backend produced, including
+// the PID (some drivers gate on it matching the session's backend
+// PID before surfacing the notification to application code).
+type PostgresV3Notification struct {
+	BackendPID int32  `json:"backendPID,omitempty" yaml:"backendPID,omitempty" bson:"backend_pid,omitempty"`
+	Channel    string `json:"channel" yaml:"channel" bson:"channel"`
+	Payload    string `json:"payload,omitempty" yaml:"payload,omitempty" bson:"payload,omitempty"`
+}
+
+// PostgresV3FunctionCall is the legacy fastpath FunctionCall ('F') →
+// FunctionCallResponse ('V') pair. Modern drivers use SELECT fn(...)
+// queries and never touch this API, but libpq's PQfn, pgBouncer's
+// internal pings, and a few ORM internals (especially around large-
+// object access) do emit it — a recorder that treats the tag as
+// "unknown" would terminate the stream there.
+//
+// All three fields are optional in the on-disk YAML:
+//   - OID identifies the server-side function (often
+//     lo_creat/lo_open/lo_read/lo_write/lo_close for large-object APIs)
+//   - Args preserves argument byte payloads (text or binary per
+//     ArgFormats)
+//   - Result holds the server's response bytes (int32(-1) → IsNull)
+type PostgresV3FunctionCall struct {
+	// OID — server-side function OID being invoked.
+	OID uint32 `json:"oid" yaml:"oid" bson:"oid"`
+	// ArgFormats — per-argument wire format (0 text, 1 binary). Spec
+	// allows len=0 (all text), len=1 (broadcast), len=N (per-arg);
+	// we preserve exactly what the client sent.
+	ArgFormats []int16 `json:"argFormats,omitempty" yaml:"argFormats,omitempty" bson:"arg_formats,omitempty"`
+	// Args — ordered list of argument payloads. A NULL argument is
+	// represented by IsNull=true; non-NULL args have the raw bytes.
+	Args []PostgresV3Cell `json:"args,omitempty" yaml:"args,omitempty" bson:"args,omitempty"`
+	// ResultFormat — wire format of the result (0 text, 1 binary).
+	ResultFormat int16 `json:"resultFormat,omitempty" yaml:"resultFormat,omitempty" bson:"result_format,omitempty"`
+	// Result — FunctionCallResponse payload. IsNull=true represents
+	// the wire int32(-1) sentinel (NULL); Bytes carries the payload
+	// otherwise.
+	Result PostgresV3Cell `json:"result,omitempty" yaml:"result,omitempty" bson:"result,omitempty"`
 }
 
 // PostgresV3CopyOutPayload captures a full server-side CopyOut burst:
@@ -426,6 +495,25 @@ type PostgresV3CopyOutPayload struct {
 type PostgresV3CopyInPayload struct {
 	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
 	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
+}
+
+// PostgresV3CopyBothPayload captures a CopyBothResponse ('W') exchange.
+// CopyBoth is used by logical replication (START_REPLICATION ...
+// LOGICAL) and pg_basebackup (START_REPLICATION ... PHYSICAL): the
+// connection stays in a bidirectional streaming mode where the backend
+// emits CopyData frames (WAL / basebackup payload) and the client
+// emits CopyData frames back (standby status updates, keepalives).
+// Data holds every CopyData body the backend emitted, in arrival
+// order, preserving packet boundaries so the replay reproduces
+// exactly what the real server sent.
+type PostgresV3CopyBothPayload struct {
+	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
+	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
+	// Data — server-produced CopyData frames between CopyBothResponse
+	// and CopyDone. Client-produced frames (standby status updates)
+	// are NOT persisted here for the same reason as CopyIn: the
+	// client under test regenerates them at replay time.
+	Data [][]byte `json:"data,omitempty" yaml:"data,omitempty" bson:"data,omitempty"`
 }
 
 type PostgresV3ColumnDescriptor struct {
