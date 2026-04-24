@@ -276,10 +276,21 @@ echo "Recording stopped."
 endsec
 
 section "Start Replay"
+# --apiTimeout=60 and --delay 20: /suite issues multiple strict
+# unconnected-UDP queries that each retry for 2-3s when cgroup/recvmsg4
+# doesn't fire (the runner quirk documented in the samples-go runSuite
+# comment). End-to-end /suite latency on this runner is ~10-15s;
+# Keploy's default per-request apiTimeout is well below that, which
+# shows up as "context deadline exceeded" on every replay of the
+# /suite testcase. 60s gives the request room to come back. --delay
+# 20 matches gin_mongo / proxy-stress-test — the sample's container
+# needs a little more start-up time than the default 10s before
+# Keploy starts dispatching the recorded requests.
 "$REPLAY_BIN" test \
   -c "docker run -p 8086:8086 --rm --net $NETWORK --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
-  --delay 15 \
+  --apiTimeout 60 \
+  --delay 20 \
   --generateGithubActions=false 2>&1 | tee test.txt || true
 # Replay mode serves recorded mocks, so Keploy's DNS forwarder is
 # typically not hit. No resolv.conf override needed here.
