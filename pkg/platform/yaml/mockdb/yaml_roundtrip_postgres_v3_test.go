@@ -150,8 +150,8 @@ func TestYAMLRoundTrip_PostgresV3Data(t *testing.T) {
 					PrimaryKey: []string{"id"},
 					Columns:    []string{"id", "tag", "created_at"},
 					Rows: []models.PostgresV3Cells{
-						{models.NewTextCell("1"), models.NewTextCell("vip"), models.NewTextCell("2026-04-22")},
-						{models.NewTextCell("2"), models.NewTextCell("churn-risk"), models.NewTextCell("2026-04-22")},
+						{models.NewValueCell("1"), models.NewValueCell("vip"), models.NewValueCell("2026-04-22")},
+						{models.NewValueCell("2"), models.NewValueCell("churn-risk"), models.NewValueCell("2026-04-22")},
 					},
 					Truncated: false,
 				},
@@ -182,14 +182,14 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
 					InvocationID:  "sha256:abcd:0",
-					BindValues:    models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:   []int{1},
 					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						Rows:            []models.PostgresV3Cells{{models.NewTextCell("1")}},
+						Rows:            []models.PostgresV3Cells{{models.NewValueCell("1")}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
@@ -274,7 +274,7 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
 					InvocationID: "sha256:null:0",
-					BindValues:   models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindValues:   models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:  []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
@@ -286,7 +286,7 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 						// type exists.
 						Rows: []models.PostgresV3Cells{
 							{models.NullCell()},
-							{models.NewTextCell("hello")},
+							{models.NewValueCell("hello")},
 						},
 						CommandComplete: "SELECT 2",
 					},
@@ -317,10 +317,13 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 	if len(q.Response.Rows[0]) == 0 {
 		t.Fatal("Rows[0] is empty; expected the NULL cell")
 	}
-	if !q.Response.Rows[0][0].IsNull {
-		t.Fatalf("NULL cell lost in yaml round-trip: got %+v, want IsNull=true", q.Response.Rows[0][0])
+	if !q.Response.Rows[0][0].IsNull() {
+		t.Fatalf("NULL cell lost in yaml round-trip: got %+v, want IsNull()=true", q.Response.Rows[0][0])
 	}
-	if q.Response.Rows[1][0].IsNull || string(q.Response.Rows[1][0].Bytes) != "hello" {
+	if q.Response.Rows[1][0].IsNull() {
+		t.Fatalf("Rows[1][0]: want text cell, got NULL")
+	}
+	if s, ok := q.Response.Rows[1][0].Value.(string); !ok || s != "hello" {
 		t.Fatalf("Rows[1][0]: want text \"hello\", got %+v", q.Response.Rows[1][0])
 	}
 	if !reflect.DeepEqual(q, in.Spec.PostgresV3.Query) {

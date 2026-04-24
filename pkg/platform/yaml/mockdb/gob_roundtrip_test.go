@@ -176,8 +176,8 @@ func TestRoundTrip_PostgresV3Data(t *testing.T) {
 					PrimaryKey: []string{"id"},
 					Columns:    []string{"id", "tag", "created_at"},
 					Rows: []models.PostgresV3Cells{
-						{models.NewTextCell("1"), models.NewTextCell("vip"), models.NewTextCell("2026-04-22")},
-						{models.NewTextCell("2"), models.NewTextCell("churn-risk"), models.NewTextCell("2026-04-22")},
+						{models.NewValueCell("1"), models.NewValueCell("vip"), models.NewValueCell("2026-04-22")},
+						{models.NewValueCell("2"), models.NewValueCell("churn-risk"), models.NewValueCell("2026-04-22")},
 					},
 					Truncated: false,
 				},
@@ -205,7 +205,7 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 					// (4 bytes, big-endian). Stored as a PostgresV3Cell which
 					// will serialise as !!binary in YAML because the bytes
 					// contain NULs that fail the plain-string predicate.
-					BindValues:  models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindValues:  models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats: []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
@@ -213,7 +213,7 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 						},
 						// One row, one text-format cell containing the literal "1".
 						// Emits as a plain YAML string in the recorded mock.
-						Rows:            []models.PostgresV3Cells{{models.NewTextCell("1")}},
+						Rows:            []models.PostgresV3Cells{{models.NewValueCell("1")}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
@@ -242,7 +242,7 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
 					InvocationID: "sha256:null:0",
-					BindValues:   models.PostgresV3Cells{models.NewBinaryCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindValues:   models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
 					BindFormats:  []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
@@ -254,7 +254,7 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 						// PostgresV3Cell type (see PostgresV3Cell.IsNull).
 						Rows: []models.PostgresV3Cells{
 							{models.NullCell()},
-							{models.NewTextCell("hello")},
+							{models.NewValueCell("hello")},
 						},
 						CommandComplete: "SELECT 2",
 					},
