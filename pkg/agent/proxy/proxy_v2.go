@@ -46,8 +46,13 @@ func newRelayDisabled() bool {
 //     so the parser receives both surfaces through its existing
 //     RecordOutgoing signature.
 //  4. Invoke sv.Run; on a FallthroughToPassthrough result, drop the
-//     parser and run globalPassThrough on the real sockets so user
-//     traffic continues regardless of the parser's fate.
+//     parser and keep the existing relay forwarding raw bytes on the
+//     real sockets until peer close so user traffic continues
+//     regardless of the parser's fate. (Critically we do NOT call
+//     globalPassThrough here: that would create a gap between the
+//     relay stopping and a replacement read loop starting — exactly
+//     the kind of stall the V2 architecture is meant to eliminate.
+//     See invariant I1 in pkg/agent/proxy/README.md.)
 //
 // The caller remains responsible for closing srcConn/dstConn in its
 // deferred cleanup; this helper never closes them.

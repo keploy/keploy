@@ -4,9 +4,11 @@
 // cannot touch real sockets. To request mid-stream operations that
 // require real-socket access (notably mid-stream TLS upgrades for
 // Postgres SSLRequest and MySQL CLIENT_SSL), parsers send a
-// [Directive] on a channel owned by the [supervisor], which forwards
-// the request to the [relay], executes it on the real sockets, and
-// returns an [Ack] to the parser.
+// [Directive] on a channel exposed by the [relay] (surfaced on the
+// supervisor.Session's Directives field). The relay processes the
+// request on the real sockets and returns an [Ack] to the parser
+// on the Acks channel. The supervisor itself never touches the
+// directive stream — it only supervises the parser lifecycle.
 //
 // The choreography keeps parsers ignorant of TLS state, socket
 // handles, and relay timing. Every parser uses the same directive

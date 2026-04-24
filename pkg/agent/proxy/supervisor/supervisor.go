@@ -290,6 +290,7 @@ func (s *Supervisor) classifyReturn(outerCtx context.Context, panicked bool, pan
 		s.cfg.Logger.Error("parser panicked",
 			zap.Any("panic", panicVal),
 			zap.ByteString("stack", stack),
+			zap.String("next_step", "the supervisor is falling through to raw passthrough so user traffic continues unaffected; file the panic with the parser owner using the captured stack, and set KEPLOY_NEW_RELAY=off to force the legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
 		s.reportPanic(panicVal, stack)
 		s.fireOnAbort()

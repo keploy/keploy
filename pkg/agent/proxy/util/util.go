@@ -907,11 +907,12 @@ func RecoverWithoutClose(logger *zap.Logger) {
 		// Mirror Recover's safe-fallback behaviour: the enclosing
 		// function is already unwinding and the caller asked us to
 		// swallow the panic, so the least-bad thing we can do
-		// without a logger is announce ourselves on stdout and
-		// still recover() so the goroutine doesn't crash the
-		// process.
+		// without a logger is announce ourselves on stderr (stdout
+		// is reserved for CLI output and writing there from library
+		// code can corrupt tool-parseable streams) and still
+		// recover() so the goroutine doesn't crash the process.
 		if r := recover(); r != nil {
-			fmt.Println(Emoji + "Recovered from panic in parser (no logger available)")
+			fmt.Fprintln(os.Stderr, Emoji+"Recovered from panic in parser (no logger available)")
 		}
 		return
 	}
