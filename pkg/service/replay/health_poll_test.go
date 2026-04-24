@@ -92,7 +92,7 @@ func TestWaitForAppReady_503ThenOK(t *testing.T) {
 }
 
 // TestWaitForAppReady_NeverOK verifies the fallback path: when the health
-// endpoint never returns 2xx we log the WARN and sleep for --delay.
+// endpoint never returns 2xx we log at INFO and sleep for --delay.
 func TestWaitForAppReady_NeverOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -103,7 +103,7 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 	// observable lower bound after the ceiling elapses.
 	cfg := newCfg(srv.URL, 300*time.Millisecond)
 
-	core, logs := observer.New(zap.WarnLevel)
+	core, logs := observer.New(zap.InfoLevel)
 	logger := zap.New(core)
 
 	start := time.Now()
@@ -126,7 +126,7 @@ func TestWaitForAppReady_NeverOK(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected WARN 'health probe timed out' log, entries=%v", logs.All())
+		t.Fatalf("expected INFO 'health probe timed out' log, entries=%v", logs.All())
 	}
 }
 

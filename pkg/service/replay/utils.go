@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,6 +35,12 @@ var healthPoller = httpHealthPoll
 // httpHealthPoll issues a single GET to url with a short per-request timeout and reports
 // whether it returned a 2xx status. Non-2xx, transport errors, and timeouts all report false;
 // the caller decides whether to retry.
+//
+// The response body is fully drained (io.Copy to io.Discard) before Close so the underlying
+// TCP connection can be returned to the DefaultClient's keep-alive pool and reused by the
+// next poll iteration. Without the drain, net/http treats the connection as dirty and opens
+// a new socket every 500ms, which is pure overhead against an endpoint we are going to hit
+// many times in a row.
 func httpHealthPoll(ctx context.Context, url string) bool {
 	reqCtx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
 	defer cancel()
@@ -45,7 +52,11 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain first, then close — enables HTTP keep-alive reuse across poll iterations.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
@@ -56,8 +67,12 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 //
 // Otherwise we poll HealthURL every healthPollInterval (with a per-request cap
 // of healthProbeTimeout). The first 2xx unblocks immediately. If HealthPollTimeout
-// elapses with no 2xx, we log a WARN and fall back to the fixed Delay sleep so
-// operators never get stuck worse than today.
+// elapses with no 2xx, we log an INFO telling the operator what to tune and fall
+// back to the fixed Delay sleep so operators never get stuck worse than today.
+//
+// The poll cadence uses a single time.Ticker plus a single time.Timer for the
+// ceiling (pattern: pkg/util.go WaitForPort). This avoids per-iteration timer
+// allocation from time.After and gives deterministic teardown via defer Stop.
 //
 // Returns true when the caller should proceed to run tests, false only when ctx
 // was canceled (caller should treat as user abort).
@@ -77,22 +92,35 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	if pollCeiling <= 0 {
 		pollCeiling = 60 * time.Second
 	}
-	deadline := time.Now().Add(pollCeiling)
 
 	logger.Info("polling application health endpoint before firing tests",
 		zap.String("healthUrl", cfg.Test.HealthURL),
 		zap.Duration("pollTimeout", pollCeiling),
 	)
 
+	// Probe once immediately so a fast-ready app doesn't pay the first tick's
+	// healthPollInterval of latency.
+	if healthPoller(ctx, cfg.Test.HealthURL) {
+		logger.Debug("health endpoint reported 2xx; proceeding",
+			zap.String("healthUrl", cfg.Test.HealthURL),
+		)
+		return true
+	}
+
+	ticker := time.NewTicker(healthPollInterval)
+	defer ticker.Stop()
+	ceiling := time.NewTimer(pollCeiling)
+	defer ceiling.Stop()
+
 	for {
-		if healthPoller(ctx, cfg.Test.HealthURL) {
-			logger.Debug("health endpoint reported 2xx; proceeding",
-				zap.String("healthUrl", cfg.Test.HealthURL),
-			)
-			return true
-		}
-		if time.Now().After(deadline) {
-			logger.Warn("health probe timed out, falling back to fixed delay",
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ceiling.C:
+			// Health probe never returned 2xx inside pollCeiling. Downgraded
+			// from Warn per repo logging guidelines; the message still tells
+			// operators exactly which knobs to turn.
+			logger.Info("health probe timed out, falling back to fixed delay — set KEPLOY_HEALTH_URL to an endpoint that returns 2xx sooner, or raise --health-poll-timeout",
 				zap.String("healthUrl", cfg.Test.HealthURL),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
@@ -103,11 +131,13 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			case <-ctx.Done():
 				return false
 			}
-		}
-		select {
-		case <-time.After(healthPollInterval):
-		case <-ctx.Done():
-			return false
+		case <-ticker.C:
+			if healthPoller(ctx, cfg.Test.HealthURL) {
+				logger.Debug("health endpoint reported 2xx; proceeding",
+					zap.String("healthUrl", cfg.Test.HealthURL),
+				)
+				return true
+			}
 		}
 	}
 }
