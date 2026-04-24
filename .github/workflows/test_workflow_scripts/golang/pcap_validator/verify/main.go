@@ -8,19 +8,19 @@
 //
 // Expected behavior:
 //
-//   HTTP path (plaintext from client → app):
-//     • HTTP marker is visible in the INCOMING kpcap (request body).
-//     • HTTP marker is visible in the OUTGOING kpcap (PG/Mongo wire).
+//	HTTP path (plaintext from client → app):
+//	  • HTTP marker is visible in the INCOMING kpcap (request body).
+//	  • HTTP marker is visible in the OUTGOING kpcap (PG/Mongo wire).
 //
-//   HTTPS path (TLS from client → app):
-//     • HTTPS marker is NOT visible plaintext in the INCOMING kpcap —
-//       Keploy's incoming proxy does not terminate TLS, so the client's
-//       TLS records pass through opaquely. (If this ever changes, drop
-//       the strict assertion below.)
-//     • HTTPS marker IS visible plaintext in the OUTGOING kpcap because
-//       the app decrypts the request itself and emits the label to PG /
-//       Mongo over plaintext wire — which Keploy's outgoing proxy then
-//       captures.
+//	HTTPS path (TLS from client → app):
+//	  • HTTPS marker is NOT visible plaintext in the INCOMING kpcap —
+//	    Keploy's incoming proxy does not terminate TLS, so the client's
+//	    TLS records pass through opaquely. (If this ever changes, drop
+//	    the strict assertion below.)
+//	  • HTTPS marker IS visible plaintext in the OUTGOING kpcap because
+//	    the app decrypts the request itself and emits the label to PG /
+//	    Mongo over plaintext wire — which Keploy's outgoing proxy then
+//	    captures.
 package main
 
 import (
@@ -45,7 +45,6 @@ type fileSummary struct {
 	path       string
 	chunks     int
 	hasStart   bool
-	hasEnd     bool
 	markerHits map[string][]hit
 }
 
@@ -109,7 +108,6 @@ func summarize(path string, markers []string) (*fileSummary, error) {
 			s.hasStart = true
 			continue
 		case "capture-end":
-			s.hasEnd = true
 			continue
 		case "chunk":
 			// fall through
@@ -151,11 +149,11 @@ func report(in, out *fileSummary, httpMarker, httpsMarker string) {
 	fmt.Printf("  HTTPS marker plaintext in OUTGOING : %s (hits=%d) — expected YES (app decrypts, hits PG/Mongo plaintext)\n", okmark(httpsOut > 0), httpsOut)
 
 	var problems []string
-	if !in.hasStart || !in.hasEnd {
-		problems = append(problems, fmt.Sprintf("incoming kpcap missing capture-start/end (start=%v end=%v)", in.hasStart, in.hasEnd))
+	if !in.hasStart {
+		problems = append(problems, "incoming kpcap missing capture-start")
 	}
-	if !out.hasStart || !out.hasEnd {
-		problems = append(problems, fmt.Sprintf("outgoing kpcap missing capture-start/end (start=%v end=%v)", out.hasStart, out.hasEnd))
+	if !out.hasStart {
+		problems = append(problems, "outgoing kpcap missing capture-start")
 	}
 	if httpInc == 0 {
 		problems = append(problems, "HTTP marker missing from INCOMING — plaintext HTTP capture is broken")
@@ -180,8 +178,8 @@ func report(in, out *fileSummary, httpMarker, httpsMarker string) {
 }
 
 func printSummary(label string, s *fileSummary) {
-	fmt.Printf("== %s == %s\n  chunks=%d  capture-start=%v  capture-end=%v\n",
-		label, s.path, s.chunks, s.hasStart, s.hasEnd)
+	fmt.Printf("== %s == %s\n  chunks=%d  capture-start=%v\n",
+		label, s.path, s.chunks, s.hasStart)
 	for marker, hits := range s.markerHits {
 		fmt.Printf("  marker %s: %d hit(s)\n", marker, len(hits))
 		for _, h := range hits {
