@@ -163,6 +163,30 @@ type Proxy struct {
 	// Uses bounded LRU with TTL to prevent unbounded memory growth.
 	recordedDNSMocks *expirable.LRU[string, bool]
 
+	// dnsUpstreamServers is the list of upstream DNS resolver IPs
+	// captured from /etc/resolv.conf ONCE at proxy startup, BEFORE the
+	// DNS server begins listening on p.DNSPort. This snapshot preserves
+	// the original (pre-keploy) cluster resolver addresses (typically
+	// CoreDNS in a Kubernetes pod) so that on a mock miss the
+	// userspace DNS handler can forward queries upstream and return a
+	// real answer for cluster-internal names (e.g.
+	// `mysql.svc.cluster.local`) instead of the proxy's 127.0.0.1
+	// fallback — which would cause the app to attempt DB connections
+	// against the wrong IP.
+	//
+	// Captured via dns.ClientConfigFromFile. Empty when the file is
+	// missing or unparseable; the forwarder falls back to the legacy
+	// synthetic response in that case.
+	dnsUpstreamServers []string
+	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
+	// Defaults to "53" when resolv.conf does not specify one.
+	dnsUpstreamPort string
+	// dnsForwardTimeout caps how long a single upstream Exchange is
+	// allowed to block. Short by design — a flaky resolver must never
+	// stall the app's DNS lookup. On timeout we fall through to the
+	// legacy default/NXDOMAIN behaviour with a clear log line.
+	dnsForwardTimeout time.Duration
+
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
@@ -450,6 +474,17 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		caJavaHome:         opts.Agent.CAJavaHome,
 		dnsCache:           newDNSCache(),
 		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		// dnsForwardTimeout is the per-forward deadline for upstream DNS
+		// exchanges. 2 s is long enough to absorb a single UDP retransmit
+		// against CoreDNS (~500 ms default) while keeping app-side lookup
+		// latency bounded if the upstream is hard-down. Tuned to match the
+		// task spec ("~2s"). Tests override by assigning to this field
+		// directly on the Proxy struct; see
+		// pkg/agent/proxy/dns_forward_test.go (newProxyWithUpstream). The
+		// field is package-private, so sibling _test.go files have
+		// legitimate direct access and we intentionally do not expose a
+		// setter helper for a one-line test-only override.
+		dnsForwardTimeout: 2 * time.Second,
 	}
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
@@ -674,6 +709,21 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if len(opts.DNSIPv6Addr) != 0 {
 		p.IP6 = opts.DNSIPv6Addr
 	}
+
+	// Capture the ORIGINAL cluster resolver list from /etc/resolv.conf
+	// BEFORE binding our own listener on p.DNSPort. This MUST happen
+	// here (not lazily on first query) because in Kubernetes sidecar
+	// deployments the injector rewrites the app container's resolv.conf
+	// nameserver entry to 127.0.0.1 and redirects DNS traffic to the
+	// agent's port 26789 via iptables/eBPF (resolv.conf itself has no
+	// port syntax — standard `nameserver` lines are IP-only). If we
+	// ever pick that loopback entry up as our "upstream" we forward
+	// queries back to ourselves. The sidecar's own /etc/resolv.conf
+	// still points at CoreDNS at this point, so the snapshot we take
+	// here is the correct set of real upstream resolvers. Errors are
+	// non-fatal: on failure the forwarder simply falls back to the
+	// legacy default response.
+	p.captureDNSUpstream()
 
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")

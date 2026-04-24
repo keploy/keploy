@@ -1054,10 +1054,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 
-		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
+		// Wait for the user application to become ready before firing the first test.
+		// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
+		if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1199,10 +1198,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			})
 
-			// Delay for user application to run
-			select {
-			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-			case <-runTestSetCtx.Done():
+			// Wait for the user application to become ready before firing the first test.
+			// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
+			if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 

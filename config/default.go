@@ -39,6 +39,8 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  healthUrl: ""
+  healthPollTimeout: 60s
   host: "localhost"
   port: 0
   grpcPort: 0
