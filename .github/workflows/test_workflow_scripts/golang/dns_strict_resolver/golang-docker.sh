@@ -59,6 +59,15 @@ dump_diagnostics() {
   echo "::group::docker ps -a"
   docker ps -a || true
   echo "::endgroup::"
+  echo "::group::bpf_trace_pipe (filtered)"
+  if [ -s bpf-trace.txt ]; then
+    grep -E 'recvmsg4|sendmsg4-dns' bpf-trace.txt | tail -200 || true
+    echo "--- tail ---"
+    tail -100 bpf-trace.txt || true
+  else
+    echo "(bpf-trace.txt missing or empty)"
+  fi
+  echo "::endgroup::"
 }
 
 check_curl_output() {
@@ -227,6 +236,15 @@ section "Start Recording"
 # the sample's cgroup and attach the eBPF programs there (unlike
 # golang_linux.yml where non-docker loopback UDP doesn't reach
 # cgroup/recvmsg4).
+# Start a background tail of the kernel's bpf trace ring so any
+# bpf_printk from our hooks (the diagnostic build in
+# keploy/ebpf@97b4d2b) lands in bpf-trace.txt, which
+# dump_diagnostics() tails on failure.
+sudo sh -c 'echo > /sys/kernel/debug/tracing/trace || true' 2>/dev/null || true
+sudo cat /sys/kernel/debug/tracing/trace_pipe >bpf-trace.txt 2>/dev/null &
+TRACE_PID=$!
+echo "bpf trace_pipe tail pid=$TRACE_PID"
+
 "$RECORD_BIN" record\
   -c "docker run -p 8086:8086 --rm --net $NETWORK --name $SAMPLE_NAME $SAMPLE_NAME:test" \
   --container-name "$SAMPLE_NAME" \
@@ -250,9 +268,24 @@ echo "Killing keploy record (pid=$REC_PID)"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors record.txt
+# Kill the background bpf trace tail so we stop accumulating output.
+if [ -n "${TRACE_PID:-}" ]; then
+  sudo kill "$TRACE_PID" 2>/dev/null || true
+fi
 docker rm -f "$SAMPLE_NAME" 2>/dev/null || true
 echo "Recording stopped."
 endsec
+
+# Always surface a filtered bpf-trace tail on the happy path too so we
+# can see even a passing run's [recvmsg4]/[sendmsg4-dns] events and
+# confirm the hook is firing as expected.
+echo "::group::bpf_trace_pipe (recvmsg4/sendmsg4, all lines)"
+if [ -s bpf-trace.txt ]; then
+  grep -E 'recvmsg4|sendmsg4-dns' bpf-trace.txt | tail -200 || true
+else
+  echo "(bpf-trace.txt empty — is /sys/kernel/debug/tracing readable?)"
+fi
+echo "::endgroup::"
 
 section "Start Replay"
 "$REPLAY_BIN" test \
