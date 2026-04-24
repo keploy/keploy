@@ -365,12 +365,6 @@ type PostgresV3Response struct {
 	// resend its own bytes. nil on non-COPY responses.
 	CopyIn *PostgresV3CopyInPayload `json:"copyIn,omitempty" yaml:"copyIn,omitempty" bson:"copy_in,omitempty"`
 
-	// CopyBoth is set when the server responded with a
-	// CopyBothResponse ('W'), which puts the connection in
-	// bidirectional COPY mode (logical replication / pg_basebackup).
-	// Mutually exclusive with Rows/CopyOut/CopyIn. nil otherwise.
-	CopyBoth *PostgresV3CopyBothPayload `json:"copyBoth,omitempty" yaml:"copyBoth,omitempty" bson:"copy_both,omitempty"`
-
 	// Notices holds NoticeResponse ('N') messages the server emitted
 	// while answering this invocation. Postgres interleaves notices
 	// with any command response (e.g. "NOTICE: relation already
@@ -495,25 +489,6 @@ type PostgresV3CopyOutPayload struct {
 type PostgresV3CopyInPayload struct {
 	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
 	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
-}
-
-// PostgresV3CopyBothPayload captures a CopyBothResponse ('W') exchange.
-// CopyBoth is used by logical replication (START_REPLICATION ...
-// LOGICAL) and pg_basebackup (START_REPLICATION ... PHYSICAL): the
-// connection stays in a bidirectional streaming mode where the backend
-// emits CopyData frames (WAL / basebackup payload) and the client
-// emits CopyData frames back (standby status updates, keepalives).
-// Data holds every CopyData body the backend emitted, in arrival
-// order, preserving packet boundaries so the replay reproduces
-// exactly what the real server sent.
-type PostgresV3CopyBothPayload struct {
-	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
-	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
-	// Data — server-produced CopyData frames between CopyBothResponse
-	// and CopyDone. Client-produced frames (standby status updates)
-	// are NOT persisted here for the same reason as CopyIn: the
-	// client under test regenerates them at replay time.
-	Data [][]byte `json:"data,omitempty" yaml:"data,omitempty" bson:"data,omitempty"`
 }
 
 type PostgresV3ColumnDescriptor struct {
