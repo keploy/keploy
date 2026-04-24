@@ -125,7 +125,7 @@ func e2eEnabled() bool {
 	case "1", "true", "yes", "on":
 		return true
 	}
-	return e2eTagEnabled // set to true in chaos_test_e2e_tag.go, false in chaos_test_no_tag.go
+	return e2eTagEnabled // set to true in e2e_tag_enabled_test.go, false in e2e_tag_disabled_test.go
 }
 
 // probeDocker is a quick "is docker compose usable?" check. Returns

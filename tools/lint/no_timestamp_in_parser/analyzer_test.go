@@ -14,9 +14,11 @@ import (
 //   - suppressed:  parser-scoped file with per-call `// allow:time.Now`
 //     opt-outs that must produce zero diagnostics.
 //
-// All three fixtures live under testdata/src/<pkg>/recorder/ so the
-// analyzer's path-based scope check ("contains /recorder/") fires, mirroring
-// production layout (pkg/agent/proxy/integrations/<proto>/recorder/...).
+// All three fixtures live under testdata/src/<pkg>/recorder/record_v2.go so
+// the analyzer's scope check (basename ends with "_v2.go") fires. The
+// production analogue is pkg/agent/proxy/integrations/<proto>/recorder/
+// record_v2.go and similar V2-suffixed files across the integrations /
+// enterprise repos.
 func TestAnalyzer(t *testing.T) {
 	testdata := analysistest.TestData()
 	analysistest.Run(t, testdata, Analyzer,

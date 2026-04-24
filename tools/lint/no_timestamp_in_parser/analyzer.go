@@ -28,6 +28,7 @@ package notimestampinparser
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"path/filepath"
 	"strings"
 
@@ -82,16 +83,10 @@ func run(pass *analysis.Pass) (any, error) {
 			if !ok {
 				return true
 			}
-			if ident.Name != "time" {
-				return true
-			}
 			if !forbiddenSelectors[sel.Sel.Name] {
 				return true
 			}
-			// Defensive: if the "time" identifier has an Obj (i.e. a local
-			// variable named time shadows the package), skip — there's no
-			// way it refers to the stdlib package.
-			if ident.Obj != nil {
+			if !refersToStdlibTimePackage(pass, ident) {
 				return true
 			}
 
@@ -100,8 +95,8 @@ func run(pass *analysis.Pass) (any, error) {
 				return true
 			}
 			pass.Reportf(sel.Pos(),
-				"time.%s is forbidden in parser record-path files (invariant I5); derive timestamps from fakeconn.Chunk.ReadAt/WrittenAt instead. Use `// allow:time.Now` on the preceding line to suppress for log/telemetry sites.",
-				sel.Sel.Name)
+				"time.%s is forbidden in parser record-path files (invariant I5); derive timestamps from fakeconn.Chunk.ReadAt/WrittenAt instead. Use `%s` on the preceding line to suppress for log/telemetry sites.",
+				sel.Sel.Name, suppressionComment)
 			return true
 		})
 	}
@@ -114,13 +109,14 @@ func run(pass *analysis.Pass) (any, error) {
 // as the pre-V2 anti-pattern the new architecture replaces, not something
 // to be retrofitted).
 //
-// Two matchers:
-//   - any *_v2.go file anywhere under pkg/agent/proxy/integrations/ or
-//     pkg/**/(postgres|mongo|http2|kafka|redis|hbase|pulsar|sqs|grpcV2)/
-//     — the canonical V2 parser file naming across this and sibling repos
-//     (record_v2.go, encode_v2.go, query_v2.go, etc.).
-//   - any .go file under a recorder_v2/ directory (reserved for future
-//     parsers that want a separate subpackage).
+// Two matchers (intentionally directory-agnostic — the rule is named
+// by file-naming convention, not location, so every repo that hosts
+// V2 parsers in the same naming scheme — keploy, keploy/integrations,
+// keploy/enterprise — gets consistent enforcement without each repo
+// re-declaring its own integration tree):
+//   - any *_v2.go file (record_v2.go, encode_v2.go, query_v2.go, …)
+//   - any .go file under a recorder_v2/ directory (reserved for
+//     parsers that want to split V2 logic into a subpackage).
 //
 // The older "any encode*.go" pattern was too broad — legacy encode.go files
 // in integrations/generic and integrations/http use time.Now() legitimately
@@ -156,6 +152,35 @@ func fileAllowlisted(filename string) bool {
 	return strings.HasPrefix(base, "record_legacy")
 }
 
+// refersToStdlibTimePackage reports whether the identifier in a
+// selector expression like ident.Now resolves to the stdlib "time"
+// package. Uses pass.TypesInfo so aliased imports
+// (`import stdtime "time"`) and renamed copies are all handled
+// correctly; falls back to a bare name match if TypesInfo is
+// unavailable for any reason (e.g. testdata without full type-check).
+func refersToStdlibTimePackage(pass *analysis.Pass, ident *ast.Ident) bool {
+	if pass.TypesInfo != nil {
+		if obj, ok := pass.TypesInfo.Uses[ident]; ok {
+			if pkgName, ok := obj.(*types.PkgName); ok {
+				return pkgName.Imported().Path() == "time"
+			}
+			// A non-PkgName Use (local var, function, etc.) means
+			// the identifier isn't a package reference.
+			return false
+		}
+	}
+	// No type info or no Uses entry — fall back to the name match
+	// the original implementation used. This keeps analysistest
+	// working in constrained testdata environments.
+	if ident.Name != "time" {
+		return false
+	}
+	// ident.Obj != nil implies a local variable named "time" shadows
+	// the package; in that case the selector is not referring to
+	// the stdlib.
+	return ident.Obj == nil
+}
+
 // collectSuppressLines returns the set of source lines L for which the line
 // immediately above L contains the suppression marker "// allow:time.Now".
 //
@@ -181,15 +206,16 @@ func collectSuppressLines(tf *token.File, groups []*ast.CommentGroup) map[int]bo
 			default:
 				continue
 			}
-			// Accept any marker-prefixed form (tolerate trailing
-			// context like "allow:time.Now  -- boot-time splash log").
-			if !strings.HasPrefix(inner, "allow:time.Now") {
+			// Derive the marker body from the documented constant so
+			// the matcher and the user-facing error message stay a
+			// single source of truth.
+			marker := strings.TrimSpace(strings.TrimPrefix(suppressionComment, "//"))
+			if !strings.HasPrefix(inner, marker) {
 				continue
 			}
 			endLine := tf.Position(c.End()).Line
 			out[endLine+1] = true
 		}
 	}
-	_ = suppressionComment // keep the documented constant referenced.
 	return out
 }
