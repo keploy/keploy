@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -41,7 +42,19 @@ var resolvConfPath = "/etc/resolv.conf"
 // A nil / empty result is acceptable. The forwarder handles that by
 // returning "no upstream configured" and letting the caller fall back
 // to the legacy synthetic response.
+//
+// Windows has no /etc/resolv.conf and this feature — forward-on-miss
+// to cluster resolvers — is only meaningful in Linux sidecar
+// environments where the k8s injector has rewritten resolv.conf. On
+// Windows we short-circuit to a clean no-op so we neither burn a stat
+// on a path that can never exist nor log a misleading "file not
+// found" at every agent startup. hasDNSUpstream() then returns false
+// and the proxy's DNS handler falls back to the legacy synthetic
+// response, matching pre-feature behavior exactly.
 func (p *Proxy) captureDNSUpstream() {
+	if runtime.GOOS == "windows" {
+		return
+	}
 	config, err := dns.ClientConfigFromFile(resolvConfPath)
 	if err != nil {
 		p.logger.Info("could not read resolv.conf for upstream forwarding; DNS mock misses will fall back to synthetic responses",
