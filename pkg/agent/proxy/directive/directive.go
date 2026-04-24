@@ -90,11 +90,18 @@ type Directive struct {
 // Ack is the supervisor → parser response to a Directive.
 //
 // OK is true if the directive was carried out successfully. For
-// KindUpgradeTLS, BoundaryReadAt and BoundaryWrittenAt identify the
-// exact wallclock instants at which the real sockets transitioned
-// from cleartext to TLS, in the producing (Read) and opposite (Write)
-// directions respectively. Parsers MAY record these in prelude mocks
-// but need not — the ack signals "everything after this point on
+// KindUpgradeTLS, BoundaryReadAt and BoundaryWrittenAt are
+// relay-observed upgrade-boundary timestamps: BoundaryReadAt is
+// captured just BEFORE the handshakes begin (so it bounds the last
+// instant any cleartext Read could have returned), and
+// BoundaryWrittenAt is captured AFTER both handshakes succeed (so
+// it bounds the first instant any TLS Write can land). Parsers
+// MAY record these in prelude mocks for boundary analysis but
+// must not treat them as the exact microsecond of transition on
+// either socket — the TCP stack has no hook that would let the
+// relay observe that instant, and the handshake itself is a
+// multi-roundtrip sequence that takes real time. What the ack
+// guarantees is: "everything after this ack on
 // ClientStream/DestStream is plaintext from the upgraded session."
 //
 // On failure (OK=false), Err is populated with the root cause and

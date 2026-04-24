@@ -276,9 +276,31 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 					FallthroughToPassthrough: true,
 				}
 			}
+			// Clean parser exit on outer-cancel: no blocked reads to
+			// unstick, so we intentionally skip fireOnAbort. The
+			// FakeConns will be GC'd on the normal return path.
 			return Result{Status: StatusCanceled, Err: r.err}
 		case <-time.After(50 * time.Millisecond):
-			return Result{Status: StatusCanceled, Err: ctx.Err()}
+			// Parser did NOT return within the grace window. Most
+			// likely it is parked in FakeConn.Read/ReadChunk, which
+			// do not observe ctx — they only unblock on Close. Fire
+			// SessionOnAbort now so the dispatcher's abort callback
+			// (closes both FakeConns, pauses relay tees) runs and
+			// the parser goroutine can exit. Without this, the
+			// goroutine leaks for the life of the process and the
+			// relay tees stay armed, so every subsequent chunk on
+			// this connection falls through the channel-full drop
+			// path logging at Debug.
+			//
+			// FallthroughToPassthrough is set so the outer caller
+			// knows this connection should route raw; consistent
+			// with the hang / panic paths above.
+			s.fireOnAbort()
+			return Result{
+				Status:                   StatusCanceled,
+				Err:                      ctx.Err(),
+				FallthroughToPassthrough: true,
+			}
 		}
 	}
 }
