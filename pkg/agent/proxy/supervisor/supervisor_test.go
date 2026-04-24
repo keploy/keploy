@@ -360,11 +360,12 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 //
 // Earlier iterations of this test rebound the package-singleton
 // syncMock's outChan via SetOutputChannel(...). That touched a
-// global visible across every test in the process, and parallel
-// `go test` runs in sibling packages (e.g.
-// pkg/agent/proxy/integrations/http/recordv2_test.go) that also
-// call SetOutputChannel raced on the outChan pointer and produced
-// flaky timeouts. Asserting on the local Session.Mocks channel
+// global visible across every test in the same test process, so
+// parallel tests or t.Parallel() subtests in this package that
+// also call SetOutputChannel could race on the outChan pointer
+// and produce flaky timeouts. (Cross-package `go test ./...` runs
+// each package in its own binary, so the race was strictly
+// intra-package.) Asserting on the local Session.Mocks channel
 // keeps the test entirely within this Session instance.
 func TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched(t *testing.T) {
 	t.Parallel()
