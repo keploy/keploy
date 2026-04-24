@@ -393,15 +393,15 @@ func TestPostgresV3Cell_LegacyNullSentinel_DecodedAsNull(t *testing.T) {
 // cells round-trip — the exact shape mocks.yaml stores for a row.
 func TestPostgresV3Cell_RowRoundTrip_TabInStringSurvives(t *testing.T) {
 	tricky := []string{
-		"\thello",                  // leading tab
-		"hello\tworld",             // embedded tab
-		"\n\thello",                // leading newline + tab — the echo-sql failure
-		"line1\n\tline2\n\tline3",  // block-scalar with tabs
-		"trailing\t",               // trailing tab
-		" leading space",           // leading whitespace
-		"trailing space ",          // trailing whitespace
-		"plain no weirdness",       // baseline (should still round-trip)
-		"",                         // empty string (distinct from NULL)
+		"\thello",                 // leading tab
+		"hello\tworld",            // embedded tab
+		"\n\thello",               // leading newline + tab — the echo-sql failure
+		"line1\n\tline2\n\tline3", // block-scalar with tabs
+		"trailing\t",              // trailing tab
+		" leading space",          // leading whitespace
+		"trailing space ",         // trailing whitespace
+		"plain no weirdness",      // baseline (should still round-trip)
+		"",                        // empty string (distinct from NULL)
 	}
 
 	row := make(PostgresV3Cells, len(tricky))
