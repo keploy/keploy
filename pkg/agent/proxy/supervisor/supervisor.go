@@ -331,7 +331,9 @@ func (s *Supervisor) reportPanic(v any, stack []byte) {
 	defer func() {
 		if rr := recover(); rr != nil {
 			s.cfg.Logger.Error("panic reporter itself panicked",
-				zap.Any("panic", rr))
+				zap.Any("panic", rr),
+				zap.String("next_step", "the configured PanicReporter must be non-blocking and must not panic; fix the reporter implementation, or unset it via supervisor.Config.PanicReporter=nil to fall back to no external reporting (the recovered parser panic is still logged at Error level)"),
+			)
 		}
 	}()
 	s.cfg.PanicReporter(v, stack)
@@ -402,7 +404,9 @@ func (s *Supervisor) fireOnAbort() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.cfg.Logger.Error("SessionOnAbort callback panicked",
-					zap.Any("panic", r))
+					zap.Any("panic", r),
+					zap.String("next_step", "SessionOnAbort callbacks must be non-blocking and must not panic — they run on the supervisor's abort path where further errors have nowhere to propagate to; fix the callback (typical use is just closing FakeConns and pausing tees — see proxy_v2.go for the reference implementation), or unset it by constructing the Supervisor without SessionOnAbort if the caller can tolerate parser-side reads not unblocking promptly on abort"),
+				)
 			}
 		}()
 		s.SessionOnAbort()
