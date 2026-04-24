@@ -200,7 +200,7 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
-					InvocationID: "sha256:abcd:0",
+					InvocationID:  "sha256:abcd:0",
 					// Binary bindFormat=1 cell: the int4 value 1 on the wire
 					// (4 bytes, big-endian). Stored as a PostgresV3Cell which
 					// will serialise as !!binary in YAML because the bytes
@@ -241,9 +241,9 @@ func TestRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID: "sha256:null:0",
-					BindValues:   models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
-					BindFormats:  []int{1},
+					InvocationID:  "sha256:null:0",
+					BindValues:    models.PostgresV3Cells{models.NewValueCell([]byte{0x00, 0x00, 0x00, 0x01})},
+					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},

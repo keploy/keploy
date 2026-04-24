@@ -254,21 +254,21 @@ type PostgresV3Sequence struct {
 }
 
 type PostgresV3MigrationTable struct {
-	Name    string             `json:"name" yaml:"name" bson:"name"`
-	Columns []string           `json:"columns" yaml:"columns" bson:"columns"`
-	Rows    []PostgresV3Cells  `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Name    string            `json:"name" yaml:"name" bson:"name"`
+	Columns []string          `json:"columns" yaml:"columns" bson:"columns"`
+	Rows    []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 }
 
 // PostgresV3DataSpec — one per seeded user table. Carries the row-store
 // seed for L4's transactional engine.
 type PostgresV3DataSpec struct {
-	Schema     string             `json:"schema" yaml:"schema" bson:"schema"`
-	Table      string             `json:"table" yaml:"table" bson:"table"`
-	PrimaryKey []string           `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
-	Columns    []string           `json:"columns" yaml:"columns" bson:"columns"`
-	Rows       []PostgresV3Cells  `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	Truncated  bool               `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
-	RowLimit   int                `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
+	Schema     string            `json:"schema" yaml:"schema" bson:"schema"`
+	Table      string            `json:"table" yaml:"table" bson:"table"`
+	PrimaryKey []string          `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
+	Columns    []string          `json:"columns" yaml:"columns" bson:"columns"`
+	Rows       []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Truncated  bool              `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
+	RowLimit   int               `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
 }
 
 // PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
