@@ -1,0 +1,249 @@
+package utils
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestParseEnvFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected map[string]string
+		wantErr  bool
+	}{
+		{
+			name:     "basic key-value pairs",
+			content:  "DB_HOST=localhost\nDB_PORT=5432\n",
+			expected: map[string]string{"DB_HOST": "localhost", "DB_PORT": "5432"},
+		},
+		{
+			name:     "comments and empty lines are skipped",
+			content:  "# this is a comment\n\nAPI_KEY=secret\n",
+			expected: map[string]string{"API_KEY": "secret"},
+		},
+		{
+			name:     "double-quoted values are stripped",
+			content:  `DB_URL="postgres://localhost/mydb"`,
+			expected: map[string]string{"DB_URL": "postgres://localhost/mydb"},
+		},
+		{
+			name:     "single-quoted values are stripped",
+			content:  "TOKEN='abc123'",
+			expected: map[string]string{"TOKEN": "abc123"},
+		},
+		{
+			name:     "value containing equals sign",
+			content:  "DSN=host=localhost port=5432",
+			expected: map[string]string{"DSN": "host=localhost port=5432"},
+		},
+		{
+			name:     "lines without equals are skipped",
+			content:  "EXPORT_ME\nKEY=value\n",
+			expected: map[string]string{"KEY": "value"},
+		},
+		{
+			name:     "empty file",
+			content:  "",
+			expected: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".env")
+			if err := os.WriteFile(path, []byte(tt.content), 0600); err != nil {
+				t.Fatalf("failed to write temp env file: %v", err)
+			}
+
+			got, err := ParseEnvFile(path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseEnvFile() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			if len(got) != len(tt.expected) {
+				t.Fatalf("ParseEnvFile() returned %d entries, want %d; got=%v", len(got), len(tt.expected), got)
+			}
+			for k, want := range tt.expected {
+				if got[k] != want {
+					t.Errorf("ParseEnvFile()[%q] = %q, want %q", k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseEnvFile_MissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist.env")
+	_, err := ParseEnvFile(path)
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+func TestResolveEnvVars(t *testing.T) {
+	t.Run("inline only", func(t *testing.T) {
+		result, err := ResolveEnvVars(map[string]string{"KEY": "val"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["KEY"] != "val" {
+			t.Errorf("expected KEY=val, got %q", result["KEY"])
+		}
+	})
+
+	t.Run("env file only", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("FROM_FILE=yes\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := ResolveEnvVars(nil, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["FROM_FILE"] != "yes" {
+			t.Errorf("expected FROM_FILE=yes, got %q", result["FROM_FILE"])
+		}
+	})
+
+	t.Run("inline overrides file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("KEY=from_file\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := ResolveEnvVars(map[string]string{"KEY": "from_inline"}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["KEY"] != "from_inline" {
+			t.Errorf("expected KEY=from_inline (inline wins), got %q", result["KEY"])
+		}
+	})
+
+	t.Run("empty inputs return empty map", func(t *testing.T) {
+		result, err := ResolveEnvVars(nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result) != 0 {
+			t.Errorf("expected empty map, got %v", result)
+		}
+	})
+
+	t.Run("rejects invalid inline key with space", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"BAD KEY": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for invalid key, got nil")
+		}
+	})
+
+	t.Run("rejects invalid inline key starting with digit", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"1NVALID": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for key starting with digit, got nil")
+		}
+	})
+
+	t.Run("rejects invalid key with metacharacters", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"WITH;META": "val"}, "")
+		if err == nil {
+			t.Fatal("expected error for key with metacharacters, got nil")
+		}
+	})
+
+	t.Run("rejects invalid key from env file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("BAD KEY=value\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolveEnvVars(nil, path)
+		if err == nil {
+			t.Fatal("expected error for invalid key in env file, got nil")
+		}
+	})
+
+	t.Run("rejects reserved key from inline map", func(t *testing.T) {
+		_, err := ResolveEnvVars(map[string]string{"NODE_EXTRA_CA_CERTS": "/my/cert.pem"}, "")
+		if err == nil {
+			t.Fatal("expected error for reserved key NODE_EXTRA_CA_CERTS, got nil")
+		}
+	})
+
+	t.Run("rejects reserved key from env file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".env")
+		if err := os.WriteFile(path, []byte("JAVA_TOOL_OPTIONS=-Xmx512m\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ResolveEnvVars(nil, path)
+		if err == nil {
+			t.Fatal("expected error for reserved key JAVA_TOOL_OPTIONS in env file, got nil")
+		}
+	})
+}
+
+func TestResolveEnvFilePath(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "keploy.yml")
+	if err := os.WriteFile(cfgFile, []byte(""), 0600); err != nil {
+		t.Fatalf("failed to create temp config file: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		configPath string
+		envFile    string
+		expected   string
+	}{
+		{
+			name:       "envFile empty returns empty",
+			configPath: "/some/dir",
+			envFile:    "",
+			expected:   "",
+		},
+		{
+			name:       "configPath empty returns envFile unchanged",
+			configPath: "",
+			envFile:    ".env",
+			expected:   ".env",
+		},
+		{
+			name:       "absolute envFile returned unchanged",
+			configPath: "/some/dir",
+			envFile:    "/abs/.env",
+			expected:   "/abs/.env",
+		},
+		{
+			name:       "configPath is a file resolves relative to its directory",
+			configPath: cfgFile,
+			envFile:    ".env",
+			expected:   filepath.Join(dir, ".env"),
+		},
+		{
+			name:       "configPath is a directory resolves relative to it directly",
+			configPath: dir,
+			envFile:    ".env",
+			expected:   filepath.Join(dir, ".env"),
+		},
+		{
+			name:       "nonexistent configPath stat fails path used as-is",
+			configPath: "/nonexistent/cfg.yml",
+			envFile:    ".env",
+			expected:   filepath.Join("/nonexistent/cfg.yml", ".env"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveEnvFilePath(tt.configPath, tt.envFile)
+			if got != tt.expected {
+				t.Errorf("ResolveEnvFilePath(%q, %q) = %q, want %q", tt.configPath, tt.envFile, got, tt.expected)
+			}
+		})
+	}
+}

@@ -107,6 +107,8 @@ contract:
   download: false
   generate: false
 inCi: false
+env: {}
+envFile: ""
 `, models.DefaultIncomingProxyPort)
 
 func GetDefaultConfig() string {

@@ -34,10 +34,19 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, envVars map[string]string) CmdError {
 	// Run the app as the user who invoked sudo
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
+
+	// Inject user-defined environment variables on top of the current process environment.
+	// When cmd.Env is nil the child inherits the parent env unchanged (existing behavior).
+	if len(envVars) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range envVars {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 
 	// Set the cancel function for the command
 	cmd.Cancel = cancel(cmd)

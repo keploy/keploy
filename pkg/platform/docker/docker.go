@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -932,7 +933,7 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	}
 
 	// Now modify the app container to integrate with keploy-agent
-	err = idc.modifyAppServiceForKeploy(compose, appContainerName)
+	err = idc.modifyAppServiceForKeploy(compose, appContainerName, opts.EnvVars)
 	if err != nil {
 		return fmt.Errorf("failed to modify app service: %w", err)
 	}
@@ -940,7 +941,7 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 }
 
 // modifyAppServiceForKeploy modifies the app service to depend on keploy-agent and share namespaces
-func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string) error {
+func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string, envVars map[string]string) error {
 	if compose.Services.Content == nil {
 		return fmt.Errorf("no services found in compose file")
 	}
@@ -989,6 +990,18 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)
+
+			// Inject user-defined environment variables.
+			// Sort keys for deterministic YAML output across runs.
+			envKeys := make([]string, 0, len(envVars))
+			for k := range envVars {
+				envKeys = append(envKeys, k)
+			}
+			sort.Strings(envKeys)
+			for _, k := range envKeys {
+				idc.addServiceEnvVar(serviceContentNode, k, envVars[k])
+			}
+
 			// Add PID namespace sharing
 			idc.addServiceProperty(serviceContentNode, "pid", fmt.Sprintf("service:%s", "keploy-agent"))
 

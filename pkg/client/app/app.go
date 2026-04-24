@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -52,6 +53,7 @@ type App struct {
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
+	envTempFile     string // path to temp --env-file for docker run; cleaned up after run
 	EnableTesting   bool
 	Mode            models.Mode
 }
@@ -119,6 +121,10 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
+	// docker start cannot accept --env-file; env vars can only be set at docker run time.
+	if a.kind == utils.DockerStart && len(a.opts.EnvVars) > 0 {
+		return fmt.Errorf("env var injection is not supported for 'docker start': 'docker start' cannot modify container environment at start time; use 'docker run' instead")
+	}
 	// Attach the keploy agent container's PID namespace and network namespace to the app container
 	// Sharing network namespace so that the docker container IPs of both agent and app remain same
 	// sharing pid namespace so that they share the same process tree (common ancestor) in docker
@@ -145,6 +151,41 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
+	}
+
+	if len(a.opts.EnvVars) > 0 {
+		tmpFile, err := os.CreateTemp("", "keploy-env-*.env")
+		if err != nil {
+			return fmt.Errorf("failed to create temp env file for docker run: %w", err)
+		}
+		envKeys := make([]string, 0, len(a.opts.EnvVars))
+		for k := range a.opts.EnvVars {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			value := a.opts.EnvVars[k]
+			if strings.ContainsAny(value, "\r\n") {
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				return fmt.Errorf("env var %q value contains a newline or carriage return, which is not supported in docker --env-file; provide a single-line value", k)
+			}
+			if _, err := fmt.Fprintf(tmpFile, "%s=%s\n", k, value); err != nil {
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				return fmt.Errorf("failed to write env var %q to temp env file: %w", k, err)
+			}
+		}
+		if err := tmpFile.Close(); err != nil {
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to write temp env file for docker run: %w", err)
+		}
+		if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to secure temp env file: %w", err)
+		}
+		a.envTempFile = tmpFile.Name()
+		tlsFlags += fmt.Sprintf("--env-file \"%s\" ", tmpFile.Name())
 	}
 
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
@@ -541,6 +582,17 @@ func extractProjectFlags(cmd string) []string {
 func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 
+	if a.envTempFile != "" {
+		defer func(path string) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				a.logger.Debug("failed to remove temporary env file; remove it manually if still present",
+					zap.String("path", path),
+					zap.Error(err),
+				)
+			}
+		}(a.envTempFile)
+	}
+
 	if a.kind == utils.DockerCompose {
 		defer a.composeDown()
 	}
@@ -597,7 +649,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	execEnvVars := a.opts.EnvVars
+	if utils.IsDockerCmd(a.kind) {
+		execEnvVars = nil
+	}
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, execEnvVars)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
