@@ -161,7 +161,12 @@ func TestV2_HappyPath_ChunkTimestampsCarried(t *testing.T) {
 		t.Fatal("client did not receive reply within 2s")
 	}
 
-	res := <-resCh
+	var res supervisor.Result
+	select {
+	case res = <-resCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recordViaSupervisor did not return within 3s — parser/supervisor may be stuck")
+	}
 	if res.Status != supervisor.StatusOK {
 		t.Errorf("status = %v, want StatusOK; err=%v", res.Status, res.Err)
 	}
@@ -253,7 +258,12 @@ func TestV2_PanicDoesNotBlockTraffic(t *testing.T) {
 		t.Fatal("client did not receive reply despite parser panic")
 	}
 
-	res := <-resCh
+	var res supervisor.Result
+	select {
+	case res = <-resCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recordViaSupervisor did not return within 3s — supervisor panic-to-passthrough may be stuck")
+	}
 	if res.Status != supervisor.StatusPanicked {
 		t.Errorf("status = %v, want StatusPanicked", res.Status)
 	}

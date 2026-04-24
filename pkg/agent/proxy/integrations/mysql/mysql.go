@@ -149,7 +149,9 @@ func (m *MySQL) recordV2(ctx context.Context, session *integrations.RecordSessio
 	logger := session.Logger
 	err := recorder.RecordV2(ctx, logger, session.V2)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
+		utils.LogError(logger, err, "failed to encode the mysql message into the yaml",
+			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to route MySQL through the legacy record path while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
+		)
 		return err
 	}
 	return nil

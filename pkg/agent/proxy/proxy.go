@@ -910,7 +910,20 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			// Track the connection BEFORE spawning the goroutine to
+			// close the Add-vs-Wait race that sync.WaitGroup's
+			// contract forbids. If Add ran inside the goroutine
+			// (i.e. after clientConnErrGrp.Go returns), a concurrent
+			// StopProxyServer calling waitForConnDrain -> Wait could
+			// observe count=0 and return before this connection's
+			// goroutine registered itself — the shutdown would
+			// then proceed as if there were no in-flight work, and
+			// the late Add could trigger "sync: WaitGroup misuse"
+			// panics in some interleavings. Done() still runs in
+			// the goroutine's deferred cleanup.
+			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
+				defer p.activeConns.Done()
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
@@ -936,12 +949,9 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
-	// Track the goroutine for shutdown drain. Done fires on return
-	// regardless of the path taken (success, error, panic via the
-	// named-return-value recovers below), so waitForConnDrain gets
-	// a precise count of in-flight parsers.
-	p.activeConns.Add(1)
-	defer p.activeConns.Done()
+	// activeConns.Add/Done are paired at the goroutine-spawn site
+	// in the accept loop (see caller) to avoid the "Add concurrent
+	// with Wait" race sync.WaitGroup documents as a misuse.
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
@@ -1791,7 +1801,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					if isNetworkClosedErr(err) {
 						logger.Debug("V2 record path: connection closed", zap.Error(err))
 					} else {
-						utils.LogError(logger, err, "V2 record path failed")
+						utils.LogError(logger, err, "V2 record path failed",
+							zap.String("parser", string(parserType)),
+							zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force the legacy record path for this parser while investigating, or KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough); the supervisor has already fallen through to passthrough for this connection so user traffic continues"),
+						)
 					}
 					return err
 				}
