@@ -117,6 +117,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 
 	Volumes = Volumes + tlsVolumeMount
+	if opts.CapturePath != "" {
+		Volumes += fmt.Sprintf("-v %s:%s ", opts.CapturePath, opts.CapturePath)
+	}
 
 	extraArgs := opts.ExtraArgs
 	// Skip publishing the proxy port when it's zero. Docker rejects
@@ -162,6 +165,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		}
+		if opts.CapturePath != "" {
+			alias += " --capture-path " + opts.CapturePath
 		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
@@ -230,6 +236,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
+			if opts.CapturePath != "" {
+				alias += " --capture-path " + opts.CapturePath
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -281,6 +290,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		}
+		if opts.CapturePath != "" {
+			alias += " --capture-path " + opts.CapturePath
 		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
@@ -349,6 +361,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
+			if opts.CapturePath != "" {
+				alias += " --capture-path " + opts.CapturePath
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -399,6 +414,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		}
+		if opts.CapturePath != "" {
+			alias += " --capture-path " + opts.CapturePath
 		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath

@@ -558,6 +558,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
+	if opts.CapturePath != "" {
+		volumes = append(volumes, fmt.Sprintf("%s:%s", opts.CapturePath, opts.CapturePath))
+	}
 
 	clientPid := int(os.Getpid())
 	// Build command arguments
@@ -570,6 +573,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		"--is-docker",
 	}
 
+	if opts.CapturePath != "" {
+		command = append(command, "--capture-path", opts.CapturePath)
+	}
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}

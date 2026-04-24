@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
+	"go.keploy.io/server/v3/pkg/agent/proxy/kpcap"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -45,17 +46,19 @@ type IngressProxyManager struct {
 	sampling     bool
 	samplingSem  chan struct{}
 
-	ingressHook IngressHook
+	packetCapture *kpcap.Capture
+	ingressHook   IngressHook
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
-		logger:      logger,
-		hooks:       h,
-		tcChan:      make(chan *models.TestCase, 100),
-		active:      make(map[uint16]proxyStop),
-		synchronous: cfg.Agent.Synchronous,
-		sampling:    false,
+		logger:        logger,
+		hooks:         h,
+		tcChan:        make(chan *models.TestCase, 100),
+		active:        make(map[uint16]proxyStop),
+		synchronous:   cfg.Agent.Synchronous,
+		sampling:      false,
+		packetCapture: kpcap.New(logger, string(cfg.Agent.Mode), cfg.Agent.CapturePath, cfg.Debug, "incoming"),
 		samplingSem: make(chan struct{}, func() int {
 			if cfg.Agent.EnableSampling > 0 {
 				return cfg.Agent.EnableSampling
@@ -141,6 +144,11 @@ func (pm *IngressProxyManager) StopAll() {
 		if err := s(); err != nil {
 			pm.logger.Error("Failed to stop ingress proxy; verify ingress hook stop implementation and permissions, then restart the agent if needed",
 				zap.Uint16("port", p), zap.Error(err))
+		}
+	}
+	if pm.packetCapture != nil {
+		if err := pm.packetCapture.Close(); err != nil {
+			pm.logger.Debug("failed to close incoming kpcap capture", zap.Error(err))
 		}
 	}
 }
@@ -306,7 +314,10 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// the preface. RecordIncoming's forwardAndTee will forward everything
 		// (including the preface) to the upstream app, which is what cmux needs
 		// to see the original handshake.
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
+		replay := newReplayConn(preface, clientConn)
+		captureCtx := pm.incomingCaptureContext("grpc", replay, upConn, finalAppAddr, actualPort)
+		replay, upConn = pm.wrapIncomingConns(replay, upConn, captureCtx)
+		grpc.RecordIncoming(ctx, logger, replay, upConn, t, actualPort, finalAppAddr)
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}

@@ -874,6 +874,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if len(extraArgs) > 0 {
 		args = append(args, extraArgs...)
 	}
+	if opts.CapturePath != "" {
+		args = append(args, "--capture-path", opts.CapturePath)
+	}
 	if a.conf.Debug {
 		args = append(args, "--debug")
 	}
@@ -1147,6 +1150,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	opts.ProxyPort = proxyPort
 	opts.DnsPort = dnsPort
 	opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
+	if opts.CapturePath == "" {
+		opts.CapturePath = a.conf.Path
+	}
 
 	// Update the ports in the configuration
 	a.conf.Agent.AgentPort = agentPort
@@ -1155,6 +1161,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
+	a.conf.Agent.CapturePath = opts.CapturePath
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -1269,6 +1276,7 @@ func (a *AgentClient) getApp() (*app.App, error) {
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
+		Debug:          a.conf.Debug,
 	}, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")

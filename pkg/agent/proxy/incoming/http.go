@@ -303,13 +303,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}
 	defer upConn.Close()
 
+	captureCtx := pm.incomingCaptureContext("http1", clientConn, upConn, finalAppAddr, actualPort)
+	clientConn, upConn = pm.wrapIncomingConns(clientConn, upConn, captureCtx)
+
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
 	// uses the zero-copy path for both tracked and bypass connections.
 	forceCloseMode := pm.synchronous
 
 	if !forceCloseMode {
-		// Sampling bypass: no lock, no capture — raw TCP passthrough.
+		// Sampling bypass: no lock and no testcase capture — raw TCP passthrough.
+		// Debug .kpcap capture remains active when --debug enabled it.
 		if pm.sampling && !acquiredLock {
 			forwardRawTCP(ctx, clientConn, upConn)
 			return
@@ -698,8 +702,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if reqFeeder != nil {
 			reqFeeder.Close()
 		}
-		if tc, ok := upConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if cw, ok := upConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
@@ -714,8 +718,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if respFeeder != nil {
 			respFeeder.Close()
 		}
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
@@ -831,15 +835,15 @@ func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upConn, clientConn)
-		if tc, ok := upConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if cw, ok := upConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(clientConn, upConn)
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()

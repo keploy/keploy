@@ -294,6 +294,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
 		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
 		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
+		cmd.Flags().String("capture-path", c.cfg.Agent.CapturePath, "Directory where Keploy debug packet captures are stored")
+		if err := cmd.Flags().MarkHidden("capture-path"); err != nil {
+			return err
+		}
 
 	default:
 		return errors.New("unknown command name")
@@ -371,6 +375,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
 		"configPath":            "config-path",
+		"capturePath":           "capture-path",
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
@@ -1313,6 +1318,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				zap.Uint64("memory_limit_mb", c.cfg.Agent.MemoryLimit))
 			c.cfg.Agent.MemoryLimit = 0
 		}
+
+		capturePath, err := cmd.Flags().GetString("capture-path")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get capture-path flag")
+			return fmt.Errorf("failed to get capture-path flag: %w", err)
+		}
+		c.cfg.Agent.CapturePath = capturePath
 
 	}
 

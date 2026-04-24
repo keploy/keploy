@@ -102,8 +102,13 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	MemoryLimit       uint64
 	ConfigPath        string
-	ExtraArgs         []string
-	EnableSampling    int
+	// CapturePath is the host-visible Keploy output directory used by the
+	// agent for debug-only .kpcap files. The record/test CLI populates this
+	// with Config.Path (normally <user-path>/keploy) and the agent falls back
+	// to ./keploy when it is empty.
+	CapturePath    string
+	ExtraArgs      []string
+	EnableSampling int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF

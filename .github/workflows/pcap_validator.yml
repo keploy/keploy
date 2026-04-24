@@ -1,0 +1,151 @@
+name: PCAP Validator
+
+# Asserts that Keploy's debug .kpcap capture matches the expected
+# encrypted-vs-unencrypted behavior across two axes:
+#
+#   1) Client encryption (HTTP :8080 vs HTTPS :8443 to the recorded app).
+#      Validated in every run. The HTTP marker must appear plaintext in
+#      both the incoming and outgoing kpcap; the HTTPS marker must NOT
+#      appear plaintext in the incoming kpcap (Keploy does not terminate
+#      ingress TLS) but MUST appear plaintext in the outgoing kpcap
+#      (because the app decrypts and forwards the label to PG/Mongo
+#      over plaintext wire).
+#
+#   2) Dependency encryption (validate_tls only). Same shape as (1) but
+#      with PG and Mongo running TLS. The HTTPS marker must STILL appear
+#      plaintext in the outgoing kpcap — which only works if Keploy's
+#      Postgres and Mongo parsers MITM the upstream TLS connection.
+#      Those parsers live in the private keploy/integrations repo, so
+#      this job is gated on the standard "internal PR or push to main"
+#      condition that prepare_and_run.yml uses.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pkg/agent/proxy/**'
+      - 'pkg/models/instrument.go'
+      - 'cli/provider/cmd.go'
+      - 'pkg/platform/docker/**'
+      - 'pkg/platform/http/**'
+      - 'pkg/service/record/**'
+      - 'pkg/service/replay/**'
+      - '.github/workflows/pcap_validator.yml'
+      - '.github/workflows/test_workflow_scripts/golang/pcap_validator/**'
+  workflow_dispatch:
+    inputs:
+      samples_ref:
+        description: 'samples-go ref to check out'
+        type: string
+        required: false
+        default: 'main'
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner to use'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      samples_ref:
+        description: 'samples-go ref to check out'
+        type: string
+        required: false
+        default: 'main'
+
+env:
+  # Match prepare_and_run.yml so the integrations ref stays in lockstep
+  # across pipelines. Override at the repo level via vars.INTEGRATION_REF.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
+jobs:
+  validate_basic:
+    name: pcap-validator (db_tls=false)
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      DB_TLS: 'false'
+    steps:
+      - name: Checkout keploy
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq
+
+      - name: Build keploy
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags=viper_bind_struct -o keploy
+
+      - name: Checkout samples-go
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: ${{ inputs.samples_ref || 'main' }}
+
+      - name: Run pcap-validator validation (basic)
+        env:
+          RECORD_BIN: ${{ github.workspace }}/keploy
+        run: |
+          cd samples-go/pcap-validator
+          chmod +x "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pcap_validator/golang-linux.sh"
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pcap_validator/golang-linux.sh"
+
+  validate_tls:
+    name: pcap-validator (db_tls=true)
+    # Only runs on internal PRs (no fork) or pushes to main / manual
+    # dispatch. Same gating prepare_and_run.yml uses for private
+    # parsers — outside of those events the secret needed by
+    # setup-private-parsers is not available, and without those
+    # parsers the encrypted-deps test would falsely fail.
+    if: |
+      (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    env:
+      DB_TLS: 'true'
+    steps:
+      - name: Checkout keploy
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq
+
+      - name: Build keploy (with private parsers)
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags=viper_bind_struct -o keploy
+
+      - name: Checkout samples-go
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: ${{ inputs.samples_ref || 'main' }}
+
+      - name: Run pcap-validator validation (TLS deps)
+        env:
+          RECORD_BIN: ${{ github.workspace }}/keploy
+        run: |
+          cd samples-go/pcap-validator
+          chmod +x "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pcap_validator/golang-linux.sh"
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pcap_validator/golang-linux.sh"

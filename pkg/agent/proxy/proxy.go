@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/kpcap"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -202,6 +203,8 @@ type Proxy struct {
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
 	skipListener bool
+
+	packetCapture *kpcap.Capture
 }
 
 // SetSkipListener disables the TCP accept loop.
@@ -491,6 +494,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		// legitimate direct access and we intentionally do not expose a
 		// setter helper for a one-line test-only override.
 		dnsForwardTimeout: 2 * time.Second,
+		packetCapture:     kpcap.New(logger, string(opts.Agent.Mode), opts.Agent.CapturePath, opts.Debug, "outgoing"),
 	}
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
@@ -1145,6 +1149,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
+		captureCtx := p.outgoingCaptureContext(rule.Mode, clientConnID, destConnID, srcConn, dstAddr, sourcePort, destInfo.Port)
+		captureCtx.Parser = "passthrough"
+		srcConn, dstConn = p.wrapOutgoingConns(srcConn, dstConn, captureCtx)
+
 		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle the global pass through")
@@ -1169,6 +1177,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				Port: uint(destInfo.Port),
 			}
 			outgoingOpts.DstCfg = dstCfg
+
+			captureCtx := p.outgoingCaptureContext(rule.Mode, clientConnID, destConnID, srcConn, dstAddr, sourcePort, destInfo.Port)
+			captureCtx.Parser = string(integrations.MYSQL)
+			srcConn, dstConn = p.wrapOutgoingConns(srcConn, dstConn, captureCtx)
 
 			mysqlLogger := p.logger.With(
 				zap.String("Client ConnectionID", fmt.Sprint(clientConnID)),
@@ -1203,6 +1215,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
+		captureCtx := p.outgoingCaptureContext(rule.Mode, clientConnID, destConnID, srcConn, dstAddr, sourcePort, destInfo.Port)
+		captureCtx.Parser = string(integrations.MYSQL)
+		srcConn = p.wrapOutgoingClientConn(srcConn, captureCtx)
+
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
@@ -1821,6 +1837,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
+	captureCtx := p.outgoingCaptureContext(rule.Mode, clientConnID, destConnID, srcConn, dstCfg.Addr, sourcePort, destInfo.Port)
+	if generic {
+		captureCtx.Parser = string(integrations.GENERIC)
+	} else {
+		captureCtx.Parser = string(parserType)
+	}
+	srcConn, dstConn = p.wrapOutgoingConns(srcConn, dstConn, captureCtx)
+
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin
 	// endpoint, skip parser dispatch and hand the connection to
@@ -1986,6 +2010,11 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 
 	p.CloseErrorChannel()
+	if p.packetCapture != nil {
+		if err := p.packetCapture.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close kpcap capture: %w", err))
+		}
+	}
 	if len(cleanupErrors) > 0 {
 		for _, err := range cleanupErrors {
 			utils.LogError(p.logger, err, "cleanup error in StopProxyServer")
