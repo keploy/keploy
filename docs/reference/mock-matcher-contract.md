@@ -33,7 +33,7 @@ For each mock, the matcher reads:
 
 | Key | Value | Written by |
 |-----|-------|------------|
-| `type` | protocol name (e.g. `"mysql"`) | Every parser. |
+| `type` | lifetime tag: `"config"` (session-lifetime) or `"connection"` (connection-lifetime). See `pkg/models/lifetime.go`. | Every parser. |
 | `connID` | same as `ConnectionID` | Every parser. |
 | `destAddr` | `host:port` of real destination | Every parser where known. |
 | `tls_stage` | `"prelude"` or `"post-upgrade"` | Mid-stream-TLS parsers (Postgres v2, MySQL, SMTP STARTTLS in the future). |

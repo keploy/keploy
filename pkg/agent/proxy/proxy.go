@@ -125,8 +125,14 @@ type Proxy struct {
 	connMutex *sync.Mutex
 	ipMutex   *sync.Mutex
 	// channel to mark client connection as closed
-	clientClose       chan bool
-	clientConnections []net.Conn
+	clientClose chan bool
+
+	// activeConns tracks outgoing handleConnection goroutines so
+	// shutdown can wait for them to finish naturally (drain grace)
+	// before tearing listeners down. Count-only — connections close
+	// themselves via their own defers / context cancellation; we do
+	// not need references to force-close them.
+	activeConns sync.WaitGroup
 
 	Listener net.Listener
 
@@ -930,6 +936,12 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	// Track the goroutine for shutdown drain. Done fires on return
+	// regardless of the path taken (success, error, panic via the
+	// named-return-value recovers below), so waitForConnDrain gets
+	// a precise count of in-flight parsers.
+	p.activeConns.Add(1)
+	defer p.activeConns.Done()
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
@@ -1886,14 +1898,15 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	defer drainCancel()
 	p.waitForConnDrain(drainCtx)
 
-	p.connMutex.Lock()
-	for _, clientConn := range p.clientConnections {
-		if err := clientConn.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
-		}
-	}
-	p.clientConnections = nil
-	p.connMutex.Unlock()
+	// Any connections still in flight after the grace window have
+	// already received parent-context cancellation (propagated into
+	// the per-connection parserCtx in handleConnection). Their own
+	// deferred srcConn/dstConn closes run on return. We intentionally
+	// do NOT keep a shared slice of net.Conn values: that requires
+	// tracking lifecycle hooks we don't own reliably, and the
+	// WaitGroup + ctx cancellation combination already covers the
+	// "stuck parser eventually exits" case without double-close
+	// races on the real sockets.
 	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
 		if err := p.stopDNSServers(ctx); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
