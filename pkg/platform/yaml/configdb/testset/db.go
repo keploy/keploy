@@ -50,7 +50,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 			// Don't return early - continue with secret loading even if config is malformed
 			// Use default config instead
 			config = newValue[T]()
-			db.logger.Warn("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
+			db.logger.Debug("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
 		}
 	}
 
