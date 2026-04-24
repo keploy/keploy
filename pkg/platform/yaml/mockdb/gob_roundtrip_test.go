@@ -251,8 +251,8 @@ func TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 					// see the matching comment in the non-NULL variant of
 					// this test for why we keep it in logical form even
 					// though BindFormats records binary on the wire.
-					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
-					BindFormats:   []int{1},
+					BindValues:  models.PostgresV3Cells{models.NewValueCell(int64(1))},
+					BindFormats: []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
