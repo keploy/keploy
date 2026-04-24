@@ -287,6 +287,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// --ca-java-home is the manual override for the app-aware Java
+		// truststore install. When the auto-detector in
+		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
+		// (exotic launcher, containerised re-exec), operators can point
+		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
+		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
+		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
 
 	default:
 		return errors.New("unknown command name")
@@ -312,6 +319,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
+		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for --health-url polling (e.g. 60s, 2m). If no 2xx is seen within this window, replay logs an info message and falls back to --delay.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
@@ -389,6 +398,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployContainer":       "keploy-container",
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
+		"healthUrl":             "health-url",
+		"healthPollTimeout":     "health-poll-timeout",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
 		"protoFile":             "proto-file",
@@ -441,7 +452,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Debug("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
+		c.logger.Info("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
 	// The "create config file if missing" behavior is meaningful
@@ -943,7 +954,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			// check if the buildDelay is less than 30 seconds
 			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
-				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
+				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
@@ -1137,7 +1148,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if c.cfg.Test.Delay <= 5 {
-				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
+				c.logger.Info(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
 					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
@@ -1213,6 +1224,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
+
+		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get ca-java-home flag")
+			return nil
+		}
+		// Trim whitespace so accidental `--ca-java-home=" "` doesn't
+		// short-circuit auto-detection with a junk path that will
+		// stat-fail in installJavaCAForHome and fall back to PATH
+		// keytool anyway (but logged at Debug as a spurious override).
+		c.cfg.Agent.CAJavaHome = strings.TrimSpace(caJavaHome)
 
 		mode, err := cmd.Flags().GetString("mode")
 		if err != nil {

@@ -355,7 +355,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	}
 
 	if len(testSets) == 0 {
-		t.logger.Warn("No test sets found to templatize")
+		t.logger.Debug("No test sets found to templatize")
 		return nil
 	}
 
@@ -382,7 +382,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 
 		if len(tcs) == 0 {
-			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
+			t.logger.Debug("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
 

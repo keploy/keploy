@@ -87,12 +87,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 				utils.LogError(logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
 			}
 			if c.ContainerName != "" && c.ContainerName != cont {
-				logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
+				logger.Debug(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
 			}
 			c.ContainerName = cont
 
 			if c.NetworkName != "" && c.NetworkName != net {
-				logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
+				logger.Debug(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
 			}
 			c.NetworkName = net
 

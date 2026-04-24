@@ -61,7 +61,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	// Always try to load secrets, regardless of whether config.yaml existed
 	secretValues, err := db.ReadSecret(ctx, testSetID)
 	if err != nil {
-		db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		db.logger.Debug("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
 		// Don't return error here - missing secrets shouldn't fail the config loading
 		return config, nil
 	}
