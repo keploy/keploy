@@ -25,8 +25,9 @@ import (
 //
 // Parsers that need a full net.Conn (e.g. gRPC, HTTP/2 libraries) can
 // obtain one via RecordSession.IngressConn / RecordSession.EgressConn,
-// which perform a checked conversion and return nil for sessions
-// whose underlying implementation does not satisfy net.Conn.
+// which return (net.Conn, error): a non-nil error is returned when the
+// session or connection is unavailable, or when the underlying
+// RecordConn implementation does not satisfy net.Conn.
 type RecordConn interface {
 	io.Reader
 	io.Writer
@@ -45,9 +46,10 @@ type RecordConn interface {
 // (SafeConn) also implements net.Conn with Close as a no-op, so it
 // can be reused with libraries like gRPC and HTTP/2 that require
 // net.Conn; the IngressConn / EgressConn helpers expose that net.Conn
-// view safely (returning nil rather than panicking when the field is
-// nil or the underlying type does not satisfy net.Conn — for example
-// on the V2 path).
+// view safely, returning (net.Conn, error) so callers handle the
+// "not available" case explicitly — for example on the V2 path where
+// Ingress/Egress are unset, or when the underlying RecordConn
+// implementation does not satisfy net.Conn.
 type RecordSession struct {
 	// Ingress is the client-side connection.
 	// Read: client requests. Write: server responses back to client.
@@ -157,28 +159,35 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 // relay path), or the underlying RecordConn implementation does not
 // satisfy net.Conn.
 func (s *RecordSession) IngressConn() (net.Conn, error) {
-	return s.recordNetConn("ingress", s.Ingress)
+	if s == nil {
+		return nil, fmt.Errorf("record session ingress: nil session")
+	}
+	return s.recordNetConn("ingress", "IngressConn", s.Ingress)
 }
 
 // EgressConn is the egress counterpart of IngressConn. See IngressConn
 // for the error contract.
 func (s *RecordSession) EgressConn() (net.Conn, error) {
-	return s.recordNetConn("egress", s.Egress)
+	if s == nil {
+		return nil, fmt.Errorf("record session egress: nil session")
+	}
+	return s.recordNetConn("egress", "EgressConn", s.Egress)
 }
 
 // recordNetConn safely converts a RecordConn to net.Conn. The named
 // `which` is included in the error so callers can distinguish ingress
-// from egress without re-implementing the message.
-func (s *RecordSession) recordNetConn(which string, conn RecordConn) (net.Conn, error) {
-	if s == nil {
-		return nil, fmt.Errorf("record session %s: nil session", which)
-	}
+// from egress without re-implementing the message; methodName is the
+// exported helper the caller invoked (IngressConn / EgressConn) so the
+// error refers to the public API surface rather than the lowercase
+// internal label. Callers guarantee a non-nil receiver before invoking
+// this helper.
+func (s *RecordSession) recordNetConn(which string, methodName string, conn RecordConn) (net.Conn, error) {
 	if conn == nil {
-		return nil, fmt.Errorf("record session %s: connection not initialised; ensure the session is created with a live connection before calling %sConn", which, which)
+		return nil, fmt.Errorf("record session %s: connection not initialised; ensure the session is created with a live connection before calling %s", which, methodName)
 	}
 	netConn, ok := conn.(net.Conn)
 	if !ok {
-		return nil, fmt.Errorf("record session %s: underlying RecordConn implementation does not satisfy net.Conn; use a connection type that satisfies net.Conn", which)
+		return nil, fmt.Errorf("record session %s: underlying RecordConn implementation does not satisfy net.Conn; use a connection type that satisfies net.Conn before calling %s", which, methodName)
 	}
 	return netConn, nil
 }

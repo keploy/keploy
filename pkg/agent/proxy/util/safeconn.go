@@ -17,8 +17,9 @@ import (
 // management.
 //
 // SafeConn is the parser-facing wrapper used in this repo for record
-// mode: Close and SetDeadline are no-ops, and parsers must treat both
-// as unavailable for lifecycle management. Some enterprise builds may
+// mode: Close and all deadline setters (SetDeadline, SetReadDeadline,
+// SetWriteDeadline) are no-ops, and parsers must treat all of them as
+// unavailable for lifecycle management. Some enterprise builds may
 // provide a separate SimulatedConn type for other proxy modes that
 // follows the same contract; that type is not defined in this repo,
 // but where it exists it is expected to honour the same "Close and
@@ -34,7 +35,8 @@ type SafeConn struct {
 	mu     sync.Mutex
 }
 
-// NewSafeConn wraps conn so that Close and SetDeadline are no-ops.
+// NewSafeConn wraps conn so that Close and the deadline setters
+// (SetDeadline, SetReadDeadline, SetWriteDeadline) are no-ops.
 func NewSafeConn(conn net.Conn, logger *zap.Logger) *SafeConn {
 	return &SafeConn{
 		conn:   conn,
