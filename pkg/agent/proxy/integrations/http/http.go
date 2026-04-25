@@ -128,11 +128,15 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 	return h.recordLegacy(ctx, session)
 }
 
-// recordLegacy is the original RecordOutgoing body preserved unchanged.
-// It consumes the legacy RecordSession fields (Ingress / Egress / Mocks)
-// and forwards bytes between the real sockets itself. The V2 path in
-// recordV2 relies on the supervisor's relay to do the forwarding and
-// only observes teed chunks via FakeConn streams.
+// recordLegacy is the original RecordOutgoing body — semantics are
+// preserved against the pre-V2 implementation (consume RecordSession
+// Ingress / Egress / Mocks, forward bytes between the real sockets,
+// emit one mock per HTTP exchange). The conn lookups go through
+// session.IngressConn() / EgressConn() now that those return
+// (net.Conn, error); errors are wrapped with an "http: " prefix and
+// returned. The V2 path in recordV2 relies on the supervisor's relay
+// to do the forwarding and only observes teed chunks via FakeConn
+// streams.
 func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
