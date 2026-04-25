@@ -232,14 +232,17 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 	})
 }
 
-// TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker exercises the NULL-cell
-// code path specifically. The current encoding uses PostgresV3Cell.IsNull as
-// the in-memory marker and a native YAML null on disk (no string sentinel) —
-// previous revisions used \x00NULL\x00 and then a printable sentinel; both
-// were retired. This test must keep distinguishing SQL NULL from an empty
-// string across both gob and yaml round-trips, which is the whole purpose
-// of the PostgresV3Cell type.
-func TestRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
+// TestRoundTrip_PostgresV3Query_NullCell_ValueNilMarker exercises the
+// NULL-cell code path specifically. The in-memory marker is
+// PostgresV3Cell.Value == nil (the IsNull() method wraps that check
+// plus typed-nil-pointer handling — there is no exported IsNull
+// field), and the on-disk form is a native YAML null (no string
+// sentinel — earlier revisions tried \x00NULL\x00 and then a
+// printable sentinel; both were retired). This test must keep
+// distinguishing SQL NULL from an empty string across both gob and
+// yaml round-trips, which is the whole purpose of the
+// PostgresV3Cell type.
+func TestRoundTrip_PostgresV3Query_NullCell_ValueNilMarker(t *testing.T) {
 	roundTrip(t, "PostgresV3QueryNullCell", &models.Mock{
 		Version: "api.keploy.io/v1beta1",
 		Kind:    models.PostgresV3,

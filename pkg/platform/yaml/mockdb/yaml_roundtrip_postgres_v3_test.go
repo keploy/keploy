@@ -271,16 +271,17 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 	}
 }
 
-// TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker — the reason
-// this sub-type gets a dedicated yaml test. The current encoding marks
-// SQL NULL with PostgresV3Cell.Value == nil (the IsNull() method just
-// wraps that nil-check; there is no exported IsNull field) and emits a
-// native YAML null on disk (no string sentinel). Earlier revisions
-// used NUL-byte and then printable string sentinels; both were
-// retired. A future regression that re-introduces a string- or
+// TestYAMLRoundTrip_PostgresV3Query_NullCell_ValueNilMarker — the
+// reason this sub-type gets a dedicated yaml test. The current
+// encoding marks SQL NULL with PostgresV3Cell.Value == nil (the
+// IsNull() method just wraps that nil-check plus typed-nil-pointer
+// handling; there is no exported IsNull field) and emits a native
+// YAML null on disk (no string sentinel). Earlier revisions used
+// NUL-byte and then printable string sentinels; both were retired.
+// A future regression that re-introduces a string- or
 // control-byte-based sentinel must fail here first rather than
 // silently at record time when mocks.yaml becomes unwritable.
-func TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
+func TestYAMLRoundTrip_PostgresV3Query_NullCell_ValueNilMarker(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
 		Kind:    models.PostgresV3,
