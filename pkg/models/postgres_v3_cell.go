@@ -57,6 +57,11 @@ type PostgresV3Cell struct {
 	//   int8            → int64
 	//   oid/xid/cid     → uint32  (pg_catalog metadata columns)
 	//   xid8            → uint64  (PG ≥ 13 64-bit txids)
+	//   text[] / int4[] / composite-row → []interface{} of the
+	//                       per-element logical type (string for
+	//                       text[], int32 for int4[], etc.). Multi-
+	//                       dimensional arrays nest through the
+	//                       same []interface{} shape.
 	//   float4/8        → float64
 	// Width caveat: yaml.v3's resolver decodes every !!int back to a
 	// Go int64, so int16 / int32 cells round-trip through the gob
@@ -475,6 +480,11 @@ func stripBase64Whitespace(s string) string {
 //	11 → uint16      (gob uint16 — rare but kept for catalogue
 //	                  closure)
 //	12 → uint64      (gob uint64 — `xid8` on PG ≥ 13)
+//	13 → []interface{}  (length-prefixed sequence of nested cells —
+//	                  PG ARRAY columns: text[], int4[], composite-row,
+//	                  multi-dim arrays. Each element is encoded
+//	                  recursively through this very GobEncode so the
+//	                  type closure stays stable across nesting depth.)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -501,6 +511,15 @@ const (
 	cellTagUint32 byte = 10
 	cellTagUint16 byte = 11
 	cellTagUint64 byte = 12
+	// Tag 13 covers PG ARRAY columns: pgtype scans `text[]`, `int4[]`,
+	// composite-row, etc. into a Go `[]interface{}` whose elements are
+	// the per-cell logical Go type (string for text[], int32 for int4[],
+	// nested []interface{} for multi-dim arrays). Encoding strategy:
+	// length-prefixed sequence of nested PostgresV3Cells, each going
+	// through this cell's own GobEncode/GobDecode recursively. That
+	// keeps the type closure stable (no new tag per element type) and
+	// gracefully nests for multi-dimensional arrays.
+	cellTagSlice byte = 13
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -585,6 +604,31 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		buf.WriteByte(cellTagUint64)
 		if err := enc.Encode(v); err != nil {
 			return nil, err
+		}
+	case []interface{}:
+		// PG ARRAY columns: pgtype.Map.Scan resolves text[] / int4[] /
+		// composite-row / multi-dim arrays into a `[]interface{}` whose
+		// elements are the per-cell logical Go type. Encode as a length-
+		// prefixed sequence of nested cells so element types stay
+		// per-position and multi-dim nesting works recursively. Without
+		// this case, listmonk's install-time INSERT INTO lists (...,
+		// tags TEXT[], ...) recorded a no-PD mock (because the gob
+		// failure dropped the entire mock including its
+		// ParameterDescription) and replay served a 0-arg ParseComplete
+		// to a 7-arg INSERT — pgx aborted with "expected 0 arguments,
+		// got 7" and listmonk crashed before any user traffic.
+		buf.WriteByte(cellTagSlice)
+		if err := enc.Encode(int32(len(v))); err != nil {
+			return nil, err
+		}
+		for i, elem := range v {
+			elemBytes, err := PostgresV3Cell{Value: elem}.GobEncode()
+			if err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode slice elem %d (%T): %w", i, elem, err)
+			}
+			if err := enc.Encode(elemBytes); err != nil {
+				return nil, err
+			}
 		}
 	case float64:
 		buf.WriteByte(cellTagFloat64)
@@ -734,6 +778,31 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 			return fmt.Errorf("PostgresV3Cell.GobDecode uint64: %w", err)
 		}
 		c.Value = v
+	case cellTagSlice:
+		// Symmetric to the GobEncode []interface{} branch: read the
+		// length, then each element as a self-contained nested cell
+		// gob blob, and decode it back to its underlying Value. The
+		// rebuild produces a fresh []interface{} the caller can
+		// type-assert per its own per-OID expectations (text[]
+		// elements come back as string, int4[] as int32, multi-dim
+		// arrays as nested []interface{} via the recursive case).
+		var n int32
+		if err := dec.Decode(&n); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode slice length: %w", err)
+		}
+		out := make([]interface{}, n)
+		for i := int32(0); i < n; i++ {
+			var elemBytes []byte
+			if err := dec.Decode(&elemBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode slice elem %d bytes: %w", i, err)
+			}
+			var elem PostgresV3Cell
+			if err := elem.GobDecode(elemBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode slice elem %d cell: %w", i, err)
+			}
+			out[i] = elem.Value
+		}
+		c.Value = out
 	default:
 		return fmt.Errorf("PostgresV3Cell.GobDecode: unknown tag %d", tag)
 	}

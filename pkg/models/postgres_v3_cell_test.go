@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -244,6 +245,21 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 		{"uint16", uint16(65000)},
 		{"uint32", uint32(4294967295)}, // max oid
 		{"uint64", uint64(18446744073709551615)},
+		// PG arrays — pgtype hands back []interface{} whose elements
+		// are per-OID logical Go types. Mixed primitive types pin the
+		// recursive cell encoding (each element re-enters GobEncode
+		// via its own tag byte). Listmonk's INSERT INTO lists (...,
+		// tags TEXT[], ...) is the regression case: pre-fix, the
+		// encoder rejected []interface{} and the recorder dropped
+		// the entire mock including its ParameterDescription, so
+		// replay served a 0-arg ParseComplete to a 7-arg INSERT.
+		{"slice_text_array", []interface{}{"vip", "churn-risk", "active"}},
+		{"slice_mixed_types", []interface{}{int32(42), "hello", true, nil, []byte{0x01, 0x02}}},
+		{"slice_empty", []interface{}{}},
+		{"slice_nested_2d", []interface{}{
+			[]interface{}{"a", "b"},
+			[]interface{}{"c", "d"},
+		}},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
 		{"bool", true},
@@ -279,6 +295,16 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 				gr, ok := got.Value.(PostgresV3CellRaw)
 				if !ok || gr.Format != want.Format || !bytes.Equal(gr.Bytes, want.Bytes) {
 					t.Errorf("raw round-trip: got %+v, want %+v", got.Value, want)
+				}
+			case []interface{}:
+				// Slice cells (PG arrays) need DeepEqual — `==` on
+				// interface-typed slices panics. Each element should
+				// have round-tripped via the recursive nested cell
+				// encoding, so the rebuilt []interface{} matches the
+				// input element-for-element including primitive types,
+				// nil, and nested slices for multi-dim arrays.
+				if !reflect.DeepEqual(got.Value, want) {
+					t.Errorf("slice round-trip: got %#v, want %#v", got.Value, want)
 				}
 			default:
 				if got.Value != tc.in {
