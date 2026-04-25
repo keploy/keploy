@@ -454,10 +454,14 @@ func stripBase64Whitespace(s string) string {
 //	5  → []byte      (gob []byte)
 //	6  → time.Time   (gob time.Time — uses time's own GobEncode)
 //	7  → rawBytes    (format int16 + []byte payload; for unknown OIDs
-//	                  that the codec stored verbatim as *RawValue.
+//	                  represented in this repo as PostgresV3CellRaw.
 //	                  We carry just the (format, bytes) tuple and
-//	                  decode back to the codec's RawValue on read if
-//	                  the caller needs the typed form.)
+//	                  GobDecode restores a PostgresV3CellRaw value on
+//	                  read if the caller needs the typed form. The
+//	                  integrations-side codec consumes that struct via
+//	                  RawBytesAndFormat() — there is no conversion
+//	                  back to a separate codec RawValue type in this
+//	                  package.)
 //	8  → int32       (gob int32 — pgtype hands int4 columns back as
 //	                  Go int32 when the destination is *any)
 //	9  → int16       (gob int16 — same for int2 columns)
