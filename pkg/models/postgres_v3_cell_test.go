@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
+	"math/big"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -271,6 +273,18 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 			"app.lang": "en",
 			"tags":     []interface{}{"transactional", "marketing"},
 		}},
+		// Tag 15 — Go untyped `int`. Reachable on yaml.v3 reload of
+		// nested integers inside slice / jsonb cells; the recursive
+		// PostgresV3Cell.GobEncode would fail-loud without this case.
+		{"int_native", 42},
+		{"int_zero", 0},
+		// Tag 16 — float32 (PG float4). Distinct from float64 above.
+		{"float32", float32(3.14)},
+		// Tag 17 — pgtype.Numeric. Three flavours pin the wire shape:
+		// a typical decimal value, NaN, and an infinity sentinel.
+		{"numeric_decimal", pgtype.Numeric{Int: big.NewInt(123456), Exp: -2, Valid: true}},
+		{"numeric_nan", pgtype.Numeric{NaN: true, Valid: true}},
+		{"numeric_inf", pgtype.Numeric{InfinityModifier: pgtype.Infinity, Valid: true}},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
 		{"bool", true},
@@ -325,6 +339,25 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 				// is randomised).
 				if !reflect.DeepEqual(got.Value, want) {
 					t.Errorf("jsonb round-trip: got %#v, want %#v", got.Value, want)
+				}
+			case pgtype.Numeric:
+				// Numeric needs DeepEqual too — *big.Int can't be
+				// compared with `==`. Both sides must agree on Int
+				// (numeric value, not pointer identity), Exp, NaN,
+				// InfinityModifier, and Valid.
+				gn, ok := got.Value.(pgtype.Numeric)
+				if !ok {
+					t.Fatalf("numeric round-trip: got %T, want pgtype.Numeric", got.Value)
+				}
+				if gn.NaN != want.NaN || gn.Valid != want.Valid ||
+					gn.Exp != want.Exp || gn.InfinityModifier != want.InfinityModifier {
+					t.Errorf("numeric meta drift: got %+v, want %+v", gn, want)
+				}
+				if (gn.Int == nil) != (want.Int == nil) {
+					t.Errorf("numeric Int nil-ness drift: got %v, want %v", gn.Int, want.Int)
+				}
+				if gn.Int != nil && want.Int != nil && gn.Int.Cmp(want.Int) != 0 {
+					t.Errorf("numeric Int drift: got %s, want %s", gn.Int.String(), want.Int.String())
 				}
 			default:
 				if got.Value != tc.in {

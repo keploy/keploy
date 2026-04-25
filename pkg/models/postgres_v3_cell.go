@@ -34,10 +34,12 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -53,43 +55,50 @@ type PostgresV3Cell struct {
 	// Value is the logical column value. Go type is dictated by the
 	// column's TypeOID, matching what pgtype hands back when the
 	// scan target is *any:
-	//   int2            → int16
-	//   int4            → int32
-	//   int8            → int64
-	//   oid/xid/cid     → uint32  (pg_catalog metadata columns)
-	//   xid8            → uint64  (PG ≥ 13 64-bit txids)
-	//   text[] / int4[] / composite-row → []interface{} of the
-	//                       per-element logical type (string for
-	//                       text[], int32 for int4[], etc.). Multi-
-	//                       dimensional arrays nest through the
-	//                       same []interface{} shape.
-	//   json / jsonb     → map[string]interface{} (top-level object) or
-	//                       []interface{} (top-level array) per pgtype's
-	//                       JSON decoder. Nested objects + arrays land
-	//                       in the same recursive cell encoding.
-	//   float4/8        → float64
-	// Width caveat: yaml.v3's resolver decodes every !!int back to a
-	// Go int64, so int16 / int32 cells round-trip through the gob
-	// path (sidecar → agent stream) with their original Go width but
-	// widen to int64 through the YAML path (mocks.yaml on disk). That
-	// is intentional — the codec on the integrations side encodes
-	// onto the wire using the column OID, not the Go width, so the
-	// emitted bytes are correct in both cases. Downstream code that
-	// type-switches on Cell.Value should accept int16, int32, AND
-	// int64 for "an integer column", or use a helper that widens.
-	//   bool            → bool
-	//   text/varchar/…  → string
-	//   timestamp[tz]   → time.Time
-	//   date            → time.Time (time-of-day zero)
-	//   bytea           → []byte
-	//   uuid            → string (canonical 8-4-4-4-12 form)
-	//   json/jsonb      → string (canonical UTF-8 JSON)
-	//   unknown OIDs    → PostgresV3CellRaw (format-tagged bytes,
-	//                     carried through the mock as-is; the codec
-	//                     shim on the integration side duck-types on
-	//                     RawBytesAndFormat and re-emits without
-	//                     transcoding across text ↔ binary since no
-	//                     codec is registered for the OID).
+	//
+	//   int2 / int4 / int8         → int16 / int32 / int64
+	//   oid / xid / cid            → uint32 (pg_catalog metadata)
+	//   xid8                       → uint64 (PG ≥ 13)
+	//   float4 / float8            → float32 / float64
+	//   numeric / decimal          → pgtype.Numeric (arbitrary
+	//                                precision; struct fields go
+	//                                through gob-friendly paths)
+	//   bool                       → bool
+	//   text / varchar / name /
+	//     bpchar / char             → string
+	//   timestamp / timestamptz    → time.Time
+	//   date / time / timetz       → time.Time (time-of-day zero on
+	//                                date; pgtype.Time fallback on
+	//                                some pgx versions)
+	//   bytea / xml                → []byte
+	//   uuid                       → canonical 8-4-4-4-12 string
+	//   text[] / int4[] / composite-row / multi-dim arrays
+	//                              → []interface{} of per-element
+	//                                logical type
+	//   json / jsonb               → map[string]interface{} for
+	//                                top-level objects, []interface{}
+	//                                for top-level arrays. Nested
+	//                                values use the same recursive
+	//                                cell encoding.
+	//   yaml-reloaded nested ints  → int (yaml.v3 produces native
+	//                                Go int when destination is `any`,
+	//                                which is the recursive decode
+	//                                path inside slice / jsonb cells)
+	//   unknown OIDs               → PostgresV3CellRaw (format-tagged
+	//                                bytes, carried through verbatim;
+	//                                codec on integrations side duck-
+	//                                types on RawBytesAndFormat to
+	//                                re-emit without transcoding)
+	//
+	// Width caveat: yaml.v3's resolver decodes every !!int back to
+	// int64, so int16 / int32 cells round-trip through the gob path
+	// (sidecar → agent stream) with their source Go width but widen
+	// to int64 through the YAML path (mocks.yaml on disk). That's
+	// intentional — the codec on the integrations side encodes onto
+	// the wire using the column OID, not the Go width, so the bytes
+	// emitted are correct in both cases. Downstream code that type-
+	// switches on Cell.Value should accept int16/int32/int64 for "an
+	// integer column" or use a helper that widens.
 	Value any
 }
 
@@ -496,6 +505,16 @@ func stripBase64Whitespace(s string) string {
 //	                  objects / arrays land in the map (this) / slice
 //	                  (tag 13) cases. Keys sorted on encode for
 //	                  deterministic gob bytes.)
+//	15 → int         (gob int64 on the wire, decoded back to int —
+//	                  yaml.v3 produces Go's untyped int when reloading
+//	                  nested integers inside slice / jsonb cells.)
+//	16 → float32     (gob float32 — pgtype hands float4 columns back
+//	                  as Go float32; distinct from tag 2 float64.)
+//	17 → pgtype.Numeric  (constituent fields: *big.Int via its own
+//	                  GobEncode, Exp int32, InfinityModifier int8, NaN
+//	                  bool, Valid bool. Required for PG `numeric` /
+//	                  `decimal` columns — listmonk dashboard regression
+//	                  surfaced this on /api/settings.)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -544,6 +563,32 @@ const (
 	// recorder dropped every JSONB-bearing mock and replay couldn't
 	// satisfy the install path.
 	cellTagJSONB byte = 14
+	// Tag 15 covers Go's untyped `int`. Reachable in two cases the
+	// principal-engineer audit pinned: (1) yaml.v3 decodes nested
+	// `!!int` values inside slice/jsonb cells into Go's native `int`
+	// when the destination is `any` (the recursive node.Decode(&v)
+	// path that handles tag-13 slice / tag-14 jsonb shapes), so a
+	// fresh-from-disk mock can carry int values inside its array /
+	// object cells; (2) some app-level helpers wrap counts in plain
+	// `int` before stuffing them into bind parameters. Width is
+	// platform-dependent in Go but PG ints are bounded; we narrow to
+	// int64 on the wire and decode back into int so the round-trip
+	// is shape-stable.
+	cellTagInt byte = 15
+	// Tag 16 covers float4 columns: pgtype hands those back as Go
+	// `float32` when destination is *any. Distinct from tag 2 which
+	// is float64 — keeping the source width through gob preserves
+	// what pgtype.Encode wants on emit (binary float4 is 4 bytes,
+	// not 8).
+	cellTagFloat32 byte = 16
+	// Tag 17 covers `pgtype.Numeric` — PG's arbitrary-precision
+	// `numeric` / `decimal` type. The struct's fields (Int *big.Int,
+	// Exp int32, NaN bool, InfinityModifier int8, Valid bool) are
+	// gob-friendly natively (big.Int has its own GobEncoder). Without
+	// this tag, listmonk's `GET /api/settings` endpoint dropped its
+	// recorded mock on every dashboard query that surfaces a numeric
+	// (counts, rate-limit thresholds, configurable monetary values).
+	cellTagNumeric byte = 17
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -627,6 +672,74 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		// lock workload running on a recent PG.
 		buf.WriteByte(cellTagUint64)
 		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case int:
+		// Reachable when a slice / jsonb cell is reloaded from
+		// mocks.yaml: yaml.v3 decodes nested `!!int` into Go's
+		// platform-dependent `int` whenever the destination is
+		// `any`, which is the recursive node.Decode(&v) path
+		// inside this cell's slice (tag 13) and jsonb (tag 14)
+		// branches. Without this case, GobEncode would fail-loud
+		// on the rebuilt cell and the storemocks step would abort
+		// the entire replay. Width is platform-dependent in Go but
+		// the wire form is fixed at int64 — we don't lose range on
+		// either 32- or 64-bit platforms because PG ints are
+		// bounded.
+		buf.WriteByte(cellTagInt)
+		if err := enc.Encode(int64(v)); err != nil {
+			return nil, err
+		}
+	case float32:
+		// pgtype hands float4 columns back as Go float32. Distinct
+		// from cellTagFloat64 (tag 2) so the source width survives
+		// on emit — the binary float4 wire format is 4 bytes, not 8,
+		// and pgtype.Encode for OIDFloat4 expects float32.
+		buf.WriteByte(cellTagFloat32)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case pgtype.Numeric:
+		// PG `numeric` / `decimal` — arbitrary-precision. Encode the
+		// constituent fields directly: *big.Int via its own GobEncode
+		// (handles nil → empty-bytes), Exp / InfinityModifier / NaN /
+		// Valid via gob's primitive emit. We canonicalise nil Int to
+		// big.NewInt(0) so the gob stream is deterministic for the
+		// "valid Numeric with zero/null payload" case (rare but
+		// reachable on degenerate inputs). Decode reconstructs the
+		// struct verbatim so pgtype.Encode on emit gets the exact
+		// shape it expects.
+		buf.WriteByte(cellTagNumeric)
+		// Encode an Int-presence flag separately from the bytes:
+		// big.Int.GobEncode() of a fresh big.NewInt(0) produces a
+		// non-empty payload that's indistinguishable from "absent
+		// Int" if we encoded nil → zero-int. NaN / ±infinity numerics
+		// legitimately carry Int=nil and the round-trip must preserve
+		// that nil-ness so pgtype.Encode picks the right wire shape
+		// on emit. Tag the presence explicitly.
+		hasInt := v.Int != nil
+		if err := enc.Encode(hasInt); err != nil {
+			return nil, err
+		}
+		if hasInt {
+			intBytes, err := v.Int.GobEncode()
+			if err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode numeric Int: %w", err)
+			}
+			if err := enc.Encode(intBytes); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Encode(v.Exp); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(int8(v.InfinityModifier)); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.NaN); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
 			return nil, err
 		}
 	case map[string]interface{}:
@@ -837,6 +950,61 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 			return fmt.Errorf("PostgresV3Cell.GobDecode uint64: %w", err)
 		}
 		c.Value = v
+	case cellTagInt:
+		var v int64
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode int: %w", err)
+		}
+		// Decode back into Go's untyped int — the round-trip target
+		// is the same shape yaml.v3 produced on load. int64 → int
+		// narrows on 32-bit platforms but PG int values fit; bigger
+		// numerics live in pgtype.Numeric (tag 17).
+		c.Value = int(v)
+	case cellTagFloat32:
+		var v float32
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode float32: %w", err)
+		}
+		c.Value = v
+	case cellTagNumeric:
+		var (
+			hasInt    bool
+			expVal    int32
+			infMod    int8
+			nanFlag   bool
+			validFlag bool
+		)
+		if err := dec.Decode(&hasInt); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode numeric hasInt flag: %w", err)
+		}
+		recovered := pgtype.Numeric{}
+		if hasInt {
+			var intBytes []byte
+			if err := dec.Decode(&intBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode numeric Int bytes: %w", err)
+			}
+			recovered.Int = new(big.Int)
+			if err := recovered.Int.GobDecode(intBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode numeric Int gob: %w", err)
+			}
+		}
+		if err := dec.Decode(&expVal); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode numeric Exp: %w", err)
+		}
+		if err := dec.Decode(&infMod); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode numeric InfinityModifier: %w", err)
+		}
+		if err := dec.Decode(&nanFlag); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode numeric NaN: %w", err)
+		}
+		if err := dec.Decode(&validFlag); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode numeric Valid: %w", err)
+		}
+		recovered.Exp = expVal
+		recovered.InfinityModifier = pgtype.InfinityModifier(infMod)
+		recovered.NaN = nanFlag
+		recovered.Valid = validFlag
+		c.Value = recovered
 	case cellTagJSONB:
 		// Symmetric to the GobEncode map case: read length, then
 		// (key, nested-cell-bytes) pairs, decode each value through
