@@ -2,7 +2,7 @@ package generic
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -51,12 +51,13 @@ func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.Reco
 func (g *Generic) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
-	ingress := session.IngressConn()
-	egress := session.EgressConn()
-	if ingress == nil || egress == nil {
-		utils.LogError(logger, nil, "record session is missing net.Conn-backed ingress/egress",
-			zap.String("next_step", "verify SafeConn is wired into RecordSession before invoking the recorder"))
-		return errors.New("generic: record session has no net.Conn-backed ingress/egress; ensure the session is built with SafeConn before calling RecordOutgoing")
+	ingress, err := session.IngressConn()
+	if err != nil {
+		return fmt.Errorf("generic: %w", err)
+	}
+	egress, err := session.EgressConn()
+	if err != nil {
+		return fmt.Errorf("generic: %w", err)
 	}
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, ingress)

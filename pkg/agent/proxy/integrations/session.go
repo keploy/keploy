@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"fmt"
 	"io"
 	"net"
 
@@ -151,46 +152,33 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 // IngressConn returns Ingress as a net.Conn for use with libraries
 // (gRPC, HTTP/2) or internal helpers that require a full net.Conn.
 //
-// The standard RecordConn implementation in this repo (SafeConn)
-// satisfies net.Conn with Close as a no-op, so the conversion
-// normally succeeds. However, this method may return nil when:
-//   - the session is nil,
-//   - Ingress has not been initialised (e.g. on V2-only sessions
-//     served entirely through the supervisor + relay path), or
-//   - the underlying RecordConn implementation does not satisfy
-//     net.Conn.
-//
-// Callers must handle a nil return; an error is logged in the
-// degenerate cases via the session logger.
-func (s *RecordSession) IngressConn() net.Conn {
-	return s.recordNetConn("Ingress", s.Ingress)
+// Returns an error when the session is nil, Ingress was not initialised
+// (e.g. on V2-only sessions served entirely through the supervisor +
+// relay path), or the underlying RecordConn implementation does not
+// satisfy net.Conn.
+func (s *RecordSession) IngressConn() (net.Conn, error) {
+	return s.recordNetConn("ingress", s.Ingress)
 }
 
-// EgressConn returns Egress as a net.Conn. Same contract and
-// nullability rules as IngressConn — see its godoc.
-func (s *RecordSession) EgressConn() net.Conn {
-	return s.recordNetConn("Egress", s.Egress)
+// EgressConn is the egress counterpart of IngressConn. See IngressConn
+// for the error contract.
+func (s *RecordSession) EgressConn() (net.Conn, error) {
+	return s.recordNetConn("egress", s.Egress)
 }
 
-// recordNetConn safely converts a RecordConn to net.Conn.
-// Returns nil if the session/connection is unavailable or if the
-// underlying implementation does not satisfy net.Conn.
-func (s *RecordSession) recordNetConn(name string, conn RecordConn) net.Conn {
+// recordNetConn safely converts a RecordConn to net.Conn. The named
+// `which` is included in the error so callers can distinguish ingress
+// from egress without re-implementing the message.
+func (s *RecordSession) recordNetConn(which string, conn RecordConn) (net.Conn, error) {
 	if s == nil {
-		return nil
+		return nil, fmt.Errorf("record session %s: nil session", which)
 	}
 	if conn == nil {
-		if s.Logger != nil {
-			s.Logger.Error("record session connection is not initialized; ensure the session is created with a live connection before calling " + name + "Conn")
-		}
-		return nil
+		return nil, fmt.Errorf("record session %s: connection not initialised; ensure the session is created with a live connection before calling %sConn", which, which)
 	}
 	netConn, ok := conn.(net.Conn)
 	if !ok {
-		if s.Logger != nil {
-			s.Logger.Error("record session connection does not implement net.Conn; use a connection type that satisfies net.Conn before calling " + name + "Conn")
-		}
-		return nil
+		return nil, fmt.Errorf("record session %s: underlying RecordConn implementation does not satisfy net.Conn; use a connection type that satisfies net.Conn", which)
 	}
-	return netConn
+	return netConn, nil
 }
