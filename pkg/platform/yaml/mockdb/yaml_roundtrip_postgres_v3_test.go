@@ -10,10 +10,13 @@
 // The NULL-cell case is called out as its own test: prior revisions
 // used string sentinels (\x00NULL\x00, then ~~KEPLOY_PG_NULL~~) that
 // repeatedly caused yaml.v3 edge-case failures. The current
-// representation uses PostgresV3Cell.IsNull + native YAML null, which
-// gives a round-trip distinction between SQL NULL and empty string
-// without escape hacks. That test is the regression canary if the
-// struct-level encoding ever slips back to a string-sentinel scheme.
+// representation marks SQL NULL with PostgresV3Cell.Value == nil
+// (the IsNull() method just wraps that nil-check; there is no
+// exported IsNull field) and emits a native YAML null on disk,
+// which gives a round-trip distinction between SQL NULL and empty
+// string without escape hacks. That test is the regression canary
+// if the struct-level encoding ever slips back to a string-sentinel
+// scheme.
 package mockdb
 
 import (
@@ -270,12 +273,13 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 
 // TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker — the reason
 // this sub-type gets a dedicated yaml test. The current encoding marks
-// SQL NULL via PostgresV3Cell.IsNull and emits a native YAML null on
-// disk (no string sentinel). Earlier revisions used NUL-byte and then
-// printable string sentinels; both were retired. A future regression
-// that re-introduces a string- or control-byte-based sentinel must
-// fail here first rather than silently at record time when mocks.yaml
-// becomes unwritable.
+// SQL NULL with PostgresV3Cell.Value == nil (the IsNull() method just
+// wraps that nil-check; there is no exported IsNull field) and emits a
+// native YAML null on disk (no string sentinel). Earlier revisions
+// used NUL-byte and then printable string sentinels; both were
+// retired. A future regression that re-introduces a string- or
+// control-byte-based sentinel must fail here first rather than
+// silently at record time when mocks.yaml becomes unwritable.
 func TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
@@ -296,8 +300,8 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCell_IsNullMarker(t *testing.T) {
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
 						},
-						// Row 0 is SQL NULL (Cell.IsNull=true), row 1 is the
-						// text "hello". The Postgres-semantic distinction
+						// Row 0 is SQL NULL (Cell.Value == nil), row 1 is
+						// the text "hello". The Postgres-semantic distinction
 						// between NULL and '' is the whole reason the Cell
 						// type exists.
 						Rows: []models.PostgresV3Cells{

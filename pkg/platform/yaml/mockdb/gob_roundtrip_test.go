@@ -110,11 +110,12 @@ func TestRoundTrip_Postgres(t *testing.T) {
 // round-trip through gob byte-for-byte so the replayer's BuildIndex
 // doesn't see partial or missing fields after a save-load cycle. The
 // NULL-cell case is separated out because its handling is easy to
-// regress: NULL is now flagged via PostgresV3Cell.IsNull (no string
-// sentinel — earlier revisions tried \x00NULL\x00 and then a printable
-// string sentinel, both retired), so the encoding must keep
-// distinguishing SQL NULL from an empty string across both gob AND
-// yaml paths.
+// regress: NULL is now flagged via PostgresV3Cell.Value == nil (the
+// IsNull() method just wraps that nil-check; there is no exported
+// IsNull field — earlier revisions tried \x00NULL\x00 and then a
+// printable string sentinel, both retired), so the encoding must
+// keep distinguishing SQL NULL from an empty string across both gob
+// AND yaml paths.
 
 func TestRoundTrip_PostgresV3Session(t *testing.T) {
 	roundTrip(t, "PostgresV3Session", &models.Mock{
