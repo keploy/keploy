@@ -192,7 +192,7 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					// client selects at Bind time.
 					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
-					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
+					ResultFormats: []int{1}, // binary int8/bigint — matches RowDescription.TypeOID 20 above; the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
