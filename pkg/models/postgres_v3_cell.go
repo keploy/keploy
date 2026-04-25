@@ -43,8 +43,11 @@ import (
 // the IsNull helper in hot paths.
 type PostgresV3Cell struct {
 	// Value is the logical column value. Go type is dictated by the
-	// column's TypeOID:
-	//   int2/4/8        → int64
+	// column's TypeOID, matching what pgtype hands back when the
+	// scan target is *any:
+	//   int2            → int16
+	//   int4            → int32
+	//   int8            → int64
 	//   float4/8        → float64
 	//   bool            → bool
 	//   text/varchar/…  → string
@@ -399,7 +402,7 @@ func stripBase64Whitespace(s string) string {
 // sidecar stream depend on stability):
 //
 //	0  → NULL        (no payload)
-//	1  → int64       (gob int64)
+//	1  → int64       (gob int64 — int8 columns)
 //	2  → float64     (gob float64)
 //	3  → string      (gob string)
 //	4  → bool        (gob bool)
@@ -410,6 +413,9 @@ func stripBase64Whitespace(s string) string {
 //	                  We carry just the (format, bytes) tuple and
 //	                  decode back to the codec's RawValue on read if
 //	                  the caller needs the typed form.)
+//	8  → int32       (gob int32 — pgtype hands int4 columns back as
+//	                  Go int32 when the destination is *any)
+//	9  → int16       (gob int16 — same for int2 columns)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -419,6 +425,12 @@ const (
 	cellTagBytes   byte = 5
 	cellTagTime    byte = 6
 	cellTagRaw     byte = 7
+	// Tags 8 and 9 cover the narrower integer types pgtype hands
+	// back for int4 / int2 columns when the destination is *any.
+	// Allocated after the original closed set, so older mocks (gob
+	// streams that only carry tags 0-7) still decode unchanged.
+	cellTagInt32 byte = 8
+	cellTagInt16 byte = 9
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -453,6 +465,24 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		}
 	case int64:
 		buf.WriteByte(cellTagInt64)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case int32:
+		// pgtype scans int4 into a Go int32 when the destination is
+		// `*any`, so this is the on-wire shape for every smallint/
+		// integer column the recorder captures. We preserve the
+		// concrete type rather than widening to int64 because the
+		// codec's encode path matches against the source type when
+		// re-emitting and an int64 ↔ int4 mismatch reads as a
+		// driver-level type tag drift on replay.
+		buf.WriteByte(cellTagInt32)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case int16:
+		// Same rationale as int32 — pgtype maps int2 to Go int16.
+		buf.WriteByte(cellTagInt16)
 		if err := enc.Encode(v); err != nil {
 			return nil, err
 		}
@@ -561,6 +591,18 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		var v PostgresV3CellRaw
 		if err := dec.Decode(&v); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode raw: %w", err)
+		}
+		c.Value = v
+	case cellTagInt32:
+		var v int32
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode int32: %w", err)
+		}
+		c.Value = v
+	case cellTagInt16:
+		var v int16
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode int16: %w", err)
 		}
 		c.Value = v
 	default:

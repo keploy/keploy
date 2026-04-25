@@ -238,6 +238,8 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 		in   any
 	}{
 		{"null", nil},
+		{"int16", int16(246)},
+		{"int32", int32(246)},
 		{"int64", int64(246)},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
