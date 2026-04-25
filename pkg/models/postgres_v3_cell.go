@@ -55,6 +55,8 @@ type PostgresV3Cell struct {
 	//   int2            → int16
 	//   int4            → int32
 	//   int8            → int64
+	//   oid/xid/cid     → uint32  (pg_catalog metadata columns)
+	//   xid8            → uint64  (PG ≥ 13 64-bit txids)
 	//   float4/8        → float64
 	// Width caveat: yaml.v3's resolver decodes every !!int back to a
 	// Go int64, so int16 / int32 cells round-trip through the gob
@@ -467,6 +469,12 @@ func stripBase64Whitespace(s string) string {
 //	8  → int32       (gob int32 — pgtype hands int4 columns back as
 //	                  Go int32 when the destination is *any)
 //	9  → int16       (gob int16 — same for int2 columns)
+//	10 → uint32      (gob uint32 — pgtype's mapping for `oid`,
+//	                  `xid`, `cid`. Required for pg_catalog metadata
+//	                  queries every JPA / ORM driver runs at boot.)
+//	11 → uint16      (gob uint16 — rare but kept for catalogue
+//	                  closure)
+//	12 → uint64      (gob uint64 — `xid8` on PG ≥ 13)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -482,6 +490,17 @@ const (
 	// streams that only carry tags 0-7) still decode unchanged.
 	cellTagInt32 byte = 8
 	cellTagInt16 byte = 9
+	// Tags 10-12 cover the unsigned-integer types pgtype hands back
+	// for PG's `oid`, `xid`, `cid`, and `xid8` types. `oid` (uint32)
+	// is the most common — every pg_catalog metadata query that
+	// Hibernate / SQLAlchemy / pgjdbc issue at startup returns oid
+	// columns, and without these tags those mocks fail to gob-encode
+	// in the recorder sidecar, get dropped on the syncMock channel,
+	// and the entire app boot wedges on a "no recorded invocation
+	// matched" against `SELECT … FROM pg_class …`.
+	cellTagUint32 byte = 10
+	cellTagUint16 byte = 11
+	cellTagUint64 byte = 12
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -534,6 +553,36 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 	case int16:
 		// Same rationale as int32 — pgtype maps int2 to Go int16.
 		buf.WriteByte(cellTagInt16)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case uint32:
+		// PostgreSQL's `oid`, `xid`, and `cid` types all surface as
+		// Go uint32 from pgtype.Map.Scan — and they show up
+		// constantly in the pg_catalog metadata queries every JPA /
+		// ORM driver runs at boot (Hibernate's
+		// `SELECT n.nspname,c.relname,a.attname,a.atttypid,...
+		// FROM pg_class c JOIN pg_attribute a ON …` is the load-
+		// bearing one). Drop a tag here so those mocks gob-encode
+		// successfully and the recorder doesn't lose the entire
+		// boot-time mock cohort.
+		buf.WriteByte(cellTagUint32)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case uint16:
+		// pgtype emits uint16 for some attlen / typmod-aligned
+		// columns; rare but keeping the catalogue closed is
+		// cheap.
+		buf.WriteByte(cellTagUint16)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case uint64:
+		// xid8 (PG 13+ 64-bit transaction ids) — pgtype maps it to
+		// Go uint64. Required for any txid_current() or advisory-
+		// lock workload running on a recent PG.
+		buf.WriteByte(cellTagUint64)
 		if err := enc.Encode(v); err != nil {
 			return nil, err
 		}
@@ -665,6 +714,24 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		var v int16
 		if err := dec.Decode(&v); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode int16: %w", err)
+		}
+		c.Value = v
+	case cellTagUint32:
+		var v uint32
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode uint32: %w", err)
+		}
+		c.Value = v
+	case cellTagUint16:
+		var v uint16
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode uint16: %w", err)
+		}
+		c.Value = v
+	case cellTagUint64:
+		var v uint64
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode uint64: %w", err)
 		}
 		c.Value = v
 	default:

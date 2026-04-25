@@ -241,6 +241,9 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 		{"int16", int16(246)},
 		{"int32", int32(246)},
 		{"int64", int64(246)},
+		{"uint16", uint16(65000)},
+		{"uint32", uint32(4294967295)}, // max oid
+		{"uint64", uint64(18446744073709551615)},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
 		{"bool", true},
