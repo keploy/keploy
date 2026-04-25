@@ -100,7 +100,14 @@ runs:
         # for cross-repo PRs whose branch names don't match (the common
         # case — keploy feature branches follow `feat/*` while
         # integrations uses `<topic>-features` / etc.).
-        PR_BODY: ${{ github.event.pull_request.body }}
+        # Guard the pull_request.body access: this composite action
+        # runs from push and tag workflows too, where
+        # `github.event.pull_request` is null and the unguarded
+        # expression evaluates to an empty string with a noisy warning
+        # (or, on some runner versions, errors out). The short-circuit
+        # leaves PR_BODY empty for non-PR events; the bash/pwsh
+        # extractors below already treat empty as "no override".
+        PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
@@ -206,7 +213,14 @@ runs:
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
         GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
-        PR_BODY: ${{ github.event.pull_request.body }}
+        # Guard the pull_request.body access: this composite action
+        # runs from push and tag workflows too, where
+        # `github.event.pull_request` is null and the unguarded
+        # expression evaluates to an empty string with a noisy warning
+        # (or, on some runner versions, errors out). The short-circuit
+        # leaves PR_BODY empty for non-PR events; the bash/pwsh
+        # extractors below already treat empty as "no override".
+        PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
         # Use per-run config when isolation is active, otherwise fall back to --global
         if ($env:GIT_CONFIG_GLOBAL) {
