@@ -138,6 +138,9 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 // to do the forwarding and only observes teed chunks via FakeConn
 // streams.
 func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
+	if session == nil {
+		return errors.New("http: record session is nil; ensure RecordOutgoing is called with a valid session")
+	}
 	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")

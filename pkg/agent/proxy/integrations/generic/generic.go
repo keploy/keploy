@@ -2,6 +2,7 @@ package generic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
@@ -49,6 +50,9 @@ func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.Reco
 }
 
 func (g *Generic) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
+	if session == nil {
+		return errors.New("generic: record session is nil; ensure RecordOutgoing is called with a valid session")
+	}
 	logger := session.Logger
 
 	ingress, err := session.IngressConn()
