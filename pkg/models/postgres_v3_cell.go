@@ -34,6 +34,7 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,6 +63,10 @@ type PostgresV3Cell struct {
 	//                       text[], int32 for int4[], etc.). Multi-
 	//                       dimensional arrays nest through the
 	//                       same []interface{} shape.
+	//   json / jsonb     → map[string]interface{} (top-level object) or
+	//                       []interface{} (top-level array) per pgtype's
+	//                       JSON decoder. Nested objects + arrays land
+	//                       in the same recursive cell encoding.
 	//   float4/8        → float64
 	// Width caveat: yaml.v3's resolver decodes every !!int back to a
 	// Go int64, so int16 / int32 cells round-trip through the gob
@@ -485,6 +490,12 @@ func stripBase64Whitespace(s string) string {
 //	                  multi-dim arrays. Each element is encoded
 //	                  recursively through this very GobEncode so the
 //	                  type closure stays stable across nesting depth.)
+//	14 → map[string]interface{}  (length-prefixed sorted (key, nested-
+//	                  cell) pairs — PG `json` / `jsonb` columns. Each
+//	                  value re-enters GobEncode recursively so nested
+//	                  objects / arrays land in the map (this) / slice
+//	                  (tag 13) cases. Keys sorted on encode for
+//	                  deterministic gob bytes.)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -520,6 +531,19 @@ const (
 	// keeps the type closure stable (no new tag per element type) and
 	// gracefully nests for multi-dimensional arrays.
 	cellTagSlice byte = 13
+	// Tag 14 covers PG JSON / JSONB columns: pgtype scans `jsonb` /
+	// `json` into a Go `map[string]interface{}` whose values are
+	// per-key logical types (string for strings, float64 for numbers,
+	// bool for booleans, nested map[string]interface{} for objects,
+	// []interface{} for arrays). Encoding strategy: length-prefixed
+	// sequence of (key, nested-cell) pairs — each value goes through
+	// PostgresV3Cell.GobEncode recursively, so nested objects + arrays
+	// re-enter the slice case (tag 13) and the value-type closure stays
+	// stable. Required for listmonk's `settings` table (its bootstrap
+	// `SELECT … FROM settings` was the regression case): pre-fix the
+	// recorder dropped every JSONB-bearing mock and replay couldn't
+	// satisfy the install path.
+	cellTagJSONB byte = 14
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -604,6 +628,41 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		buf.WriteByte(cellTagUint64)
 		if err := enc.Encode(v); err != nil {
 			return nil, err
+		}
+	case map[string]interface{}:
+		// PG `json` / `jsonb` columns: pgtype.Map.Scan resolves these
+		// into a Go `map[string]interface{}` whose values are the per-
+		// key logical Go type (string, float64, bool, nested
+		// map[string]interface{}, []interface{} for arrays). Encode
+		// strategy: length-prefix + sorted (key, nested-cell) pairs
+		// — keys sorted so the gob byte stream is deterministic for a
+		// given map regardless of Go's randomized map-iteration order.
+		// Each value re-enters GobEncode recursively so nested objects
+		// + arrays land in the slice (tag 13) / map (this) cases.
+		// Without this case listmonk's bootstrap `SELECT … FROM
+		// settings` (settings.value is jsonb) dropped its mock and
+		// the install-time replay served 0-arg ParseComplete to a
+		// 7-arg INSERT INTO lists, crashing the app.
+		buf.WriteByte(cellTagJSONB)
+		if err := enc.Encode(int32(len(v))); err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if err := enc.Encode(k); err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode jsonb key %q: %w", k, err)
+			}
+			elemBytes, err := PostgresV3Cell{Value: v[k]}.GobEncode()
+			if err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode jsonb value at %q (%T): %w", k, v[k], err)
+			}
+			if err := enc.Encode(elemBytes); err != nil {
+				return nil, err
+			}
 		}
 	case []interface{}:
 		// PG ARRAY columns: pgtype.Map.Scan resolves text[] / int4[] /
@@ -778,6 +837,34 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 			return fmt.Errorf("PostgresV3Cell.GobDecode uint64: %w", err)
 		}
 		c.Value = v
+	case cellTagJSONB:
+		// Symmetric to the GobEncode map case: read length, then
+		// (key, nested-cell-bytes) pairs, decode each value through
+		// PostgresV3Cell.GobDecode recursively. Map iteration on
+		// the encode side is sorted so the gob stream is
+		// deterministic; rebuild does not need to preserve order
+		// (Go's map type is unordered).
+		var n int32
+		if err := dec.Decode(&n); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode jsonb length: %w", err)
+		}
+		out := make(map[string]interface{}, n)
+		for i := int32(0); i < n; i++ {
+			var k string
+			if err := dec.Decode(&k); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode jsonb key %d: %w", i, err)
+			}
+			var elemBytes []byte
+			if err := dec.Decode(&elemBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode jsonb value bytes for %q: %w", k, err)
+			}
+			var elem PostgresV3Cell
+			if err := elem.GobDecode(elemBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode jsonb value cell for %q: %w", k, err)
+			}
+			out[k] = elem.Value
+		}
+		c.Value = out
 	case cellTagSlice:
 		// Symmetric to the GobEncode []interface{} branch: read the
 		// length, then each element as a self-contained nested cell

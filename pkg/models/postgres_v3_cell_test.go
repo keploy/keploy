@@ -260,6 +260,17 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 			[]interface{}{"a", "b"},
 			[]interface{}{"c", "d"},
 		}},
+		// PG json/jsonb columns: pgtype scans into map[string]interface{}.
+		// Listmonk's `settings` table is the regression case — its
+		// `value` column is jsonb and the bootstrap query was dropping
+		// every mock pre-fix.
+		{"jsonb_simple", map[string]interface{}{"name": "vip", "active": true, "count": int32(42)}},
+		{"jsonb_empty", map[string]interface{}{}},
+		{"jsonb_nested", map[string]interface{}{
+			"smtp":     map[string]interface{}{"host": "mail.example.com", "port": int32(25)},
+			"app.lang": "en",
+			"tags":     []interface{}{"transactional", "marketing"},
+		}},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
 		{"bool", true},
@@ -305,6 +316,15 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 				// nil, and nested slices for multi-dim arrays.
 				if !reflect.DeepEqual(got.Value, want) {
 					t.Errorf("slice round-trip: got %#v, want %#v", got.Value, want)
+				}
+			case map[string]interface{}:
+				// JSONB cells — same DeepEqual story as slices, with
+				// the additional sort-on-encode determinism property
+				// (the gob bytes for the same input map must be
+				// stable across runs because Go's map iteration order
+				// is randomised).
+				if !reflect.DeepEqual(got.Value, want) {
+					t.Errorf("jsonb round-trip: got %#v, want %#v", got.Value, want)
 				}
 			default:
 				if got.Value != tc.in {
