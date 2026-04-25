@@ -183,7 +183,15 @@ func (s *RecordSession) EgressConn() (net.Conn, error) {
 // this helper.
 func (s *RecordSession) recordNetConn(which string, methodName string, conn RecordConn) (net.Conn, error) {
 	if conn == nil {
-		return nil, fmt.Errorf("record session %s: connection not initialized; ensure the session is created with a live connection before calling %s", which, methodName)
+		// V2/supervisor-backed sessions intentionally leave Ingress /
+		// Egress unset and route I/O through session.V2.ClientStream /
+		// DestStream instead. Tailor the diagnostic so a V2 caller is
+		// pointed at the correct API rather than misled into thinking
+		// the session was constructed wrong.
+		if s.V2 != nil {
+			return nil, fmt.Errorf("record session %s: %s is intentionally unset on V2/supervisor-backed sessions; use session.V2.ClientStream / session.V2.DestStream instead of calling %s", which, which, methodName)
+		}
+		return nil, fmt.Errorf("record session %s: connection not initialized; ensure the session is created with a live connection (or, if running under the supervisor, use session.V2 directly) before calling %s", which, methodName)
 	}
 	netConn, ok := conn.(net.Conn)
 	if !ok {
