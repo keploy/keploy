@@ -14,11 +14,18 @@ import (
 // record mode. It deliberately omits Close and SetDeadline — the
 // proxy owns connection lifecycle, and parsers must not call either.
 //
-// Both SafeConn (standard proxy) and SimulatedConn (low-latency
-// sockmap proxy) satisfy this interface. Parsers that need a full
-// net.Conn (e.g. gRPC, HTTP/2 libraries) can type-assert with
-// conn.(net.Conn); the underlying types do implement net.Conn, but
-// Close is a no-op in both implementations.
+// In this repository, SafeConn (see pkg/agent/proxy/util) is the
+// parser-facing wrapper that satisfies this interface for record mode.
+// Some enterprise builds layer in a separate SimulatedConn type for
+// other proxy modes (e.g. a low-latency sockmap path); that type is
+// not defined in this repo, but where it exists it is expected to
+// honour the same contract — Close and the deadline setters must be
+// treated as unavailable by parsers.
+//
+// Parsers that need a full net.Conn (e.g. gRPC, HTTP/2 libraries) can
+// obtain one via RecordSession.IngressConn / RecordSession.EgressConn,
+// which perform a checked conversion and return nil for sessions
+// whose underlying implementation does not satisfy net.Conn.
 type RecordConn interface {
 	io.Reader
 	io.Writer
@@ -33,9 +40,13 @@ type RecordConn interface {
 //
 // Connections implement RecordConn — Close and SetDeadline are not
 // part of the interface. The proxy retains the real connections and
-// manages their lifecycle. The underlying types also implement
-// net.Conn (with Close as a no-op) for compatibility with libraries
-// like gRPC and HTTP/2 that require net.Conn.
+// manages their lifecycle. The concrete RecordConn used in this repo
+// (SafeConn) also implements net.Conn with Close as a no-op, so it
+// can be reused with libraries like gRPC and HTTP/2 that require
+// net.Conn; the IngressConn / EgressConn helpers expose that net.Conn
+// view safely (returning nil rather than panicking when the field is
+// nil or the underlying type does not satisfy net.Conn — for example
+// on the V2 path).
 type RecordSession struct {
 	// Ingress is the client-side connection.
 	// Read: client requests. Write: server responses back to client.
@@ -137,17 +148,49 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 	}
 }
 
-// IngressConn returns Ingress as a net.Conn. The underlying types
-// (SafeConn, SimulatedConn) always implement net.Conn with Close
-// as a no-op, so this assertion is safe. Use this when passing
-// connections to libraries (gRPC, HTTP/2) or internal functions
-// that require net.Conn.
+// IngressConn returns Ingress as a net.Conn for use with libraries
+// (gRPC, HTTP/2) or internal helpers that require a full net.Conn.
+//
+// The standard RecordConn implementation in this repo (SafeConn)
+// satisfies net.Conn with Close as a no-op, so the conversion
+// normally succeeds. However, this method may return nil when:
+//   - the session is nil,
+//   - Ingress has not been initialised (e.g. on V2-only sessions
+//     served entirely through the supervisor + relay path), or
+//   - the underlying RecordConn implementation does not satisfy
+//     net.Conn.
+//
+// Callers must handle a nil return; an error is logged in the
+// degenerate cases via the session logger.
 func (s *RecordSession) IngressConn() net.Conn {
-	return s.Ingress.(net.Conn)
+	return s.recordNetConn("Ingress", s.Ingress)
 }
 
-// EgressConn returns Egress as a net.Conn. Same contract as
-// IngressConn — Close is a no-op on the underlying type.
+// EgressConn returns Egress as a net.Conn. Same contract and
+// nullability rules as IngressConn — see its godoc.
 func (s *RecordSession) EgressConn() net.Conn {
-	return s.Egress.(net.Conn)
+	return s.recordNetConn("Egress", s.Egress)
+}
+
+// recordNetConn safely converts a RecordConn to net.Conn.
+// Returns nil if the session/connection is unavailable or if the
+// underlying implementation does not satisfy net.Conn.
+func (s *RecordSession) recordNetConn(name string, conn RecordConn) net.Conn {
+	if s == nil {
+		return nil
+	}
+	if conn == nil {
+		if s.Logger != nil {
+			s.Logger.Error("record session connection is not initialized; ensure the session is created with a live connection before calling " + name + "Conn")
+		}
+		return nil
+	}
+	netConn, ok := conn.(net.Conn)
+	if !ok {
+		if s.Logger != nil {
+			s.Logger.Error("record session connection does not implement net.Conn; use a connection type that satisfies net.Conn before calling " + name + "Conn")
+		}
+		return nil
+	}
+	return netConn
 }
