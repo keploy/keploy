@@ -225,10 +225,17 @@ func (s PostgresV3SafeString) MarshalYAML() (any, error) {
 
 // UnmarshalYAML accepts both plain and quoted scalars — the on-disk
 // shape is just a string, only the WRITE side cares about styling.
+// Non-scalar nodes (sequences / mappings) are rejected with an
+// explicit error: their .Value is empty, so the previous "just copy
+// node.Value" path would have silently produced "" and corrupted
+// notice / error fields without surfacing the malformed input.
 func (s *PostgresV3SafeString) UnmarshalYAML(node *yaml.Node) error {
 	if node == nil {
 		*s = ""
 		return nil
+	}
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("PostgresV3SafeString: expected scalar node, got kind=%d", node.Kind)
 	}
 	*s = PostgresV3SafeString(node.Value)
 	return nil
@@ -439,11 +446,6 @@ func isPostgresV3CellRawNode(node *yaml.Node) bool {
 	return seenFormat && seenBytes
 }
 
-// stripBase64Whitespace removes space / tab / CR / LF from s. Used to
-// un-fold !!binary payloads the yaml.v3 emitter wraps across multiple
-// lines for long scalars; StdEncoding.DecodeString can't tolerate the
-// embedded whitespace but the character set we strip is disjoint from
-// the base64 alphabet so no legitimate payload byte is lost.
 // encodeGeomVec2s writes a length-prefixed sequence of Vec2 (X, Y
 // pairs) for the geometric union (Point as len=1, Lseg/Box as len=2,
 // Path/Polygon as len=N). The shared helper keeps the geometric encode
@@ -470,8 +472,14 @@ func decodeGeomVec2s(dec *gob.Decoder) ([]pgtype.Vec2, error) {
 	if err := dec.Decode(&n); err != nil {
 		return nil, err
 	}
-	out := make([]pgtype.Vec2, n)
-	for i := int32(0); i < n; i++ {
+	// Same defensive bounds check as the slice-cell GobDecode arm:
+	// gob input is untrusted, so a corrupted/hand-edited length
+	// must not crash make() or drive an unbounded allocation.
+	if n < 0 {
+		return nil, fmt.Errorf("decodeGeomVec2s: invalid negative length %d", n)
+	}
+	out := make([]pgtype.Vec2, int(n))
+	for i := 0; i < int(n); i++ {
 		if err := dec.Decode(&out[i].X); err != nil {
 			return nil, err
 		}
@@ -482,6 +490,11 @@ func decodeGeomVec2s(dec *gob.Decoder) ([]pgtype.Vec2, error) {
 	return out, nil
 }
 
+// stripBase64Whitespace removes space / tab / CR / LF from s. Used to
+// un-fold !!binary payloads the yaml.v3 emitter wraps across multiple
+// lines for long scalars; StdEncoding.DecodeString can't tolerate the
+// embedded whitespace but the character set we strip is disjoint from
+// the base64 alphabet so no legitimate payload byte is lost.
 func stripBase64Whitespace(s string) string {
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
@@ -1680,8 +1693,16 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		if err := dec.Decode(&n); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode slice length: %w", err)
 		}
-		out := make([]interface{}, n)
-		for i := int32(0); i < n; i++ {
+		// Bounds-check before allocating: gob input is untrusted (it
+		// arrives over the recorder→agent socket and from on-disk
+		// mocks that may have been hand-edited), so a malformed
+		// length must not be allowed to drive a 2-GiB allocation or
+		// a panic via make's runtime length check.
+		if n < 0 {
+			return fmt.Errorf("PostgresV3Cell.GobDecode slice length: invalid negative length %d", n)
+		}
+		out := make([]interface{}, int(n))
+		for i := 0; i < int(n); i++ {
 			var elemBytes []byte
 			if err := dec.Decode(&elemBytes); err != nil {
 				return fmt.Errorf("PostgresV3Cell.GobDecode slice elem %d bytes: %w", i, err)
@@ -1709,7 +1730,15 @@ type PostgresV3Cells []PostgresV3Cell
 // UnmarshalYAML is invoked (including null-valued scalars that
 // yaml.v3 would otherwise short-circuit).
 func (cs *PostgresV3Cells) UnmarshalYAML(node *yaml.Node) error {
-	if node == nil || node.Kind != yaml.SequenceNode {
+	// node==nil is a distinct failure mode from "wrong kind": the
+	// previous combined guard would dereference node.Kind in the
+	// error formatter and panic. Split them so a missing/empty
+	// node surfaces a descriptive error instead of crashing the
+	// loader on hand-edited YAML.
+	if node == nil {
+		return fmt.Errorf("PostgresV3Cells: expected sequence, got nil node")
+	}
+	if node.Kind != yaml.SequenceNode {
 		return fmt.Errorf("PostgresV3Cells: expected sequence, got kind=%d", node.Kind)
 	}
 	out := make(PostgresV3Cells, len(node.Content))

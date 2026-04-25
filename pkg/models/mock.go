@@ -312,18 +312,31 @@ type PostgresV3QuerySpec struct {
 	// BindValues holds the client-supplied bind parameters for this
 	// invocation, one entry per placeholder. Cells are stored as
 	// logical Go values irrespective of the wire format the client
-	// used. The supported in-memory types are: int16 / int32 / int64
-	// (matching pgtype's int2 / int4 / int8 mapping), float64, bool,
-	// string, time.Time, []byte, and PostgresV3CellRaw for unknown
-	// OIDs. PostgresV3Cell.MarshalYAML picks the appropriate scalar
-	// tag per value so common types stay eyeballable and greppable in
-	// mocks.yaml while bytea and raw-OID payloads land as !!binary.
+	// used. The supported in-memory types track the PostgresV3Cell
+	// gob tag table (see postgres_v3_cell.go for the authoritative
+	// list): int8 / int16 / int32 / int / int64 (matching pgtype's
+	// int2 / int4 / int8 mapping plus the int8/int alias surfaces),
+	// uint16 / uint32 / uint64 (for OID / XID / CID and xid8-style
+	// values pgtype hands back from pg_catalog metadata queries),
+	// float32 / float64 (PG float4 / float8), bool, string, time.Time,
+	// []byte, []interface{} (PG ARRAY columns — text[], int4[],
+	// composite-row, multi-dim arrays), map[string]interface{}
+	// (PG json / jsonb), pgtype.Numeric, pgtype.Interval, pgtype.Time,
+	// pgtype.Bits, pgtype.TID, pgtype.TSVector, pgtype.Hstore,
+	// pgtype.Range[any], pgtype.Multirange[Range[any]], the
+	// geometric union (Point/Line/Lseg/Box/Path/Polygon/Circle),
+	// netip.Prefix, net.HardwareAddr, and PostgresV3CellRaw for
+	// unknown OIDs. PostgresV3Cell.MarshalYAML picks the appropriate
+	// scalar tag per value so common types stay eyeballable and
+	// greppable in mocks.yaml while bytea, raw-OID, and structured
+	// payloads land as !!binary or as nested mappings/sequences.
 	// Note that yaml.v3's resolver decodes every !!int back to int64,
-	// so int16/int32 cells round-trip through the gob path with their
-	// original Go width but widen to int64 through the YAML path —
-	// that's safe because the codec on the integration side encodes
-	// to the wire using the column OID, not the Go width. NULL binds
-	// are distinguished from empty-string binds via Cell.IsNull.
+	// so int8/int16/int32/int and uint16/uint32/uint64 cells round-
+	// trip through the gob path with their original Go width but
+	// widen to int64 through the YAML path — that's safe because the
+	// codec on the integration side encodes to the wire using the
+	// column OID, not the Go width. NULL binds are distinguished
+	// from empty-string binds via Value == nil / cell.IsNull().
 	// BindFormats records the client's per-placeholder format flag
 	// (0=text, 1=binary) so the replayer can re-encode the logical
 	// value on the wire in the form the live client expects,
