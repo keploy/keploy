@@ -12,11 +12,18 @@
 // satisfy a live request in the other because format is derived at
 // emit time, not stored in the mock.
 //
-// Encoding (on-disk YAML/JSON): cells serialize as their native Go
+// Encoding (on-disk YAML): cells serialize as their native Go
 // value. Integer cells are plain YAML integers; string cells are
 // plain strings; timestamps are ISO 8601; byte slices use yaml.v3's
 // native !!binary tag. The result is diffable, reviewable, and
 // hand-editable.
+//
+// JSON is a secondary path used by syncMock / MockOutgoing to ferry
+// recorded values through encoding/json. PostgresV3Cell deliberately
+// does NOT implement MarshalJSON / UnmarshalJSON — encoding/json's
+// reflection emits the struct as `{"Value": ...}` and consumers on
+// the receive side decode with the same struct shape. The native-
+// scalar guarantee above applies only to the on-disk YAML form.
 //
 // NULL is cell.Value == nil. An empty-string value ("") is distinct
 // from NULL — both round-trip correctly.
@@ -87,14 +94,43 @@ func NullCell() PostgresV3Cell {
 }
 
 // NewValueCell wraps an already-decoded logical Go value.
+//
+// A typed-nil pointer (e.g. (*PostgresV3CellRaw)(nil) handed in by a
+// nil-coalesced raw extractor) is collapsed to plain nil so the
+// resulting cell behaves consistently across IsNull(), MarshalYAML,
+// and GobEncode — without this, the cell would test as not-NULL via
+// IsNull but serialize as NULL through gob, which silently breaks
+// NULL-vs-empty diffs at replay time.
 func NewValueCell(v any) PostgresV3Cell {
+	if isTypedNilPointer(v) {
+		v = nil
+	}
 	return PostgresV3Cell{Value: v}
 }
 
 // IsNull reports whether the cell is SQL NULL. Readable over
-// `cell.Value == nil` when context matters.
+// `cell.Value == nil` when context matters. Also returns true for a
+// typed-nil pointer (e.g. (*PostgresV3CellRaw)(nil)) so the predicate
+// matches the on-disk encoding GobEncode picks for the same shape.
 func (c PostgresV3Cell) IsNull() bool {
-	return c.Value == nil
+	if c.Value == nil {
+		return true
+	}
+	return isTypedNilPointer(c.Value)
+}
+
+// isTypedNilPointer reports whether v is a typed-nil pointer, i.e.
+// v != nil at the interface level but the underlying pointer is nil.
+// We restrict the check to the one pointer type that GobEncode
+// special-cases (*PostgresV3CellRaw). Any other typed-nil arriving
+// here is a programmer error and is left alone so it surfaces in
+// the GobEncode default branch with a clear "unsupported Value
+// type" message.
+func isTypedNilPointer(v any) bool {
+	if raw, ok := v.(*PostgresV3CellRaw); ok && raw == nil {
+		return true
+	}
+	return false
 }
 
 // MarshalYAML emits the cell's logical value directly. A row is a

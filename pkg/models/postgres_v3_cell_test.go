@@ -383,29 +383,49 @@ func TestPostgresV3Cell_LegacyNullSentinel_DecodedAsNull(t *testing.T) {
 	}
 }
 
-// A typed-nil *PostgresV3CellRaw must not crash GobEncode. Go type
-// assertions match the interface dispatch on type identity rather
-// than nil-ness, so `case *PostgresV3CellRaw:` accepts a typed-nil
-// pointer just as readily as a non-nil one; without an explicit
-// guard, `enc.Encode(*v)` would dereference nil and panic. We treat
-// the typed-nil as SQL NULL — that's the only sensible
-// interpretation of "the recorder handed us a *PostgresV3CellRaw
-// that has no underlying value".
-func TestPostgresV3Cell_TypedNilRawValue_GobEncodesAsNull(t *testing.T) {
-	cell := PostgresV3Cell{Value: (*PostgresV3CellRaw)(nil)}
+// A typed-nil *PostgresV3CellRaw must not crash GobEncode and must
+// be treated as SQL NULL across IsNull(), MarshalYAML, and
+// GobEncode — otherwise the cell would test as not-NULL via IsNull
+// but serialize as NULL through gob, silently breaking NULL-vs-
+// empty diffs at replay time.
+//
+// Defence is two-layered: NewValueCell normalises typed-nil to
+// plain nil at construction, and IsNull defensively reports true
+// for cells whose Value field still holds a typed-nil (e.g. mocks
+// constructed via the struct literal). Both gates must hold.
+func TestPostgresV3Cell_TypedNilRawValue_NormalizedToNull(t *testing.T) {
+	t.Run("NewValueCell collapses typed-nil to plain nil", func(t *testing.T) {
+		cell := NewValueCell((*PostgresV3CellRaw)(nil))
+		if cell.Value != nil {
+			t.Errorf("NewValueCell typed-nil: Value=%v (type %T), want plain nil", cell.Value, cell.Value)
+		}
+		if !cell.IsNull() {
+			t.Errorf("NewValueCell typed-nil: IsNull()=false, want true")
+		}
+	})
 
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(cell); err != nil {
-		t.Fatalf("gob encode of typed-nil *PostgresV3CellRaw must not error: %v", err)
-	}
+	t.Run("IsNull catches struct-literal typed-nil", func(t *testing.T) {
+		cell := PostgresV3Cell{Value: (*PostgresV3CellRaw)(nil)}
+		if !cell.IsNull() {
+			t.Error("struct-literal typed-nil cell: IsNull()=false, want true")
+		}
+	})
 
-	var got PostgresV3Cell
-	if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
-		t.Fatalf("gob decode: %v", err)
-	}
-	if !got.IsNull() {
-		t.Errorf("typed-nil *PostgresV3CellRaw round-tripped as %v (type %T), want NULL", got.Value, got.Value)
-	}
+	t.Run("Gob round-trip emits as NULL", func(t *testing.T) {
+		cell := PostgresV3Cell{Value: (*PostgresV3CellRaw)(nil)}
+
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(cell); err != nil {
+			t.Fatalf("gob encode of typed-nil *PostgresV3CellRaw must not error: %v", err)
+		}
+		var got PostgresV3Cell
+		if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
+			t.Fatalf("gob decode: %v", err)
+		}
+		if !got.IsNull() || got.Value != nil {
+			t.Errorf("typed-nil *PostgresV3CellRaw round-tripped as %v (type %T), want plain-nil NULL", got.Value, got.Value)
+		}
+	})
 }
 
 // yaml.v3 v3.0.1 has an emitter bug for plain strings containing
