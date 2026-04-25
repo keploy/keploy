@@ -140,15 +140,17 @@ func isTypedNilPointer(v any) bool {
 // generic slice encoder and produces a sequence-of-ints instead of
 // the binary tag).
 //
-// String values get routed through yamlSafeStringNode so the emitter
-// never picks a block-scalar style for content that would re-parse
-// back as invalid YAML — yaml.v3 has a long-standing bug where
-// strings starting with "\n\t" or containing embedded tabs emit as
-// `|4-` block scalars whose content tab disrupts indent detection
-// when the scalar lives inside a sequence (the shape PostgresV3Cells
-// produces), so the same mock file the recorder just wrote back fails
-// to load on replay. Routing strings through a double-quoted scalar
-// sidesteps the bug and is stable across yaml.v3 versions.
+// String values are screened through stringNeedsDoubleQuoted; when
+// that predicate matches, MarshalYAML returns an explicit yaml.Node
+// with yaml.DoubleQuotedStyle instead of the raw string. The escape
+// keeps the emitter out of the literal-block-scalar branch — yaml.v3
+// has a long-standing bug where strings starting with "\n\t" or
+// containing embedded tabs emit as `|4-` block scalars whose content
+// tab disrupts indent detection when the scalar lives inside a
+// sequence (the shape PostgresV3Cells produces), so the same mock
+// file the recorder just wrote back fails to load on replay. The
+// double-quoted form sidesteps that path entirely and is stable
+// across yaml.v3 versions.
 func (c PostgresV3Cell) MarshalYAML() (any, error) {
 	switch v := c.Value.(type) {
 	case []byte:
