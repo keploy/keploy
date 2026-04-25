@@ -253,6 +253,38 @@ func (s *Session) IsMockIncomplete() bool {
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
+	return s.emitMockCore(m, false)
+}
+
+// EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
+// parsers that have just reconstructed an in-flight invocation from
+// chunks the relay observed BEFORE ctx cancelled. The standard EmitMock
+// short-circuits via the SyncMock-path ctx pre-check (and the direct-
+// channel select-against-ctx) which would discard exactly the work
+// the shutdown drain just recovered.
+//
+// Semantics relative to EmitMock:
+//
+//   - SyncMock path: skip the s.Ctx pre-check and call mgr.AddMock
+//     unconditionally. AddMock owns its own lifecycle (memory-pause,
+//     drop accounting, sendBudget) and remains the right place to
+//     enforce shutdown-time backpressure.
+//
+//   - Direct-channel path: replace the select-against-ctx with a
+//     non-blocking best-effort send. If the channel is full at
+//     shutdown the mock is dropped (the alternative — blocking on a
+//     channel whose consumer is itself shutting down — would deadlock
+//     the parser). Callers that need stricter delivery semantics
+//     during shutdown should serialise through the SyncMock manager.
+//
+// All other invariants (mockIncomplete gate, ClientConnID
+// propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
+// chain, OnPendingCleared) match EmitMock byte-for-byte.
+func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
+	return s.emitMockCore(m, true)
+}
+
+func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s == nil || m == nil {
 		return nil
 	}
@@ -333,9 +365,17 @@ func (s *Session) EmitMock(m *models.Mock) error {
 			// above); forcing full ctx-honoring into AddMock would
 			// require threading ctx through every legacy
 			// record-path call site too.
-			if ctx := s.Ctx; ctx != nil {
-				if err := ctx.Err(); err != nil {
-					return err
+			//
+			// Shutdown variant SKIPS this pre-check: the parser has
+			// just reconstructed an invocation from chunks captured
+			// before ctx cancelled, and discarding that work because
+			// ctx is now done would lose the very last mock on a
+			// connection in flight at SIGINT.
+			if !shutdown {
+				if ctx := s.Ctx; ctx != nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 				}
 			}
 			mgr.AddMock(m)
@@ -361,6 +401,21 @@ func (s *Session) EmitMock(m *models.Mock) error {
 			s.OnPendingCleared()
 		}
 		return nil
+	}
+	if shutdown {
+		// Non-blocking send: at shutdown the consumer is also
+		// winding down so a blocked send would deadlock the
+		// parser. Drop on full channel; callers that want stricter
+		// delivery during shutdown should route via SyncMock.
+		select {
+		case s.Mocks <- m:
+			if s.OnPendingCleared != nil {
+				s.OnPendingCleared()
+			}
+			return nil
+		default:
+			return nil
+		}
 	}
 	select {
 	case s.Mocks <- m:
