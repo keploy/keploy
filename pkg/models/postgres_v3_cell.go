@@ -223,6 +223,28 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 		return marshalPgRangeYAML(v)
 	case pgtype.Multirange[pgtype.Range[any]]:
 		return marshalPgMultirangeYAML(v)
+	case netip.Prefix:
+		// PG `inet` / `cidr`. Without explicit dispatch, yaml.v3's
+		// reflective encoder emits this as a plain string scalar
+		// (netip.Prefix implements encoding.TextMarshaler) — which
+		// round-trips to a Go `string` on decode, losing the type
+		// fidelity the integrations-side codec needs to dispatch
+		// `inet`/`cidr` encode plans. Emit a single-key mapping
+		// `{prefix: "<canonical>"}` so the decode side recovers the
+		// concrete type via the same canonical-key-set probe used
+		// for the 16 pgtype shapes.
+		return marshalNetipPrefixYAML(v), nil
+	case net.HardwareAddr:
+		// PG `macaddr` / `macaddr8`. HardwareAddr is a *named*
+		// `[]byte`, so the `case []byte:` arm above doesn't match
+		// (Go type-switch matches the unnamed type only). Without
+		// explicit dispatch yaml.v3 emits it via the generic slice
+		// encoder as a sequence of ints, which round-trips to
+		// `[]any` and breaks the codec's encode-plan dispatch for
+		// `macaddr`. Emit a single-key mapping
+		// `{macaddr: !!binary <base64>}` so the decode side
+		// recovers the named type.
+		return marshalHardwareAddrYAML(v), nil
 	}
 	return c.Value, nil
 }
@@ -252,6 +274,8 @@ const (
 	pgYAMLTagHstore     = "!pg/hstore"
 	pgYAMLTagRange      = "!pg/range"
 	pgYAMLTagMultirange = "!pg/multirange"
+	pgYAMLTagPrefix     = "!pg/prefix"
+	pgYAMLTagMACAddr    = "!pg/macaddr"
 )
 
 // scalarBoolNode / scalarIntNode / scalarStrNode build the lightweight
@@ -548,6 +572,46 @@ func marshalPgMultirangeYAML(v pgtype.Multirange[pgtype.Range[any]]) (*yaml.Node
 		out.Content = append(out.Content, n)
 	}
 	return out, nil
+}
+
+// marshalNetipPrefixYAML emits a netip.Prefix as a single-key mapping
+// `{prefix: "<canonical>"}`. The canonical string form
+// (`Prefix.String()`) round-trips losslessly through
+// `netip.ParsePrefix` for both IPv4 and IPv6, including host-only
+// forms like `1.2.3.4/32` and `::1/128`. The single-key mapping is
+// unambiguous against the other pgtype shapes (none use a sole
+// `prefix` key), so the canonical-key-set probe in
+// decodePgUntaggedMapping picks it up cleanly without a `!pg/<name>`
+// tag (cross-version compat with released keploy).
+func marshalNetipPrefixYAML(v netip.Prefix) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			scalarKeyNode("prefix"), scalarStrNode(v.String()),
+		},
+	}
+}
+
+// marshalHardwareAddrYAML emits a net.HardwareAddr as a single-key
+// mapping `{macaddr: !!binary <base64>}`. The raw bytes (rather than
+// the canonical colon-separated text form) preserve the macaddr8 vs
+// macaddr distinction by length without a separate field, matching
+// how the gob path stores them. The single-key mapping disambiguates
+// against the unnamed `[]byte` cell, which goes through the
+// `case []byte:` arm in MarshalYAML and emits a bare `!!binary`
+// scalar — so the cell-level decode never confuses a `bytea` column
+// with a `macaddr` column.
+func marshalHardwareAddrYAML(v net.HardwareAddr) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			scalarKeyNode("macaddr"), {
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!binary",
+				Value: base64.StdEncoding.EncodeToString(v),
+			},
+		},
+	}
 }
 
 // toYAMLNode converts a value (which may already be a *yaml.Node from a
@@ -875,6 +939,12 @@ func decodePgTaggedNode(node *yaml.Node) (any, bool, error) {
 	case pgYAMLTagMultirange:
 		v, err := decodePgMultirangeNode(node)
 		return v, true, err
+	case pgYAMLTagPrefix:
+		v, err := decodeNetipPrefixMapping(node)
+		return v, true, err
+	case pgYAMLTagMACAddr:
+		v, err := decodeHardwareAddrMapping(node)
+		return v, true, err
 	}
 	return nil, false, nil
 }
@@ -939,6 +1009,12 @@ func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 		return v, true, err
 	case keysEqual(keys, []string{"lower", "upper", "lowertype", "uppertype", "valid"}):
 		v, err := decodePgRangeMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"prefix"}):
+		v, err := decodeNetipPrefixMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"macaddr"}):
+		v, err := decodeHardwareAddrMapping(node)
 		return v, true, err
 	}
 	return nil, false, nil
@@ -1507,6 +1583,58 @@ func decodePgMultirangeNode(node *yaml.Node) (pgtype.Multirange[pgtype.Range[any
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// decodeNetipPrefixMapping reconstructs a netip.Prefix from the
+// `{prefix: "<canonical>"}` mapping shape emitted by
+// marshalNetipPrefixYAML. The string body is parsed with
+// netip.ParsePrefix; both IPv4 (`1.2.3.0/24`, `1.2.3.4/32`) and IPv6
+// (`2001:db8::/32`, `::1/128`) canonical forms round-trip cleanly.
+func decodeNetipPrefixMapping(node *yaml.Node) (netip.Prefix, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("pg/prefix: %w", err)
+	}
+	pn, ok := fields["prefix"]
+	if !ok || pn == nil {
+		return netip.Prefix{}, fmt.Errorf("pg/prefix: missing 'prefix' field")
+	}
+	if pn.Kind != yaml.ScalarNode {
+		return netip.Prefix{}, fmt.Errorf("pg/prefix: 'prefix' must be a scalar, got kind=%d", pn.Kind)
+	}
+	p, err := netip.ParsePrefix(pn.Value)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("pg/prefix: parse %q: %w", pn.Value, err)
+	}
+	return p, nil
+}
+
+// decodeHardwareAddrMapping reconstructs a net.HardwareAddr from the
+// `{macaddr: !!binary <base64>}` mapping shape emitted by
+// marshalHardwareAddrYAML. The byte slice is wrapped in a
+// HardwareAddr named-type cast; the byte length encodes macaddr (6)
+// vs macaddr8 (8) without a separate field.
+func decodeHardwareAddrMapping(node *yaml.Node) (net.HardwareAddr, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return nil, fmt.Errorf("pg/macaddr: %w", err)
+	}
+	mn, ok := fields["macaddr"]
+	if !ok || mn == nil {
+		return nil, fmt.Errorf("pg/macaddr: missing 'macaddr' field")
+	}
+	if mn.Kind != yaml.ScalarNode {
+		return nil, fmt.Errorf("pg/macaddr: 'macaddr' must be a scalar, got kind=%d", mn.Kind)
+	}
+	raw := mn.Value
+	if strings.ContainsAny(raw, " \t\r\n") {
+		raw = stripBase64Whitespace(raw)
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("pg/macaddr: base64 decode: %w", err)
+	}
+	return net.HardwareAddr(b), nil
 }
 
 // isPostgresV3CellRawNode reports whether a YAML mapping node has
