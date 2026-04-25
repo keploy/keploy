@@ -5,6 +5,8 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"math/big"
+	"net"
+	"net/netip"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
 )
+
+func stringPtr(s string) *string { return &s }
 
 // The logical-value PostgresV3Cell round-trips native Go values via
 // YAML. Key invariants:
@@ -285,6 +289,45 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 		{"numeric_decimal", pgtype.Numeric{Int: big.NewInt(123456), Exp: -2, Valid: true}},
 		{"numeric_nan", pgtype.Numeric{NaN: true, Valid: true}},
 		{"numeric_inf", pgtype.Numeric{InfinityModifier: pgtype.Infinity, Valid: true}},
+		// Tags 18-29 — proactive close of the §D audit (every type
+		// pgtype hands back from a default-registered OID into *any).
+		// Fixtures cover the canonical wire shape of each PG type so
+		// recorder→replay never fail-louds on a workload we haven't
+		// seen yet.
+		{"int8", int8(-42)},
+		{"interval", pgtype.Interval{Microseconds: 3600_000_000, Days: 7, Months: 1, Valid: true}},
+		{"pgtime", pgtype.Time{Microseconds: 12345, Valid: true}},
+		{"bits", pgtype.Bits{Bytes: []byte{0xAB, 0xCD}, Len: 16, Valid: true}},
+		{"point", pgtype.Point{P: pgtype.Vec2{X: 1.5, Y: 2.5}, Valid: true}},
+		{"line", pgtype.Line{A: 1, B: -1, C: 0, Valid: true}},
+		{"lseg", pgtype.Lseg{P: [2]pgtype.Vec2{{X: 0, Y: 0}, {X: 3, Y: 4}}, Valid: true}},
+		{"box", pgtype.Box{P: [2]pgtype.Vec2{{X: 0, Y: 0}, {X: 1, Y: 1}}, Valid: true}},
+		{"path_open", pgtype.Path{P: []pgtype.Vec2{{X: 0, Y: 0}, {X: 1, Y: 1}, {X: 2, Y: 0}}, Closed: false, Valid: true}},
+		{"path_closed", pgtype.Path{P: []pgtype.Vec2{{X: 0, Y: 0}, {X: 1, Y: 1}}, Closed: true, Valid: true}},
+		{"polygon", pgtype.Polygon{P: []pgtype.Vec2{{X: 0, Y: 0}, {X: 1, Y: 0}, {X: 1, Y: 1}, {X: 0, Y: 1}}, Valid: true}},
+		{"circle", pgtype.Circle{P: pgtype.Vec2{X: 5, Y: 5}, R: 2.5, Valid: true}},
+		{"tid", pgtype.TID{BlockNumber: 42, OffsetNumber: 7, Valid: true}},
+		{"tsvector", pgtype.TSVector{Lexemes: []pgtype.TSVectorLexeme{
+			{Word: "cat", Positions: []pgtype.TSVectorPosition{{Position: 1, Weight: pgtype.TSVectorWeightD}}},
+			{Word: "fish", Positions: []pgtype.TSVectorPosition{{Position: 2, Weight: pgtype.TSVectorWeightA}}},
+		}, Valid: true}},
+		{"netip_prefix_v4_host", netip.MustParsePrefix("192.168.1.10/32")},
+		{"netip_prefix_v4_net", netip.MustParsePrefix("10.0.0.0/8")},
+		{"netip_prefix_v6", netip.MustParsePrefix("2001:db8::/64")},
+		{"macaddr_6", net.HardwareAddr{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}},
+		{"macaddr_8", net.HardwareAddr{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}},
+		{"hstore", pgtype.Hstore{
+			"key1":    stringPtr("value1"),
+			"key2":    nil, // SQL NULL inside the hstore
+			"empty":   stringPtr(""),
+			"unicode": stringPtr("café"),
+		}},
+		{"range_int4", pgtype.Range[any]{Lower: int32(1), Upper: int32(10), LowerType: pgtype.Inclusive, UpperType: pgtype.Exclusive, Valid: true}},
+		{"range_empty", pgtype.Range[any]{LowerType: pgtype.Empty, UpperType: pgtype.Empty, Valid: true}},
+		{"multirange_int4", pgtype.Multirange[pgtype.Range[any]]{
+			{Lower: int32(1), Upper: int32(5), LowerType: pgtype.Inclusive, UpperType: pgtype.Exclusive, Valid: true},
+			{Lower: int32(10), Upper: int32(20), LowerType: pgtype.Inclusive, UpperType: pgtype.Exclusive, Valid: true},
+		}},
 		{"float64", 3.14},
 		{"string", "priority-i23-333b"},
 		{"bool", true},
@@ -339,6 +382,15 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 				// is randomised).
 				if !reflect.DeepEqual(got.Value, want) {
 					t.Errorf("jsonb round-trip: got %#v, want %#v", got.Value, want)
+				}
+			case pgtype.Interval, pgtype.Time, pgtype.Bits, pgtype.Point,
+				pgtype.Line, pgtype.Lseg, pgtype.Box, pgtype.Path,
+				pgtype.Polygon, pgtype.Circle, pgtype.TID,
+				pgtype.TSVector, netip.Prefix, net.HardwareAddr,
+				pgtype.Hstore, pgtype.Range[any],
+				pgtype.Multirange[pgtype.Range[any]]:
+				if !reflect.DeepEqual(got.Value, want) {
+					t.Errorf("%T round-trip drift:\n got  %+v\n want %+v", want, got.Value, want)
 				}
 			case pgtype.Numeric:
 				// Numeric needs DeepEqual too — *big.Int can't be

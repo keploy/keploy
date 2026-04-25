@@ -35,6 +35,8 @@ import (
 	"encoding/gob"
 	"fmt"
 	"math/big"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -442,6 +444,44 @@ func isPostgresV3CellRawNode(node *yaml.Node) bool {
 // lines for long scalars; StdEncoding.DecodeString can't tolerate the
 // embedded whitespace but the character set we strip is disjoint from
 // the base64 alphabet so no legitimate payload byte is lost.
+// encodeGeomVec2s writes a length-prefixed sequence of Vec2 (X, Y
+// pairs) for the geometric union (Point as len=1, Lseg/Box as len=2,
+// Path/Polygon as len=N). The shared helper keeps the geometric encode
+// arms compact and consistent.
+func encodeGeomVec2s(enc *gob.Encoder, ps []pgtype.Vec2) error {
+	if err := enc.Encode(int32(len(ps))); err != nil {
+		return err
+	}
+	for _, p := range ps {
+		if err := enc.Encode(p.X); err != nil {
+			return err
+		}
+		if err := enc.Encode(p.Y); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// decodeGeomVec2s reads a length-prefixed Vec2 sequence written by
+// encodeGeomVec2s. Symmetric inverse.
+func decodeGeomVec2s(dec *gob.Decoder) ([]pgtype.Vec2, error) {
+	var n int32
+	if err := dec.Decode(&n); err != nil {
+		return nil, err
+	}
+	out := make([]pgtype.Vec2, n)
+	for i := int32(0); i < n; i++ {
+		if err := dec.Decode(&out[i].X); err != nil {
+			return nil, err
+		}
+		if err := dec.Decode(&out[i].Y); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func stripBase64Whitespace(s string) string {
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
@@ -515,6 +555,32 @@ func stripBase64Whitespace(s string) string {
 //	                  bool, Valid bool. Required for PG `numeric` /
 //	                  `decimal` columns — listmonk dashboard regression
 //	                  surfaced this on /api/settings.)
+//	18 → int8        (gob int8 — pgtype.InfinityModifier sentinel for
+//	                  ±infinity timestamps, plus literal int8 binds.)
+//	19 → pgtype.Interval  (Microseconds, Days, Months, Valid.)
+//	20 → pgtype.Time      (Microseconds, Valid.)
+//	21 → pgtype.Bits      (Bytes, Len int32, Valid.)
+//	22 → geometric union  (1-byte sub-discriminator: 1=Point, 2=Line,
+//	                  3=Lseg, 4=Box, 5=Path, 6=Polygon, 7=Circle,
+//	                  followed by Vec2 sequence + per-shape extras.)
+//	23 → pgtype.TID       (BlockNumber uint32, OffsetNumber uint16,
+//	                  Valid.)
+//	24 → pgtype.TSVector  (length + sequence of (Word string, length
+//	                  + sequence of (Position uint16, Weight byte)),
+//	                  Valid.)
+//	25 → netip.Prefix     (canonical Prefix.String() form.)
+//	26 → net.HardwareAddr (raw bytes, distinct tag from cellTagBytes
+//	                  to preserve type identity for pgtype.Encode.)
+//	27 → pgtype.Hstore    (length + sorted (key, isNil bool, value
+//	                  string-when-not-nil) tuples. *string preserves
+//	                  the SQL-NULL-inside-hstore semantic.)
+//	28 → pgtype.Range[any]  (Lower nested-cell bytes, Upper nested-
+//	                  cell bytes, LowerType byte, UpperType byte,
+//	                  Valid. Bound element type recurses through the
+//	                  whole catalogue — int4 → int32, tstzrange →
+//	                  time.Time, numrange → pgtype.Numeric, etc.)
+//	29 → pgtype.Multirange[Range[any]]  (length + sequence of nested
+//	                  Range cells through tag 28.)
 const (
 	cellTagNull    byte = 0
 	cellTagInt64   byte = 1
@@ -589,6 +655,67 @@ const (
 	// recorded mock on every dashboard query that surfaces a numeric
 	// (counts, rate-limit thresholds, configurable monetary values).
 	cellTagNumeric byte = 17
+	// Tag 18 — `int8`. Covers PG's `pgtype.InfinityModifier` (int8 alias)
+	// returned for `'infinity'` / `'-infinity'` timestamps, plus any
+	// caller that supplies a literal int8 bind. Kept distinct from
+	// int16/int32/int64 because gob's reflection won't widen across
+	// signed integer sizes when the destination is `*any`.
+	cellTagInt8 byte = 18
+	// Tag 19 — `pgtype.Interval` (PG `interval`).
+	cellTagInterval byte = 19
+	// Tag 20 — `pgtype.Time` (PG `time`).
+	cellTagPgTime byte = 20
+	// Tag 21 — `pgtype.Bits` (PG `bit` / `varbit`).
+	cellTagBits byte = 21
+	// Tag 22 — geometric union (Point / Line / Lseg / Box / Path /
+	// Polygon / Circle). One tag with a 1-byte sub-discriminator keeps
+	// the wire format readable and avoids burning seven tag bytes on
+	// types that share the same Vec2-based shape.
+	cellTagGeom byte = 22
+	// Tag 23 — `pgtype.TID` (PG `tid` / ctid).
+	cellTagTID byte = 23
+	// Tag 24 — `pgtype.TSVector` (PG `tsvector`).
+	cellTagTSVector byte = 24
+	// Tag 25 — `netip.Prefix` (PG `inet` / `cidr`). Encoded as the
+	// canonical `Prefix.String()` form so a host-only address (no
+	// /N) and a network prefix round-trip distinctly.
+	cellTagNetipPrefix byte = 25
+	// Tag 26 — `net.HardwareAddr` (PG `macaddr` / `macaddr8`). Stored
+	// as raw bytes with a distinct tag from cellTagBytes (5) so the
+	// type identity survives the round-trip — pgtype.Encode's plan
+	// dispatch picks different paths for `net.HardwareAddr` vs
+	// `[]byte`, so collapsing them would emit wrong wire bytes.
+	cellTagMACAddr byte = 26
+	// Tag 27 — `pgtype.Hstore` (`map[string]*string`). Distinct from
+	// cellTagJSONB (14) because hstore values are `*string` (with
+	// nil meaning SQL NULL inside the hstore) while jsonb values
+	// reach as `interface{}` (with `nil` being JSON null at the
+	// Go-typing layer too — but the type identity is what
+	// pgtype.Encode dispatches on).
+	cellTagHstore byte = 27
+	// Tag 28 — `pgtype.Range[any]` (PG int4range / int8range /
+	// numrange / tsrange / tstzrange / daterange). Lower and Upper
+	// recurse through PostgresV3Cell.GobEncode so the bound element
+	// type stays per-cohort (int4 → int32, tstzrange → time.Time,
+	// numrange → pgtype.Numeric, etc.).
+	cellTagRange byte = 28
+	// Tag 29 — `pgtype.Multirange[Range[any]]` (PG int4multirange /
+	// int8multirange / nummultirange / tsmultirange / tstzmultirange
+	// / datemultirange — added in PG 14). Length-prefixed sequence
+	// of nested Range cells through tag 28.
+	cellTagMultirange byte = 29
+)
+
+// Geometric sub-discriminators for cellTagGeom. Stable across versions
+// — do NOT renumber: existing mocks on disk depend on these.
+const (
+	geomKindPoint   byte = 1
+	geomKindLine    byte = 2
+	geomKindLseg    byte = 3
+	geomKindBox     byte = 4
+	geomKindPath    byte = 5
+	geomKindPolygon byte = 6
+	geomKindCircle  byte = 7
 )
 
 // PostgresV3CellRaw is the wire form for a raw-OID fallback cell.
@@ -741,6 +868,245 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		}
 		if err := enc.Encode(v.Valid); err != nil {
 			return nil, err
+		}
+	case int8:
+		buf.WriteByte(cellTagInt8)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+	case pgtype.Interval:
+		buf.WriteByte(cellTagInterval)
+		if err := enc.Encode(v.Microseconds); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Days); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Months); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Time:
+		buf.WriteByte(cellTagPgTime)
+		if err := enc.Encode(v.Microseconds); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Bits:
+		buf.WriteByte(cellTagBits)
+		if err := enc.Encode(v.Bytes); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Len); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Point:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindPoint); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, []pgtype.Vec2{v.P}); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Line:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindLine); err != nil {
+			return nil, err
+		}
+		// A·x + B·y + C = 0 — three coefficients, no Vec2.
+		if err := enc.Encode([3]float64{v.A, v.B, v.C}); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Lseg:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindLseg); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, v.P[:]); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Box:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindBox); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, v.P[:]); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Path:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindPath); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, v.P); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Closed); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Polygon:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindPolygon); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, v.P); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Circle:
+		buf.WriteByte(cellTagGeom)
+		if err := enc.Encode(geomKindCircle); err != nil {
+			return nil, err
+		}
+		if err := encodeGeomVec2s(enc, []pgtype.Vec2{v.P}); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.R); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.TID:
+		buf.WriteByte(cellTagTID)
+		if err := enc.Encode(v.BlockNumber); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.OffsetNumber); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.TSVector:
+		buf.WriteByte(cellTagTSVector)
+		if err := enc.Encode(int32(len(v.Lexemes))); err != nil {
+			return nil, err
+		}
+		for i, lex := range v.Lexemes {
+			if err := enc.Encode(lex.Word); err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode tsvector lex %d word: %w", i, err)
+			}
+			if err := enc.Encode(int32(len(lex.Positions))); err != nil {
+				return nil, err
+			}
+			for _, p := range lex.Positions {
+				if err := enc.Encode(p.Position); err != nil {
+					return nil, err
+				}
+				if err := enc.Encode(byte(p.Weight)); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case netip.Prefix:
+		buf.WriteByte(cellTagNetipPrefix)
+		// Canonical string form: a host-only IPv4 reads as "1.2.3.4/32"
+		// and a /24 network prefix reads as "1.2.3.0/24" — distinct,
+		// round-trip clean via netip.ParsePrefix on decode.
+		if err := enc.Encode(v.String()); err != nil {
+			return nil, err
+		}
+	case net.HardwareAddr:
+		buf.WriteByte(cellTagMACAddr)
+		// Stored as raw bytes; the distinct tag preserves type
+		// identity for pgtype.Encode's plan dispatch.
+		if err := enc.Encode([]byte(v)); err != nil {
+			return nil, err
+		}
+	case pgtype.Hstore:
+		buf.WriteByte(cellTagHstore)
+		if err := enc.Encode(int32(len(v))); err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if err := enc.Encode(k); err != nil {
+				return nil, err
+			}
+			val := v[k]
+			isNil := val == nil
+			if err := enc.Encode(isNil); err != nil {
+				return nil, err
+			}
+			if !isNil {
+				if err := enc.Encode(*val); err != nil {
+					return nil, err
+				}
+			}
+		}
+	case pgtype.Range[any]:
+		buf.WriteByte(cellTagRange)
+		// Bounds recurse through this very GobEncode so the bound
+		// element type (int32 for int4range, time.Time for tstzrange,
+		// pgtype.Numeric for numrange, etc.) is preserved verbatim.
+		lower, err := PostgresV3Cell{Value: v.Lower}.GobEncode()
+		if err != nil {
+			return nil, fmt.Errorf("PostgresV3Cell.GobEncode range lower (%T): %w", v.Lower, err)
+		}
+		upper, err := PostgresV3Cell{Value: v.Upper}.GobEncode()
+		if err != nil {
+			return nil, fmt.Errorf("PostgresV3Cell.GobEncode range upper (%T): %w", v.Upper, err)
+		}
+		if err := enc.Encode(lower); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(upper); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(byte(v.LowerType)); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(byte(v.UpperType)); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(v.Valid); err != nil {
+			return nil, err
+		}
+	case pgtype.Multirange[pgtype.Range[any]]:
+		buf.WriteByte(cellTagMultirange)
+		if err := enc.Encode(int32(len(v))); err != nil {
+			return nil, err
+		}
+		for i, r := range v {
+			rangeBytes, err := PostgresV3Cell{Value: r}.GobEncode()
+			if err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell.GobEncode multirange[%d]: %w", i, err)
+			}
+			if err := enc.Encode(rangeBytes); err != nil {
+				return nil, err
+			}
 		}
 	case map[string]interface{}:
 		// PG `json` / `jsonb` columns: pgtype.Map.Scan resolves these
@@ -1005,6 +1371,275 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		recovered.NaN = nanFlag
 		recovered.Valid = validFlag
 		c.Value = recovered
+	case cellTagInt8:
+		var v int8
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode int8: %w", err)
+		}
+		c.Value = v
+	case cellTagInterval:
+		var ivl pgtype.Interval
+		if err := dec.Decode(&ivl.Microseconds); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode interval Microseconds: %w", err)
+		}
+		if err := dec.Decode(&ivl.Days); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode interval Days: %w", err)
+		}
+		if err := dec.Decode(&ivl.Months); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode interval Months: %w", err)
+		}
+		if err := dec.Decode(&ivl.Valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode interval Valid: %w", err)
+		}
+		c.Value = ivl
+	case cellTagPgTime:
+		var tm pgtype.Time
+		if err := dec.Decode(&tm.Microseconds); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode pgtype.Time Microseconds: %w", err)
+		}
+		if err := dec.Decode(&tm.Valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode pgtype.Time Valid: %w", err)
+		}
+		c.Value = tm
+	case cellTagBits:
+		var b pgtype.Bits
+		if err := dec.Decode(&b.Bytes); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode bits Bytes: %w", err)
+		}
+		if err := dec.Decode(&b.Len); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode bits Len: %w", err)
+		}
+		if err := dec.Decode(&b.Valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode bits Valid: %w", err)
+		}
+		c.Value = b
+	case cellTagGeom:
+		var kind byte
+		if err := dec.Decode(&kind); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode geom discriminator: %w", err)
+		}
+		switch kind {
+		case geomKindPoint:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil || len(ps) != 1 {
+				return fmt.Errorf("PostgresV3Cell.GobDecode point Vec2: %v (len=%d)", err, len(ps))
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode point Valid: %w", err)
+			}
+			c.Value = pgtype.Point{P: ps[0], Valid: valid}
+		case geomKindLine:
+			var coef [3]float64
+			if err := dec.Decode(&coef); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode line coef: %w", err)
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode line Valid: %w", err)
+			}
+			c.Value = pgtype.Line{A: coef[0], B: coef[1], C: coef[2], Valid: valid}
+		case geomKindLseg:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil || len(ps) != 2 {
+				return fmt.Errorf("PostgresV3Cell.GobDecode lseg Vec2: %v (len=%d)", err, len(ps))
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode lseg Valid: %w", err)
+			}
+			c.Value = pgtype.Lseg{P: [2]pgtype.Vec2{ps[0], ps[1]}, Valid: valid}
+		case geomKindBox:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil || len(ps) != 2 {
+				return fmt.Errorf("PostgresV3Cell.GobDecode box Vec2: %v (len=%d)", err, len(ps))
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode box Valid: %w", err)
+			}
+			c.Value = pgtype.Box{P: [2]pgtype.Vec2{ps[0], ps[1]}, Valid: valid}
+		case geomKindPath:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode path Vec2s: %w", err)
+			}
+			var closed, valid bool
+			if err := dec.Decode(&closed); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode path Closed: %w", err)
+			}
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode path Valid: %w", err)
+			}
+			c.Value = pgtype.Path{P: ps, Closed: closed, Valid: valid}
+		case geomKindPolygon:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode polygon Vec2s: %w", err)
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode polygon Valid: %w", err)
+			}
+			c.Value = pgtype.Polygon{P: ps, Valid: valid}
+		case geomKindCircle:
+			ps, err := decodeGeomVec2s(dec)
+			if err != nil || len(ps) != 1 {
+				return fmt.Errorf("PostgresV3Cell.GobDecode circle Vec2: %v (len=%d)", err, len(ps))
+			}
+			var r float64
+			if err := dec.Decode(&r); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode circle R: %w", err)
+			}
+			var valid bool
+			if err := dec.Decode(&valid); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode circle Valid: %w", err)
+			}
+			c.Value = pgtype.Circle{P: ps[0], R: r, Valid: valid}
+		default:
+			return fmt.Errorf("PostgresV3Cell.GobDecode geom: unknown kind %d", kind)
+		}
+	case cellTagTID:
+		var tid pgtype.TID
+		if err := dec.Decode(&tid.BlockNumber); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tid BlockNumber: %w", err)
+		}
+		if err := dec.Decode(&tid.OffsetNumber); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tid OffsetNumber: %w", err)
+		}
+		if err := dec.Decode(&tid.Valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tid Valid: %w", err)
+		}
+		c.Value = tid
+	case cellTagTSVector:
+		var n int32
+		if err := dec.Decode(&n); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tsvector length: %w", err)
+		}
+		lexemes := make([]pgtype.TSVectorLexeme, n)
+		for i := int32(0); i < n; i++ {
+			if err := dec.Decode(&lexemes[i].Word); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d word: %w", i, err)
+			}
+			var pn int32
+			if err := dec.Decode(&pn); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d pos count: %w", i, err)
+			}
+			poss := make([]pgtype.TSVectorPosition, pn)
+			for j := int32(0); j < pn; j++ {
+				if err := dec.Decode(&poss[j].Position); err != nil {
+					return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d pos %d Position: %w", i, j, err)
+				}
+				var w byte
+				if err := dec.Decode(&w); err != nil {
+					return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d pos %d Weight: %w", i, j, err)
+				}
+				poss[j].Weight = pgtype.TSVectorWeight(w)
+			}
+			lexemes[i].Positions = poss
+		}
+		var valid bool
+		if err := dec.Decode(&valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tsvector Valid: %w", err)
+		}
+		c.Value = pgtype.TSVector{Lexemes: lexemes, Valid: valid}
+	case cellTagNetipPrefix:
+		var s string
+		if err := dec.Decode(&s); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode netip.Prefix: %w", err)
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode netip.Prefix parse %q: %w", s, err)
+		}
+		c.Value = p
+	case cellTagMACAddr:
+		var b []byte
+		if err := dec.Decode(&b); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode net.HardwareAddr: %w", err)
+		}
+		c.Value = net.HardwareAddr(b)
+	case cellTagHstore:
+		var n int32
+		if err := dec.Decode(&n); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode hstore length: %w", err)
+		}
+		out := make(pgtype.Hstore, n)
+		for i := int32(0); i < n; i++ {
+			var k string
+			if err := dec.Decode(&k); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode hstore key %d: %w", i, err)
+			}
+			var isNil bool
+			if err := dec.Decode(&isNil); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode hstore nil-flag for %q: %w", k, err)
+			}
+			if isNil {
+				out[k] = nil
+				continue
+			}
+			var val string
+			if err := dec.Decode(&val); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode hstore value for %q: %w", k, err)
+			}
+			out[k] = &val
+		}
+		c.Value = out
+	case cellTagRange:
+		var lowerBytes, upperBytes []byte
+		if err := dec.Decode(&lowerBytes); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range lower bytes: %w", err)
+		}
+		if err := dec.Decode(&upperBytes); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range upper bytes: %w", err)
+		}
+		var lt, ut byte
+		if err := dec.Decode(&lt); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range LowerType: %w", err)
+		}
+		if err := dec.Decode(&ut); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range UpperType: %w", err)
+		}
+		var valid bool
+		if err := dec.Decode(&valid); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range Valid: %w", err)
+		}
+		var lower, upper PostgresV3Cell
+		if err := lower.GobDecode(lowerBytes); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range lower cell: %w", err)
+		}
+		if err := upper.GobDecode(upperBytes); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode range upper cell: %w", err)
+		}
+		c.Value = pgtype.Range[any]{
+			Lower:     lower.Value,
+			Upper:     upper.Value,
+			LowerType: pgtype.BoundType(lt),
+			UpperType: pgtype.BoundType(ut),
+			Valid:     valid,
+		}
+	case cellTagMultirange:
+		var n int32
+		if err := dec.Decode(&n); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode multirange length: %w", err)
+		}
+		out := make(pgtype.Multirange[pgtype.Range[any]], n)
+		for i := int32(0); i < n; i++ {
+			var rangeBytes []byte
+			if err := dec.Decode(&rangeBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode multirange[%d] bytes: %w", i, err)
+			}
+			var rcell PostgresV3Cell
+			if err := rcell.GobDecode(rangeBytes); err != nil {
+				return fmt.Errorf("PostgresV3Cell.GobDecode multirange[%d] cell: %w", i, err)
+			}
+			r, ok := rcell.Value.(pgtype.Range[any])
+			if !ok {
+				return fmt.Errorf("PostgresV3Cell.GobDecode multirange[%d]: nested cell is %T, want pgtype.Range[any]", i, rcell.Value)
+			}
+			out[i] = r
+		}
+		c.Value = out
 	case cellTagJSONB:
 		// Symmetric to the GobEncode map case: read length, then
 		// (key, nested-cell-bytes) pairs, decode each value through
