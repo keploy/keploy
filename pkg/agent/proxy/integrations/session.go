@@ -154,7 +154,7 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 // IngressConn returns Ingress as a net.Conn for use with libraries
 // (gRPC, HTTP/2) or internal helpers that require a full net.Conn.
 //
-// Returns an error when the session is nil, Ingress was not initialised
+// Returns an error when the session is nil, Ingress was not initialized
 // (e.g. on V2-only sessions served entirely through the supervisor +
 // relay path), or the underlying RecordConn implementation does not
 // satisfy net.Conn.
@@ -183,7 +183,7 @@ func (s *RecordSession) EgressConn() (net.Conn, error) {
 // this helper.
 func (s *RecordSession) recordNetConn(which string, methodName string, conn RecordConn) (net.Conn, error) {
 	if conn == nil {
-		return nil, fmt.Errorf("record session %s: connection not initialised; ensure the session is created with a live connection before calling %s", which, methodName)
+		return nil, fmt.Errorf("record session %s: connection not initialized; ensure the session is created with a live connection before calling %s", which, methodName)
 	}
 	netConn, ok := conn.(net.Conn)
 	if !ok {
