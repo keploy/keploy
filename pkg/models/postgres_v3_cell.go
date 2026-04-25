@@ -191,8 +191,389 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 			}, nil
 		}
 		return v, nil
+	case pgtype.Numeric:
+		return marshalPgNumericYAML(v)
+	case pgtype.Interval:
+		return marshalPgIntervalYAML(v), nil
+	case pgtype.Time:
+		return marshalPgTimeYAML(v), nil
+	case pgtype.Bits:
+		return marshalPgBitsYAML(v), nil
+	case pgtype.Point:
+		return marshalPgPointYAML(v), nil
+	case pgtype.Line:
+		return marshalPgLineYAML(v), nil
+	case pgtype.Lseg:
+		return marshalPgLsegYAML(v), nil
+	case pgtype.Box:
+		return marshalPgBoxYAML(v), nil
+	case pgtype.Path:
+		return marshalPgPathYAML(v), nil
+	case pgtype.Polygon:
+		return marshalPgPolygonYAML(v), nil
+	case pgtype.Circle:
+		return marshalPgCircleYAML(v), nil
+	case pgtype.TID:
+		return marshalPgTIDYAML(v), nil
+	case pgtype.TSVector:
+		return marshalPgTSVectorYAML(v), nil
+	case pgtype.Hstore:
+		return marshalPgHstoreYAML(v), nil
+	case pgtype.Range[any]:
+		return marshalPgRangeYAML(v)
+	case pgtype.Multirange[pgtype.Range[any]]:
+		return marshalPgMultirangeYAML(v)
 	}
 	return c.Value, nil
+}
+
+// YAML local tags for the pgtype-typed cell shapes. Each tag pins a
+// concrete reconstructor in UnmarshalYAML so the on-disk mapping is
+// disambiguated from a generic map[string]any. Backward-compat probing
+// (canonical key-set match) handles untagged mappings already on disk
+// from pre-fix recordings — see decodePgUntaggedMapping below.
+const (
+	pgYAMLTagNumeric    = "!pg/numeric"
+	pgYAMLTagInterval   = "!pg/interval"
+	pgYAMLTagTime       = "!pg/time"
+	pgYAMLTagBits       = "!pg/bits"
+	pgYAMLTagPoint      = "!pg/point"
+	pgYAMLTagLine       = "!pg/line"
+	pgYAMLTagLseg       = "!pg/lseg"
+	pgYAMLTagBox        = "!pg/box"
+	pgYAMLTagPath       = "!pg/path"
+	pgYAMLTagPolygon    = "!pg/polygon"
+	pgYAMLTagCircle     = "!pg/circle"
+	pgYAMLTagTID        = "!pg/tid"
+	pgYAMLTagTSVector   = "!pg/tsvector"
+	pgYAMLTagHstore     = "!pg/hstore"
+	pgYAMLTagRange      = "!pg/range"
+	pgYAMLTagMultirange = "!pg/multirange"
+)
+
+// scalarBoolNode / scalarIntNode / scalarStrNode build the lightweight
+// yaml.Node primitives used to assemble the pgtype mapping bodies. Pulled
+// out so each per-type MarshalYAML helper stays a flat list of key/value
+// pairs and the field encoding stays uniform with how the reflective
+// encoder would emit a struct field of the same Go type.
+func scalarBoolNode(b bool) *yaml.Node {
+	v := "false"
+	if b {
+		v = "true"
+	}
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: v}
+}
+
+func scalarIntNode(n int64) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: fmt.Sprintf("%d", n)}
+}
+
+func scalarFloatNode(f float64) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: fmt.Sprintf("%g", f)}
+}
+
+func scalarStrNode(s string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s}
+}
+
+func scalarKeyNode(s string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Value: s}
+}
+
+func marshalVec2Node(v pgtype.Vec2) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			scalarKeyNode("x"), scalarFloatNode(v.X),
+			scalarKeyNode("y"), scalarFloatNode(v.Y),
+		},
+	}
+}
+
+func marshalVec2SeqNode(ps []pgtype.Vec2) *yaml.Node {
+	out := &yaml.Node{Kind: yaml.SequenceNode}
+	out.Content = make([]*yaml.Node, 0, len(ps))
+	for _, p := range ps {
+		out.Content = append(out.Content, marshalVec2Node(p))
+	}
+	return out
+}
+
+// marshalPgNumericYAML emits Numeric as `{int: "<digits>", exp: N,
+// nan: bool, infinitymodifier: N, valid: bool}`. Int is rendered as a
+// string scalar (matching what yaml.v3 does for *big.Int via its
+// TextMarshaler), and an absent Int is emitted as `int: ""` so the
+// nil-vs-zero distinction round-trips. NaN / ±infinity numerics
+// legitimately carry Int=nil and the codec on the integrations side
+// dispatches on that nil-ness when re-emitting.
+func marshalPgNumericYAML(v pgtype.Numeric) (*yaml.Node, error) {
+	intStr := ""
+	if v.Int != nil {
+		intStr = v.Int.String()
+	}
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagNumeric,
+		Content: []*yaml.Node{
+			scalarKeyNode("int"), {Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: intStr},
+			scalarKeyNode("exp"), scalarIntNode(int64(v.Exp)),
+			scalarKeyNode("nan"), scalarBoolNode(v.NaN),
+			scalarKeyNode("infinitymodifier"), scalarIntNode(int64(v.InfinityModifier)),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}, nil
+}
+
+func marshalPgIntervalYAML(v pgtype.Interval) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagInterval,
+		Content: []*yaml.Node{
+			scalarKeyNode("microseconds"), scalarIntNode(v.Microseconds),
+			scalarKeyNode("days"), scalarIntNode(int64(v.Days)),
+			scalarKeyNode("months"), scalarIntNode(int64(v.Months)),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgTimeYAML(v pgtype.Time) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagTime,
+		Content: []*yaml.Node{
+			scalarKeyNode("microseconds"), scalarIntNode(v.Microseconds),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgBitsYAML(v pgtype.Bits) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagBits,
+		Content: []*yaml.Node{
+			scalarKeyNode("bytes"), {Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString(v.Bytes)},
+			scalarKeyNode("len"), scalarIntNode(int64(v.Len)),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgPointYAML(v pgtype.Point) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagPoint,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2Node(v.P),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgLineYAML(v pgtype.Line) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagLine,
+		Content: []*yaml.Node{
+			scalarKeyNode("a"), scalarFloatNode(v.A),
+			scalarKeyNode("b"), scalarFloatNode(v.B),
+			scalarKeyNode("c"), scalarFloatNode(v.C),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgLsegYAML(v pgtype.Lseg) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagLseg,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2SeqNode(v.P[:]),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgBoxYAML(v pgtype.Box) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagBox,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2SeqNode(v.P[:]),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgPathYAML(v pgtype.Path) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagPath,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2SeqNode(v.P),
+			scalarKeyNode("closed"), scalarBoolNode(v.Closed),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgPolygonYAML(v pgtype.Polygon) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagPolygon,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2SeqNode(v.P),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgCircleYAML(v pgtype.Circle) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagCircle,
+		Content: []*yaml.Node{
+			scalarKeyNode("p"), marshalVec2Node(v.P),
+			scalarKeyNode("r"), scalarFloatNode(v.R),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgTIDYAML(v pgtype.TID) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagTID,
+		Content: []*yaml.Node{
+			scalarKeyNode("blocknumber"), scalarIntNode(int64(v.BlockNumber)),
+			scalarKeyNode("offsetnumber"), scalarIntNode(int64(v.OffsetNumber)),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+func marshalPgTSVectorYAML(v pgtype.TSVector) *yaml.Node {
+	lexemes := &yaml.Node{Kind: yaml.SequenceNode}
+	lexemes.Content = make([]*yaml.Node, 0, len(v.Lexemes))
+	for _, lex := range v.Lexemes {
+		positions := &yaml.Node{Kind: yaml.SequenceNode}
+		positions.Content = make([]*yaml.Node, 0, len(lex.Positions))
+		for _, p := range lex.Positions {
+			positions.Content = append(positions.Content, &yaml.Node{
+				Kind: yaml.MappingNode,
+				Content: []*yaml.Node{
+					scalarKeyNode("position"), scalarIntNode(int64(p.Position)),
+					scalarKeyNode("weight"), scalarIntNode(int64(p.Weight)),
+				},
+			})
+		}
+		lexemes.Content = append(lexemes.Content, &yaml.Node{
+			Kind: yaml.MappingNode,
+			Content: []*yaml.Node{
+				scalarKeyNode("word"), scalarStrNode(lex.Word),
+				scalarKeyNode("positions"), positions,
+			},
+		})
+	}
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagTSVector,
+		Content: []*yaml.Node{
+			scalarKeyNode("lexemes"), lexemes,
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}
+}
+
+// marshalPgHstoreYAML emits an hstore as a tagged mapping carrying the
+// raw key/value pairs. SQL-NULL values inside the hstore (the `*string`
+// being nil) are emitted as YAML null so the round-trip preserves the
+// nil-vs-empty-string distinction the codec dispatches on.
+func marshalPgHstoreYAML(v pgtype.Hstore) *yaml.Node {
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := &yaml.Node{Kind: yaml.MappingNode, Tag: pgYAMLTagHstore}
+	out.Content = make([]*yaml.Node, 0, 2*len(keys))
+	for _, k := range keys {
+		val := v[k]
+		var valNode *yaml.Node
+		if val == nil {
+			valNode = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}
+		} else if StringNeedsDoubleQuoted(*val) {
+			valNode = &yaml.Node{Kind: yaml.ScalarNode, Style: yaml.DoubleQuotedStyle, Value: *val}
+		} else {
+			valNode = scalarStrNode(*val)
+		}
+		out.Content = append(out.Content, scalarKeyNode(k), valNode)
+	}
+	return out
+}
+
+// marshalPgRangeYAML emits Range[any] as a tagged mapping. Lower and
+// Upper recurse through PostgresV3Cell.MarshalYAML so the bound element
+// type stays per-cohort (int4 → int32, tstzrange → time.Time, numrange
+// → pgtype.Numeric, etc.) — same recursion pattern as the gob path.
+func marshalPgRangeYAML(v pgtype.Range[any]) (*yaml.Node, error) {
+	lowerAny, err := PostgresV3Cell{Value: v.Lower}.MarshalYAML()
+	if err != nil {
+		return nil, fmt.Errorf("PostgresV3Cell.MarshalYAML range lower: %w", err)
+	}
+	upperAny, err := PostgresV3Cell{Value: v.Upper}.MarshalYAML()
+	if err != nil {
+		return nil, fmt.Errorf("PostgresV3Cell.MarshalYAML range upper: %w", err)
+	}
+	lowerNode, err := toYAMLNode(lowerAny)
+	if err != nil {
+		return nil, fmt.Errorf("PostgresV3Cell.MarshalYAML range lower node: %w", err)
+	}
+	upperNode, err := toYAMLNode(upperAny)
+	if err != nil {
+		return nil, fmt.Errorf("PostgresV3Cell.MarshalYAML range upper node: %w", err)
+	}
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  pgYAMLTagRange,
+		Content: []*yaml.Node{
+			scalarKeyNode("lower"), lowerNode,
+			scalarKeyNode("upper"), upperNode,
+			scalarKeyNode("lowertype"), scalarIntNode(int64(v.LowerType)),
+			scalarKeyNode("uppertype"), scalarIntNode(int64(v.UpperType)),
+			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
+		},
+	}, nil
+}
+
+func marshalPgMultirangeYAML(v pgtype.Multirange[pgtype.Range[any]]) (*yaml.Node, error) {
+	out := &yaml.Node{Kind: yaml.SequenceNode, Tag: pgYAMLTagMultirange}
+	out.Content = make([]*yaml.Node, 0, len(v))
+	for i, r := range v {
+		n, err := marshalPgRangeYAML(r)
+		if err != nil {
+			return nil, fmt.Errorf("PostgresV3Cell.MarshalYAML multirange[%d]: %w", i, err)
+		}
+		out.Content = append(out.Content, n)
+	}
+	return out, nil
+}
+
+// toYAMLNode converts a value (which may already be a *yaml.Node from a
+// nested MarshalYAML call, or a plain Go value yaml.v3 will encode via
+// reflection) to a *yaml.Node. Used by the range/multirange marshallers
+// that need to splice the per-bound MarshalYAML output back into a
+// MappingNode.Content slice.
+func toYAMLNode(v any) (*yaml.Node, error) {
+	if n, ok := v.(*yaml.Node); ok {
+		return n, nil
+	}
+	out := &yaml.Node{}
+	if err := out.Encode(v); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // PostgresV3SafeString wraps string for fields that may carry text
@@ -412,12 +793,710 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 		c.Value = raw
 		return nil
 	}
+	// Tag-driven dispatch for the pgtype-shaped cells (mapping or
+	// sequence node carrying a `!pg/<name>` local tag). MarshalYAML
+	// emits these explicitly; the tag uniquely identifies the
+	// reconstructor without depending on key-set heuristics.
+	if v, ok, err := decodePgTaggedNode(node); err != nil {
+		return err
+	} else if ok {
+		c.Value = v
+		return nil
+	}
+	// Backward-compat: untagged mapping that looks like one of the
+	// pgtype shapes (e.g. listmonk recordings written before the
+	// tag-driven encoder shipped). Probe the canonical key set and
+	// route to the right reconstructor; if nothing matches, fall
+	// through to the generic any-decode path.
+	//
+	// `!!map` is yaml.v3's auto-resolved tag for any plain mapping
+	// without an explicit local tag — that's the shape pre-fix
+	// recordings carry on disk, so we treat it the same as an empty
+	// tag string for backward-compat probing.
+	if node.Kind == yaml.MappingNode && (node.Tag == "" || node.Tag == "!!map") {
+		if v, ok, err := decodePgUntaggedMapping(node); err != nil {
+			return err
+		} else if ok {
+			c.Value = v
+			return nil
+		}
+	}
 	var v any
 	if err := node.Decode(&v); err != nil {
 		return fmt.Errorf("PostgresV3Cell: decode node (kind=%d, tag=%q): %w", node.Kind, node.Tag, err)
 	}
 	c.Value = v
 	return nil
+}
+
+// decodePgTaggedNode handles the `!pg/<name>` tag dispatch. Returns
+// (value, true, nil) on a match, (nil, false, nil) if the node has a
+// different (or empty) tag, or (nil, false, err) on a decode failure.
+func decodePgTaggedNode(node *yaml.Node) (any, bool, error) {
+	switch node.Tag {
+	case pgYAMLTagNumeric:
+		v, err := decodePgNumericMapping(node)
+		return v, true, err
+	case pgYAMLTagInterval:
+		v, err := decodePgIntervalMapping(node)
+		return v, true, err
+	case pgYAMLTagTime:
+		v, err := decodePgTimeMapping(node)
+		return v, true, err
+	case pgYAMLTagBits:
+		v, err := decodePgBitsMapping(node)
+		return v, true, err
+	case pgYAMLTagPoint:
+		v, err := decodePgPointMapping(node)
+		return v, true, err
+	case pgYAMLTagLine:
+		v, err := decodePgLineMapping(node)
+		return v, true, err
+	case pgYAMLTagLseg:
+		v, err := decodePgLsegMapping(node)
+		return v, true, err
+	case pgYAMLTagBox:
+		v, err := decodePgBoxMapping(node)
+		return v, true, err
+	case pgYAMLTagPath:
+		v, err := decodePgPathMapping(node)
+		return v, true, err
+	case pgYAMLTagPolygon:
+		v, err := decodePgPolygonMapping(node)
+		return v, true, err
+	case pgYAMLTagCircle:
+		v, err := decodePgCircleMapping(node)
+		return v, true, err
+	case pgYAMLTagTID:
+		v, err := decodePgTIDMapping(node)
+		return v, true, err
+	case pgYAMLTagTSVector:
+		v, err := decodePgTSVectorMapping(node)
+		return v, true, err
+	case pgYAMLTagHstore:
+		v, err := decodePgHstoreMapping(node)
+		return v, true, err
+	case pgYAMLTagRange:
+		v, err := decodePgRangeMapping(node)
+		return v, true, err
+	case pgYAMLTagMultirange:
+		v, err := decodePgMultirangeNode(node)
+		return v, true, err
+	}
+	return nil, false, nil
+}
+
+// decodePgUntaggedMapping inspects an untagged MappingNode for one of
+// the canonical pgtype key sets and routes to the matching
+// reconstructor. Used for backward compatibility with on-disk
+// recordings that pre-date the `!pg/<name>` tag — e.g. listmonk's
+// pre-fix mocks.yaml carries Numeric as a bare `{int, exp, nan,
+// infinitymodifier, valid}` mapping. Only key sets that uniquely
+// identify a single pgtype shape are probed; ambiguous shapes
+// (Point/Lseg/Box/Polygon all match `{p, valid}`) require the tag.
+func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
+	keys := pgMappingKeySet(node)
+	if keys == nil {
+		return nil, false, nil
+	}
+	switch {
+	case keysEqual(keys, []string{"int", "exp", "nan", "infinitymodifier", "valid"}):
+		v, err := decodePgNumericMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"microseconds", "days", "months", "valid"}):
+		v, err := decodePgIntervalMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"microseconds", "valid"}):
+		v, err := decodePgTimeMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"bytes", "len", "valid"}):
+		v, err := decodePgBitsMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"a", "b", "c", "valid"}):
+		v, err := decodePgLineMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"p", "closed", "valid"}):
+		v, err := decodePgPathMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"p", "r", "valid"}):
+		v, err := decodePgCircleMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"blocknumber", "offsetnumber", "valid"}):
+		v, err := decodePgTIDMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"lexemes", "valid"}):
+		v, err := decodePgTSVectorMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"lower", "upper", "lowertype", "uppertype", "valid"}):
+		v, err := decodePgRangeMapping(node)
+		return v, true, err
+	}
+	return nil, false, nil
+}
+
+// pgMappingKeySet returns the lowercased keys of a mapping node, or nil
+// if any key is non-scalar (in which case backward-compat probing must
+// not match — the node is a generic map).
+func pgMappingKeySet(node *yaml.Node) []string {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	out := make([]string, 0, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		k := node.Content[i]
+		if k.Kind != yaml.ScalarNode {
+			return nil
+		}
+		out = append(out, k.Value)
+	}
+	return out
+}
+
+func keysEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	gs := make([]string, len(got))
+	copy(gs, got)
+	ws := make([]string, len(want))
+	copy(ws, want)
+	sort.Strings(gs)
+	sort.Strings(ws)
+	for i := range gs {
+		if gs[i] != ws[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// pgMappingFields returns the value node for each lowercased key in a
+// MappingNode. Per-type decoders look up the fields they care about
+// rather than walking the slice manually for every type.
+func pgMappingFields(node *yaml.Node) (map[string]*yaml.Node, error) {
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("expected mapping node, got kind=%d", node.Kind)
+	}
+	out := make(map[string]*yaml.Node, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k := node.Content[i]
+		if k.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("non-scalar mapping key (kind=%d)", k.Kind)
+		}
+		out[k.Value] = node.Content[i+1]
+	}
+	return out, nil
+}
+
+func decodePgNumericMapping(node *yaml.Node) (pgtype.Numeric, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Numeric{}, fmt.Errorf("pg/numeric: %w", err)
+	}
+	out := pgtype.Numeric{}
+	if intNode, ok := fields["int"]; ok && intNode != nil {
+		// pgtype.Numeric.Int is *big.Int rendered via its TextMarshaler
+		// — yaml.v3 emits "<digits>" or "" for nil. Decode the string
+		// form back into *big.Int; an empty string keeps Int=nil so
+		// NaN / ±infinity numerics preserve their nil-Int identity.
+		var s string
+		if intNode.Kind == yaml.ScalarNode {
+			s = intNode.Value
+		} else if err := intNode.Decode(&s); err != nil {
+			return pgtype.Numeric{}, fmt.Errorf("pg/numeric int: %w", err)
+		}
+		if s != "" {
+			bi := new(big.Int)
+			if _, ok := bi.SetString(s, 10); !ok {
+				return pgtype.Numeric{}, fmt.Errorf("pg/numeric int: invalid integer literal %q", s)
+			}
+			out.Int = bi
+		}
+	}
+	if expNode, ok := fields["exp"]; ok && expNode != nil {
+		var n int32
+		if err := expNode.Decode(&n); err != nil {
+			return pgtype.Numeric{}, fmt.Errorf("pg/numeric exp: %w", err)
+		}
+		out.Exp = n
+	}
+	if nanNode, ok := fields["nan"]; ok && nanNode != nil {
+		if err := nanNode.Decode(&out.NaN); err != nil {
+			return pgtype.Numeric{}, fmt.Errorf("pg/numeric nan: %w", err)
+		}
+	}
+	if imNode, ok := fields["infinitymodifier"]; ok && imNode != nil {
+		var n int8
+		if err := imNode.Decode(&n); err != nil {
+			return pgtype.Numeric{}, fmt.Errorf("pg/numeric infinitymodifier: %w", err)
+		}
+		out.InfinityModifier = pgtype.InfinityModifier(n)
+	}
+	if validNode, ok := fields["valid"]; ok && validNode != nil {
+		if err := validNode.Decode(&out.Valid); err != nil {
+			return pgtype.Numeric{}, fmt.Errorf("pg/numeric valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgIntervalMapping(node *yaml.Node) (pgtype.Interval, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Interval{}, fmt.Errorf("pg/interval: %w", err)
+	}
+	out := pgtype.Interval{}
+	if n, ok := fields["microseconds"]; ok && n != nil {
+		if err := n.Decode(&out.Microseconds); err != nil {
+			return out, fmt.Errorf("pg/interval microseconds: %w", err)
+		}
+	}
+	if n, ok := fields["days"]; ok && n != nil {
+		if err := n.Decode(&out.Days); err != nil {
+			return out, fmt.Errorf("pg/interval days: %w", err)
+		}
+	}
+	if n, ok := fields["months"]; ok && n != nil {
+		if err := n.Decode(&out.Months); err != nil {
+			return out, fmt.Errorf("pg/interval months: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/interval valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgTimeMapping(node *yaml.Node) (pgtype.Time, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Time{}, fmt.Errorf("pg/time: %w", err)
+	}
+	out := pgtype.Time{}
+	if n, ok := fields["microseconds"]; ok && n != nil {
+		if err := n.Decode(&out.Microseconds); err != nil {
+			return out, fmt.Errorf("pg/time microseconds: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/time valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgBitsMapping(node *yaml.Node) (pgtype.Bits, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Bits{}, fmt.Errorf("pg/bits: %w", err)
+	}
+	out := pgtype.Bits{}
+	if n, ok := fields["bytes"]; ok && n != nil {
+		// Bytes may arrive as `!!binary` (the new tagged emitter) or as
+		// a `[]int` sequence (yaml.v3's reflective fallback). Try the
+		// binary scalar path first, then fall back to the int-slice
+		// decode so backward-compat with hand-edited fixtures works.
+		if n.Kind == yaml.ScalarNode && n.Tag == "!!binary" {
+			raw := n.Value
+			if strings.ContainsAny(raw, " \t\r\n") {
+				raw = stripBase64Whitespace(raw)
+			}
+			b, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil {
+				return out, fmt.Errorf("pg/bits bytes: %w", err)
+			}
+			out.Bytes = b
+		} else if err := n.Decode(&out.Bytes); err != nil {
+			return out, fmt.Errorf("pg/bits bytes: %w", err)
+		}
+	}
+	if n, ok := fields["len"]; ok && n != nil {
+		if err := n.Decode(&out.Len); err != nil {
+			return out, fmt.Errorf("pg/bits len: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/bits valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodeVec2Mapping(node *yaml.Node) (pgtype.Vec2, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Vec2{}, fmt.Errorf("pg vec2: %w", err)
+	}
+	out := pgtype.Vec2{}
+	if n, ok := fields["x"]; ok && n != nil {
+		if err := n.Decode(&out.X); err != nil {
+			return out, fmt.Errorf("pg vec2 x: %w", err)
+		}
+	}
+	if n, ok := fields["y"]; ok && n != nil {
+		if err := n.Decode(&out.Y); err != nil {
+			return out, fmt.Errorf("pg vec2 y: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodeVec2SeqNode(node *yaml.Node) ([]pgtype.Vec2, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("pg vec2 seq: expected sequence, got kind=%d", node.Kind)
+	}
+	out := make([]pgtype.Vec2, 0, len(node.Content))
+	for i, child := range node.Content {
+		v, err := decodeVec2Mapping(child)
+		if err != nil {
+			return nil, fmt.Errorf("pg vec2 seq[%d]: %w", i, err)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func decodePgPointMapping(node *yaml.Node) (pgtype.Point, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Point{}, fmt.Errorf("pg/point: %w", err)
+	}
+	out := pgtype.Point{}
+	if n, ok := fields["p"]; ok && n != nil {
+		v, err := decodeVec2Mapping(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/point p: %w", err)
+		}
+		out.P = v
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/point valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgLineMapping(node *yaml.Node) (pgtype.Line, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Line{}, fmt.Errorf("pg/line: %w", err)
+	}
+	out := pgtype.Line{}
+	if n, ok := fields["a"]; ok && n != nil {
+		if err := n.Decode(&out.A); err != nil {
+			return out, fmt.Errorf("pg/line a: %w", err)
+		}
+	}
+	if n, ok := fields["b"]; ok && n != nil {
+		if err := n.Decode(&out.B); err != nil {
+			return out, fmt.Errorf("pg/line b: %w", err)
+		}
+	}
+	if n, ok := fields["c"]; ok && n != nil {
+		if err := n.Decode(&out.C); err != nil {
+			return out, fmt.Errorf("pg/line c: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/line valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgLsegMapping(node *yaml.Node) (pgtype.Lseg, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Lseg{}, fmt.Errorf("pg/lseg: %w", err)
+	}
+	out := pgtype.Lseg{}
+	if n, ok := fields["p"]; ok && n != nil {
+		ps, err := decodeVec2SeqNode(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/lseg p: %w", err)
+		}
+		if len(ps) != 2 {
+			return out, fmt.Errorf("pg/lseg p: expected 2 vec2, got %d", len(ps))
+		}
+		out.P = [2]pgtype.Vec2{ps[0], ps[1]}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/lseg valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgBoxMapping(node *yaml.Node) (pgtype.Box, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Box{}, fmt.Errorf("pg/box: %w", err)
+	}
+	out := pgtype.Box{}
+	if n, ok := fields["p"]; ok && n != nil {
+		ps, err := decodeVec2SeqNode(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/box p: %w", err)
+		}
+		if len(ps) != 2 {
+			return out, fmt.Errorf("pg/box p: expected 2 vec2, got %d", len(ps))
+		}
+		out.P = [2]pgtype.Vec2{ps[0], ps[1]}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/box valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgPathMapping(node *yaml.Node) (pgtype.Path, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Path{}, fmt.Errorf("pg/path: %w", err)
+	}
+	out := pgtype.Path{}
+	if n, ok := fields["p"]; ok && n != nil {
+		ps, err := decodeVec2SeqNode(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/path p: %w", err)
+		}
+		out.P = ps
+	}
+	if n, ok := fields["closed"]; ok && n != nil {
+		if err := n.Decode(&out.Closed); err != nil {
+			return out, fmt.Errorf("pg/path closed: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/path valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgPolygonMapping(node *yaml.Node) (pgtype.Polygon, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Polygon{}, fmt.Errorf("pg/polygon: %w", err)
+	}
+	out := pgtype.Polygon{}
+	if n, ok := fields["p"]; ok && n != nil {
+		ps, err := decodeVec2SeqNode(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/polygon p: %w", err)
+		}
+		out.P = ps
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/polygon valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgCircleMapping(node *yaml.Node) (pgtype.Circle, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Circle{}, fmt.Errorf("pg/circle: %w", err)
+	}
+	out := pgtype.Circle{}
+	if n, ok := fields["p"]; ok && n != nil {
+		v, err := decodeVec2Mapping(n)
+		if err != nil {
+			return out, fmt.Errorf("pg/circle p: %w", err)
+		}
+		out.P = v
+	}
+	if n, ok := fields["r"]; ok && n != nil {
+		if err := n.Decode(&out.R); err != nil {
+			return out, fmt.Errorf("pg/circle r: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/circle valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgTIDMapping(node *yaml.Node) (pgtype.TID, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.TID{}, fmt.Errorf("pg/tid: %w", err)
+	}
+	out := pgtype.TID{}
+	if n, ok := fields["blocknumber"]; ok && n != nil {
+		if err := n.Decode(&out.BlockNumber); err != nil {
+			return out, fmt.Errorf("pg/tid blocknumber: %w", err)
+		}
+	}
+	if n, ok := fields["offsetnumber"]; ok && n != nil {
+		if err := n.Decode(&out.OffsetNumber); err != nil {
+			return out, fmt.Errorf("pg/tid offsetnumber: %w", err)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/tid valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgTSVectorMapping(node *yaml.Node) (pgtype.TSVector, error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.TSVector{}, fmt.Errorf("pg/tsvector: %w", err)
+	}
+	out := pgtype.TSVector{}
+	if n, ok := fields["lexemes"]; ok && n != nil {
+		if n.Kind != yaml.SequenceNode {
+			return out, fmt.Errorf("pg/tsvector lexemes: expected sequence, got kind=%d", n.Kind)
+		}
+		out.Lexemes = make([]pgtype.TSVectorLexeme, 0, len(n.Content))
+		for i, lexNode := range n.Content {
+			lf, err := pgMappingFields(lexNode)
+			if err != nil {
+				return out, fmt.Errorf("pg/tsvector lex[%d]: %w", i, err)
+			}
+			lex := pgtype.TSVectorLexeme{}
+			if w, ok := lf["word"]; ok && w != nil {
+				if err := w.Decode(&lex.Word); err != nil {
+					return out, fmt.Errorf("pg/tsvector lex[%d] word: %w", i, err)
+				}
+			}
+			if pn, ok := lf["positions"]; ok && pn != nil {
+				if pn.Kind != yaml.SequenceNode {
+					return out, fmt.Errorf("pg/tsvector lex[%d] positions: expected sequence, got kind=%d", i, pn.Kind)
+				}
+				lex.Positions = make([]pgtype.TSVectorPosition, 0, len(pn.Content))
+				for j, posNode := range pn.Content {
+					pf, err := pgMappingFields(posNode)
+					if err != nil {
+						return out, fmt.Errorf("pg/tsvector lex[%d] pos[%d]: %w", i, j, err)
+					}
+					pos := pgtype.TSVectorPosition{}
+					if pp, ok := pf["position"]; ok && pp != nil {
+						if err := pp.Decode(&pos.Position); err != nil {
+							return out, fmt.Errorf("pg/tsvector lex[%d] pos[%d] position: %w", i, j, err)
+						}
+					}
+					if pw, ok := pf["weight"]; ok && pw != nil {
+						var w byte
+						if err := pw.Decode(&w); err != nil {
+							return out, fmt.Errorf("pg/tsvector lex[%d] pos[%d] weight: %w", i, j, err)
+						}
+						pos.Weight = pgtype.TSVectorWeight(w)
+					}
+					lex.Positions = append(lex.Positions, pos)
+				}
+			}
+			out.Lexemes = append(out.Lexemes, lex)
+		}
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/tsvector valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgHstoreMapping(node *yaml.Node) (pgtype.Hstore, error) {
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("pg/hstore: expected mapping, got kind=%d", node.Kind)
+	}
+	out := make(pgtype.Hstore, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k := node.Content[i]
+		v := node.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("pg/hstore: non-scalar key (kind=%d)", k.Kind)
+		}
+		if v.Kind == yaml.ScalarNode && v.Tag == "!!null" {
+			out[k.Value] = nil
+			continue
+		}
+		var s string
+		if err := v.Decode(&s); err != nil {
+			return nil, fmt.Errorf("pg/hstore value for %q: %w", k.Value, err)
+		}
+		sv := s
+		out[k.Value] = &sv
+	}
+	return out, nil
+}
+
+func decodePgRangeMapping(node *yaml.Node) (pgtype.Range[any], error) {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return pgtype.Range[any]{}, fmt.Errorf("pg/range: %w", err)
+	}
+	out := pgtype.Range[any]{}
+	if n, ok := fields["lower"]; ok && n != nil {
+		var c PostgresV3Cell
+		if err := c.UnmarshalYAML(n); err != nil {
+			return out, fmt.Errorf("pg/range lower: %w", err)
+		}
+		out.Lower = c.Value
+	}
+	if n, ok := fields["upper"]; ok && n != nil {
+		var c PostgresV3Cell
+		if err := c.UnmarshalYAML(n); err != nil {
+			return out, fmt.Errorf("pg/range upper: %w", err)
+		}
+		out.Upper = c.Value
+	}
+	if n, ok := fields["lowertype"]; ok && n != nil {
+		var b byte
+		if err := n.Decode(&b); err != nil {
+			return out, fmt.Errorf("pg/range lowertype: %w", err)
+		}
+		out.LowerType = pgtype.BoundType(b)
+	}
+	if n, ok := fields["uppertype"]; ok && n != nil {
+		var b byte
+		if err := n.Decode(&b); err != nil {
+			return out, fmt.Errorf("pg/range uppertype: %w", err)
+		}
+		out.UpperType = pgtype.BoundType(b)
+	}
+	if n, ok := fields["valid"]; ok && n != nil {
+		if err := n.Decode(&out.Valid); err != nil {
+			return out, fmt.Errorf("pg/range valid: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func decodePgMultirangeNode(node *yaml.Node) (pgtype.Multirange[pgtype.Range[any]], error) {
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("pg/multirange: expected sequence, got kind=%d", node.Kind)
+	}
+	out := make(pgtype.Multirange[pgtype.Range[any]], 0, len(node.Content))
+	for i, child := range node.Content {
+		r, err := decodePgRangeMapping(child)
+		if err != nil {
+			return nil, fmt.Errorf("pg/multirange[%d]: %w", i, err)
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // isPostgresV3CellRawNode reports whether a YAML mapping node has
