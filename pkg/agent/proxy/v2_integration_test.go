@@ -322,10 +322,11 @@ func TestV2_HangDetected(t *testing.T) {
 // -------- Kill switch --------
 
 func TestV2_KillSwitchLifecycle(t *testing.T) {
-	// Not t.Parallel() — tests DefaultKillSwitch; serialize with any
-	// other test that might be touching it.
-	// We construct a fresh local KillSwitch to avoid cross-test
-	// pollution.
+	// This test exercises a FRESH local KillSwitch constructed via
+	// newLocalKillSwitch — util.DefaultKillSwitch is NOT touched,
+	// so t.Parallel is technically safe. We keep the test serial
+	// anyway so future additions that DO couple to the global
+	// can't accidentally race against us.
 	ks := newLocalKillSwitch()
 	if ks.Enabled() {
 		t.Fatal("fresh KillSwitch reports Enabled")
