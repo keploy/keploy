@@ -892,6 +892,18 @@ func decodePgTaggedNode(node *yaml.Node) (any, bool, error) {
 // concrete Go type from an untagged mapping alone — those decode as
 // `map[string]any`, matching how released keploy's reflection emit
 // also rehydrates them.
+//
+// Invariant: every key set in the switch below must be pairwise
+// distinct from — and not a subset of — every other key set in the
+// switch. `keysEqual` requires exact equality, so a subset relation
+// (e.g. Time's {microseconds, valid} is contained in Interval's
+// {microseconds, days, months, valid}) does not cause silent
+// corruption today; but the moment anyone weakens the predicate to a
+// "contains-all-required-keys" match, the smaller set would shadow
+// the larger one and silently misroute the larger type's recordings.
+// The disjointness audit is pinned by
+// TestPgtypeYAMLKeySetsMutuallyDisjoint in
+// pgtype_yaml_disambiguation_test.go.
 func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 	keys := pgMappingKeySet(node)
 	if keys == nil {
