@@ -214,9 +214,14 @@ func TestRoundTrip_PostgresV3Query(t *testing.T) {
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						// One row, one text-format cell containing the literal "1".
-						// Emits as a plain YAML string in the recorded mock.
-						Rows:            []models.PostgresV3Cells{{models.NewValueCell("1")}},
+						// Row value is int64 to match the bigint OID 20
+						// declared in RowDescription. Under the logical-
+						// value contract on PostgresV3Cell (int8 →
+						// int64) the recorder always lifts wire-format
+						// integer cells back into Go ints, so a string
+						// fixture here would diverge from production
+						// behaviour and weaken the gob-path coverage.
+						Rows:            []models.PostgresV3Cells{{models.NewValueCell(int64(1))}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},

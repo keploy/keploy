@@ -142,12 +142,22 @@ func TestPostgresV3Response_CopyOut_RoundTrip(t *testing.T) {
 // bump from silently invalidating every mock file on disk.
 func TestPostgresV3Response_BackwardCompat_NoCopyFields(t *testing.T) {
 	// Shape of a legacy recording: RowDescription + Rows +
-	// CommandComplete only. Also includes the retired `scope:`
-	// tombstone key real fkppl debug-bundle fragments still carry, so
-	// this test asserts both (a) the new optional Copy fields default
+	// CommandComplete only. Pre-PostgresV3Cell, Rows lived on disk
+	// as a [][]string slice — each inner element a YAML scalar
+	// containing the recorded text-format wire bytes verbatim
+	// (binary-format cells used the printable
+	// "~~KEPLOY_PG_NULL~~" sentinel for SQL NULL and the raw text
+	// for everything else; yaml.v3 rejected base64 for these short
+	// numeric cells because the recorder picked plain style by
+	// default). PostgresV3Cells.UnmarshalYAML therefore needs to
+	// keep accepting bare `"1"` / `"2"` scalars in the row position.
+	// This fixture also includes the retired `scope:` tombstone
+	// key — real fkppl debug-bundle fragments still carry it — so
+	// the test asserts both (a) the new optional Copy fields default
 	// to nil on old mocks and (b) yaml.v3's lenient unknown-field
-	// handling still holds on PostgresV3Response — a switch to
-	// Decoder.KnownFields(true) downstream would fail this test loudly.
+	// handling still holds on PostgresV3Response: a switch to
+	// Decoder.KnownFields(true) downstream would fail this test
+	// loudly.
 	const legacyYAML = `
 rowDescription:
   - name: id

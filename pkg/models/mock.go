@@ -311,15 +311,22 @@ type PostgresV3QuerySpec struct {
 
 	// BindValues holds the client-supplied bind parameters for this
 	// invocation, one entry per placeholder. Cells are stored as
-	// logical Go values (int64, float64, string, bool, time.Time, []byte,
-	// or PostgresV3CellRaw for unknown OIDs) irrespective of the wire
-	// format the client used; PostgresV3Cell.MarshalYAML picks the
-	// appropriate scalar tag per value so common types stay eyeballable
-	// and greppable in mocks.yaml while bytea and raw-OID payloads land
-	// as !!binary. NULL binds are distinguished from empty-string binds
-	// via Cell.IsNull. BindFormats records the client's per-placeholder
-	// format flag (0=text, 1=binary) so the replayer can re-encode the
-	// logical value on the wire in the form the live client expects,
+	// logical Go values irrespective of the wire format the client
+	// used. The supported in-memory types are: int16 / int32 / int64
+	// (matching pgtype's int2 / int4 / int8 mapping), float64, bool,
+	// string, time.Time, []byte, and PostgresV3CellRaw for unknown
+	// OIDs. PostgresV3Cell.MarshalYAML picks the appropriate scalar
+	// tag per value so common types stay eyeballable and greppable in
+	// mocks.yaml while bytea and raw-OID payloads land as !!binary.
+	// Note that yaml.v3's resolver decodes every !!int back to int64,
+	// so int16/int32 cells round-trip through the gob path with their
+	// original Go width but widen to int64 through the YAML path —
+	// that's safe because the codec on the integration side encodes
+	// to the wire using the column OID, not the Go width. NULL binds
+	// are distinguished from empty-string binds via Cell.IsNull.
+	// BindFormats records the client's per-placeholder format flag
+	// (0=text, 1=binary) so the replayer can re-encode the logical
+	// value on the wire in the form the live client expects,
 	// regardless of which form the recorder originally captured.
 	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`

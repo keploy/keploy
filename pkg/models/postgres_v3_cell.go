@@ -49,6 +49,15 @@ type PostgresV3Cell struct {
 	//   int4            → int32
 	//   int8            → int64
 	//   float4/8        → float64
+	// Width caveat: yaml.v3's resolver decodes every !!int back to a
+	// Go int64, so int16 / int32 cells round-trip through the gob
+	// path (sidecar → agent stream) with their original Go width but
+	// widen to int64 through the YAML path (mocks.yaml on disk). That
+	// is intentional — the codec on the integrations side encodes
+	// onto the wire using the column OID, not the Go width, so the
+	// emitted bytes are correct in both cases. Downstream code that
+	// type-switches on Cell.Value should accept int16, int32, AND
+	// int64 for "an integer column", or use a helper that widens.
 	//   bool            → bool
 	//   text/varchar/…  → string
 	//   timestamp[tz]   → time.Time

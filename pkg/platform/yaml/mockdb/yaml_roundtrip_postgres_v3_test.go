@@ -194,7 +194,14 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						Rows:            []models.PostgresV3Cells{{models.NewValueCell("1")}},
+						// Row value is int64 to match the bigint OID
+						// declared in RowDescription. Storing the cell
+						// as a string would conflict with the logical-
+						// value contract on PostgresV3Cell (int8 →
+						// int64) and weaken the regression coverage:
+						// a future change that breaks integer round-
+						// trip would still pass with a stringy fixture.
+						Rows:            []models.PostgresV3Cells{{models.NewValueCell(int64(1))}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
