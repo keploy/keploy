@@ -219,7 +219,7 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	if r.config != nil {
 		outOpts.Rules = r.config.BypassRules
 		outOpts.MongoPassword = r.config.Test.MongoPassword
-		outOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 	}
 	// Extract header noise for mock matching (mirrors replay behavior).
