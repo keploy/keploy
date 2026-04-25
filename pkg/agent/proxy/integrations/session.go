@@ -160,7 +160,7 @@ func (s *RecordSession) AddPostRecordHook(h PostRecordHook) {
 // satisfy net.Conn.
 func (s *RecordSession) IngressConn() (net.Conn, error) {
 	if s == nil {
-		return nil, fmt.Errorf("record session ingress: nil session")
+		return nil, fmt.Errorf("record session ingress: nil session; pass a non-nil *RecordSession to IngressConn (or check for nil before calling)")
 	}
 	return s.recordNetConn("ingress", "IngressConn", s.Ingress)
 }
@@ -169,7 +169,7 @@ func (s *RecordSession) IngressConn() (net.Conn, error) {
 // for the error contract.
 func (s *RecordSession) EgressConn() (net.Conn, error) {
 	if s == nil {
-		return nil, fmt.Errorf("record session egress: nil session")
+		return nil, fmt.Errorf("record session egress: nil session; pass a non-nil *RecordSession to EgressConn (or check for nil before calling)")
 	}
 	return s.recordNetConn("egress", "EgressConn", s.Egress)
 }
