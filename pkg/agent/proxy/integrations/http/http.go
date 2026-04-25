@@ -137,12 +137,20 @@ func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSes
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.IngressConn())
+	ingress := session.IngressConn()
+	egress := session.EgressConn()
+	if ingress == nil || egress == nil {
+		utils.LogError(logger, nil, "record session is missing net.Conn-backed ingress/egress",
+			zap.String("next_step", "verify SafeConn is wired into RecordSession before invoking the recorder"))
+		return errors.New("http: record session has no net.Conn-backed ingress/egress; ensure the session is built with SafeConn before calling RecordOutgoing")
+	}
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.IngressConn(), session.EgressConn(), session.Mocks, session.Opts, session.OnMockRecorded)
+	err = h.encodeHTTP(ctx, reqBuf, ingress, egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err

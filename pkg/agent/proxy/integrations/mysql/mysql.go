@@ -3,6 +3,7 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 
@@ -133,7 +134,15 @@ func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.Record
 func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
-	err := recorder.Record(ctx, logger, session.IngressConn(), session.EgressConn(), session.Mocks, session.Opts, session.TLSUpgrader)
+	ingress := session.IngressConn()
+	egress := session.EgressConn()
+	if ingress == nil || egress == nil {
+		utils.LogError(logger, nil, "record session is missing net.Conn-backed ingress/egress",
+			zap.String("next_step", "verify SafeConn is wired into RecordSession before invoking the recorder"))
+		return errors.New("mysql: record session has no net.Conn-backed ingress/egress; ensure the session is built with SafeConn before calling RecordOutgoing")
+	}
+
+	err := recorder.Record(ctx, logger, ingress, egress, session.Mocks, session.Opts, session.TLSUpgrader)
 
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")

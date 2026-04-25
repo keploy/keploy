@@ -2,6 +2,7 @@ package generic
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -50,13 +51,21 @@ func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.Reco
 func (g *Generic) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.IngressConn())
+	ingress := session.IngressConn()
+	egress := session.EgressConn()
+	if ingress == nil || egress == nil {
+		utils.LogError(logger, nil, "record session is missing net.Conn-backed ingress/egress",
+			zap.String("next_step", "verify SafeConn is wired into RecordSession before invoking the recorder"))
+		return errors.New("generic: record session has no net.Conn-backed ingress/egress; ensure the session is built with SafeConn before calling RecordOutgoing")
+	}
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
 		return err
 	}
 
-	err = encodeGeneric(ctx, logger, reqBuf, session.IngressConn(), session.EgressConn(), session.Mocks, session.Opts)
+	err = encodeGeneric(ctx, logger, reqBuf, ingress, egress, session.Mocks, session.Opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err
