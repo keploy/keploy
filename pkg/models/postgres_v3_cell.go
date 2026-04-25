@@ -526,6 +526,17 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 			return nil, err
 		}
 	case *PostgresV3CellRaw:
+		// A typed-nil pointer survives the `case nil:` arm above
+		// because (*PostgresV3CellRaw)(nil) has a non-nil type
+		// descriptor; without this guard `enc.Encode(*v)` would
+		// panic on the nil dereference. Treat it the same as a
+		// SQL NULL — the call site clearly intended an absent
+		// value, and writing tagRaw with a zero RawValue would
+		// emit garbled bytes on replay.
+		if v == nil {
+			buf.WriteByte(cellTagNull)
+			break
+		}
 		buf.WriteByte(cellTagRaw)
 		if err := enc.Encode(*v); err != nil {
 			return nil, err

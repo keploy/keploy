@@ -383,6 +383,31 @@ func TestPostgresV3Cell_LegacyNullSentinel_DecodedAsNull(t *testing.T) {
 	}
 }
 
+// A typed-nil *PostgresV3CellRaw must not crash GobEncode. Go type
+// assertions match the interface dispatch on type identity rather
+// than nil-ness, so `case *PostgresV3CellRaw:` accepts a typed-nil
+// pointer just as readily as a non-nil one; without an explicit
+// guard, `enc.Encode(*v)` would dereference nil and panic. We treat
+// the typed-nil as SQL NULL — that's the only sensible
+// interpretation of "the recorder handed us a *PostgresV3CellRaw
+// that has no underlying value".
+func TestPostgresV3Cell_TypedNilRawValue_GobEncodesAsNull(t *testing.T) {
+	cell := PostgresV3Cell{Value: (*PostgresV3CellRaw)(nil)}
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(cell); err != nil {
+		t.Fatalf("gob encode of typed-nil *PostgresV3CellRaw must not error: %v", err)
+	}
+
+	var got PostgresV3Cell
+	if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("gob decode: %v", err)
+	}
+	if !got.IsNull() {
+		t.Errorf("typed-nil *PostgresV3CellRaw round-tripped as %v (type %T), want NULL", got.Value, got.Value)
+	}
+}
+
 // yaml.v3 v3.0.1 has an emitter bug for plain strings containing
 // embedded tab characters: when the string also has a newline, the
 // emitter picks a literal block scalar (`|4-`) and writes the tab byte
