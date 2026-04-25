@@ -143,7 +143,7 @@ func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSes
 	}
 	logger := session.Logger
 
-	h.Logger.Debug("Recording the outgoing http call in record mode")
+	logger.Debug("Recording the outgoing http call in record mode")
 
 	ingress, err := session.IngressConn()
 	if err != nil {
