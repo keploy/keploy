@@ -57,6 +57,12 @@ Intégrez Keploy en installant l'agent localement. Aucun changement de code n'es
 curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
 
+> **Note :** par défaut, cette commande installe **Keploy Enterprise** afin que vous puissiez explorer toutes les fonctionnalités. Pour installer la version OSS à la place, ajoutez l'option `--oss` :
+>
+> ```shell
+> curl --silent -O -L https://keploy.io/install.sh && source install.sh --oss
+> ```
+
 ##  🎬 Enregistrer les cas de test
 
 Lancez votre application avec Keploy pour transformer les appels d'API en tests et mocks/stubs.

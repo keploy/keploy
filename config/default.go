@@ -64,8 +64,6 @@ test:
   basePath: ""
   mocking: true
   disableLineCoverage: false
-  disableMockUpload: true
-  useLocalMock: false
   updateTemplate: false
   mustPass: false
   maxFailAttempts: 5

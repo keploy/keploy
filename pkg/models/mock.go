@@ -822,8 +822,3 @@ func (m *Mock) DeepCopy() *Mock {
 
 	return &c
 }
-
-type ReRecordCfg struct {
-	Rerecord bool
-	TestSet  string
-}
