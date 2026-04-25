@@ -1056,34 +1056,8 @@ func sanitizeYAMLStringNodes(node *yamlLib.Node) {
 		if node.Style == yamlLib.DoubleQuotedStyle || node.Style == yamlLib.SingleQuotedStyle {
 			return
 		}
-		if needsSafeStringStyle(node.Value) {
+		if models.StringNeedsDoubleQuoted(node.Value) {
 			node.Style = yamlLib.DoubleQuotedStyle
 		}
 	}
-}
-
-// needsSafeStringStyle mirrors stringNeedsDoubleQuoted in
-// pkg/models/postgres_v3_cell.go but kept local to avoid a back-import
-// (mockdb already imports models for the spec types). See that
-// function's doc for the failure modes — embedded newline/tab and
-// leading or trailing whitespace are the unsafe shapes.
-func needsSafeStringStyle(s string) bool {
-	if s == "" {
-		return false
-	}
-	switch s[0] {
-	case ' ', '\t', '\n', '\r':
-		return true
-	}
-	switch s[len(s)-1] {
-	case ' ', '\t':
-		return true
-	}
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\t', '\n', '\r':
-			return true
-		}
-	}
-	return false
 }

@@ -140,7 +140,7 @@ func isTypedNilPointer(v any) bool {
 // generic slice encoder and produces a sequence-of-ints instead of
 // the binary tag).
 //
-// String values are screened through stringNeedsDoubleQuoted; when
+// String values are screened through StringNeedsDoubleQuoted; when
 // that predicate matches, MarshalYAML returns an explicit yaml.Node
 // with yaml.DoubleQuotedStyle instead of the raw string. The escape
 // keeps the emitter out of the literal-block-scalar branch — yaml.v3
@@ -160,7 +160,7 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 			Value: base64.StdEncoding.EncodeToString(v),
 		}, nil
 	case string:
-		if stringNeedsDoubleQuoted(v) {
+		if StringNeedsDoubleQuoted(v) {
 			return &yaml.Node{
 				Kind:  yaml.ScalarNode,
 				Style: yaml.DoubleQuotedStyle,
@@ -190,7 +190,7 @@ type PostgresV3SafeString string
 // a plain scalar so common short values stay greppable.
 func (s PostgresV3SafeString) MarshalYAML() (any, error) {
 	v := string(s)
-	if stringNeedsDoubleQuoted(v) {
+	if StringNeedsDoubleQuoted(v) {
 		return &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Style: yaml.DoubleQuotedStyle,
@@ -211,7 +211,7 @@ func (s *PostgresV3SafeString) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// stringNeedsDoubleQuoted reports whether yaml.v3's plain/block style
+// StringNeedsDoubleQuoted reports whether yaml.v3's plain/block style
 // heuristic would mis-emit a round-trip-unsafe representation for s.
 // Reproduced in isolation against yaml.v3 v3.0.1, the landmines are:
 //
@@ -236,7 +236,7 @@ func (s *PostgresV3SafeString) UnmarshalYAML(node *yaml.Node) error {
 // sequence. The trade-off is readability — quoted strings are slightly
 // noisier than plain — but those strings already had control bytes,
 // so the loss is small in practice.
-func stringNeedsDoubleQuoted(s string) bool {
+func StringNeedsDoubleQuoted(s string) bool {
 	if s == "" {
 		return false
 	}
