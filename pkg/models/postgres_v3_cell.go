@@ -227,11 +227,14 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 	return c.Value, nil
 }
 
-// YAML local tags for the pgtype-typed cell shapes. Each tag pins a
-// concrete reconstructor in UnmarshalYAML so the on-disk mapping is
-// disambiguated from a generic map[string]any. Backward-compat probing
-// (canonical key-set match) handles untagged mappings already on disk
-// from pre-fix recordings — see decodePgUntaggedMapping below.
+// YAML local tags for the pgtype-typed cell shapes. The current
+// MarshalYAML emits *untagged* mappings (matching the released
+// keploy's reflection-based emit, which is what cross-version replay
+// in the GHA matrix encounters on Docker Hub); the primary read path
+// is decodePgUntaggedMapping below, which probes the canonical key
+// set. These tags exist for backward-compat decode of any recordings
+// from the brief window when MarshalYAML did emit them — see
+// decodePgTaggedNode.
 const (
 	pgYAMLTagNumeric    = "!pg/numeric"
 	pgYAMLTagInterval   = "!pg/interval"
@@ -313,7 +316,6 @@ func marshalPgNumericYAML(v pgtype.Numeric) (*yaml.Node, error) {
 	}
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagNumeric,
 		Content: []*yaml.Node{
 			scalarKeyNode("int"), {Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: intStr},
 			scalarKeyNode("exp"), scalarIntNode(int64(v.Exp)),
@@ -327,7 +329,6 @@ func marshalPgNumericYAML(v pgtype.Numeric) (*yaml.Node, error) {
 func marshalPgIntervalYAML(v pgtype.Interval) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagInterval,
 		Content: []*yaml.Node{
 			scalarKeyNode("microseconds"), scalarIntNode(v.Microseconds),
 			scalarKeyNode("days"), scalarIntNode(int64(v.Days)),
@@ -340,7 +341,6 @@ func marshalPgIntervalYAML(v pgtype.Interval) *yaml.Node {
 func marshalPgTimeYAML(v pgtype.Time) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagTime,
 		Content: []*yaml.Node{
 			scalarKeyNode("microseconds"), scalarIntNode(v.Microseconds),
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -351,7 +351,6 @@ func marshalPgTimeYAML(v pgtype.Time) *yaml.Node {
 func marshalPgBitsYAML(v pgtype.Bits) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagBits,
 		Content: []*yaml.Node{
 			scalarKeyNode("bytes"), {Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString(v.Bytes)},
 			scalarKeyNode("len"), scalarIntNode(int64(v.Len)),
@@ -363,7 +362,6 @@ func marshalPgBitsYAML(v pgtype.Bits) *yaml.Node {
 func marshalPgPointYAML(v pgtype.Point) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagPoint,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2Node(v.P),
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -374,7 +372,6 @@ func marshalPgPointYAML(v pgtype.Point) *yaml.Node {
 func marshalPgLineYAML(v pgtype.Line) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagLine,
 		Content: []*yaml.Node{
 			scalarKeyNode("a"), scalarFloatNode(v.A),
 			scalarKeyNode("b"), scalarFloatNode(v.B),
@@ -387,7 +384,6 @@ func marshalPgLineYAML(v pgtype.Line) *yaml.Node {
 func marshalPgLsegYAML(v pgtype.Lseg) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagLseg,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2SeqNode(v.P[:]),
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -398,7 +394,6 @@ func marshalPgLsegYAML(v pgtype.Lseg) *yaml.Node {
 func marshalPgBoxYAML(v pgtype.Box) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagBox,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2SeqNode(v.P[:]),
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -409,7 +404,6 @@ func marshalPgBoxYAML(v pgtype.Box) *yaml.Node {
 func marshalPgPathYAML(v pgtype.Path) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagPath,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2SeqNode(v.P),
 			scalarKeyNode("closed"), scalarBoolNode(v.Closed),
@@ -421,7 +415,6 @@ func marshalPgPathYAML(v pgtype.Path) *yaml.Node {
 func marshalPgPolygonYAML(v pgtype.Polygon) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagPolygon,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2SeqNode(v.P),
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -432,7 +425,6 @@ func marshalPgPolygonYAML(v pgtype.Polygon) *yaml.Node {
 func marshalPgCircleYAML(v pgtype.Circle) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagCircle,
 		Content: []*yaml.Node{
 			scalarKeyNode("p"), marshalVec2Node(v.P),
 			scalarKeyNode("r"), scalarFloatNode(v.R),
@@ -444,7 +436,6 @@ func marshalPgCircleYAML(v pgtype.Circle) *yaml.Node {
 func marshalPgTIDYAML(v pgtype.TID) *yaml.Node {
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagTID,
 		Content: []*yaml.Node{
 			scalarKeyNode("blocknumber"), scalarIntNode(int64(v.BlockNumber)),
 			scalarKeyNode("offsetnumber"), scalarIntNode(int64(v.OffsetNumber)),
@@ -478,7 +469,6 @@ func marshalPgTSVectorYAML(v pgtype.TSVector) *yaml.Node {
 	}
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagTSVector,
 		Content: []*yaml.Node{
 			scalarKeyNode("lexemes"), lexemes,
 			scalarKeyNode("valid"), scalarBoolNode(v.Valid),
@@ -486,17 +476,18 @@ func marshalPgTSVectorYAML(v pgtype.TSVector) *yaml.Node {
 	}
 }
 
-// marshalPgHstoreYAML emits an hstore as a tagged mapping carrying the
-// raw key/value pairs. SQL-NULL values inside the hstore (the `*string`
-// being nil) are emitted as YAML null so the round-trip preserves the
-// nil-vs-empty-string distinction the codec dispatches on.
+// marshalPgHstoreYAML emits an hstore as an untagged mapping carrying
+// the raw key/value pairs. SQL-NULL values inside the hstore (the
+// `*string` being nil) are emitted as YAML null so the round-trip
+// preserves the nil-vs-empty-string distinction the codec dispatches
+// on.
 func marshalPgHstoreYAML(v pgtype.Hstore) *yaml.Node {
 	keys := make([]string, 0, len(v))
 	for k := range v {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	out := &yaml.Node{Kind: yaml.MappingNode, Tag: pgYAMLTagHstore}
+	out := &yaml.Node{Kind: yaml.MappingNode}
 	out.Content = make([]*yaml.Node, 0, 2*len(keys))
 	for _, k := range keys {
 		val := v[k]
@@ -513,7 +504,7 @@ func marshalPgHstoreYAML(v pgtype.Hstore) *yaml.Node {
 	return out
 }
 
-// marshalPgRangeYAML emits Range[any] as a tagged mapping. Lower and
+// marshalPgRangeYAML emits Range[any] as an untagged mapping. Lower and
 // Upper recurse through PostgresV3Cell.MarshalYAML so the bound element
 // type stays per-cohort (int4 → int32, tstzrange → time.Time, numrange
 // → pgtype.Numeric, etc.) — same recursion pattern as the gob path.
@@ -536,7 +527,6 @@ func marshalPgRangeYAML(v pgtype.Range[any]) (*yaml.Node, error) {
 	}
 	return &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  pgYAMLTagRange,
 		Content: []*yaml.Node{
 			scalarKeyNode("lower"), lowerNode,
 			scalarKeyNode("upper"), upperNode,
@@ -548,7 +538,7 @@ func marshalPgRangeYAML(v pgtype.Range[any]) (*yaml.Node, error) {
 }
 
 func marshalPgMultirangeYAML(v pgtype.Multirange[pgtype.Range[any]]) (*yaml.Node, error) {
-	out := &yaml.Node{Kind: yaml.SequenceNode, Tag: pgYAMLTagMultirange}
+	out := &yaml.Node{Kind: yaml.SequenceNode}
 	out.Content = make([]*yaml.Node, 0, len(v))
 	for i, r := range v {
 		n, err := marshalPgRangeYAML(r)
@@ -793,26 +783,29 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 		c.Value = raw
 		return nil
 	}
-	// Tag-driven dispatch for the pgtype-shaped cells (mapping or
-	// sequence node carrying a `!pg/<name>` local tag). MarshalYAML
-	// emits these explicitly; the tag uniquely identifies the
-	// reconstructor without depending on key-set heuristics.
+	// Backward-compat: a `!pg/<name>` local tag on the node selects a
+	// specific reconstructor without depending on key-set heuristics.
+	// MarshalYAML no longer emits these — the cross-version GHA matrix
+	// (PR-built recorder, released-keploy replayer) cannot tolerate
+	// custom tags the released binary doesn't register — but recordings
+	// from the brief window when the tag-driven encoder shipped still
+	// decode through this path.
 	if v, ok, err := decodePgTaggedNode(node); err != nil {
 		return err
 	} else if ok {
 		c.Value = v
 		return nil
 	}
-	// Backward-compat: untagged mapping that looks like one of the
-	// pgtype shapes (e.g. listmonk recordings written before the
-	// tag-driven encoder shipped). Probe the canonical key set and
-	// route to the right reconstructor; if nothing matches, fall
-	// through to the generic any-decode path.
+	// Primary read path: untagged mapping that looks like one of the
+	// pgtype shapes (the on-disk shape released keploy emits and the
+	// shape this version emits since the !pg/<name> tags were dropped).
+	// Probe the canonical key set and route to the right reconstructor;
+	// if nothing matches, fall through to the generic any-decode path.
 	//
 	// `!!map` is yaml.v3's auto-resolved tag for any plain mapping
-	// without an explicit local tag — that's the shape pre-fix
-	// recordings carry on disk, so we treat it the same as an empty
-	// tag string for backward-compat probing.
+	// without an explicit local tag — that's the shape current and
+	// pre-tagged recordings both carry on disk, so we treat it the
+	// same as an empty tag string for the canonical-key-set probe.
 	if node.Kind == yaml.MappingNode && (node.Tag == "" || node.Tag == "!!map") {
 		if v, ok, err := decodePgUntaggedMapping(node); err != nil {
 			return err
@@ -888,12 +881,17 @@ func decodePgTaggedNode(node *yaml.Node) (any, bool, error) {
 
 // decodePgUntaggedMapping inspects an untagged MappingNode for one of
 // the canonical pgtype key sets and routes to the matching
-// reconstructor. Used for backward compatibility with on-disk
-// recordings that pre-date the `!pg/<name>` tag — e.g. listmonk's
-// pre-fix mocks.yaml carries Numeric as a bare `{int, exp, nan,
-// infinitymodifier, valid}` mapping. Only key sets that uniquely
-// identify a single pgtype shape are probed; ambiguous shapes
-// (Point/Lseg/Box/Polygon all match `{p, valid}`) require the tag.
+// reconstructor. This is the primary read path: MarshalYAML emits
+// untagged mappings (for cross-version compat with released keploy
+// on Docker Hub, whose YAML library doesn't know the `!pg/<name>`
+// local tags), and listmonk's pre-fix mocks.yaml shape — Numeric as a
+// bare `{int, exp, nan, infinitymodifier, valid}` mapping — flows
+// through the same path. Only key sets that uniquely identify a
+// single pgtype shape are probed; ambiguous shapes (Point/Lseg/Box/
+// Polygon all match `{p, valid}`) cannot be recovered to their
+// concrete Go type from an untagged mapping alone — those decode as
+// `map[string]any`, matching how released keploy's reflection emit
+// also rehydrates them.
 func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 	keys := pgMappingKeySet(node)
 	if keys == nil {

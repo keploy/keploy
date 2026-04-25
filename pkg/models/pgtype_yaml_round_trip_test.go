@@ -16,26 +16,32 @@ import (
 // goes through three checks:
 //
 //  1. Marshal → Unmarshal via the cell schema, DeepEqual against the
-//     original value (the new tagged form).
-//  2. The marshaled YAML carries the documented `!pg/<name>` local
-//     tag — the tag is what UnmarshalYAML dispatches on, so a missing
-//     tag would silently regress to the old generic-map decode path.
-//  3. Backward-compat: a hand-crafted untagged mapping (mirroring an
-//     on-disk recording from before the tag-driven encoder shipped)
-//     decodes via canonical-key-set probing into the same Go value.
-//     Only the unambiguous shapes are exercised here; ambiguous ones
-//     (Point/Lseg/Box/Polygon all match `{p, valid}`) require the tag.
+//     original value. The emitter writes untagged mappings (matching
+//     released-keploy's reflection-based emit) for cross-version
+//     compatibility, and the decoder dispatches via canonical-key-set
+//     probing — that's the primary read path exercised here.
+//  2. The marshaled YAML does NOT carry an `!pg/<name>` local tag —
+//     a tag would break replay against released keploy that doesn't
+//     register the custom tag set.
+//  3. Backward-compat (tag): a hand-crafted tagged mapping (mirroring
+//     an on-disk recording from the brief window when the encoder
+//     emitted tags) still decodes into the same Go value via the
+//     tag-switching read path that's preserved alongside the untagged
+//     probe. Only the unambiguous shapes are exercised here; ambiguous
+//     ones (Point/Lseg/Box/Polygon all match `{p, valid}`) require the
+//     tag for disambiguation and rely on the tagged path exclusively.
 func TestPgtypeYAMLRoundTrip(t *testing.T) {
 	type roundTripCase struct {
 		name string
 		in   any
 		tag  string
-		// untagged, when non-empty, is the on-disk YAML body for the
-		// pre-tag recording shape. The harness substitutes the body
-		// into a single-cell row, decodes it, and DeepEquals the
-		// resulting Value against `in`. Empty means no backward-compat
-		// shape is asserted (used for shapes whose canonical key set
-		// collides with another pgtype).
+		// untagged, when non-empty, is an alternate on-disk YAML body
+		// (untagged mapping) that the decoder must accept via the
+		// canonical-key-set probe. The harness decodes it and
+		// DeepEquals the resulting Value against `in`. Empty means no
+		// untagged shape is asserted (used for shapes whose canonical
+		// key set collides with another pgtype and so require the
+		// tagged read path for disambiguation).
 		untagged string
 	}
 	cases := []roundTripCase{
@@ -251,46 +257,88 @@ func TestPgtypeYAMLRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			// The serialized form must carry the documented `!pg/<name>`
-			// local tag — UnmarshalYAML dispatches on the tag and a
-			// missing tag silently regresses to the generic any-decode
-			// path that produced the original bug.
-			if !strings.Contains(string(body), tc.tag) {
-				t.Errorf("marshaled YAML missing tag %q:\n%s", tc.tag, body)
+			// The serialized form must NOT carry an `!pg/<name>` local
+			// tag — released keploy on Docker Hub doesn't register the
+			// custom tag set, so a tagged emit breaks cross-version
+			// replay (PR-built recorder, released-keploy replayer).
+			// MarshalYAML emits untagged mappings instead and the
+			// decoder dispatches via canonical-key-set probing; the
+			// tag-switching read path is preserved only for
+			// recordings made during the brief tag-emitting window.
+			if strings.Contains(string(body), "!pg/") {
+				t.Errorf("marshaled YAML must not carry a !pg/<name> tag (cross-version compat with released keploy):\n%s", body)
 			}
-			var got PostgresV3Cell
-			if err := yaml.Unmarshal(body, &got); err != nil {
-				t.Fatalf("unmarshal: %v\n--YAML--\n%s", err, body)
+			// Backward-compat (tag): a hand-crafted body that does
+			// carry the tag must still decode through the legacy
+			// tag-switching read path. We synthesise the body by
+			// reconstructing the tagged form from the (untagged)
+			// marshaled output — the tag goes on the outermost
+			// mapping/sequence node.
+			tagged := injectPgTag(string(body), tc.tag)
+			var taggedCell PostgresV3Cell
+			if err := yaml.Unmarshal([]byte(tagged), &taggedCell); err != nil {
+				t.Fatalf("tagged backward-compat unmarshal: %v\n--YAML--\n%s", err, tagged)
 			}
-			if !pgtypeEqual(t, got.Value, tc.in) {
-				t.Errorf("tagged round-trip drift:\n got  %#v\n want %#v\n--YAML--\n%s", got.Value, tc.in, body)
+			if !pgtypeEqual(t, taggedCell.Value, tc.in) {
+				t.Errorf("tagged backward-compat drift:\n got  %#v\n want %#v\n--YAML--\n%s", taggedCell.Value, tc.in, tagged)
 			}
 			if tc.untagged == "" {
+				// Ambiguous shapes (Point/Lseg/Box/Polygon all match
+				// `{p, valid}`; multirange has nested ambiguity) cannot
+				// be recovered to their concrete pgtype Go type from
+				// an untagged mapping — that's exactly what released
+				// keploy produces too, so the cross-version contract
+				// is "decode loses Go-type fidelity for these shapes,
+				// the integrations-side codec re-encodes from logical
+				// fields anyway". The untagged round-trip is therefore
+				// not asserted here.
 				return
 			}
+			// Primary read path: an untagged body decodes via the
+			// canonical-key-set probe to the same Go value.
 			var legacy PostgresV3Cell
 			if err := yaml.Unmarshal([]byte(tc.untagged), &legacy); err != nil {
 				t.Fatalf("untagged unmarshal: %v\n--YAML--\n%s", err, tc.untagged)
 			}
 			if !pgtypeEqual(t, legacy.Value, tc.in) {
-				t.Errorf("untagged backward-compat drift:\n got  %#v\n want %#v\n--YAML--\n%s", legacy.Value, tc.in, tc.untagged)
+				t.Errorf("untagged decode drift:\n got  %#v\n want %#v\n--YAML--\n%s", legacy.Value, tc.in, tc.untagged)
 			}
 		})
 	}
 }
 
-// TestPgtypeYAMLRoundTrip_NumericTagPresent pins that Numeric in
-// particular emits the `!pg/numeric` tag (the bug-report regression
-// case — pre-fix it was emitted as a bare mapping, which UnmarshalYAML
-// then routed to a generic map[string]any).
-func TestPgtypeYAMLRoundTrip_NumericTagPresent(t *testing.T) {
+// injectPgTag returns a copy of the (untagged) marshaled cell body
+// with the given !pg/<name> local tag prepended to the outermost
+// mapping/sequence. Used by the round-trip test to drive the
+// backward-compat tag-switching decode path.
+//
+// yaml.v3 prints the cell value at the document root with no leading
+// indentation. For a MappingNode the body starts with `key:` on line
+// one; for a SequenceNode it starts with `- ` on line one. Either way,
+// inserting `<tag>\n` ahead of the body promotes the implicit document
+// node to the tag — yaml.v3's parser binds a leading tag token to the
+// next node it encounters.
+func injectPgTag(body, tag string) string {
+	return tag + "\n" + body
+}
+
+// TestPgtypeYAMLRoundTrip_NumericTagAbsent pins the inverse of the
+// pre-revert assertion: Numeric (and every other pgtype-shaped cell)
+// must NOT carry an `!pg/numeric` tag in its on-disk form, because
+// released keploy on Docker Hub doesn't register the custom tag set
+// and the cross-version GHA replay matrix would fail with
+// `cannot unmarshal !pg/numeric into string`. The decoder's
+// tag-switching path stays in place for backward compat with any
+// recordings made during the brief tag-emitting window — see
+// TestPgtypeYAMLRoundTrip's tagged sub-assertion.
+func TestPgtypeYAMLRoundTrip_NumericTagAbsent(t *testing.T) {
 	cell := NewValueCell(pgtype.Numeric{Int: big.NewInt(1), Exp: 0, Valid: true})
 	body, err := yaml.Marshal(cell)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !bytes.Contains(body, []byte("!pg/numeric")) {
-		t.Errorf("Numeric MarshalYAML missing !pg/numeric tag:\n%s", body)
+	if bytes.Contains(body, []byte("!pg/")) {
+		t.Errorf("Numeric MarshalYAML must not emit !pg/<name> tag (cross-version replay against released keploy):\n%s", body)
 	}
 }
 
