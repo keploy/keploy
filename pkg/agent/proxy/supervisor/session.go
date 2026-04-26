@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -124,6 +125,24 @@ type Session struct {
 	// Nil is safe.
 	OnPendingCleared func()
 
+	// RouteMocksViaSyncMock, when true, makes EmitMock deliver the
+	// mock via the package-singleton syncMock.SyncMockManager
+	// (AddMock) instead of directly sending on s.Mocks. Production
+	// recordViaSupervisor sets this to true so the V2 path gets the
+	// same firstReqSeen session-window buffering, lifetime
+	// derivation, and drop accounting that legacy parsers enjoy —
+	// without it, V2-recorded mocks captured before the first app
+	// test request fall outside the session window and are lost at
+	// replay.
+	//
+	// Tests that wire a bare mocks channel and want to observe the
+	// emitted mocks directly should leave this false (default) so
+	// the direct-channel fallback below still fires. The two paths
+	// both run the OnMockRecorded hook chain and the ClientConnID
+	// / monotonic-timestamp normalisation — they only differ on the
+	// final handoff.
+	RouteMocksViaSyncMock bool
+
 	// --- Internal bookkeeping ---
 
 	mockIncomplete   atomic.Bool
@@ -199,14 +218,73 @@ func (s *Session) IsMockIncomplete() bool {
 // is dropped on the floor and the incomplete flag is cleared, matching
 // the "partial mocks are dropped" invariant).
 //
-// EmitMock honours context cancellation: if Ctx is done before the
-// send succeeds, Ctx.Err() is returned. The caller's post-record hook
-// chain runs synchronously before the send so wrappers can annotate.
+// Context cancellation semantics differ between the two delivery paths:
+//
+//   - Direct-channel path (RouteMocksViaSyncMock=false, s.Mocks bound):
+//     EmitMock selects between `s.Mocks <- m` and `<-ctx.Done()`. While
+//     the send is not yet ready, cancellation causes EmitMock to return
+//     ctx.Err(). If ctx is ALREADY cancelled AND the send is also ready
+//     (e.g. s.Mocks is buffered with spare capacity), Go's select is
+//     free to pick either case — the outcome is non-deterministic:
+//     EmitMock may emit the mock and return nil, OR it may pick the
+//     ctx.Done() arm and return ctx.Err() without emitting. Once the
+//     send case wins, delivery is guaranteed; callers that want a
+//     strict "no emit past cancel" barrier must probe ctx.Err()
+//     themselves before calling EmitMock.
+//
+//   - SyncMock path (RouteMocksViaSyncMock=true): ctx is checked ONCE
+//     before calling mgr.AddMock. If ctx was already cancelled,
+//     EmitMock returns ctx.Err() without touching the manager. If ctx
+//     cancels AFTER the AddMock call starts, AddMock runs to completion
+//     (buffers the mock, or blocks in its own bounded sendToOutChan
+//     up to sendBudget) and EmitMock returns nil. AddMock may also
+//     drop the mock under backpressure/memory-pause without signalling
+//     the caller — the drop is recorded on the manager's drop counter
+//     instead. This is a deliberate asymmetry: the syncMock manager
+//     owns its own lifecycle so best-effort delivery with ctx-probe
+//     on entry is the cleanest fit; forcing ctx through would
+//     require threading it into every AddMock call site in the legacy
+//     record path too.
+//
+// Caller's post-record hook chain (OnMockRecorded) runs synchronously
+// before either delivery branch so wrappers can annotate.
 //
 // It is safe to call EmitMock with a nil session (returns nil); this
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
+	return s.emitMockCore(m, false)
+}
+
+// EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
+// parsers that have just reconstructed an in-flight invocation from
+// chunks the relay observed BEFORE ctx cancelled. The standard EmitMock
+// short-circuits via the SyncMock-path ctx pre-check (and the direct-
+// channel select-against-ctx) which would discard exactly the work
+// the shutdown drain just recovered.
+//
+// Semantics relative to EmitMock:
+//
+//   - SyncMock path: skip the s.Ctx pre-check and call mgr.AddMock
+//     unconditionally. AddMock owns its own lifecycle (memory-pause,
+//     drop accounting, sendBudget) and remains the right place to
+//     enforce shutdown-time backpressure.
+//
+//   - Direct-channel path: replace the select-against-ctx with a
+//     non-blocking best-effort send. If the channel is full at
+//     shutdown the mock is dropped (the alternative — blocking on a
+//     channel whose consumer is itself shutting down — would deadlock
+//     the parser). Callers that need stricter delivery semantics
+//     during shutdown should serialise through the SyncMock manager.
+//
+// All other invariants (mockIncomplete gate, ClientConnID
+// propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
+// chain, OnPendingCleared) match EmitMock byte-for-byte.
+func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
+	return s.emitMockCore(m, true)
+}
+
+func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s == nil || m == nil {
 		return nil
 	}
@@ -251,6 +329,63 @@ func (s *Session) EmitMock(m *models.Mock) error {
 		hook(m)
 	}
 
+	// Route through the package-singleton SyncMockManager when the
+	// caller opts in. Legacy parsers (http, mysql, generic, etc.)
+	// call (*SyncMockManager).AddMock — obtained via syncMock.Get() —
+	// because it does:
+	//
+	//   1. Lifetime derivation from Metadata["type"] (session vs
+	//      per-test), stamped onto TestModeInfo.Lifetime.
+	//   2. firstReqSeen buffering — mocks captured BEFORE the first
+	//      app test request are treated as "session" scope and
+	//      re-delivered on every replay; mocks after belong to the
+	//      currently-active test window. Dispatchers that skip this
+	//      will emit per-test mocks even for startup-phase traffic,
+	//      and replay against a recording loses them because the
+	//      session window is empty.
+	//   3. Memory-pause gating and drop counters.
+	//
+	// Tests that wire a bare s.Mocks channel and want to observe
+	// emitted mocks directly leave RouteMocksViaSyncMock false so
+	// the direct-channel fallback below runs. Production
+	// recordViaSupervisor sets it true.
+	if s.RouteMocksViaSyncMock {
+		if mgr := syncMock.Get(); mgr != nil {
+			// Best-effort ctx probe. mgr.AddMock (the SyncMock
+			// manager method obtained from syncMock.Get()) doesn't
+			// observe s.Ctx — it takes its own mutex and may sit
+			// in sendToOutChan up to the manager's internal
+			// sendBudget without signalling cancellation back to
+			// us. A pre-check at least catches the "already
+			// cancelled" case so we don't spend mgr.AddMock's
+			// bounded wait on work the parser already abandoned.
+			// Post-call cancellation during mgr.AddMock's send is
+			// documented as a semantic difference from the
+			// direct-channel branch (see the EmitMock doc comment
+			// above); forcing full ctx-honoring into AddMock would
+			// require threading ctx through every legacy
+			// record-path call site too.
+			//
+			// Shutdown variant SKIPS this pre-check: the parser has
+			// just reconstructed an invocation from chunks captured
+			// before ctx cancelled, and discarding that work because
+			// ctx is now done would lose the very last mock on a
+			// connection in flight at SIGINT.
+			if !shutdown {
+				if ctx := s.Ctx; ctx != nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+			}
+			mgr.AddMock(m)
+			if s.OnPendingCleared != nil {
+				s.OnPendingCleared()
+			}
+			return nil
+		}
+	}
+
 	if s.Mocks == nil {
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
@@ -266,6 +401,21 @@ func (s *Session) EmitMock(m *models.Mock) error {
 			s.OnPendingCleared()
 		}
 		return nil
+	}
+	if shutdown {
+		// Non-blocking send: at shutdown the consumer is also
+		// winding down so a blocked send would deadlock the
+		// parser. Drop on full channel; callers that want stricter
+		// delivery during shutdown should route via SyncMock.
+		select {
+		case s.Mocks <- m:
+			if s.OnPendingCleared != nil {
+				s.OnPendingCleared()
+			}
+			return nil
+		default:
+			return nil
+		}
 	}
 	select {
 	case s.Mocks <- m:

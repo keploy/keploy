@@ -144,7 +144,7 @@ check_for_errors record.log
 
 # Replay: Keploy replays the captured gRPC calls against the server.
 echo "🧪 Replaying recorded tests..."
-"$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false --disableMockUpload 2>&1 | tee test.log || true
+"$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test.log || true
 
 check_for_errors test.log
 if ! check_test_report; then
