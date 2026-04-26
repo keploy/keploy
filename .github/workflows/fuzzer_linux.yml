@@ -245,9 +245,26 @@ jobs:
           RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
           REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
           POSTGRES_FUZZER_BIN:  ${{ steps.postgres_fuzzer.outputs.path }}
+          # RCA instrumentation for postgres-v3 per-test window misalignment
+          # (see PR #4126). Logs live PG bind values on replay matcher misses
+          # so the uploaded recordings can be cross-checked offline.
+          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/postgres/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/postgres/golang-linux.sh
+
+      - name: Upload Postgres Fuzzer recorded mocks and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-fuzzer-${{ matrix.config.job }}-recordings
+          path: |
+            keploy/
+            golden/
+            record.txt
+            test.txt
+          if-no-files-found: warn
+          retention-days: 7
 
 
   mongo_fuzzer:
