@@ -2746,6 +2746,13 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		if err := dec.Decode(&n); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode tsvector length: %w", err)
 		}
+		// Bounds-check before allocating: gob input is untrusted (see
+		// the cellTagSlice arm below for the full threat-model note).
+		// A negative or absurd length must not drive a runtime panic
+		// in make() or an unbounded allocation. Symmetric guard.
+		if n < 0 {
+			return fmt.Errorf("PostgresV3Cell.GobDecode tsvector length: invalid negative length %d", n)
+		}
 		lexemes := make([]pgtype.TSVectorLexeme, n)
 		for i := int32(0); i < n; i++ {
 			if err := dec.Decode(&lexemes[i].Word); err != nil {
@@ -2754,6 +2761,9 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 			var pn int32
 			if err := dec.Decode(&pn); err != nil {
 				return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d pos count: %w", i, err)
+			}
+			if pn < 0 {
+				return fmt.Errorf("PostgresV3Cell.GobDecode tsvector lex %d pos count: invalid negative length %d", i, pn)
 			}
 			poss := make([]pgtype.TSVectorPosition, pn)
 			for j := int32(0); j < pn; j++ {
@@ -2793,6 +2803,11 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		var n int32
 		if err := dec.Decode(&n); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode hstore length: %w", err)
+		}
+		// Bounds-check before allocating: gob input is untrusted (see
+		// the cellTagSlice arm below for the full threat-model note).
+		if n < 0 {
+			return fmt.Errorf("PostgresV3Cell.GobDecode hstore length: invalid negative length %d", n)
 		}
 		out := make(pgtype.Hstore, n)
 		for i := int32(0); i < n; i++ {
@@ -2853,6 +2868,11 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		if err := dec.Decode(&n); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode multirange length: %w", err)
 		}
+		// Bounds-check before allocating: gob input is untrusted (see
+		// the cellTagSlice arm below for the full threat-model note).
+		if n < 0 {
+			return fmt.Errorf("PostgresV3Cell.GobDecode multirange length: invalid negative length %d", n)
+		}
 		out := make(pgtype.Multirange[pgtype.Range[any]], n)
 		for i := int32(0); i < n; i++ {
 			var rangeBytes []byte
@@ -2880,6 +2900,15 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		var n int32
 		if err := dec.Decode(&n); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode jsonb length: %w", err)
+		}
+		// Bounds-check before allocating: gob input is untrusted (see
+		// the cellTagSlice arm below for the full threat-model note).
+		// A negative length on a map make() doesn't itself panic, but
+		// we still reject it eagerly so the loop's `for i < n` doesn't
+		// go negative-iterations and surface the corruption later as
+		// a confusing nested decode error.
+		if n < 0 {
+			return fmt.Errorf("PostgresV3Cell.GobDecode jsonb length: invalid negative length %d", n)
 		}
 		out := make(map[string]interface{}, n)
 		for i := int32(0); i < n; i++ {
