@@ -29,6 +29,88 @@ func stubIngressPaused(t *testing.T, fn func() bool) {
 	})
 }
 
+// TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk locks in the contract
+// that LastReadTime, when called after a successful Read, returns the readAt
+// of the chunk whose data the most recent Read returned bytes from — never
+// a chunk that is queued but not yet consumed.
+//
+// This is the exact race that broke listmonk-postgres on PR #4130's first
+// pass: the previous bridge+pipe design stored chunk N+1's ts BEFORE
+// pipe.Write blocked, so a parser that finished consuming chunk N and
+// queried LastReadTime before the bridge advanced past pipe.Write would
+// observe the next chunk's ts as the current request's reqTimestamp,
+// pushing per-test postgres mocks out of the window. Empty-body GETs
+// hit it deterministically because the parser never re-entered Read
+// between ReadRequest and LastReadTime.
+func TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	f := newAsyncPipeFeeder(0, zap.NewNop())
+
+	// Enqueue three chunks at distinct times.
+	t1 := time.Now()
+	t2 := t1.Add(15 * time.Millisecond)
+	t3 := t2.Add(15 * time.Millisecond)
+	f.ch <- timedChunk{data: []byte("AAA"), readAt: t1}
+	f.ch <- timedChunk{data: []byte("BBB"), readAt: t2}
+	f.ch <- timedChunk{data: []byte("CCC"), readAt: t3}
+	close(f.ch)
+
+	// Before any Read, LastReadTime is zero.
+	if !f.LastReadTime().IsZero() {
+		t.Fatalf("expected zero LastReadTime before any Read, got %v", f.LastReadTime())
+	}
+
+	read := func(n int) string {
+		buf := make([]byte, n)
+		got, err := f.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("unexpected Read error: %v", err)
+		}
+		return string(buf[:got])
+	}
+
+	// Consume chunk 1 fully. LastReadTime should equal t1, NOT t2 — even
+	// though chunk 2 is already queued.
+	if got := read(3); got != "AAA" {
+		t.Fatalf("first read: want AAA, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t1) {
+		t.Fatalf("after chunk 1: want %v, got %v (overshoot to next chunk)", t1, f.LastReadTime())
+	}
+
+	// Consume chunk 2 fully. LastReadTime should equal t2.
+	if got := read(3); got != "BBB" {
+		t.Fatalf("second read: want BBB, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t2) {
+		t.Fatalf("after chunk 2: want %v, got %v", t2, f.LastReadTime())
+	}
+
+	// Partial read of chunk 3 still updates LastReadTime to t3 (the
+	// chunk was popped on the partial read; subsequent reads draw
+	// from the same chunk).
+	if got := read(2); got != "CC" {
+		t.Fatalf("third read partial: want CC, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t3) {
+		t.Fatalf("after partial chunk 3: want %v, got %v", t3, f.LastReadTime())
+	}
+	// Drain the rest from the same chunk.
+	if got := read(8); got != "C" {
+		t.Fatalf("third read drain: want C, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t3) {
+		t.Fatalf("after full chunk 3: want %v, got %v", t3, f.LastReadTime())
+	}
+
+	// Channel closed, no more chunks. EOF.
+	buf := make([]byte, 4)
+	if _, err := f.Read(buf); err != io.EOF {
+		t.Fatalf("expected EOF after drain, got %v", err)
+	}
+}
+
 func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
 	paused := false
 	stubIngressPaused(t, func() bool { return paused })

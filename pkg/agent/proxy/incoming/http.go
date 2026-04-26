@@ -90,50 +90,68 @@ func (b *httpBodyCaptureBuffer) Reset() {
 }
 
 // timedChunk pairs a forwarded byte slice with the time the proxy's
-// io.Copy goroutine read it from the source socket. The bridge stamps
-// `lastReadNano` with this time AFTER the chunk has been consumed by
-// the parser-side pipe reader, giving the parser an accurate "when did
-// these bytes arrive at the proxy" anchor — which is what we want for
-// the per-test window, not "when did the parser get scheduled to look
-// at this byte stream."
+// io.Copy goroutine read it from the source socket. asyncPipeFeeder.Read
+// stores chunk.readAt into lastReadNano BEFORE returning any bytes from
+// the chunk, so a subsequent LastReadTime call from the same parser
+// goroutine sees the chunk's timestamp.
 type timedChunk struct {
 	data   []byte
 	readAt time.Time
 }
 
-// asyncPipeFeeder is a non-blocking writer used in the forwarding path.
-// It copies incoming bytes to a buffered channel; a separate bridge goroutine
-// drains the channel into an io.PipeWriter. This guarantees the forwarding
-// goroutine (io.Copy) is never blocked by capture — even if the parser is slow
-// or CaptureHook blocks on a full channel.
+// asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
+// io.Copy on the forwarding path writes into it via Write (non-blocking,
+// drops on backpressure); the parseStreamingHTTP goroutine reads from
+// it via Read.
 //
-// Each enqueued chunk carries a `readAt` timestamp captured at the moment
-// io.Copy handed bytes to the feeder (i.e., immediately after the source
-// socket Read returned). After the bridge successfully writes the chunk
-// to the pipe — meaning the parser has consumed those bytes — the feeder
-// stores the chunk's `readAt` in `lastReadNano`. Parsers query
-// LastReadTime() right after consuming a request/response so the captured
-// timestamp reflects byte arrival, not parser-iteration-start time.
+// Earlier revisions placed an io.Pipe + a separate bridge goroutine
+// between Write and Read so the forwarding path was decoupled from
+// parser stalls. That design had a window-attribution bug: the bridge
+// stored chunk N+1's readAt into lastReadNano BEFORE pipe.Write blocked
+// on chunk N+1, so a parser that finished consuming chunk N and then
+// queried LastReadTime could observe chunk N+1's ts (the *next*
+// request's arrival time) as the *current* request's reqTimestamp.
+// Empty-body GETs hit this every time because the parser does not
+// trigger another pipe.Read between ReadRequest's return and its
+// LastReadTime call, so there is no scheduling barrier protecting
+// the read of lastReadNano. The integration listmonk-postgres workload
+// reproduced it as 403-invalid-session failures on tightly packed
+// per-test GETs whose session-lookup mocks ended up attributed to the
+// previous test's window.
 //
-// Graceful degradation: when memory pressure is detected, the max capture size
-// is exceeded, or the channel fills up, the feeder silently stops capturing.
-// The forwarding path is never affected.
+// The simpler design below keeps the channel for backpressure but
+// removes the bridge: Read pulls one chunk at a time from the channel
+// and updates lastReadNano synchronously before returning data. The
+// timestamp store and the data hand-off happen on the same goroutine
+// as the parser's eventual LastReadTime call, so there is no race.
+//
+// Graceful degradation is unchanged: memory pressure, exceeding
+// maxSize, or a full channel cause the feeder to silently stop
+// capturing while forwarding continues unimpacted.
 type asyncPipeFeeder struct {
-	ch           chan timedChunk
-	pw           *io.PipeWriter
-	closed       atomic.Bool
-	written      atomic.Int64
-	maxSize      int64
-	logger       *zap.Logger
-	closeOnce    sync.Once
+	ch        chan timedChunk
+	closed    atomic.Bool
+	written   atomic.Int64
+	maxSize   int64
+	logger    *zap.Logger
+	closeOnce sync.Once
+
+	// cur and lastReadNano are touched only from the parser goroutine
+	// (the single Read caller), so no synchronization is needed for
+	// either. The atomic is for Go's memory model rather than any
+	// cross-goroutine visibility concern: we want LastReadTime callers
+	// from the same goroutine to see the most recent store, which a
+	// plain field would also provide, but atomic.Int64 keeps the type
+	// honest if a future caller queries from another goroutine.
+	cur          []byte
 	lastReadNano atomic.Int64
 }
 
-// newAsyncPipeFeeder creates a feeder and returns the pipe reader end for
-// the streaming parser. The bridge goroutine is started automatically.
-func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) (*asyncPipeFeeder, *io.PipeReader) {
-	pr, pw := io.Pipe()
-	f := &asyncPipeFeeder{
+// newAsyncPipeFeeder creates a feeder used as both the forwarding-side
+// io.Writer and the parser-side io.Reader. There is no separate bridge
+// goroutine; Read pulls chunks from the channel directly.
+func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) *asyncPipeFeeder {
+	return &asyncPipeFeeder{
 		// 512 slots ≈ 16MB at 32KB/chunk. Must be large enough that
 		// the channel never overflows during normal operation — a single
 		// 5MB response body needs ~160 slots, and brief pipeline stalls
@@ -142,56 +160,48 @@ func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) (*asyncPipeFeeder, *io.
 		// rest of the connection because the HTTP stream becomes
 		// unrecoverable.
 		ch:      make(chan timedChunk, 512),
-		pw:      pw,
 		maxSize: int64(maxSize),
 		logger:  logger,
 	}
-	go f.bridge()
-	return f, pr
 }
 
-// bridge drains the buffered channel into the pipe writer. It runs in its
-// own goroutine so the forwarding goroutine never blocks on pipe writes.
-// Exits when the channel is closed (by Close) or on pipe write error.
+// Read returns bytes from the current chunk's data, pulling a new chunk
+// from the channel when the current one is exhausted. The new chunk's
+// readAt is stored into lastReadNano BEFORE any of its data is returned,
+// so a parser that calls LastReadTime after a successful Read sees the
+// timestamp of the chunk that delivered the most recent byte.
 //
-// lastReadNano is stamped BEFORE pipe.Write rather than after. Reasoning:
-// io.Pipe.Write blocks until the reader fully consumes the slice, so once
-// Write returns the parser is already unblocked and can race ahead to
-// query LastReadTime before this goroutine gets scheduled to perform a
-// post-Write store. Storing first guarantees the parser sees a non-zero
-// timestamp for the current chunk on its very first LastReadTime call,
-// which is critical for short single-chunk requests where the parser
-// completes ReadRequest+body without triggering another pipe.Read cycle.
-// The "overshoot" risk (lastReadNano reflecting a chunk that's queued
-// but not yet consumed) is bounded to one chunk and only relevant on
-// reused connections with sub-microsecond inter-request gaps — well
-// below the granularity that matters for per-test window attribution.
-func (f *asyncPipeFeeder) bridge() {
-	defer f.pw.Close()
-	for chunk := range f.ch {
+// Read is the only consumer of the channel and only ever runs on the
+// parseStreamingHTTP goroutine; cur and lastReadNano are not shared.
+// On channel close, Read returns io.EOF, which propagates through the
+// bufio.Reader to terminate ReadRequest/ReadResponse cleanly.
+func (f *asyncPipeFeeder) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(f.cur) == 0 {
+		chunk, ok := <-f.ch
+		if !ok {
+			return 0, io.EOF
+		}
+		f.cur = chunk.data
 		if !chunk.readAt.IsZero() {
 			f.lastReadNano.Store(chunk.readAt.UnixNano())
 		}
-		if _, err := f.pw.Write(chunk.data); err != nil {
-			// Pipe reader closed (parser done). Mark closed so Write()
-			// stops enqueuing new items via its non-blocking select.
-			// Return immediately — no need to drain the channel here.
-			// Write() won't block on send (select/default), and Close()
-			// will close the channel when the forwarding goroutine finishes.
-			f.closed.Store(true)
-			return
-		}
 	}
+	n := copy(p, f.cur)
+	f.cur = f.cur[n:]
+	return n, nil
 }
 
-// Write copies p and enqueues it for the bridge goroutine. It never blocks
-// the caller. Called only from the forwarding goroutine (via io.MultiWriter).
+// Write copies p and enqueues it for the parser. It never blocks the
+// caller. Called only from the forwarding goroutine (via io.MultiWriter).
 func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 	if f.closed.Load() {
 		return len(p), nil
 	}
 	if isIngressRecordingPaused() {
-		f.shutdown() // close channel so bridge+parser exit promptly
+		f.shutdown() // close channel so the parser exits promptly
 		return len(p), nil
 	}
 	newTotal := f.written.Add(int64(len(p)))
@@ -210,7 +220,7 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 	case f.ch <- chunk:
 	default:
 		// Channel full — parser can't keep up. Stop capture entirely
-		// so bridge+parser goroutines can exit.
+		// so the parser goroutine sees io.EOF and exits.
 		f.shutdown()
 		if f.logger != nil {
 			f.logger.Debug("Capture channel full — dropping remaining test cases on this connection. "+
@@ -233,17 +243,21 @@ func (f *asyncPipeFeeder) shutdown() {
 	f.closeOnce.Do(func() { close(f.ch) })
 }
 
-// Close signals the bridge goroutine to exit. Must be called after the
-// forwarding goroutine finishes (after io.Copy returns).
+// Close signals the parser goroutine to exit by closing the chunk channel.
+// Must be called after the forwarding goroutine finishes (after io.Copy returns).
 func (f *asyncPipeFeeder) Close() {
 	f.shutdown()
 }
 
-// LastReadTime returns the arrival timestamp of the most recent chunk that
-// has been fully consumed by the parser-side pipe reader. Zero time means
-// no chunk has been delivered+consumed yet — callers should fall back to
-// time.Now() in that case (matches pre-fix behaviour). Safe to call from
-// any goroutine.
+// LastReadTime returns the arrival timestamp of the most recent chunk
+// that Read returned bytes from. Zero time means no chunk has been read
+// yet — callers should fall back to time.Now() in that case.
+//
+// Intended call site: from the parser goroutine, immediately after
+// http.ReadRequest / http.ReadResponse returns. Because the timestamp
+// store happens inside Read (same goroutine, before bytes are returned),
+// the parser is guaranteed to see the right chunk's timestamp without
+// any synchronization beyond Go's memory model.
 func (f *asyncPipeFeeder) LastReadTime() time.Time {
 	n := f.lastReadNano.Load()
 	if n == 0 {
@@ -719,15 +733,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	captureEnabled := !isIngressRecordingPaused()
 	var reqFeeder, respFeeder *asyncPipeFeeder
 	if captureEnabled {
-		var reqPipeR, respPipeR *io.PipeReader
 		// maxSize=0 disables the per-feeder total-bytes limit. With
 		// streaming capture the parser consumes data incrementally, so
 		// in-flight memory is bounded by the channel buffer plus one
 		// request/response body in the parser. The per-test-case size
 		// limit is enforced downstream in CaptureHook.
-		reqFeeder, reqPipeR = newAsyncPipeFeeder(0, logger)
-		respFeeder, respPipeR = newAsyncPipeFeeder(0, logger)
-		go pm.parseStreamingHTTP(ctx, logger, reqFeeder, respFeeder, reqPipeR, respPipeR, t, appPort)
+		reqFeeder = newAsyncPipeFeeder(0, logger)
+		respFeeder = newAsyncPipeFeeder(0, logger)
+		go pm.parseStreamingHTTP(ctx, logger, reqFeeder, respFeeder, t, appPort)
 	}
 
 	// Close connections on context cancellation (shutdown) to unblock
@@ -780,7 +793,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// by parseStreamingHTTP as each HTTP exchange completed.
 }
 
-// parseStreamingHTTP reads from request and response pipes concurrently with
+// parseStreamingHTTP reads from request and response feeders concurrently with
 // live forwarding, emitting test cases as soon as each HTTP exchange completes.
 // This avoids waiting for the connection to close before capturing test cases.
 //
@@ -788,22 +801,33 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 // self-framing (headers end with \r\n\r\n, body length from Content-Length or
 // chunked encoding), so no custom delimiter detection is needed.
 //
-// Timestamps are sourced from the feeders' LastReadTime, which is stamped at
-// io.Copy's read of the source socket (not when the parser got around to
-// looking at the bytes). Under concurrent client load the parser can run
-// arbitrarily behind the forwarder; using parser-iteration time would push
-// the recorded HTTP timestamps after the corresponding DB-side mock
-// timestamps, breaking the per-test window-attribution invariant relied on
-// by the postgres v3 / mongo v2 dispatchers. Querying LastReadTime AFTER
-// the request/response is fully consumed keeps the captured timestamp
-// pinned to the actual byte arrival even when the parser is queue-deep.
+// Timestamps are sourced from the feeders' LastReadTime, which is stamped
+// inside the feeder's Read at io.Copy's read of the source socket. Under
+// concurrent client load the parser can run arbitrarily behind the
+// forwarder; using parser-iteration time would push the recorded HTTP
+// timestamps after the corresponding DB-side mock timestamps, breaking
+// the per-test window-attribution invariant relied on by the postgres v3
+// / mongo v2 dispatchers.
+//
+// Request vs response timestamp semantics differ:
+//
+//   - reqTimestamp captures FIRST-byte arrival. Snapshot AFTER ReadRequest
+//     parses headers but BEFORE io.ReadAll consumes the body, so any
+//     outbound mocks the app issues while reading the request body
+//     (streaming uploads with side-effects) fall AFTER reqTimestamp and
+//     are correctly inside the per-test window. Capturing post-body would
+//     give last-byte semantic and silently drop those mocks.
+//
+//   - respTimestamp captures LAST-byte arrival. Snapshot AFTER io.ReadAll
+//     consumes the response body — that is when the application has
+//     finished processing the test case and any outbound mocks issued
+//     during processing have already been recorded with timestamps before
+//     this point.
 func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *zap.Logger,
-	reqFeeder, respFeeder *asyncPipeFeeder, reqR *io.PipeReader, respR *io.PipeReader, t chan *models.TestCase, appPort uint16) {
-	defer reqR.Close()
-	defer respR.Close()
+	reqFeeder, respFeeder *asyncPipeFeeder, t chan *models.TestCase, appPort uint16) {
 
-	reqReader := bufio.NewReader(reqR)
-	respReader := bufio.NewReader(respR)
+	reqReader := bufio.NewReader(reqFeeder)
+	respReader := bufio.NewReader(respFeeder)
 
 	for {
 		if isIngressRecordingPaused() {
@@ -815,11 +839,28 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 			return
 		}
 
+		// Snapshot reqTimestamp here, AFTER ReadRequest has consumed
+		// the request line + headers but BEFORE io.ReadAll consumes
+		// the body. lastReadNano now reflects the chunk that delivered
+		// the most recent bufio fill — for tightly packed connections
+		// this is the chunk holding the request's first byte; for the
+		// rare case of headers split across two chunks it is the chunk
+		// holding the last header byte (a sub-µs overshoot).
+		//
+		// This is the FIRST-byte semantic the per-test window-
+		// attribution path expects: any DB queries the app issues
+		// during request handling fall AFTER reqTimestamp and BEFORE
+		// respTimestamp, putting them inside the test's window.
+		reqTimestamp := reqFeeder.LastReadTime()
+		if reqTimestamp.IsZero() {
+			reqTimestamp = time.Now()
+		}
+
 		// Set Host header to match pkg.ParseHTTPRequest behavior
 		req.Header.Set("Host", req.Host)
 
 		// Read request body with a size cap to avoid unbounded allocations.
-		// We must consume the full body to advance the pipe reader past it
+		// We must consume the full body to advance the reader past it
 		// (HTTP framing), but only keep up to MaxTestCaseSize in memory.
 		reqBody, err := io.ReadAll(io.LimitReader(req.Body, int64(hooksUtils.MaxTestCaseSize)+1))
 		// Drain any remainder to keep the stream aligned.
@@ -827,17 +868,6 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		req.Body.Close()
 		if err != nil {
 			return
-		}
-
-		// Now that the request has been fully consumed, the feeder's
-		// LastReadTime reflects the arrival timestamp of the chunk that
-		// contained the last byte of this request. Fall back to time.Now()
-		// only if no chunk has been stamped yet (defensive — should not
-		// happen after a successful ReadRequest, since ReadRequest must
-		// have consumed at least one chunk to return).
-		reqTimestamp := reqFeeder.LastReadTime()
-		if reqTimestamp.IsZero() {
-			reqTimestamp = time.Now()
 		}
 
 		if len(reqBody) > hooksUtils.MaxTestCaseSize {
@@ -870,7 +900,10 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
-		// Same arrival-time invariant for the response side.
+		// Last-byte semantic for the response: lastReadNano now reflects
+		// the chunk that delivered the final byte of the response body,
+		// so the test window's upper bound encloses any outbound mocks
+		// issued during request handling.
 		respTimestamp := respFeeder.LastReadTime()
 		if respTimestamp.IsZero() {
 			respTimestamp = time.Now()

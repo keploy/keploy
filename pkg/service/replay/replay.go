@@ -2299,9 +2299,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	//                             (operator-driven update).
 	//   UpdateTestMapping=false → create-if-not-present: write only
 	//                             when mappings.yaml is absent for
-	//                             this test-set. Once a file exists,
-	//                             we leave it alone — repeat test
-	//                             runs don't churn it.
+	//                             this test-set AND we have at least
+	//                             one populated test→mocks entry.
+	//                             Once a file exists, we leave it
+	//                             alone — repeat test runs don't
+	//                             churn it.
 	//
 	// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
 	// (and other final-candidate analyses) consults to find which
@@ -2317,13 +2319,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// orthogonal concerns. DisableMapping picks the replay-time mock
 	// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
 	// a separate side-effect that records consumption. We don't gate
-	// the write on the filter strategy. Likewise the prior
-	// r.instrument gate is dropped so k8s-proxy autoreplay (non-
-	// instrument; consumed mocks fetched via the agent HTTP API)
-	// writes too — actualTestMockMappings is populated identically
-	// in both modes from hookImpl.GetConsumedMocks (line 1454/1884).
+	// the write on the filter strategy.
+	//
+	// The non-emptiness guard on the create-if-not-present branch
+	// matters because actualTestMockMappings is populated by
+	// upsertActualTestMockMapping calls that depend on consumedMocks,
+	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
+	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
+	// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
+	// so without this guard the first run would create an empty
+	// mappings.yaml and every subsequent run would skip the create
+	// branch (file exists), leaving autoreplay permanently without
+	// the mappings the feature relies on. UpdateTestMapping=true
+	// still writes an empty file when explicitly requested — that
+	// matches the operator intent of "force a refresh".
 	shouldWriteMappings := r.config.Test.UpdateTestMapping
-	if !shouldWriteMappings && r.mappingDB != nil {
+	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
 		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
 		if existsErr != nil {
 			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
