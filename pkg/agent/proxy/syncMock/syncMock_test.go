@@ -445,20 +445,18 @@ loop:
 	}
 }
 
-// TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer pins the
-// session/connection bypass added on top of #4130. Pre-#4122 the
-// V2 mongo recorder wrote handshake/auth/heartbeat mocks directly
-// to s.Mocks and the recorder picked them up off the channel
-// regardless of whether SetFirstRequestSignaled had fired. After
-// #4122 that path goes through SyncMockManager.AddMock; without
-// this carve-out a session-tagged mock arriving AFTER firstReqSeen
-// (e.g. mongo driver opening a second pool connection mid-test)
-// fell into the per-test buffer, never matched a per-test
-// ResolveRange window (session mocks are not window-anchored), and
-// was silently lost at recorder shutdown — the symptom behind
-// run_golang_native_windows / gin-mongo (record_build_replay_build)
-// on PR #4130 run 24962475421.
-func TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
+// TestAddMockSessionLifetimeBuffersAfterFirstReqSeen pins the
+// post-firstReqSeen routing for session-lifetime mocks. AddMock
+// must NOT hoist them straight to outChan: that would interleave
+// handshake mocks ahead of the per-test mocks emitted at end-of-
+// test from the buffer, and replay's connection-keyed FIFO matcher
+// stalls on the resulting out-of-order stream. The expected path
+// is: buffer the session mock now, and let ResolveRange's lifetime
+// carve-out drain it to outChan in arrival order, exempt from the
+// per-test window match and the 7 s stale cutoff. Regression coverage
+// for the run_fuzzer_linux / Mongo Fuzzer (record_build_replay_build)
+// hang on the bypass attempt of PR #4130.
+func TestAddMockSessionLifetimeBuffersAfterFirstReqSeen(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 4)
@@ -466,7 +464,7 @@ func TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
 	mgr.SetOutputChannel(ch)
-	// Past the gate: per-test mocks would now buffer.
+	// Past the gate: per-test mocks now buffer; session mocks must too.
 	mgr.SetFirstRequestSignaled()
 
 	sessionMock := &models.Mock{
@@ -477,30 +475,26 @@ func TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
 	}
 	mgr.AddMock(sessionMock)
 
-	// Session mock must have been forwarded to outChan immediately,
-	// not buffered.
 	select {
 	case got := <-ch:
-		if got != sessionMock {
-			t.Fatalf("expected session mock on outChan, got different pointer")
-		}
+		t.Fatalf("session mock unexpectedly forwarded to outChan: %p", got)
 	default:
-		t.Fatalf("session-lifetime mock should bypass the firstReqSeen buffer and forward to outChan")
 	}
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected empty buffer after session-lifetime AddMock; got %d", len(mgr.buffer))
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != sessionMock {
+		t.Fatalf("expected session mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
 	}
 }
 
-// TestAddMockConnectionLifetimeBypassesFirstReqSeenBuffer is the
+// TestAddMockConnectionLifetimeBuffersAfterFirstReqSeen is the
 // LifetimeConnection counterpart. Postgres v3 prepared-statement
 // PREPARE mocks land here: they're tagged "type: connection" with
-// a connID and must reach the recorder regardless of whether the
-// PREPARE happens before or after firstReqSeen.
-func TestAddMockConnectionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
+// a connID and must follow the same buffer-then-carve-out path so
+// arrival order is preserved relative to per-test mocks emitted on
+// the same connection.
+func TestAddMockConnectionLifetimeBuffersAfterFirstReqSeen(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 4)
@@ -523,17 +517,90 @@ func TestAddMockConnectionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		if got != connMock {
-			t.Fatalf("expected connection mock on outChan, got different pointer")
-		}
+		t.Fatalf("connection mock unexpectedly forwarded to outChan: %p", got)
 	default:
-		t.Fatalf("connection-lifetime mock should bypass the firstReqSeen buffer and forward to outChan")
 	}
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected empty buffer after connection-lifetime AddMock; got %d", len(mgr.buffer))
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != connMock {
+		t.Fatalf("expected connection mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeFlushesBufferedSessionMocksInArrivalOrder is the
+// pure regression test for the Mongo Fuzzer hang on the bypass
+// attempt. Buffer interleaves session and per-test mocks in the
+// order [session1, perTest1, session2, perTest2, perTest3] and
+// invokes a per-test ResolveRange whose window covers the per-test
+// mocks. The expectation: outChan receives mocks in the SAME
+// interleaved order, NOT all-sessions-then-all-per-tests. Replay's
+// connection-keyed FIFO matcher requires this ordering — with the
+// pre-fix bypass, session mocks landed on outChan ahead of any
+// per-test mocks queued in the buffer, the connection's mock stream
+// went out of order, and replay stalled on the last batch of ops.
+func TestResolveRangeFlushesBufferedSessionMocksInArrivalOrder(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	now := time.Now()
+	mkSession := func(id string, ts time.Time) *models.Mock {
+		m := &models.Mock{
+			Kind: models.Mongo,
+			Name: id,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: ts,
+			},
+		}
+		m.DeriveLifetime()
+		return m
+	}
+	mkPerTest := func(id string, ts time.Time) *models.Mock {
+		return &models.Mock{
+			Kind: models.Mongo,
+			Name: id,
+			Spec: models.MockSpec{ReqTimestampMock: ts},
+		}
+	}
+
+	// Capture order: s1, p1, s2, p2, p3 — all timestamped inside
+	// the test window so the per-test path matches them. The per-
+	// test ResolveRange window must include every per-test mock's
+	// timestamp; session mocks are exempt regardless.
+	mocks := []*models.Mock{
+		mkSession("s1", now.Add(-50*time.Millisecond)),
+		mkPerTest("p1", now.Add(-40*time.Millisecond)),
+		mkSession("s2", now.Add(-30*time.Millisecond)),
+		mkPerTest("p2", now.Add(-20*time.Millisecond)),
+		mkPerTest("p3", now.Add(-10*time.Millisecond)),
+	}
+	for _, m := range mocks {
+		mgr.AddMock(m)
+	}
+
+	mgr.ResolveRange(now.Add(-100*time.Millisecond), now, "test-1", true, false)
+
+	for _, want := range mocks {
+		select {
+		case got := <-ch:
+			if got != want {
+				t.Fatalf("outChan order broken: expected %s, got %s", want.Name, got.Name)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for mock %s on outChan", want.Name)
+		}
+	}
+	select {
+	case extra := <-ch:
+		t.Fatalf("unexpected extra mock on outChan: %s", extra.Name)
+	default:
 	}
 }
 

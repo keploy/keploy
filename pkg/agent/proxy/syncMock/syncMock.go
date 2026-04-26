@@ -210,54 +210,37 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 
 	// Decide forward vs buffer vs drop under a single snapshot of
-	// (outChan, outChanClosed). The legal outcomes:
+	// (outChan, outChanClosed). The trio has three legal outcomes:
 	//
-	//   closed                       → drop (shutdown in progress)
-	//   bound + session/connection   → forward (Lifetime contract is
-	//                                  "reusable across all windows";
-	//                                  buffering would leak the mock —
-	//                                  ResolveRange only flushes mocks
-	//                                  that match a per-test window and
-	//                                  session/connection mocks never
-	//                                  do, so anything that lands in
-	//                                  m.buffer for these tiers is
-	//                                  unrecoverable until shutdown
-	//                                  drops it)
-	//   unbound (nil)                → buffer (SetOutputChannel hasn't
-	//                                  fired yet; ResolveRange will emit
-	//                                  once bound)
-	//   bound + !firstReqSeen        → forward (pre-first-request mocks
-	//                                  bypass the buffer)
-	//   bound +  firstReqSeen        → buffer (per-test mock waiting
-	//                                  for window match in ResolveRange)
+	//   closed          → drop (shutdown in progress, buffer would leak)
+	//   unbound (nil)   → buffer (SetOutputChannel hasn't fired yet;
+	//                     ResolveRange will emit once bound)
+	//   bound + open    → forward via sendToOutChan, unless we're
+	//                     past firstReqSeen in which case the mock
+	//                     belongs in the dedup buffer for windowing
 	//
-	// The session/connection bypass restores the pre-#4122 behaviour
-	// for parsers (mongo V2 handshake/auth/heartbeat, postgres v3
-	// startup, mysql HikariCP COM_PING) whose reusable traffic is
-	// captured continuously through the recording. Those mocks must
-	// reach the recorder regardless of whether they arrive before or
-	// after the first app test request, and they never need windowing
-	// because their Lifetime makes them reusable across every test.
-	// Without this branch, a session-tagged mock emitted post-first-
-	// request — e.g. a mongo pool connection's handshake when the
-	// driver opens a second pool slot mid-replay-record — falls into
-	// the per-test buffer, never matches a per-test ResolveRange
-	// window, and is silently lost at shutdown. That was the symptom
-	// behind run_golang_native_windows / gin-mongo (record_build_
-	// replay_build) on PR #4130 run 24962475421: mongo handshake
-	// dropped, replay's gin app got EOF on the driver socket, every
-	// mongo-touching test failed.
+	// Session- and connection-scoped mocks (mongo handshake/heartbeat,
+	// postgres v3 startup, mysql HikariCP COM_PING) follow the same
+	// branching here — they ride the buffer when firstReqSeen has
+	// fired so they keep their FIFO position relative to per-test
+	// mocks captured on the same connection. ResolveRange's lifetime
+	// carve-out drains them to outChan without subjecting them to
+	// the per-test window match (so they're not dropped by the 7 s
+	// cutoff for being out-of-window) but preserves arrival order.
+	// An earlier attempt forwarded session mocks to outChan straight
+	// from AddMock; that broke run_fuzzer_linux / Mongo Fuzzer
+	// (record_build_replay_build) because the bypass hoisted handshake
+	// mocks ahead of the per-test mocks emitted at end-of-test from
+	// the buffer. Replay's connection-keyed FIFO matcher then saw
+	// handshakes interleaved out of order with the operations they
+	// preceded and stalled on the last batch of ops. Keeping the
+	// FIFO-via-buffer route fixes Mongo Fuzzer, and the carve-out in
+	// ResolveRange still saves session/connection mocks from the
+	// stale-cutoff drop that bit gin-mongo Windows on #4122.
 	bound, closed := m.outChanStatus()
-	isReusable := mock != nil &&
-		(mock.TestModeInfo.Lifetime == models.LifetimeSession ||
-			mock.TestModeInfo.Lifetime == models.LifetimeConnection)
 	switch {
 	case closed:
 		m.mu.Unlock()
-		return
-	case bound && isReusable:
-		m.mu.Unlock()
-		m.sendToOutChan(mock)
 		return
 	case bound && !m.firstReqSeen:
 		m.mu.Unlock()
