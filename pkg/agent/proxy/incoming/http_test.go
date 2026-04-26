@@ -252,7 +252,7 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 	captureWG.Add(1)
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 		defer captureWG.Done()
 		// Read request+response bodies here so the test can assert them.
 		reqBody, _ := io.ReadAll(req.Body)
@@ -408,7 +408,7 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 	captureWG.Add(1)
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 		defer captureWG.Done()
 		rb, _ := io.ReadAll(req.Body)
 		rsb, _ := io.ReadAll(resp.Body)

@@ -281,6 +281,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+		// Mirrors the root-level --disable-mapping switch so that the
+		// docker-compose / k8s sidecar agent (which reads its config
+		// from CLI args, not from the host's keploy.yml — the config
+		// directory isn't bind-mounted into the agent container) can
+		// honour the operator's choice and gate ResolveRange's
+		// TestMockMapping emission accordingly.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during synchronous record")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -1272,6 +1279,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.Synchronous = synchronous
+
+		// Honour --disable-mapping passed to the agent (typically by the
+		// host CLI when starting the docker-compose / k8s sidecar agent).
+		// Without this, the agent process inside the container falls
+		// back to the embedded default of disableMapping=true and
+		// silently no-ops mappings.yaml production even when the
+		// operator's keploy.yml has disableMapping: false.
+		if cmd.Flags().Changed("disable-mapping") {
+			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+			if err != nil {
+				errMsg := "failed to get the disable-mapping flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.DisableMapping = disableMapping
+		}
 
 		enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 		if err != nil {

@@ -27,7 +27,12 @@ import (
 
 var GlobalTestCounter int64
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
+// mapping (last bool before appPort) controls whether the synchronous
+// branch tells SyncMockManager.ResolveRange to emit a TestMockMapping
+// entry onto the agent's mappingChan. Mirrors !cfg.DisableMapping —
+// before this parameter existed the OSS call site hardcoded false, so
+// mappings.yaml production during record was silently a no-op (#3905).
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16)
 
 var CaptureHook CaptureFunc = Capture
 
@@ -38,7 +43,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	if memoryguard.IsRecordingPaused() {
 		// Close bodies even when skipping capture to avoid resource leaks.
 		if req.Body != nil {
@@ -179,7 +184,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true, false)
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true, mapping)
 		}
 	}
 	select {
