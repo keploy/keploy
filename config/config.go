@@ -9,10 +9,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-type MockDownload struct {
-	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
-}
-
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -41,7 +37,6 @@ type Config struct {
 	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
@@ -59,7 +54,6 @@ type Config struct {
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
-	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
@@ -92,20 +86,6 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
-}
-
-type ReRecord struct {
-	SelectedTests []string        `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters       []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	Host          string          `json:"host" yaml:"host" mapstructure:"host"`
-	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
-	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
-	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	SSEPort       uint32          `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
-	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
-	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
-	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
 
 type Contract struct {
@@ -156,8 +136,6 @@ type Test struct {
 	Mocking                     bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests                map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 	DisableLineCoverage         bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	DisableMockUpload           bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
-	UseLocalMock                bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
 	UpdateTemplate              bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 	MustPass                    bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 	MaxFailAttempts             uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
