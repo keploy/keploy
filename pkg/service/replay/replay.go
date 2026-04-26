@@ -2293,28 +2293,47 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// The test-mode mapping write is gated ONLY on UpdateTestMapping —
-	// not on isMappingEnabled (= !DisableMapping). The two flags express
-	// independent concerns:
+	// Test-mode mapping write semantics:
 	//
-	//   DisableMapping     → "during replay, filter mocks by timestamp
-	//                         instead of by the mappings.yaml index"
-	//                         (a replay-time matching-strategy switch).
-	//   UpdateTestMapping  → "after the test set runs, write the actual
-	//                         consumed-mocks-per-test record to disk"
-	//                         (a write-side-effect switch).
+	//   UpdateTestMapping=true  → always write/merge mappings.yaml
+	//                             (operator-driven update).
+	//   UpdateTestMapping=false → create-if-not-present: write only
+	//                             when mappings.yaml is absent for
+	//                             this test-set. Once a file exists,
+	//                             we leave it alone — repeat test
+	//                             runs don't churn it.
 	//
-	// Operators commonly want the second without the first — e.g. record
-	// with disableMapping=true (no mappings.yaml produced; replay falls
-	// back to timestamps), then run test mode with --update-test-mapping
-	// to capture the actual mock consumption for k8s-based final-candidate
-	// analysis. Coupling the two through a single `&&` blocked that
-	// workflow. Also drops the r.instrument gate that was here previously,
-	// so k8s-proxy autoreplay (non-instrument; consumed mocks fetched via
-	// the agent HTTP API) writes mappings.yaml for the same reason —
-	// actualTestMockMappings is populated identically in both modes via
-	// hookImpl.GetConsumedMocks at line 1454/1884.
-	if r.config.Test.UpdateTestMapping {
+	// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
+	// (and other final-candidate analyses) consults to find which
+	// mocks each test consumed. Operators who never set the flag
+	// still need a usable file the first time test mode runs; gating
+	// strictly on UpdateTestMapping leaves them without one. The
+	// create-if-not-present default closes that gap without changing
+	// behaviour for existing users who already have a mappings.yaml
+	// they don't want overwritten — they can keep flag=false and the
+	// existing file is preserved. To force a refresh, flag=true.
+	//
+	// Independence from DisableMapping: the two flags express
+	// orthogonal concerns. DisableMapping picks the replay-time mock
+	// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
+	// a separate side-effect that records consumption. We don't gate
+	// the write on the filter strategy. Likewise the prior
+	// r.instrument gate is dropped so k8s-proxy autoreplay (non-
+	// instrument; consumed mocks fetched via the agent HTTP API)
+	// writes too — actualTestMockMappings is populated identically
+	// in both modes from hookImpl.GetConsumedMocks (line 1454/1884).
+	shouldWriteMappings := r.config.Test.UpdateTestMapping
+	if !shouldWriteMappings && r.mappingDB != nil {
+		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
+		if existsErr != nil {
+			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
+				zap.String("testSetID", testSetID),
+				zap.Error(existsErr))
+		} else if !exists {
+			shouldWriteMappings = true
+		}
+	}
+	if shouldWriteMappings {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
