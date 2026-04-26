@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
@@ -280,6 +281,21 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				zap.String("next_step", nextStepPostgresV3Encode))
 			return nil, err
 		}
+		// yaml.v3 v3.0.1's emitter mishandles plain strings that contain
+		// embedded newlines or tabs when those scalars live under a
+		// sequence (the shape PostgresV3Cells, Notices, and Rows produce).
+		// It picks a literal block scalar `|N-` whose indent indicator
+		// races with the parent sequence's offset, so the same document
+		// the recorder just wrote fails to load on replay with either
+		// "found a tab character where an indentation space is expected"
+		// or "did not find expected key". Sanitize the encoded Spec
+		// in-place so every unsafe string scalar moves to a DoubleQuoted
+		// scalar before yamlLib.Marshal flattens the tree to bytes.
+		// Custom MarshalYAML on PostgresV3Cell already covers Cells; the
+		// post-encode walk catches everything else (SQLNormalized, Notice
+		// messages, table-data column values, etc.) without per-field
+		// schema churn.
+		sanitizeYAMLStringNodes(&yamlDoc.Spec)
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
@@ -1005,4 +1021,43 @@ func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*mode
 	}
 	mockSpec.PostgresResponsesV2 = resps
 	return &mockSpec, nil
+}
+
+// sanitizeYAMLStringNodes walks a yaml.Node tree and rewrites any
+// string scalar whose plain/auto styling would render as a literal
+// block scalar (`|N-`) that yaml.v3 v3.0.1's parser then refuses on
+// re-read inside a sequence context. The rewrite preserves the value
+// byte-for-byte but switches to DoubleQuotedStyle, which escapes \t /
+// \n / leading whitespace as C-style sequences and round-trips
+// reliably regardless of nesting depth.
+//
+// We only touch nodes that the encoder actually picked the unsafe
+// style for — explicitly tagged scalars (!!binary, !!timestamp, etc.)
+// and already-quoted scalars are left alone, so this is a no-op for
+// values the schema-side MarshalYAML methods (PostgresV3Cell and the
+// like) already handled.
+func sanitizeYAMLStringNodes(node *yamlLib.Node) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yamlLib.DocumentNode, yamlLib.SequenceNode, yamlLib.MappingNode:
+		for _, child := range node.Content {
+			sanitizeYAMLStringNodes(child)
+		}
+	case yamlLib.ScalarNode:
+		// Only intervene on plain or auto-styled string scalars.
+		// Anything with an explicit non-string tag (!!binary, !!int,
+		// !!timestamp, etc.) is the encoder's decision and not a
+		// safe-style candidate.
+		if node.Tag != "" && node.Tag != "!!str" {
+			return
+		}
+		if node.Style == yamlLib.DoubleQuotedStyle || node.Style == yamlLib.SingleQuotedStyle {
+			return
+		}
+		if models.StringNeedsDoubleQuoted(node.Value) {
+			node.Style = yamlLib.DoubleQuotedStyle
+		}
+	}
 }

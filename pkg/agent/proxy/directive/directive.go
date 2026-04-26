@@ -65,9 +65,12 @@ func (k Kind) String() string {
 // The relay processes the two configs in order: DestTLSConfig first
 // (keploy acts as TLS client to the real destination), then
 // ClientTLSConfig (keploy acts as TLS server to the real client,
-// presenting the MITM cert). If either side's handshake fails, the
-// ack's OK is false and the parser is expected to accept that the
-// rest of the connection becomes passthrough.
+// presenting the MITM cert). A handshake failure is reported via the
+// ack (OK=false, Err populated); how the caller handles that — mark
+// the mock incomplete, fall through to raw passthrough, retry,
+// propagate the error — is a higher-layer policy choice that the
+// directive package itself does not dictate. See the Ack doc below
+// for the general contract.
 //
 // A nil config for either side means "do not upgrade that side" —
 // useful if the parser knows one peer is already on TLS or does
@@ -104,10 +107,14 @@ type Directive struct {
 // guarantees is: "everything after this ack on
 // ClientStream/DestStream is plaintext from the upgraded session."
 //
-// On failure (OK=false), Err is populated with the root cause and
-// the parser's session will be aborted; the connection falls through
-// to raw passthrough. The parser's only responsibility is to stop
-// reading from its FakeConns, which will return EOF/ErrClosed.
+// On failure (OK=false), Err is populated with the root cause.
+// The directive package itself implies no particular follow-on
+// action: the relay returns this Ack, and higher layers decide
+// whether to mark the mock incomplete, propagate the error, retry,
+// continue forwarding, or do something else. Any supervisor,
+// dispatcher, fallthrough, cancellation, or subsequent stream
+// closure/read behavior is implementation-specific and must not be
+// inferred from OK=false alone.
 type Ack struct {
 	Kind              Kind
 	OK                bool

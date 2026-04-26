@@ -254,21 +254,21 @@ type PostgresV3Sequence struct {
 }
 
 type PostgresV3MigrationTable struct {
-	Name    string     `json:"name" yaml:"name" bson:"name"`
-	Columns []string   `json:"columns" yaml:"columns" bson:"columns"`
-	Rows    [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Name    string            `json:"name" yaml:"name" bson:"name"`
+	Columns []string          `json:"columns" yaml:"columns" bson:"columns"`
+	Rows    []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
 }
 
 // PostgresV3DataSpec — one per seeded user table. Carries the row-store
 // seed for L4's transactional engine.
 type PostgresV3DataSpec struct {
-	Schema     string     `json:"schema" yaml:"schema" bson:"schema"`
-	Table      string     `json:"table" yaml:"table" bson:"table"`
-	PrimaryKey []string   `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
-	Columns    []string   `json:"columns" yaml:"columns" bson:"columns"`
-	Rows       [][]string `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	Truncated  bool       `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
-	RowLimit   int        `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
+	Schema     string            `json:"schema" yaml:"schema" bson:"schema"`
+	Table      string            `json:"table" yaml:"table" bson:"table"`
+	PrimaryKey []string          `json:"primaryKey,omitempty" yaml:"primaryKey,omitempty" bson:"primary_key,omitempty"`
+	Columns    []string          `json:"columns" yaml:"columns" bson:"columns"`
+	Rows       []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	Truncated  bool              `json:"truncated,omitempty" yaml:"truncated,omitempty" bson:"truncated,omitempty"`
+	RowLimit   int               `json:"rowLimit,omitempty" yaml:"rowLimit,omitempty" bson:"row_limit,omitempty"`
 }
 
 // PostgresV3QuerySpec — one invocation of a recorded query, keyed in the
@@ -294,11 +294,55 @@ type PostgresV3QuerySpec struct {
 	ParamOIDs         []uint32 `json:"paramOids,omitempty" yaml:"paramOids,omitempty" bson:"param_oids,omitempty"`
 	VolatilePositions []int    `json:"volatilePositions,omitempty" yaml:"volatilePositions,omitempty" bson:"volatile_positions,omitempty"`
 
-	// Invocation
-	InvocationID     string   `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
-	PrecedingTxState string   `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
-	BindValues       []string `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
-	BindFormats      []int    `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
+	// InvocationID uniquely identifies one invocation of this query
+	// within a single record-session. Recorders should emit the
+	// canonical "<connID>:<seq>" form — e.g. "0:1968" for the 1968th
+	// invocation on connection 0. No hash prefix, no wall-clock
+	// timestamp: a repeat recording of identical traffic will produce
+	// identical InvocationIDs, which keeps diffs of re-recorded
+	// mocks.yaml quiet. The field is stored as a plain string and is
+	// not validated, so older or non-canonical values (e.g. legacy
+	// "sha256:..." forms) still load cleanly for backward compatibility.
+	// Uniqueness is local to one recording; the <sqlAstHash,
+	// invocationId> pair is globally unique across all mocks in the
+	// same file.
+	InvocationID     string `json:"invocationId" yaml:"invocationId" bson:"invocation_id"`
+	PrecedingTxState string `json:"precedingTxState,omitempty" yaml:"precedingTxState,omitempty" bson:"preceding_tx_state,omitempty"`
+
+	// BindValues holds the client-supplied bind parameters for this
+	// invocation, one entry per placeholder. Cells are stored as
+	// logical Go values irrespective of the wire format the client
+	// used. The supported in-memory types track the PostgresV3Cell
+	// gob tag table (see postgres_v3_cell.go for the authoritative
+	// list): int8 / int16 / int32 / int / int64 (matching pgtype's
+	// int2 / int4 / int8 mapping plus the int8/int alias surfaces),
+	// uint16 / uint32 / uint64 (for OID / XID / CID and xid8-style
+	// values pgtype hands back from pg_catalog metadata queries),
+	// float32 / float64 (PG float4 / float8), bool, string, time.Time,
+	// []byte, []interface{} (PG ARRAY columns — text[], int4[],
+	// composite-row, multi-dim arrays), map[string]interface{}
+	// (PG json / jsonb), pgtype.Numeric, pgtype.Interval, pgtype.Time,
+	// pgtype.Bits, pgtype.TID, pgtype.TSVector, pgtype.Hstore,
+	// pgtype.Range[any], pgtype.Multirange[Range[any]], the
+	// geometric union (Point/Line/Lseg/Box/Path/Polygon/Circle),
+	// netip.Prefix, net.HardwareAddr, and PostgresV3CellRaw for
+	// unknown OIDs. PostgresV3Cell.MarshalYAML picks the appropriate
+	// scalar tag per value so common types stay eyeballable and
+	// greppable in mocks.yaml while bytea, raw-OID, and structured
+	// payloads land as !!binary or as nested mappings/sequences.
+	// Note that yaml.v3's resolver decodes every !!int back to int64,
+	// so int8/int16/int32/int and uint16/uint32/uint64 cells round-
+	// trip through the gob path with their original Go width but
+	// widen to int64 through the YAML path — that's safe because the
+	// codec on the integration side encodes to the wire using the
+	// column OID, not the Go width. NULL binds are distinguished
+	// from empty-string binds via Value == nil / cell.IsNull().
+	// BindFormats records the client's per-placeholder format flag
+	// (0=text, 1=binary) so the replayer can re-encode the logical
+	// value on the wire in the form the live client expects,
+	// regardless of which form the recorder originally captured.
+	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
+	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
 	// ResultFormats — per-column format codes the client requested at
 	// Bind time (via the Bind packet's ResultFormatCodes field).
@@ -322,28 +366,189 @@ type PostgresV3QuerySpec struct {
 
 type PostgresV3Response struct {
 	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
-	// Rows stores each row as a []string. The sentinel value
-	// PostgresV3NullCell indicates SQL NULL — chosen so it cannot
-	// collide with base64-encoded cell data (base64 output only includes
-	// [A-Za-z0-9+/=], never '~'). Non-NULL cells are the base64-encoded
-	// raw wire bytes. The sentinel-based encoding is deliberately yaml-
-	// and gob-safe: printable ASCII (no control characters that yaml.v3
-	// rejects) and []string rather than []*string (nil pointers in slice
-	// elements crash gob's encodeArray).
-	Rows            [][]string       `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
-	CommandComplete string           `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
-	Error           *PostgresV3Error `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
+	// Rows stores each row as a []PostgresV3Cell via PostgresV3Cells.
+	// See PostgresV3Cell for the on-disk encoding rules (plain YAML
+	// string for UTF-8-safe text, !!binary for anything else, explicit
+	// native YAML null for SQL NULL). Mutually exclusive with CopyOut /
+	// CopyIn — a single Query response emits either DataRow traffic
+	// OR CopyData traffic, never both; the replay emitter enforces
+	// the invariant at wire time.
+	Rows            []PostgresV3Cells `json:"rows,omitempty" yaml:"rows,omitempty" bson:"rows,omitempty"`
+	CommandComplete string            `json:"commandComplete,omitempty" yaml:"commandComplete,omitempty" bson:"command_complete,omitempty"`
+	Error           *PostgresV3Error  `json:"error,omitempty" yaml:"error,omitempty" bson:"error,omitempty"`
+
+	// CopyOut is set when the server responded with a CopyOutResponse
+	// ('H') + zero or more CopyData ('d') chunks + CopyDone ('c')
+	// sequence, as produced by COPY ... TO STDOUT / TO PROGRAM /
+	// TO '<file>' queries. Zero CopyData chunks is valid — COPY of an
+	// empty table or an empty-result expression produces no data
+	// packets between CopyOutResponse and CopyDone. nil on non-COPY
+	// responses; omitempty keeps the serialised form clean for them.
+	CopyOut *PostgresV3CopyOutPayload `json:"copyOut,omitempty" yaml:"copyOut,omitempty" bson:"copy_out,omitempty"`
+
+	// CopyIn is set when the server responded with a CopyInResponse
+	// ('G'), signalling that it is ready to receive client-streamed
+	// data via CopyData/CopyDone (COPY ... FROM STDIN). Only the
+	// server-side "ready" metadata is persisted — the client's
+	// subsequent CopyData payload is not replayed back, since the
+	// replay side stands in as the server and the real client will
+	// resend its own bytes. nil on non-COPY responses.
+	CopyIn *PostgresV3CopyInPayload `json:"copyIn,omitempty" yaml:"copyIn,omitempty" bson:"copy_in,omitempty"`
+
+	// Notices holds NoticeResponse ('N') messages the server emitted
+	// while answering this invocation. Postgres interleaves notices
+	// with any command response (e.g. "NOTICE: relation already
+	// exists, skipping" after CREATE TABLE IF NOT EXISTS). ORMs and
+	// drivers that surface NOTICE/WARNING to the caller depend on
+	// these being replayed back, so we persist them rather than
+	// silently drop them. Ordering matches wire arrival. nil/omit
+	// when the invocation produced no notices.
+	Notices []PostgresV3Notice `json:"notices,omitempty" yaml:"notices,omitempty" bson:"notices,omitempty"`
+
+	// Notifications captures NotificationResponse ('A') messages —
+	// async LISTEN/NOTIFY deliveries the server injected into the
+	// response stream. These are connection-scoped in PG (a
+	// NotificationResponse can arrive between any two bundles), but
+	// the capture attaches them to whichever invocation is currently
+	// in flight; replay re-emits them before CommandComplete on the
+	// same invocation. Notifications that arrive when no invocation
+	// is pending (true async between-command delivery) are dropped
+	// — supporting those would require a connection-level sideband
+	// and a separate injection scheduler the replayer does not yet
+	// have. nil/omit when this invocation observed none.
+	Notifications []PostgresV3Notification `json:"notifications,omitempty" yaml:"notifications,omitempty" bson:"notifications,omitempty"`
+
+	// FunctionCall captures a legacy fastpath FunctionCall ('F') +
+	// FunctionCallResponse ('V') exchange. Mutually exclusive with
+	// Rows / CopyOut / CopyIn — an invocation is either a SQL query
+	// or a fastpath function invocation, never both. nil/omit on
+	// non-FunctionCall invocations.
+	FunctionCall *PostgresV3FunctionCall `json:"functionCall,omitempty" yaml:"functionCall,omitempty" bson:"function_call,omitempty"`
 }
 
-// PostgresV3NullCell is the sentinel string stored in
-// PostgresV3Response.Rows for SQL NULL cells. Chosen so it cannot
-// collide with base64-encoded cell data — base64 output uses only
-// [A-Za-z0-9+/=], never '~' — and so every byte of the sentinel is a
-// printable ASCII character that yaml.v3 and gob can both encode
-// without escaping. Earlier drafts used NUL bytes which gopkg.in/yaml.v3
-// rejects as control characters; '~' avoids that failure mode while
-// staying short and unambiguous.
-const PostgresV3NullCell = "~~KEPLOY_PG_NULL~~"
+// PostgresV3Notice is one NoticeResponse ('N') message. Wire format
+// mirrors ErrorResponse — same field codes (S/V/C/M/D/H/P/W) but
+// severity is always one of NOTICE/WARNING/INFO/DEBUG/LOG rather than
+// ERROR/FATAL/PANIC. Only the fields we observe in practice are
+// persisted; unused fields stay empty/omit to keep the YAML lean.
+type PostgresV3Notice struct {
+	Severity string `json:"severity,omitempty" yaml:"severity,omitempty" bson:"severity,omitempty"`
+	Code     string `json:"code,omitempty" yaml:"code,omitempty" bson:"code,omitempty"`
+	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
+	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
+	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
+}
+
+// MarshalYAML routes Notice's free-form text fields through
+// PostgresV3SafeString so the on-disk YAML never picks the literal
+// block-scalar style for content that yaml.v3's parser then rejects
+// inside a sequence (Notices live in PostgresV3Response.Notices,
+// which is the offending shape). Field types stay `string` so JSON,
+// gob, BSON, and direct Go-to-Go comparisons keep working — the
+// alias is YAML-side only.
+func (n PostgresV3Notice) MarshalYAML() (any, error) {
+	type alias struct {
+		Severity PostgresV3SafeString `yaml:"severity,omitempty"`
+		Code     PostgresV3SafeString `yaml:"code,omitempty"`
+		Message  PostgresV3SafeString `yaml:"message,omitempty"`
+		Detail   PostgresV3SafeString `yaml:"detail,omitempty"`
+		Hint     PostgresV3SafeString `yaml:"hint,omitempty"`
+	}
+	return alias{
+		Severity: PostgresV3SafeString(n.Severity),
+		Code:     PostgresV3SafeString(n.Code),
+		Message:  PostgresV3SafeString(n.Message),
+		Detail:   PostgresV3SafeString(n.Detail),
+		Hint:     PostgresV3SafeString(n.Hint),
+	}, nil
+}
+
+// PostgresV3Notification is one NotificationResponse ('A') message
+// (async LISTEN/NOTIFY delivery). Wire layout: int32 backendPID +
+// cstring channel + cstring payload. We persist all three so the
+// replay can reproduce what the real backend produced, including
+// the PID (some drivers gate on it matching the session's backend
+// PID before surfacing the notification to application code).
+type PostgresV3Notification struct {
+	BackendPID int32  `json:"backendPID,omitempty" yaml:"backendPID,omitempty" bson:"backend_pid,omitempty"`
+	Channel    string `json:"channel" yaml:"channel" bson:"channel"`
+	Payload    string `json:"payload,omitempty" yaml:"payload,omitempty" bson:"payload,omitempty"`
+}
+
+// PostgresV3FunctionCall is the legacy fastpath FunctionCall ('F') →
+// FunctionCallResponse ('V') pair. Modern drivers use SELECT fn(...)
+// queries and never touch this API, but libpq's PQfn, pgBouncer's
+// internal pings, and a few ORM internals (especially around large-
+// object access) do emit it — a recorder that treats the tag as
+// "unknown" would terminate the stream there.
+//
+// All three fields are optional in the on-disk YAML:
+//   - OID identifies the server-side function (often
+//     lo_creat/lo_open/lo_read/lo_write/lo_close for large-object APIs)
+//   - Args preserves argument values (logical Go form, see
+//     PostgresV3Cell — text or binary wire format per ArgFormats)
+//   - Result holds the server's response value (NULL → Cell.Value == nil,
+//     i.e. Cell.IsNull() == true; the wire-level int32(-1) sentinel is
+//     translated to/from this representation by the codec)
+type PostgresV3FunctionCall struct {
+	// OID — server-side function OID being invoked.
+	OID uint32 `json:"oid" yaml:"oid" bson:"oid"`
+	// ArgFormats — per-argument wire format (0 text, 1 binary). Spec
+	// allows len=0 (all text), len=1 (broadcast), len=N (per-arg);
+	// we preserve exactly what the client sent.
+	ArgFormats []int16 `json:"argFormats,omitempty" yaml:"argFormats,omitempty" bson:"arg_formats,omitempty"`
+	// Args — ordered list of argument values. A NULL argument is
+	// represented by Cell.Value == nil (Cell.IsNull() == true); non-
+	// NULL args carry the logical Go value chosen by the codec for
+	// the argument's OID (int64, string, []byte, etc.).
+	Args []PostgresV3Cell `json:"args,omitempty" yaml:"args,omitempty" bson:"args,omitempty"`
+	// ResultFormat — wire format of the result (0 text, 1 binary).
+	ResultFormat int16 `json:"resultFormat,omitempty" yaml:"resultFormat,omitempty" bson:"result_format,omitempty"`
+	// Result — FunctionCallResponse payload. Cell.Value == nil
+	// (Cell.IsNull() == true) represents the wire int32(-1) sentinel
+	// (NULL); a non-NULL result carries the codec-chosen logical Go
+	// value for the function's return OID.
+	Result PostgresV3Cell `json:"result,omitempty" yaml:"result,omitempty" bson:"result,omitempty"`
+}
+
+// PostgresV3CopyOutPayload captures a full server-side CopyOut burst:
+// the CopyOutResponse header plus the ordered list of CopyData chunks
+// the backend produced, terminated by an implicit CopyDone. The raw
+// bytes are stored as []byte slices — yaml.v3 base64-encodes byte
+// slices automatically, so non-printable bytes and NULs round-trip
+// without sentinel games. Each element of Data is exactly one wire
+// CopyData ('d') packet's body, preserved in arrival order, because
+// clients observe packet boundaries when streaming the output.
+type PostgresV3CopyOutPayload struct {
+	// OverallFormat mirrors the first byte of CopyOutResponse. 0 = text
+	// mode (psql \COPY default), 1 = binary mode. Required so the replay
+	// emitter reproduces the header exactly — drivers branch on this.
+	OverallFormat byte `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
+	// ColumnFormatCodes mirrors the per-column format array from
+	// CopyOutResponse. len == 0 is valid (COPY of a tableless expression
+	// can produce no columns). Each code is 0 = text or 1 = binary. We
+	// use uint16 to match the wire encoding exactly.
+	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
+	// Data is the ordered list of CopyData packet bodies the server
+	// produced between CopyOutResponse and CopyDone. Each []byte is one
+	// packet's payload bytes (NOT concatenated); preserving packet
+	// boundaries matches what a real client's wire read loop would see.
+	// An empty / nil slice represents a COPY that produced zero rows.
+	Data [][]byte `json:"data,omitempty" yaml:"data,omitempty" bson:"data,omitempty"`
+}
+
+// PostgresV3CopyInPayload captures only the CopyInResponse header —
+// format + per-column format codes. During replay the server side
+// emits CopyInResponse, then reads and discards whatever CopyData the
+// client produces, then closes the sub-protocol with a CommandComplete
+// + ReadyForQuery derived from the invocation's CommandComplete /
+// txTransition fields. The client-produced bytes themselves are not
+// persisted because they are re-generated on every replay by the
+// client under test.
+type PostgresV3CopyInPayload struct {
+	OverallFormat     byte     `json:"overallFormat" yaml:"overallFormat" bson:"overall_format"`
+	ColumnFormatCodes []uint16 `json:"columnFormatCodes,omitempty" yaml:"columnFormatCodes,omitempty" bson:"column_format_codes,omitempty"`
+}
 
 type PostgresV3ColumnDescriptor struct {
 	Name       string `json:"name" yaml:"name" bson:"name"`
@@ -361,6 +566,27 @@ type PostgresV3Error struct {
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
 	Detail   string `json:"detail,omitempty" yaml:"detail,omitempty" bson:"detail,omitempty"`
 	Hint     string `json:"hint,omitempty" yaml:"hint,omitempty" bson:"hint,omitempty"`
+}
+
+// MarshalYAML — see PostgresV3Notice.MarshalYAML. Same rationale: SQL
+// errors carry server-formatted multi-line detail/hint strings that
+// can include tabs (e.g. constraint diagnostic listings), so the YAML
+// emit needs the safe-string wrapper to stay round-trippable.
+func (e PostgresV3Error) MarshalYAML() (any, error) {
+	type alias struct {
+		Severity PostgresV3SafeString `yaml:"severity,omitempty"`
+		Code     PostgresV3SafeString `yaml:"code,omitempty"`
+		Message  PostgresV3SafeString `yaml:"message,omitempty"`
+		Detail   PostgresV3SafeString `yaml:"detail,omitempty"`
+		Hint     PostgresV3SafeString `yaml:"hint,omitempty"`
+	}
+	return alias{
+		Severity: PostgresV3SafeString(e.Severity),
+		Code:     PostgresV3SafeString(e.Code),
+		Message:  PostgresV3SafeString(e.Message),
+		Detail:   PostgresV3SafeString(e.Detail),
+		Hint:     PostgresV3SafeString(e.Hint),
+	}, nil
 }
 
 type PostgresV3SideEffects struct {
@@ -595,9 +821,4 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	return &c
-}
-
-type ReRecordCfg struct {
-	Rerecord bool
-	TestSet  string
 }
