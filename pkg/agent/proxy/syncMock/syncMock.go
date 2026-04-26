@@ -210,18 +210,54 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 
 	// Decide forward vs buffer vs drop under a single snapshot of
-	// (outChan, outChanClosed). The trio has three legal outcomes:
+	// (outChan, outChanClosed). The legal outcomes:
 	//
-	//   closed          → drop (shutdown in progress, buffer would leak)
-	//   unbound (nil)   → buffer (SetOutputChannel hasn't fired yet;
-	//                     ResolveRange will emit once bound)
-	//   bound + open    → forward via sendToOutChan, unless we're
-	//                     past firstReqSeen in which case the mock
-	//                     belongs in the dedup buffer for windowing
+	//   closed                       → drop (shutdown in progress)
+	//   bound + session/connection   → forward (Lifetime contract is
+	//                                  "reusable across all windows";
+	//                                  buffering would leak the mock —
+	//                                  ResolveRange only flushes mocks
+	//                                  that match a per-test window and
+	//                                  session/connection mocks never
+	//                                  do, so anything that lands in
+	//                                  m.buffer for these tiers is
+	//                                  unrecoverable until shutdown
+	//                                  drops it)
+	//   unbound (nil)                → buffer (SetOutputChannel hasn't
+	//                                  fired yet; ResolveRange will emit
+	//                                  once bound)
+	//   bound + !firstReqSeen        → forward (pre-first-request mocks
+	//                                  bypass the buffer)
+	//   bound +  firstReqSeen        → buffer (per-test mock waiting
+	//                                  for window match in ResolveRange)
+	//
+	// The session/connection bypass restores the pre-#4122 behaviour
+	// for parsers (mongo V2 handshake/auth/heartbeat, postgres v3
+	// startup, mysql HikariCP COM_PING) whose reusable traffic is
+	// captured continuously through the recording. Those mocks must
+	// reach the recorder regardless of whether they arrive before or
+	// after the first app test request, and they never need windowing
+	// because their Lifetime makes them reusable across every test.
+	// Without this branch, a session-tagged mock emitted post-first-
+	// request — e.g. a mongo pool connection's handshake when the
+	// driver opens a second pool slot mid-replay-record — falls into
+	// the per-test buffer, never matches a per-test ResolveRange
+	// window, and is silently lost at shutdown. That was the symptom
+	// behind run_golang_native_windows / gin-mongo (record_build_
+	// replay_build) on PR #4130 run 24962475421: mongo handshake
+	// dropped, replay's gin app got EOF on the driver socket, every
+	// mongo-touching test failed.
 	bound, closed := m.outChanStatus()
+	isReusable := mock != nil &&
+		(mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+			mock.TestModeInfo.Lifetime == models.LifetimeConnection)
 	switch {
 	case closed:
 		m.mu.Unlock()
+		return
+	case bound && isReusable:
+		m.mu.Unlock()
+		m.sendToOutChan(mock)
 		return
 	case bound && !m.firstReqSeen:
 		m.mu.Unlock()
@@ -349,12 +385,49 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	//   2. Out-of-window mocks are subject to the 7 s cutoff: kept if
 	//      recent (might match a future out-of-order request), dropped
 	//      otherwise (stale and unrecoverable).
+	//   3. Session- and connection-scoped mocks are flushed to outChan
+	//      (when bound) regardless of [start,end]; their Lifetime makes
+	//      them reusable across every test window and they intentionally
+	//      never window-match. Retained in the buffer when outChan is
+	//      unbound so a later ResolveRange with the channel wired can
+	//      drain them. AddMock now forwards these directly when outChan
+	//      is bound at ingest time, so this branch only fires for mocks
+	//      that landed in the buffer during the brief unbound startup
+	//      window before SetOutputChannel.
 	cutoffTime := time.Now().Add(-7 * time.Second)
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		mockTime := mock.Spec.ReqTimestampMock
+
+		// LIFETIME CARVE-OUT: session- and connection-scoped mocks
+		// are reusable across every test window and never need
+		// per-test window filtering. Drain to outChan when bound so
+		// the recorder writes them to disk; retain in the buffer
+		// otherwise so a later ResolveRange (with outChan bound) can
+		// pick them up. Skipping the per-test window match is
+		// correct: session mocks aren't anchored to any test, so
+		// trying to "match" them against [start,end] would either
+		// drop them silently (out-of-window cutoff) or attribute
+		// them to whichever test happens to ResolveRange first.
+		lt := mock.TestModeInfo.Lifetime
+		if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			// Don't stamp a synthetic name on session/connection
+			// mocks — Lifetime-derived parsers depend on
+			// Spec.Metadata for routing at replay time and the
+			// recorder writes whatever Name the mock already
+			// carries. They also don't belong in the per-test
+			// associatedMockIDs mapping (which is purely about
+			// per-test matches).
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
 
 		// MATCHING LOGIC: Process mocks in the requested window first
 		// so a long-running test's per-test mocks aren't pre-empted by
@@ -390,6 +463,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// window that includes a timestamp from before "now-7s" once
 		// we're already past the head of the dedup queue, because
 		// the queue is FIFO on ReqTimestamp. Drop to bound growth.
+		// (Session- and connection-tier mocks are handled in the
+		// lifetime carve-out at the top of the loop and never reach
+		// this branch.)
 		if mockTime.Before(cutoffTime) {
 			continue
 		}

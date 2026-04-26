@@ -445,6 +445,237 @@ loop:
 	}
 }
 
+// TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer pins the
+// session/connection bypass added on top of #4130. Pre-#4122 the
+// V2 mongo recorder wrote handshake/auth/heartbeat mocks directly
+// to s.Mocks and the recorder picked them up off the channel
+// regardless of whether SetFirstRequestSignaled had fired. After
+// #4122 that path goes through SyncMockManager.AddMock; without
+// this carve-out a session-tagged mock arriving AFTER firstReqSeen
+// (e.g. mongo driver opening a second pool connection mid-test)
+// fell into the per-test buffer, never matched a per-test
+// ResolveRange window (session mocks are not window-anchored), and
+// was silently lost at recorder shutdown — the symptom behind
+// run_golang_native_windows / gin-mongo (record_build_replay_build)
+// on PR #4130 run 24962475421.
+func TestAddMockSessionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	// Past the gate: per-test mocks would now buffer.
+	mgr.SetFirstRequestSignaled()
+
+	sessionMock := &models.Mock{
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now(),
+		},
+	}
+	mgr.AddMock(sessionMock)
+
+	// Session mock must have been forwarded to outChan immediately,
+	// not buffered.
+	select {
+	case got := <-ch:
+		if got != sessionMock {
+			t.Fatalf("expected session mock on outChan, got different pointer")
+		}
+	default:
+		t.Fatalf("session-lifetime mock should bypass the firstReqSeen buffer and forward to outChan")
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected empty buffer after session-lifetime AddMock; got %d", len(mgr.buffer))
+	}
+}
+
+// TestAddMockConnectionLifetimeBypassesFirstReqSeenBuffer is the
+// LifetimeConnection counterpart. Postgres v3 prepared-statement
+// PREPARE mocks land here: they're tagged "type: connection" with
+// a connID and must reach the recorder regardless of whether the
+// PREPARE happens before or after firstReqSeen.
+func TestAddMockConnectionLifetimeBypassesFirstReqSeenBuffer(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	connMock := &models.Mock{
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"type":   "connection",
+				"connID": "c-42",
+			},
+			ReqTimestampMock: time.Now(),
+		},
+	}
+	mgr.AddMock(connMock)
+
+	select {
+	case got := <-ch:
+		if got != connMock {
+			t.Fatalf("expected connection mock on outChan, got different pointer")
+		}
+	default:
+		t.Fatalf("connection-lifetime mock should bypass the firstReqSeen buffer and forward to outChan")
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected empty buffer after connection-lifetime AddMock; got %d", len(mgr.buffer))
+	}
+}
+
+// TestAddMockPerTestStillBuffersAfterFirstReqSeen is the negative
+// control for the carve-out: per-test mocks (zero Lifetime / no
+// metadata tag) MUST still buffer once firstReqSeen has flipped, so
+// ResolveRange can match them against the active test window. If
+// the bypass leaks here the dedup/windowing contract collapses.
+func TestAddMockPerTestStillBuffersAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	perTest := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: time.Now()},
+	}
+	mgr.AddMock(perTest)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("per-test mock unexpectedly forwarded to outChan: %p", got)
+	default:
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != perTest {
+		t.Fatalf("expected per-test mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeKeepsSessionLifetimeMocksPastCutoff covers the
+// ResolveRange safety net paired with the AddMock bypass. AddMock
+// now forwards session-lifetime mocks directly to outChan when the
+// channel is bound, so the buffer should generally not see them.
+// The exception is the brief startup window where outChan is still
+// nil at AddMock time — those session mocks land in the buffer.
+// Without the lifetime carve-out in ResolveRange the post-#4130
+// out-of-window cutoff would silently drop them once they aged
+// past 7 s and outChan became bound. This test mirrors that
+// scenario: pre-buffer a session mock with a >7 s ReqTimestampMock,
+// invoke a per-test ResolveRange whose window doesn't include the
+// mock's timestamp, and assert the mock is FLUSHED to outChan
+// rather than dropped.
+func TestResolveRangeKeepsSessionLifetimeMocksPastCutoff(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Mongo handshake captured ~10 s ago — well past the 7 s cutoff.
+	// "type: config" is the on-disk tag DeriveLifetime maps to
+	// LifetimeSession. Pre-derive on the test mock so the buffered
+	// state matches what AddMock would have written.
+	handshake := &models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now().Add(-10 * time.Second),
+		},
+	}
+	handshake.DeriveLifetime()
+	if handshake.TestModeInfo.Lifetime != models.LifetimeSession {
+		t.Fatalf("test fixture: expected LifetimeSession after DeriveLifetime, got %v", handshake.TestModeInfo.Lifetime)
+	}
+
+	// Pre-buffer it (simulates the unbound-at-AddMock startup path).
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, handshake)
+	mgr.mu.Unlock()
+
+	// Per-test ResolveRange with a window 1 s wide centred on now —
+	// the handshake timestamp (-10 s) is well outside.
+	now := time.Now()
+	mgr.ResolveRange(now.Add(-500*time.Millisecond), now.Add(500*time.Millisecond), "test-1", true, false)
+
+	// Session mock must have been flushed to outChan despite being
+	// out-of-window AND past the 7 s cutoff.
+	select {
+	case got := <-ch:
+		if got != handshake {
+			t.Fatalf("expected session mock flushed to outChan; got different pointer")
+		}
+	default:
+		t.Fatalf("expected session-lifetime mock to be flushed to outChan past cutoff; got nothing")
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected empty buffer after flushing session mock; got %d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeRetainsSessionMocksWhenOutChanUnbound complements
+// the cutoff exemption: when outChan is unbound at ResolveRange time
+// (post-CloseOutChan, or before a fresh SetOutputChannel re-binds),
+// session mocks must be RETAINED in the buffer rather than flushed
+// (sendToOutChan would no-op silently and we'd lose them) or
+// dropped. A later ResolveRange with the channel re-bound is
+// expected to drain them.
+func TestResolveRangeRetainsSessionMocksWhenOutChanUnbound(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.CloseOutChan() // outChanBound goes false, channel closed
+
+	handshake := &models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now().Add(-10 * time.Second),
+		},
+	}
+	handshake.DeriveLifetime()
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, handshake)
+	mgr.mu.Unlock()
+
+	now := time.Now()
+	mgr.ResolveRange(now.Add(-500*time.Millisecond), now.Add(500*time.Millisecond), "t", true, false)
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != handshake {
+		t.Fatalf("expected session mock retained in buffer when outChan unbound; got len=%d", len(mgr.buffer))
+	}
+}
+
 // TestSendToOutChanNoDropWhenDrainedWithinBudget exercises the
 // fast-then-bounded-block path: once the fast-path slot is taken,
 // a consumer that drains within sendBudget must let the blocked
