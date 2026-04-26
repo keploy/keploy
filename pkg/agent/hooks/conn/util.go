@@ -55,7 +55,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		var err error
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
+			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {

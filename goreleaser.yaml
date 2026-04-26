@@ -29,8 +29,18 @@ builds:
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+    # Session P: pg_query_go / libpg_query requires CGo. The host
+    # (release.yml runs on macos-latest) can cross-compile windows
+    # via the mingw-w64 override in the keploy-windows leg below,
+    # but linux cross-compile from macOS needs an external
+    # osxcross/zig-cc toolchain. TODO (follow-up): split the
+    # release build so each platform leg runs on a native runner
+    # (linux goreleaser build on ubuntu-latest, darwin/windows on
+    # macos-latest) so CGO_ENABLED=1 is honoured without
+    # cross-toolchain surgery. Until that split lands, tagging a
+    # release with this config will fail to produce linux binaries.
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
     goos:
       - linux
       - darwin
@@ -50,6 +60,11 @@ builds:
   # and self-hosted users stays disentangled. Not added to any
   # archive — the binaries live in dist/ for the docker-release job
   # to consume via `Dockerfile.runtime`.
+  #
+  # Session P: CGO_ENABLED=1 so pg_query_go links libpg_query. The
+  # same release.yml-on-macOS split caveat from the keploy leg
+  # applies — the linux runtime binaries need a native linux
+  # goreleaser leg before a tag release can publish them again.
   - binary: keploy
     id: keploy-docker
     main: ./main.go
@@ -59,7 +74,7 @@ builds:
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
     goos:
       - linux
     goarch:

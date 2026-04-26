@@ -71,6 +71,22 @@ type WindowedProxy interface {
 	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
 }
 
+// FirstWindowStartReader is an optional extension implemented by proxies
+// that can report the earliest test window start observed by their
+// underlying MockManager. Consumed by the agent's tier-aware
+// strictMockWindow filter to distinguish startup-init mocks (req_ts <
+// firstWindowStart) from stale previous-test mocks (firstWindowStart <=
+// req_ts < currentStart). Returns the zero time before the first real
+// test window has landed.
+//
+// Callers MUST type-assert from Proxy and gracefully fall back (zero
+// time = "no cutoff known, keep legacy behaviour") when the assertion
+// fails — keeps third-party Proxy implementations compiling without
+// the extra method.
+type FirstWindowStartReader interface {
+	FirstTestWindowStart() time.Time
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }

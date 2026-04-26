@@ -436,8 +436,14 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 type DedupJob struct {
 	ReqTimestamp time.Time
 	ResTimestamp time.Time
-	Resolved     bool
-	IsDuplicate  bool
+	// TestName is the recorder-side test identifier anchored to this
+	// dedup bucket. Populated at ResolveJob time so the internal
+	// ResolveRange call below forwards a non-empty testName into the
+	// TestMockMapping entry when enableMapping is true. Left empty for
+	// the early-exit defer path where no test identity is established.
+	TestName    string
+	Resolved    bool
+	IsDuplicate bool
 }
 
 type DedupQueue struct {
@@ -466,13 +472,27 @@ func (dq *DedupQueue) Enqueue(reqTime time.Time) *DedupJob {
 }
 
 // ResolveJob marks a job as resolved and attempts to process the queue from the head.
-func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, enableMapping bool, mockMgr *SyncMockManager) {
+//
+// testName is the caller's anchor for this specific job: under async
+// capture.go the header-derived Keploy-Test-Name flows in so the
+// downstream ResolveRange → TestMockMapping entry is stamped with the
+// same test identity the sync branch would have synthesised. Empty
+// testName is legal (early-exit defer, no-mapping callers) — it falls
+// through to the unchanged historical behaviour and ResolveRange simply
+// emits an anonymous mapping entry (or none, when mapping is false).
+func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, testName string, enableMapping bool, mockMgr *SyncMockManager) {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
 
 	job.IsDuplicate = isDuplicate
 	job.Resolved = true
 	job.ResTimestamp = resTimestamp
+	// Stamp the anchor onto the job itself so the head-draining loop
+	// below forwards the correct testName even when an earlier job at
+	// the head is resolved by a LATER caller (strict-FIFO drain can
+	// process several jobs under a single ResolveJob invocation, each
+	// needing its own anchor).
+	job.TestName = testName
 
 	// Always process from the head to ensure strict FIFO ordering
 	for len(dq.queue) > 0 {
@@ -487,7 +507,7 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 		if head.IsDuplicate && mockMgr != nil {
 			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
 		} else if head.IsDuplicate == false && mockMgr != nil {
-			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, "", true, enableMapping)
+			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, head.TestName, true, enableMapping)
 
 		}
 

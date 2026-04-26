@@ -370,7 +370,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if r.config != nil {
 		outOpts.Rules = r.config.BypassRules
 		outOpts.MongoPassword = r.config.Test.MongoPassword
-		outOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 	}
 	if headerNoise, ok := r.globalNoise["header"]; ok {

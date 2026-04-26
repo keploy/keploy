@@ -46,11 +46,12 @@ services:
       - shared:/shared
 
   client:
-    # Pinned digest-less but explicit Alpine tag from ECR Public
-    # (Docker Hub mirror) so the e2e is reproducible across CI runs
-    # and immune to Docker Hub rate limits. Bumping requires editing
-    # the tag explicitly — never use `:latest`.
-    image: public.ecr.aws/docker/library/alpine:3.20
+    # Pinned Alpine tag from Docker Hub so the e2e is reproducible
+    # across CI runs. Bumping requires editing the tag explicitly —
+    # never use `:latest`. (Previously went through ECR Public as a
+    # Hub mirror, but ECR Public started returning HTTP 429 itself;
+    # see PR #4101 CI flake.)
+    image: alpine:3.20
     # Wait for the agent's HTTP listener to be bound before firing the first
     # curl. Without this, the first poll-iteration races the Go bootstrap
     # and records "000" (connection refused) instead of the "503" the test

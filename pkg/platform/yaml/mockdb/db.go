@@ -39,35 +39,6 @@ const mockFormatGob = "gob"
 // decoding to a corrupt struct.
 const gobMockMagic = "keploy-gob-v1\n"
 
-// isUnfilteredMockKind classifies which mock kinds belong to the
-// "unfiltered config" bucket returned by GetUnFilteredMocks, versus
-// the per-testcase bucket returned by GetFilteredMocks. The YAML and
-// gob read paths must share this classification verbatim so replay
-// behavior does not diverge based on on-disk format.
-//
-// The switch enumerates only OSS-owned kinds whose recorders do not
-// tag lifetime at record time, so mocks need a kind-level fallback
-// to land in the config pool. Out-of-tree parsers (Enterprise Redis
-// / Kafka / HBase, downstream third parties) are NOT listed here:
-// their recorders stamp type=config / mocks / connection, so the
-// explicit `mock.Spec.Metadata["type"] == "config"` check at the
-// caller already routes their config mocks correctly. Adding them
-// would wrongly send every type=mocks data mock to the config pool
-// as well, which breaks the per-test consumption contract the
-// replayer's DeleteFilteredMock path depends on.
-//
-// PostgresV2 is intentionally listed here even though it also passes
-// the GetFilteredMocks path (matches YAML's current behavior — both
-// paths include it; a mock shows up in both buckets). Changing that
-// semantics is out of scope for this PR.
-func isUnfilteredMockKind(kind models.Kind) bool {
-	switch kind {
-	case models.GENERIC, models.Postgres, models.PostgresV2, models.HTTP, models.HTTP2, models.MySQL, models.DNS:
-		return true
-	}
-	return false
-}
-
 // configuredMockFormat holds the mock format selected via config file
 // (record.mockFormat). The env var KEPLOY_MOCK_FORMAT takes precedence
 // so ad-hoc runs can override the file without editing it.
@@ -1056,18 +1027,22 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
-			if mock.Spec.Metadata["type"] == "config" {
-				continue
-			}
-			// Shared classifier with GetUnFilteredMocks and with the
-			// YAML read path. Kinds that belong to the unfiltered
-			// bucket (HTTP, Postgres, ...) are excluded here;
-			// per-testcase kinds (Mongo, gRPC, ...) fall through to
-			// the append. PostgresV2 is a special case: YAML's
-			// GetFilteredMocks keeps it in the tcs bucket while
-			// GetUnFilteredMocks also picks it up as unfiltered, so
-			// the YAML reader yields it from both. Mirror that here.
-			if !isUnfilteredMockKind(mock.Kind) || mock.Kind == models.PostgresV2 {
+			// Unification: lifetime-only routing via DeriveLifetime —
+			// the same classifier the YAML path below uses. Aligns the
+			// gob and YAML read paths so an explicit per-test tag
+			// (metadata["type"] == "mocks") on a kind that isUnfiltered-
+			// MockKind lists as implicit-session (HTTP, Postgres, ...)
+			// correctly lands in the per-test pool instead of being
+			// shunted to unfiltered on-read. Previously the gob path
+			// gated on kind + config-tag only, which silently dropped
+			// every per-test HTTP mock from the filtered pool even
+			// when the recorder had explicitly tagged it per-test.
+			//
+			// PostgresV2 keeps its dual-pool quirk (present in BOTH
+			// filtered and unfiltered) — the YAML path mirrors this
+			// via its sibling GetUnFilteredMocks reader.
+			mock.DeriveLifetime()
+			if mock.TestModeInfo.Lifetime == models.LifetimePerTest || mock.Kind == models.PostgresV2 {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -1178,10 +1153,17 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
-			// Shared classifier with GetFilteredMocks and the YAML
-			// path. Include config-tagged mocks plus the unfiltered
-			// kinds; everything else goes to GetFilteredMocks.
-			if mock.Spec.Metadata["type"] == "config" || isUnfilteredMockKind(mock.Kind) {
+			// Unification: lifetime-only routing via DeriveLifetime —
+			// the same classifier the YAML path uses. A mock lands in
+			// the session/config pool iff DeriveLifetime classified it
+			// as Session or Connection. Untagged mocks of the legacy
+			// implicit-session kinds (HTTP, Postgres, MySQL, ...) still
+			// resolve to Session via DeriveLifetime's kind-fallback
+			// branch, so pre-tag recordings keep replaying byte-for-
+			// byte identically. metadata["scope"] is NOT consulted.
+			mock.DeriveLifetime()
+			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+				mock.TestModeInfo.Lifetime == models.LifetimeConnection {
 				configMocks = append(configMocks, mock)
 			}
 		}
