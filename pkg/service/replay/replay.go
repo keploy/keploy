@@ -2293,14 +2293,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Drop the r.instrument gate so k8s-proxy autoreplay (which runs in
-	// non-instrument mode and fetches consumed mocks via the agent's
-	// HTTP API) also writes mappings.yaml. actualTestMockMappings is
-	// populated identically in both modes — consumedMocks comes from
-	// hookImpl.GetConsumedMocks at line 1454/1884, which proxies to
-	// instrumentation.GetConsumedMocks regardless of mode — so there's
-	// no instrument-only invariant to protect here.
-	if isMappingEnabled && r.config.Test.UpdateTestMapping {
+	// The test-mode mapping write is gated ONLY on UpdateTestMapping —
+	// not on isMappingEnabled (= !DisableMapping). The two flags express
+	// independent concerns:
+	//
+	//   DisableMapping     → "during replay, filter mocks by timestamp
+	//                         instead of by the mappings.yaml index"
+	//                         (a replay-time matching-strategy switch).
+	//   UpdateTestMapping  → "after the test set runs, write the actual
+	//                         consumed-mocks-per-test record to disk"
+	//                         (a write-side-effect switch).
+	//
+	// Operators commonly want the second without the first — e.g. record
+	// with disableMapping=true (no mappings.yaml produced; replay falls
+	// back to timestamps), then run test mode with --update-test-mapping
+	// to capture the actual mock consumption for k8s-based final-candidate
+	// analysis. Coupling the two through a single `&&` blocked that
+	// workflow. Also drops the r.instrument gate that was here previously,
+	// so k8s-proxy autoreplay (non-instrument; consumed mocks fetched via
+	// the agent HTTP API) writes mappings.yaml for the same reason —
+	// actualTestMockMappings is populated identically in both modes via
+	// hookImpl.GetConsumedMocks at line 1454/1884.
+	if r.config.Test.UpdateTestMapping {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
