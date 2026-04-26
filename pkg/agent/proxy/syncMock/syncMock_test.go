@@ -343,8 +343,10 @@ func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
 // buffer (they will never drain, but we accept the small leak in
 // exchange for dropping the pre-drop branch that was suspected
 // of regressing #4045 Mongo Fuzzer record_build_replay_latest).
-// The retention path is bounded by the 7-second cutoffTime
-// at the top of ResolveRange, so the leak is time-capped.
+// In-window mocks are retained regardless of age (the long-running-
+// test contract — see TestResolveRangeLongRunningWindowKeepsOldMocks);
+// out-of-window stale mocks are still time-capped by the 7-second
+// cutoff in the unmatched branch.
 func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	t.Parallel()
 
@@ -368,6 +370,78 @@ func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	mgr.mu.Unlock()
 	if remaining != 1 {
 		t.Fatalf("expected 1 mock retained in buffer after post-close ResolveRange; got %d", remaining)
+	}
+}
+
+// TestResolveRangeLongRunningWindowKeepsOldMocks is the
+// regression test for the Mongo Fuzzer record_build_replay_build
+// failure caused by routing V2 EmitMock through syncMock (#4122).
+//
+// The fuzzer's curl POST /run takes ~56 s to complete 10 000 mongo
+// ops, so by the time ResolveRange fires at request resolution the
+// per-test mongo mocks captured in the first ~49 s are all older
+// than 7 s. The cutoff used to be checked BEFORE the window match,
+// which dropped them despite their being in-window — leaving replay
+// without the mongo handshake mocks and producing a connection-pool
+// error at driver init. The fix re-orders the loop to evaluate the
+// window match first, so an in-window mock is kept regardless of
+// age; only un-matched mocks are subject to the stale cutoff.
+func TestResolveRangeLongRunningWindowKeepsOldMocks(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Simulate a 60-second test window that starts 60 s ago.
+	now := time.Now()
+	windowStart := now.Add(-60 * time.Second)
+	windowEnd := now
+
+	// Mock at +5 s into the window — older than the 7-second cutoff
+	// (~55 s old by now) but legitimately in-window.
+	oldInWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: windowStart.Add(5 * time.Second)},
+	}
+	// Mock at -10 s before the window — out of window AND old. Must
+	// be dropped by the stale cutoff.
+	staleOutWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: windowStart.Add(-10 * time.Second)},
+	}
+	// Mock 3 s in the future relative to now — out of window but
+	// recent. Must be retained for a possible future window match.
+	freshOutWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: now.Add(3 * time.Second)},
+	}
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, oldInWindow, staleOutWindow, freshOutWindow)
+	mgr.mu.Unlock()
+
+	mgr.ResolveRange(windowStart, windowEnd, "test-1", true, false)
+
+	// Drain anything sent to the outChan.
+	var sent []*models.Mock
+loop:
+	for {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			break loop
+		}
+	}
+
+	if len(sent) != 1 || sent[0] != oldInWindow {
+		t.Fatalf("expected the in-window mock to be flushed despite being older than 7s; sent=%d", len(sent))
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != freshOutWindow {
+		t.Fatalf("expected only freshOutWindow retained in buffer; got len=%d", len(mgr.buffer))
 	}
 }
 

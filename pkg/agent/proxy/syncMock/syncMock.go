@@ -324,7 +324,31 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
 
-	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
+	// Stale-buffer safety valve.
+	//
+	// The check exists to bound buffer growth when a stream of mocks
+	// arrives that is never closed off by a corresponding test-window
+	// resolve (e.g. a parser kept emitting after the test ended).
+	// Without it, m.buffer would grow without bound across a long
+	// recording session.
+	//
+	// CRITICAL ordering: cutoff must NOT pre-empt the window match.
+	// A long-running test (mongo fuzzer's curl /run takes ~56 s for
+	// 10 000 ops) emits per-test mocks whose ReqTimestampMock is far
+	// older than 7 s by the time ResolveRange fires at request
+	// completion — but those mocks ARE in-window and must be flushed
+	// to the recorder, not silently dropped. The pre-c53b4906 V2 path
+	// bypassed syncMock entirely so the cutoff never applied; routing
+	// through AddMock (#4122) made the previous "cutoff first" ordering
+	// drop the first ~49 s of a 56 s recording window, leaving replay
+	// without the mongo handshake mocks → connection-pool error at
+	// driver init.
+	//
+	// New ordering:
+	//   1. In-window matches are kept/forwarded regardless of age.
+	//   2. Out-of-window mocks are subject to the 7 s cutoff: kept if
+	//      recent (might match a future out-of-order request), dropped
+	//      otherwise (stale and unrecoverable).
 	cutoffTime := time.Now().Add(-7 * time.Second)
 	keepIdx := 0
 
@@ -332,14 +356,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		mock := m.buffer[i]
 		mockTime := mock.Spec.ReqTimestampMock
 
-		// SAFETY VALVE: Expire old mocks
-		// If the mock is older than 7 seconds, we discard it immediately.
-		// This stops the infinite growth.
-		if mockTime.Before(cutoffTime) {
-			continue
-		}
-
-		// MATCHING LOGIC: Process mocks in the requested window
+		// MATCHING LOGIC: Process mocks in the requested window first
+		// so a long-running test's per-test mocks aren't pre-empted by
+		// the stale-buffer cutoff.
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
 				// If output channel is not wired yet, keep matching
@@ -362,6 +381,16 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
+			continue
+		}
+
+		// SAFETY VALVE: Expire stale OUT-OF-WINDOW mocks.
+		// A mock that didn't match the current window AND is older
+		// than 7 s is unrecoverable — no future request can have a
+		// window that includes a timestamp from before "now-7s" once
+		// we're already past the head of the dedup queue, because
+		// the queue is FIFO on ReqTimestamp. Drop to bound growth.
+		if mockTime.Before(cutoffTime) {
 			continue
 		}
 
