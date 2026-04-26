@@ -2293,7 +2293,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
+	// Drop the r.instrument gate so k8s-proxy autoreplay (which runs in
+	// non-instrument mode and fetches consumed mocks via the agent's
+	// HTTP API) also writes mappings.yaml. actualTestMockMappings is
+	// populated identically in both modes — consumedMocks comes from
+	// hookImpl.GetConsumedMocks at line 1454/1884, which proxies to
+	// instrumentation.GetConsumedMocks regardless of mode — so there's
+	// no instrument-only invariant to protect here.
+	if isMappingEnabled && r.config.Test.UpdateTestMapping {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
