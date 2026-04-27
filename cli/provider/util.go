@@ -20,8 +20,7 @@ func alreadyRunning(cmd, basePath string) bool {
 	return (cmd == "test" && basePath != "")
 }
 
-
-const Logo  = `
+const Logo = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄
      ████████▓▒
