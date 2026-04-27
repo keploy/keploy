@@ -332,7 +332,16 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test mode")
+		// Default mirrors keploy.yml's `disableMapping` (zero-value false → mapping
+		// enabled). Hardcoding the default to true silently disabled mapping-based
+		// mock filtering in test mode even when mappings.yaml was correctly
+		// produced during record, forcing replay onto the brittle timestamp-window
+		// path that loses tightly-spaced per-test mocks (listmonk-postgres
+		// pipeline 604, 3/38 tests with ~117 µs boundary races on the
+		// session-lookup query). determineMockingStrategy already falls back to
+		// timestamp-based filtering when no mappings.yaml exists, so flipping
+		// the default does not break recordings without mapping data.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
 		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
 		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
