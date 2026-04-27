@@ -111,6 +111,60 @@ func TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk(t *testing.T) {
 	}
 }
 
+// TestAsyncPipeFeederShutdownDrainWaitsForParser guards the regression
+// fixed alongside python-schema-match's missing /edge/nested_null capture:
+// shutdown's residual-chunk drain MUST wait for the parser goroutine to
+// exit before it consumes anything from the channel. Otherwise the drain
+// races the parser's Read for closed-channel data and silently steals
+// chunks the parser has not yet seen.
+//
+// Repro shape: short-lived HTTP/1.0 + Connection: close exchange where the
+// upstream socket EOFs immediately after the response, triggering Close
+// (and thus shutdown) on the feeder before the parser goroutine has been
+// scheduled. The parser then reads from a channel the drain has already
+// emptied, returns EOF, and emits nothing.
+func TestAsyncPipeFeederShutdownDrainWaitsForParser(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	f := newAsyncPipeFeeder(0, zap.NewNop())
+
+	// Enqueue a chunk, mimicking io.Copy's Write of a single response.
+	if _, err := f.Write([]byte("HELLO")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Forwarder finished — close the feeder. This used to spawn a drain
+	// goroutine that started consuming f.ch immediately, racing with the
+	// not-yet-scheduled parser.
+	f.Close()
+
+	// Give the (pre-fix) drain goroutine ample time to win the race and
+	// empty the channel. With the fix in place the drain blocks on the
+	// parserExited signal and stays out of the channel.
+	time.Sleep(20 * time.Millisecond)
+
+	// Now play parser: read the chunk. With the fix this must succeed —
+	// the chunk is still in the channel waiting for us. Pre-fix the
+	// channel is empty and Read returns EOF.
+	buf := make([]byte, 8)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read: unexpected error %v", err)
+	}
+	if string(buf[:n]) != "HELLO" {
+		t.Fatalf("parser was supposed to consume HELLO before drain — got %q (drain raced and stole the chunk)", string(buf[:n]))
+	}
+
+	// Signal parser exit so shutdown's drain can proceed and the goroutine
+	// doesn't leak past test end.
+	f.signalParserExit()
+
+	// EOF after drain.
+	if _, err := f.Read(buf); err != io.EOF {
+		t.Fatalf("expected EOF after drain, got %v", err)
+	}
+}
+
 func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
 	paused := false
 	stubIngressPaused(t, func() bool { return paused })

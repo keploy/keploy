@@ -147,12 +147,14 @@ var feederInFlightBytes atomic.Int64
 // maxSize, or a full channel cause the feeder to silently stop
 // capturing while forwarding continues unimpacted.
 type asyncPipeFeeder struct {
-	ch        chan timedChunk
-	closed    atomic.Bool
-	written   atomic.Int64
-	maxSize   int64
-	logger    *zap.Logger
-	closeOnce sync.Once
+	ch             chan timedChunk
+	closed         atomic.Bool
+	written        atomic.Int64
+	maxSize        int64
+	logger         *zap.Logger
+	closeOnce      sync.Once
+	parserExited   chan struct{}
+	parserExitOnce sync.Once
 
 	// cur and lastReadNano are touched only from the parser goroutine
 	// (the single Read caller), so no synchronization is needed for
@@ -177,9 +179,10 @@ func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) *asyncPipeFeeder {
 		// cause data to accumulate. Overflowing kills capture for the
 		// rest of the connection because the HTTP stream becomes
 		// unrecoverable.
-		ch:      make(chan timedChunk, 512),
-		maxSize: int64(maxSize),
-		logger:  logger,
+		ch:           make(chan timedChunk, 512),
+		maxSize:      int64(maxSize),
+		logger:       logger,
+		parserExited: make(chan struct{}),
 	}
 }
 
@@ -287,14 +290,25 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 // and their bytes returned to the global in-flight counter. Without the
 // drain those bytes would stay accounted-for (counter never decrements)
 // even though the parser goroutine has already exited on io.EOF — which
-// would slowly leak the global cap over the lifetime of the agent. The
-// drain is fire-and-forget because no caller cares when it finishes; Go
-// GC reclaims the chunks once the goroutine exits.
+// would slowly leak the global cap over the lifetime of the agent.
+//
+// The drain MUST wait for the parser to exit before consuming chunks. If the
+// drain races the parser, it can steal chunks that the parser has not yet
+// read — `<-f.ch` happily returns buffered chunks even after the channel is
+// closed, so whichever goroutine wins the read takes the data. Under
+// short-lived HTTP/1.0 + Connection: close exchanges (response arrives,
+// upstream closes immediately, shutdown fires) the drain frequently wins on
+// connections whose parser hasn't yet been scheduled by the Go runtime,
+// silently dropping a request/response pair from the test set. python-schema-match
+// reproduced this as a missing capture (/edge/nested_null) under the burst of
+// 12 sequential urllib calls. Sequencing the drain after the parser's exit
+// removes the race while still reclaiming the in-flight counter.
 func (f *asyncPipeFeeder) shutdown() {
 	f.closed.Store(true)
 	f.closeOnce.Do(func() {
 		close(f.ch)
 		go func() {
+			<-f.parserExited
 			for chunk := range f.ch {
 				feederInFlightBytes.Add(-int64(len(chunk.data)))
 			}
@@ -306,6 +320,16 @@ func (f *asyncPipeFeeder) shutdown() {
 // Must be called after the forwarding goroutine finishes (after io.Copy returns).
 func (f *asyncPipeFeeder) Close() {
 	f.shutdown()
+}
+
+// signalParserExit must be called by the parser goroutine on exit (typically
+// via defer) so the shutdown drain can safely proceed without racing the
+// parser for channel data. Idempotent — safe to call multiple times. If
+// no parser is ever attached to this feeder (e.g. capture disabled before
+// the goroutine launches) the deferred close in handleHttp1ZeroCopy must
+// still fire this so shutdown's drain doesn't block forever.
+func (f *asyncPipeFeeder) signalParserExit() {
+	f.parserExitOnce.Do(func() { close(f.parserExited) })
 }
 
 // LastReadTime returns the arrival timestamp of the most recent chunk
@@ -884,6 +908,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 //     this point.
 func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *zap.Logger,
 	reqFeeder, respFeeder *asyncPipeFeeder, t chan *models.TestCase, appPort uint16) {
+
+	// Unblock shutdown's drain goroutine on every exit path. Without this
+	// the drain would race with our Read() for channel data and could steal
+	// chunks before we consume them, silently dropping captures.
+	defer reqFeeder.signalParserExit()
+	defer respFeeder.signalParserExit()
 
 	reqReader := bufio.NewReader(reqFeeder)
 	respReader := bufio.NewReader(respFeeder)
