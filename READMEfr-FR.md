@@ -56,6 +56,11 @@ Intégrez Keploy en installant l'agent localement. Aucun changement de code n'es
 ```shell
 curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
+> **Remarque :** Par défaut, cela installe **Keploy** ***avec les fonctionnalités payantes*** afin que vous puissiez explorer l'ensemble des fonctionnalités. Pour installer plutôt l'édition OSS, ajoutez l'option `--oss` :
+>
+> ```shell
+> curl --silent -O -L https://keploy.io/install.sh && source install.sh --oss
+> ```
 
 ##  🎬 Enregistrer les cas de test
 
