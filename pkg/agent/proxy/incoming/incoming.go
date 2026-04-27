@@ -207,14 +207,19 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
 
-	if err := waitForIngressTarget(ctx, newAppAddr, ingressTargetListenTimeout); err != nil {
-		logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
-			zap.String("target", newAppAddr),
-			zap.Duration("timeout", ingressTargetListenTimeout),
-			zap.Error(err))
+	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+		if err != nil {
+			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
+				zap.String("target", newAppAddr),
+				zap.Duration("timeout", ingressTargetListenTimeout),
+				zap.Error(err))
+		} else {
+			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
+				zap.String("target", newAppAddr))
+		}
 	} else {
-		logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
-			zap.String("target", newAppAddr))
+		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
+			zap.Uint16("orig_port", origPort))
 	}
 
 	listener, err := net.Listen("tcp4", origAppAddr)
@@ -269,6 +274,13 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	h.mu.Unlock()
 
 	return nil
+}
+
+func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
+	if newPort == 0 {
+		return false, nil
+	}
+	return true, waitForIngressTarget(ctx, addr, timeout)
 }
 
 func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {

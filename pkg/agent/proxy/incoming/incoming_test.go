@@ -46,3 +46,17 @@ func TestWaitForIngressTargetTimeout(t *testing.T) {
 		t.Fatal("expected timeout waiting for unused port")
 	}
 }
+
+func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
+	start := time.Now()
+	waited, err := waitForIngressTargetWhenKnown(context.Background(), 0, "127.0.0.1:0", 5*time.Second)
+	if err != nil {
+		t.Fatalf("waitForIngressTargetWhenKnown returned error: %v", err)
+	}
+	if waited {
+		t.Fatal("expected unknown redirected port to skip target wait")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("unknown redirected port should skip immediately, took %s", elapsed)
+	}
+}
