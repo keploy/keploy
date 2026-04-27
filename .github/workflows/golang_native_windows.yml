@@ -51,12 +51,23 @@ jobs:
       # If a prior run left the workspace populated with files but no .git,
       # actions/checkout's clean:true fails at "git config --local". Wipe in
       # that case so checkout starts fresh; healthy workspaces are left alone.
-      - name: Recover broken workspace
+      - name: Recover stale runner state
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           try {
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
             $ws = $env:GITHUB_WORKSPACE
             if ($ws -and (Test-Path $ws)) {
               $gitDir = Join-Path $ws '.git'
@@ -68,7 +79,7 @@ jobs:
               }
             }
           } catch {
-            Write-Host "::warning::Recover broken workspace: $_"
+            Write-Host "::warning::Recover stale runner state: $_"
           }
           exit 0
       - name: Checkout repository
