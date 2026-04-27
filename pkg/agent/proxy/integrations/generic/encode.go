@@ -147,7 +147,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	var genericRequests []models.Payload
 	var genericResponses []models.Payload
 	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
-	reqTimestampMock := time.Now()
+	reqTimestampMock := models.CapturedReqTime(ctx)
 	var resTimestampMock time.Time
 
 	flushMock := func() {
@@ -214,7 +214,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 			// timestamp to this request's arrival time.
 			if len(genericRequests) == 0 {
 				genericResponses = nil
-				reqTimestampMock = time.Now()
+				reqTimestampMock = models.CapturedReqTime(ctx)
 			}
 			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
 			prevChunkWasReq = true
@@ -225,7 +225,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				continue
 			}
 			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
-			resTimestampMock = time.Now()
+			resTimestampMock = models.CapturedRespTime(ctx)
 
 			// Flush the moment the first response chunk for an
 			// outstanding request arrives. This makes the mock visible

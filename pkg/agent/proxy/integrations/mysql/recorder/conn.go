@@ -63,7 +63,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	}
 
 	// Set the timestamp of the initial request
-	res.reqTimestamp = time.Now()
+	res.reqTimestamp = models.CapturedReqTime(ctx)
 
 	// Decode server handshake packet
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
@@ -410,7 +410,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		}
 	}
 
-	res.resTimestamp = time.Now()
+	res.resTimestamp = models.CapturedRespTime(ctx)
 
 	setHandshakeResult(&res, authRes)
 
@@ -1001,7 +1001,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	}
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
-		mocks, entry.ReqTimestamp, time.Now(), opts)
+		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: auth exchange recorded, proceeding to command phase")
 
@@ -1106,7 +1106,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 
 	recordMock(ctx, requests, responses, "config",
 		sslReqPkt.Header.Type, mysql.StatusToString(mysql.OK),
-		mocks, entry.ReqTimestamp, time.Now(), opts)
+		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: recorded synthetic config mock for seq=0 path")
 	return nil

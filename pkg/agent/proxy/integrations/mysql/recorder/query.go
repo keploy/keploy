@@ -152,7 +152,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: time.Now()}:
+				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
 				default:
 				}
 			}
@@ -179,7 +179,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: time.Now()}:
+				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
 				default:
 				}
 			}
@@ -208,7 +208,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: time.Now()}:
+						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 						default:
 						}
 					}
@@ -225,7 +225,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: time.Now()}:
+						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 						default:
 						}
 					}
@@ -363,7 +363,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				// responses, matching the synchronous recorder behavior.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, models.CapturedRespTime(ctx), opts)
 					pendingCommand = nil
 					pendingRespBundle = nil
 					state = stateExpectCommand
@@ -375,7 +375,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
 					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, models.CapturedRespTime(ctx), opts)
 					pendingCommand = nil
 					pendingRespBundle = nil
 					state = stateExpectCommand

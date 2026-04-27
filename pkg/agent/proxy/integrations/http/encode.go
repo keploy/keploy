@@ -208,7 +208,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			}
 
 			// Capture the request timestamp.
-			reqTimestampMock := time.Now()
+			reqTimestampMock := models.CapturedReqTime(ctx)
 
 			chunkedReqStart := time.Now()
 			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
@@ -236,7 +236,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				if err == io.EOF {
 					h.Logger.Debug("Response complete, exiting the loop.")
 					if len(resp) != 0 {
-						resTimestampMock := time.Now()
+						resTimestampMock := models.CapturedRespTime(ctx)
 						_, err = clientConn.Write(resp)
 						if err != nil {
 							if ctx.Err() != nil {
@@ -281,7 +281,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				//     capture, then fall through to synthesize a fresh
 				//     error response — same behaviour as the mid-body
 				//     error branch below (line ~318).
-				resTimestampMock := time.Now()
+				resTimestampMock := models.CapturedRespTime(ctx)
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
 				if len(resp) == 0 {
@@ -324,7 +324,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			resTimestampMock := time.Now()
+			resTimestampMock := models.CapturedRespTime(ctx)
 
 			// Forward response to client.
 			_, err = clientConn.Write(resp)
@@ -366,7 +366,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				utils.LogError(h.Logger, err, "failed to handle chunk response; persisting synthesized mock")
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
-				enqueueMock(finalReq, synthResp, reqTimestampMock, time.Now())
+				enqueueMock(finalReq, synthResp, reqTimestampMock, models.CapturedRespTime(ctx))
 				errCh <- nil
 				return nil
 			}
