@@ -544,6 +544,22 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 
+	// Propagate operator-opt-in env vars (KEPLOY_PG_V3_*, KEPLOY_*_FALLBACK,
+	// etc.) from the host shell into the agent container. The agent reads
+	// these via os.Getenv() inside its own process; without explicit
+	// propagation a host-side `KEPLOY_PG_V3_BINDSHAPE_FALLBACK=1` would
+	// never reach the parser code that gates on it. Whitelist by prefix
+	// rather than full env to avoid leaking unrelated process env into
+	// the container.
+	for _, propagatePrefix := range []string{"KEPLOY_PG_V3_", "KEPLOY_STRICT_MOCK_WINDOW", "KEPLOY_MOCK_FORMAT"} {
+		for _, envEntry := range os.Environ() {
+			if !strings.HasPrefix(envEntry, propagatePrefix) {
+				continue
+			}
+			envVars = append(envVars, envEntry)
+		}
+	}
+
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
