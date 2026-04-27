@@ -59,13 +59,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Forward client → dest, tee copies to channel
 	go func() {
 		defer close(clientFrameCh)
-		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app")
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false)
 	}()
 
 	// Forward dest → client, tee copies to channel
 	go func() {
 		defer close(destFrameCh)
-		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client")
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true)
 	}()
 
 	// Single emitter goroutine to avoid duplicate test case emission.
@@ -123,7 +123,7 @@ type frameChunk struct {
 	timestamp time.Time
 }
 
-func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string) {
+func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, stampAfterWrite bool) {
 	buf := make([]byte, 32*1024)
 	teeActive := !memoryguard.IsRecordingPaused()
 	for {
@@ -135,6 +135,10 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 					zap.String("direction", direction), zap.Error(wErr))
 				return
 			}
+			timestamp := readAt
+			if stampAfterWrite {
+				timestamp = time.Now()
+			}
 			if teeActive {
 				if memoryguard.IsRecordingPaused() {
 					teeActive = false
@@ -143,7 +147,7 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 					copy(data, buf[:n])
 					ch <- frameChunk{
 						data:      data,
-						timestamp: readAt,
+						timestamp: timestamp,
 					} // blocking send — preserves stream integrity
 				}
 			}
