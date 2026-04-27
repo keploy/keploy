@@ -278,6 +278,94 @@ func TestV2_PanicDoesNotBlockTraffic(t *testing.T) {
 	}
 }
 
+// -------- Error-return parser --------
+
+// errorReturnParser reads one client chunk, then returns a non-nil
+// error without panicking. Mirrors the path real V2 parsers take when
+// they hit a decode failure (invalid Content-Length, gzip header
+// mismatch, malformed wire frame, etc.). The supervisor must classify
+// this as StatusError AND request passthrough so the relay keeps
+// forwarding bytes end-to-end — same invariant the panic test
+// asserts, but for the much more common error-return path.
+func errorReturnParser(_ context.Context, sess *supervisor.Session) error {
+	_, _ = sess.ClientStream.ReadChunk()
+	return errParserDecode{}
+}
+
+type errParserDecode struct{}
+
+func (errParserDecode) Error() string { return "synthetic parser decode error" }
+
+// TestV2_ErrorDoesNotBlockTraffic mirrors TestV2_PanicDoesNotBlockTraffic
+// for the clean error-return path. A real parser returning an error
+// (e.g. http recordv2 on "invalid content-length: ...") must not tear
+// down the application's TCP connection. Confirmed empirically against
+// the V2 HTTP parser via /api/stalls/v2gap/http?case=bad-cl in the
+// sample-app validators; this is the unit-level regression guard.
+func TestV2_ErrorDoesNotBlockTraffic(t *testing.T) {
+	t.Parallel()
+	pp := newPipePair(t)
+
+	sv := supervisor.New(supervisor.Config{Logger: zaptest.NewLogger(t)})
+	defer sv.Close()
+
+	r := mustStartRelay(t, pp, sv.BumpActivity)
+	sess, mocks := mustBuildSession(t, sv, r)
+
+	// Destination: keep echoing forever so we can probe the byte
+	// path AFTER the parser returns.
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, err := pp.destSrv.Read(buf)
+			if err != nil {
+				return
+			}
+			_, werr := pp.destSrv.Write(append([]byte("reply:"), buf[:n]...))
+			if werr != nil {
+				return
+			}
+		}
+	}()
+
+	clientGot := make(chan []byte, 1)
+	go func() {
+		_, _ = pp.clientApp.Write([]byte("hello"))
+		b := make([]byte, 64)
+		n, _ := pp.clientApp.Read(b)
+		clientGot <- b[:n]
+	}()
+
+	resCh := make(chan supervisor.Result, 1)
+	go func() { resCh <- sv.Run(context.Background(), errorReturnParser, sess) }()
+
+	// Byte path survives the parser's error return.
+	select {
+	case got := <-clientGot:
+		if !bytes.Equal(got, []byte("reply:hello")) {
+			t.Errorf("got %q, want reply:hello", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not receive reply despite parser returning an error")
+	}
+
+	var res supervisor.Result
+	select {
+	case res = <-resCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervisor did not return within 3s")
+	}
+	if res.Status != supervisor.StatusError {
+		t.Errorf("status = %v, want StatusError", res.Status)
+	}
+	if !res.FallthroughToPassthrough {
+		t.Error("error-return must request passthrough — otherwise the dispatcher cancels the relay and tears down the application's connection")
+	}
+	if len(mocks) != 0 {
+		t.Errorf("error-return produced %d mocks, want 0 (incomplete decode → no mock)", len(mocks))
+	}
+}
+
 // -------- Hang parser --------
 
 // hangParser marks pending work (so the watchdog arms) and blocks

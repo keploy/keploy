@@ -53,8 +53,17 @@ func TestRunError(t *testing.T) {
 	if !errors.Is(res.Err, sentinel) {
 		t.Fatalf("err: got %v, want %v", res.Err, sentinel)
 	}
-	if res.FallthroughToPassthrough {
-		t.Fatalf("fallthrough: got true, want false (errors alone don't fall through)")
+	// Parser-side decode/state errors must fall through to passthrough.
+	// The bytes have already been forwarded by the relay; the parser's
+	// inability to record a clean mock has no bearing on whether the
+	// application's connection should survive. The dispatcher reads
+	// FallthroughToPassthrough and skips relayCancel when true, leaving
+	// the relay alive to forward subsequent traffic until peer close.
+	// See pkg/agent/proxy/integrations/http/recordv2.go for the call
+	// sites this contract protects (invalid Content-Length, gzip
+	// decompression failure, malformed status line).
+	if !res.FallthroughToPassthrough {
+		t.Fatalf("fallthrough: got false, want true (parser errors must not tear down the application's connection)")
 	}
 }
 
@@ -347,6 +356,104 @@ func TestSessionEmitMockHonorsCtxCancel(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("EmitMock did not return after ctx cancel (deadlock)")
+	}
+}
+
+// TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched pins
+// the RouteMocksViaSyncMock=true path by asserting the negative:
+// when the flag is on, Session.Mocks must NOT receive anything,
+// and OnPendingCleared must still fire. Under this test's setup —
+// session not marked incomplete, RouteMocksViaSyncMock=true, Mocks
+// non-nil — that combination identifies the syncMock branch. Note
+// that the incomplete-mock drop path would also produce "Mocks
+// untouched + OnPendingCleared fired" if the session were marked
+// incomplete, so the invariant is conditional on the clean-session
+// precondition this test sets up.
+//
+// Earlier iterations of this test rebound the package-singleton
+// syncMock's outChan via SetOutputChannel(...). That touched a
+// global visible across every test in the same test process, so
+// parallel tests or t.Parallel() subtests in this package that
+// also call SetOutputChannel could race on the outChan pointer
+// and produce flaky timeouts. (Cross-package `go test ./...` runs
+// each package in its own binary, so the race was strictly
+// intra-package.) Asserting on the local Session.Mocks channel
+// avoids rebinding that global outChan — the syncMock manager's
+// other state (buffered mocks, firstReqSeen) is still touched
+// because RouteMocksViaSyncMock=true routes through it, but none
+// of that state is read by this test's assertions.
+func TestSessionEmitMockRouteViaSyncMock_DirectChannelUntouched(t *testing.T) {
+	t.Parallel()
+
+	directCh := make(chan *models.Mock, 1)
+
+	var pendingCleared int32
+	sess := &Session{
+		Mocks:                 directCh,
+		Logger:                zaptest.NewLogger(t),
+		Ctx:                   context.Background(),
+		RouteMocksViaSyncMock: true,
+		OnPendingCleared: func() {
+			atomic.AddInt32(&pendingCleared, 1)
+		},
+	}
+
+	if err := sess.EmitMock(&models.Mock{Name: "via-syncmock"}); err != nil {
+		t.Fatalf("EmitMock returned err: %v", err)
+	}
+
+	// Direct channel must remain empty — the syncMock route should
+	// have returned before touching it. EmitMock is synchronous, so
+	// a non-blocking receive is enough: anything it was going to
+	// send on Mocks would already be buffered by the time EmitMock
+	// returned.
+	select {
+	case got := <-directCh:
+		t.Fatalf("mock leaked to Session.Mocks when RouteMocksViaSyncMock=true: %+v", got)
+	default:
+		// expected: nothing delivered.
+	}
+
+	if c := atomic.LoadInt32(&pendingCleared); c != 1 {
+		t.Fatalf("OnPendingCleared calls = %d, want 1 (only the syncMock branch fires it without also sending on Mocks)", c)
+	}
+}
+
+// TestSessionEmitMockRouteViaSyncMock_HonorsCtx pins the ctx-cancel
+// behaviour on the syncMock routing path. Without the pre-check,
+// EmitMock would call mgr.AddMock (which does not observe s.Ctx)
+// and return nil — silently violating the documented contract
+// that EmitMock returns ctx.Err() when the parser's context has
+// been cancelled.
+//
+// Uses the local-direct-channel pattern (no singleton rebind) so
+// concurrent test packages that call SetOutputChannel can't
+// interfere.
+func TestSessionEmitMockRouteViaSyncMock_HonorsCtx(t *testing.T) {
+	t.Parallel()
+
+	directCh := make(chan *models.Mock, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before EmitMock is called
+
+	sess := &Session{
+		Mocks:                 directCh,
+		Logger:                zaptest.NewLogger(t),
+		Ctx:                   ctx,
+		RouteMocksViaSyncMock: true,
+	}
+	err := sess.EmitMock(&models.Mock{Name: "should-be-cancelled"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	// Non-blocking receive: EmitMock is synchronous, so if it had
+	// written to directCh it would already be readable.
+	select {
+	case got := <-directCh:
+		t.Fatalf("mock leaked to Session.Mocks after ctx cancel: %+v", got)
+	default:
+		// expected: no delivery.
 	}
 }
 

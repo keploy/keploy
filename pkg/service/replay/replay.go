@@ -29,7 +29,6 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
-	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -156,8 +155,6 @@ type Replayer struct {
 	telemetry          Telemetry
 	instrumentation    Instrumentation
 	config             *config.Config
-	auth               service.Auth
-	mock               *mock
 	instrument         bool
 	isLastTestSet      bool
 	isLastTestCase     bool
@@ -191,17 +188,8 @@ func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
-
-	// TODO: add some comment.
-	mock := &mock{
-		cfg:        config,
-		storage:    storage,
-		logger:     logger,
-		tsConfigDB: testSetConf,
-	}
-
-	defaultHook := NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock)
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, storage Storage, config *config.Config) Service {
+	defaultHook := NewHooks(logger, config, instrumentation)
 
 	instrument := config.Command != ""
 	return &Replayer{
@@ -215,8 +203,6 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		instrumentation: instrumentation,
 		config:          config,
 		instrument:      instrument,
-		auth:            auth,
-		mock:            mock,
 		hookImpl:        defaultHook,
 
 		completeTestReport:   make(map[string]TestReportVerdict),
@@ -616,10 +602,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testRunStatus := "fail"
 	if testRunResult {
 		testRunStatus = "pass"
-	}
-
-	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Info("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	r.completeTestReportMu.RLock()
@@ -2311,7 +2293,58 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
+	// Test-mode mapping write semantics:
+	//
+	//   UpdateTestMapping=true  → always write/merge mappings.yaml
+	//                             (operator-driven update).
+	//   UpdateTestMapping=false → create-if-not-present: write only
+	//                             when mappings.yaml is absent for
+	//                             this test-set AND we have at least
+	//                             one populated test→mocks entry.
+	//                             Once a file exists, we leave it
+	//                             alone — repeat test runs don't
+	//                             churn it.
+	//
+	// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
+	// (and other final-candidate analyses) consults to find which
+	// mocks each test consumed. Operators who never set the flag
+	// still need a usable file the first time test mode runs; gating
+	// strictly on UpdateTestMapping leaves them without one. The
+	// create-if-not-present default closes that gap without changing
+	// behaviour for existing users who already have a mappings.yaml
+	// they don't want overwritten — they can keep flag=false and the
+	// existing file is preserved. To force a refresh, flag=true.
+	//
+	// Independence from DisableMapping: the two flags express
+	// orthogonal concerns. DisableMapping picks the replay-time mock
+	// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
+	// a separate side-effect that records consumption. We don't gate
+	// the write on the filter strategy.
+	//
+	// The non-emptiness guard on the create-if-not-present branch
+	// matters because actualTestMockMappings is populated by
+	// upsertActualTestMockMapping calls that depend on consumedMocks,
+	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
+	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
+	// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
+	// so without this guard the first run would create an empty
+	// mappings.yaml and every subsequent run would skip the create
+	// branch (file exists), leaving autoreplay permanently without
+	// the mappings the feature relies on. UpdateTestMapping=true
+	// still writes an empty file when explicitly requested — that
+	// matches the operator intent of "force a refresh".
+	shouldWriteMappings := r.config.Test.UpdateTestMapping
+	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
+		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
+		if existsErr != nil {
+			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
+				zap.String("testSetID", testSetID),
+				zap.Error(existsErr))
+		} else if !exists {
+			shouldWriteMappings = true
+		}
+	}
+	if shouldWriteMappings {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -2980,7 +3013,7 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 }
 
 // UpdateTestSetTemplate writes the updated template values to the test-set's config.
-// It preserves existing pre/post scripts, secret, mock registry and metadata fields.
+// It preserves existing pre/post scripts, secret and metadata fields.
 func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
 	if len(template) == 0 { // nothing to persist
 		return nil
@@ -2995,7 +3028,6 @@ func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, 
 		ts.PreScript = existing.PreScript
 		ts.PostScript = existing.PostScript
 		ts.Secret = existing.Secret
-		ts.MockRegistry = existing.MockRegistry
 		ts.Metadata = existing.Metadata
 	} else {
 		ts.Metadata = map[string]interface{}{}
@@ -3219,7 +3251,7 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		utils.LogError(r.logger, err, "failed to get all test set ids")
-		return nil, fmt.Errorf("mocks downloading failed to due to error in getting test set ids")
+		return nil, fmt.Errorf("failed to get test set ids")
 	}
 
 	var testSets []string
@@ -3236,103 +3268,6 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 	// Sort the testsets.
 	natsort.Sort(testSets)
 	return testSets, nil
-}
-
-func (r *Replayer) authenticateUser(ctx context.Context) error {
-	//authenticate the user
-	token, err := r.auth.GetToken(ctx)
-	if err != nil {
-		r.logger.Error("Failed to Authenticate user", zap.Error(err))
-		r.logger.Info("Looks like you haven't logged in, skipping mock upload/download")
-		r.logger.Info("Please login using `keploy login` to perform mock upload/download action")
-		return fmt.Errorf("mocks downloading failed to due to authentication error")
-	}
-
-	r.mock.setToken(token)
-	return nil
-}
-func (r *Replayer) DownloadMocks(ctx context.Context) error {
-	// Authenticate the user for mock registry
-	err := r.authenticateUser(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(r.config.MockDownload.RegistryIDs) > 0 {
-		for _, registryID := range r.config.MockDownload.RegistryIDs {
-			// Use the registry ID to download mocks directly
-			r.logger.Info("Downloading mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("app", r.config.AppName))
-
-			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return err
-				}
-				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
-				continue
-			}
-
-			r.logger.Info("Successfully downloaded mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
-		}
-		return nil
-	}
-
-	testSets, err := r.GetSelectedTestSets(ctx)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get selected test sets")
-		return fmt.Errorf("mocks downloading failed to due to error in getting selected test sets")
-	}
-
-	for _, testSetID := range testSets {
-		r.logger.Info("Downloading mocks for the testset", zap.String("testset", testSetID))
-
-		err := r.mock.download(ctx, testSetID)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			utils.LogError(r.logger, err, "failed to download mocks", zap.String("testset", testSetID))
-			continue
-		}
-
-	}
-	return nil
-}
-
-func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
-	// Authenticate the user for mock registry
-	err := r.authenticateUser(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(testSets) == 0 {
-		testSets, err = r.GetSelectedTestSets(ctx)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get selected test sets")
-			return fmt.Errorf("mocks uploading failed to due to error in getting selected test sets")
-		}
-	}
-
-	for _, testSetID := range testSets {
-		r.logger.Info("Uploading mocks for the testset", zap.String("testset", testSetID))
-
-		err := r.mock.upload(ctx, testSetID)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			utils.LogError(r.logger, err, "failed to upload mocks", zap.String("testset", testSetID))
-			continue
-		}
-
-	}
-
-	return nil
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
