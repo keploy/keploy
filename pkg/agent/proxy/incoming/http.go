@@ -1032,8 +1032,14 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		// guard. The acquire blocks the parser if the semaphore is
 		// saturated — that backpressure is what prevents the next
 		// in-flight allocation, so it must be on the parser goroutine,
-		// not inside the launched goroutine.
-		captureHookSem <- struct{}{}
+		// not inside the launched goroutine. Race the acquire with
+		// ctx.Done() so a connection close during agent shutdown unblocks
+		// the parser instead of pinning it to a saturated semaphore.
+		select {
+		case captureHookSem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		go func(req *http.Request, resp *http.Response, reqTs, respTs time.Time) {
 			defer func() { <-captureHookSem }()
 			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTs, respTs, pm.incomingOpts, pm.synchronous, pm.mapping, appPort)
