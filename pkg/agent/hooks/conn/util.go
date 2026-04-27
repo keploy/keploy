@@ -183,8 +183,16 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
+		// Pass testName (the locally-synthesised "test-N" identifier),
+		// not testCase.Name. CodeQL flow analysis treats testCase as
+		// HTTP-sourced and any read from its fields as potentially
+		// sensitive — even though we just wrote a synthetic ID into
+		// .Name a line earlier. Forwarding the local string severs
+		// the taint flow and stops the go/clear-text-logging false
+		// positives that fire downstream (syncMock.go diag/Info
+		// logs include test_name for ResolveRange traceability).
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true, mapping)
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testName, true, mapping)
 		}
 	}
 	select {
