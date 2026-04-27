@@ -7,10 +7,16 @@
 // to parse on NUL bytes / missing yaml tags), and only an actual yaml
 // marshal → unmarshal cycle exercises that path.
 //
-// The sentinel case (PostgresV3NullCell) is called out as its own test:
-// its previous value (\x00NULL\x00) was a control character that
-// gopkg.in/yaml.v3 rejects. If someone reverts the sentinel to a
-// control sequence, that test is the first to fail.
+// The NULL-cell case is called out as its own test: prior revisions
+// used string sentinels (\x00NULL\x00, then ~~KEPLOY_PG_NULL~~) that
+// repeatedly caused yaml.v3 edge-case failures. The current
+// representation marks SQL NULL with PostgresV3Cell.Value == nil
+// (the IsNull() method just wraps that nil-check; there is no
+// exported IsNull field) and emits a native YAML null on disk,
+// which gives a round-trip distinction between SQL NULL and empty
+// string without escape hacks. That test is the regression canary
+// if the struct-level encoding ever slips back to a string-sentinel
+// scheme.
 package mockdb
 
 import (
@@ -146,9 +152,9 @@ func TestYAMLRoundTrip_PostgresV3Data(t *testing.T) {
 					Table:      "customer_tag",
 					PrimaryKey: []string{"id"},
 					Columns:    []string{"id", "tag", "created_at"},
-					Rows: [][]string{
-						{"1", "vip", "2026-04-22"},
-						{"2", "churn-risk", "2026-04-22"},
+					Rows: []models.PostgresV3Cells{
+						{models.NewValueCell("1"), models.NewValueCell("vip"), models.NewValueCell("2026-04-22")},
+						{models.NewValueCell("2"), models.NewValueCell("churn-risk"), models.NewValueCell("2026-04-22")},
 					},
 					Truncated: false,
 				},
@@ -178,15 +184,27 @@ func TestYAMLRoundTrip_PostgresV3Query(t *testing.T) {
 					SQLAstHash:    "sha256:abcd",
 					SQLNormalized: "select id from customer_tag where id=$1",
 					ParamOIDs:     []uint32{20},
-					InvocationID:  "sha256:abcd:0",
-					BindValues:    []string{"AAAAAQ=="},
+					InvocationID:  "0:0",
+					// Logical int64 bind for the bigint $1 — BindFormats
+					// records that the wire format was binary; the cell
+					// itself stays in logical form so the replayer can
+					// re-encode it to match whatever format the live
+					// client selects at Bind time.
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
-					ResultFormats: []int{1}, // binary int4 — the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
+					ResultFormats: []int{1}, // binary int8/bigint — matches RowDescription.TypeOID 20 above; the lib/pq RETURNING id shape; lost format codes broke round 4 listmonk validation
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
 						},
-						Rows:            [][]string{{"MQ=="}},
+						// Row value is int64 to match the bigint OID
+						// declared in RowDescription. Storing the cell
+						// as a string would conflict with the logical-
+						// value contract on PostgresV3Cell (int8 →
+						// int64) and weaken the regression coverage:
+						// a future change that breaks integer round-
+						// trip would still pass with a stringy fixture.
+						Rows:            []models.PostgresV3Cells{{models.NewValueCell(int64(1))}},
 						CommandComplete: "SELECT 1",
 					},
 					SideEffects: &models.PostgresV3SideEffects{TxTransition: ""},
@@ -217,7 +235,7 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 				Query: &models.PostgresV3QuerySpec{
 					SQLAstHash:    "sha256:shape",
 					SQLNormalized: "select 1",
-					InvocationID:  "sha256:shape:0",
+					InvocationID:  "0:0",
 				},
 			},
 		},
@@ -253,12 +271,17 @@ func TestYAMLRoundTrip_PostgresV3_WireShape(t *testing.T) {
 	}
 }
 
-// TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel — the reason this
-// sub-type gets a dedicated yaml test. The original sentinel used NUL
-// bytes which yaml.v3 rejects outright; a future revert to any
+// TestYAMLRoundTrip_PostgresV3Query_NullCell_ValueNilMarker — the
+// reason this sub-type gets a dedicated yaml test. The current
+// encoding marks SQL NULL with PostgresV3Cell.Value == nil (the
+// IsNull() method just wraps that nil-check plus typed-nil-pointer
+// handling; there is no exported IsNull field) and emits a native
+// YAML null on disk (no string sentinel). Earlier revisions used
+// NUL-byte and then printable string sentinels; both were retired.
+// A future regression that re-introduces a string- or
 // control-byte-based sentinel must fail here first rather than
 // silently at record time when mocks.yaml becomes unwritable.
-func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
+func TestYAMLRoundTrip_PostgresV3Query_NullCell_ValueNilMarker(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",
 		Kind:    models.PostgresV3,
@@ -270,16 +293,21 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 					Lifetime:      "perTest",
 					SQLAstHash:    "sha256:null",
 					SQLNormalized: "select comment from customer_note where id=$1",
-					InvocationID:  "sha256:null:0",
-					BindValues:    []string{"AAAAAQ=="},
+					ParamOIDs:     []uint32{20},
+					InvocationID:  "0:0",
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
 					BindFormats:   []int{1},
 					Response: &models.PostgresV3Response{
 						RowDescription: []models.PostgresV3ColumnDescriptor{
 							{Name: "comment", TypeOID: 25, TypeSize: -1, TypeMod: -1},
 						},
-						Rows: [][]string{
-							{models.PostgresV3NullCell},
-							{"aGVsbG8="},
+						// Row 0 is SQL NULL (Cell.Value == nil), row 1 is
+						// the text "hello". The Postgres-semantic distinction
+						// between NULL and '' is the whole reason the Cell
+						// type exists.
+						Rows: []models.PostgresV3Cells{
+							{models.NullCell()},
+							{models.NewValueCell("hello")},
 						},
 						CommandComplete: "SELECT 2",
 					},
@@ -308,11 +336,16 @@ func TestYAMLRoundTrip_PostgresV3Query_NullCellSentinel(t *testing.T) {
 		t.Fatalf("want 2 rows, got %d", len(q.Response.Rows))
 	}
 	if len(q.Response.Rows[0]) == 0 {
-		t.Fatal("Rows[0] is empty; expected the NULL sentinel cell")
+		t.Fatal("Rows[0] is empty; expected the NULL cell")
 	}
-	if q.Response.Rows[0][0] != models.PostgresV3NullCell {
-		t.Fatalf("NULL sentinel lost in yaml round-trip: got %q, want %q",
-			q.Response.Rows[0][0], models.PostgresV3NullCell)
+	if !q.Response.Rows[0][0].IsNull() {
+		t.Fatalf("NULL cell lost in yaml round-trip: got %+v, want IsNull()=true", q.Response.Rows[0][0])
+	}
+	if q.Response.Rows[1][0].IsNull() {
+		t.Fatalf("Rows[1][0]: want text cell, got NULL")
+	}
+	if s, ok := q.Response.Rows[1][0].Value.(string); !ok || s != "hello" {
+		t.Fatalf("Rows[1][0]: want text \"hello\", got %+v", q.Response.Rows[1][0])
 	}
 	if !reflect.DeepEqual(q, in.Spec.PostgresV3.Query) {
 		t.Fatalf("query mismatch:\n in  %#v\n got %#v", in.Spec.PostgresV3.Query, q)
@@ -400,6 +433,89 @@ func TestYAMLRoundTrip_PostgresV3_NilPayloadDecodeRejected(t *testing.T) {
 				t.Fatalf("%s: expected errPostgresV3NilPayload, got: %v", c.name, err)
 			}
 		})
+	}
+}
+
+// TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive reproduces the
+// echo-sql pipeline failure on this branch: when a recorded mock
+// contains a string field with embedded tabs or a leading newline,
+// yaml.v3 v3.0.1 emits a literal block scalar (`|N-`) whose
+// indentation indicator races with the surrounding sequence offset
+// and the same document fails to re-parse with "found a tab character
+// where an indentation space is expected". sanitizeYAMLStringNodes
+// rewrites those scalars to DoubleQuotedStyle in EncodeMock; this
+// test pins the contract by feeding the suspect shapes through every
+// PostgresV3 string field that can carry user-controlled text.
+func TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive(t *testing.T) {
+	tabSQL := "SELECT\n\tid,\n\tname\nFROM\n\tcustomer_tag\nWHERE\n\tid = $1"
+	leadingNlTab := "\n\thello"
+	tabbedNotice := "Multi-line notice:\n\tdetail with tab\n\tmore detail"
+
+	in := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					SQLAstHash:    "sha256:tab",
+					SQLNormalized: tabSQL, // multiline SQL with tabs
+					ParamOIDs:     []uint32{20},
+					InvocationID:  "0:0",
+					BindValues:    models.PostgresV3Cells{models.NewValueCell(int64(1))},
+					BindFormats:   []int{1},
+					Response: &models.PostgresV3Response{
+						RowDescription: []models.PostgresV3ColumnDescriptor{
+							{Name: "id", TypeOID: 20, TypeSize: 8, TypeMod: -1},
+							{Name: "tag", TypeOID: 25, TypeSize: -1, TypeMod: -1},
+						},
+						// Cell values that a real DB column could legitimately
+						// return — markdown / templated text often has these.
+						Rows: []models.PostgresV3Cells{
+							{models.NewValueCell(int64(1)), models.NewValueCell(leadingNlTab)},
+							{models.NewValueCell(int64(2)), models.NewValueCell("plain")},
+						},
+						CommandComplete: "SELECT 2",
+						Notices: []models.PostgresV3Notice{
+							{Severity: "NOTICE", Code: "00000", Message: tabbedNotice, Detail: leadingNlTab},
+						},
+					},
+					SideEffects: &models.PostgresV3SideEffects{},
+				},
+			},
+		},
+	}
+
+	got := yamlRoundTrip(t, "PostgresV3-TabBearing", in)
+	if got.Spec.PostgresV3 == nil {
+		t.Fatal("expected non-nil PostgresV3 spec")
+	}
+	q := got.Spec.PostgresV3.Query
+	if q == nil {
+		t.Fatal("expected non-nil Query spec")
+	}
+	if q.SQLNormalized != tabSQL {
+		t.Errorf("SQLNormalized lost data:\n got %q\nwant %q", q.SQLNormalized, tabSQL)
+	}
+	if q.Response == nil {
+		t.Fatal("Response went nil after round-trip")
+	}
+	if len(q.Response.Rows) != 2 {
+		t.Fatalf("Rows: want 2, got %d", len(q.Response.Rows))
+	}
+	if s, _ := q.Response.Rows[0][1].Value.(string); s != leadingNlTab {
+		t.Errorf("Rows[0][1] (leading nl+tab cell) = %q, want %q", s, leadingNlTab)
+	}
+	if len(q.Response.Notices) != 1 {
+		t.Fatalf("Notices: want 1, got %d", len(q.Response.Notices))
+	}
+	if q.Response.Notices[0].Message != tabbedNotice {
+		t.Errorf("Notice.Message = %q, want %q", q.Response.Notices[0].Message, tabbedNotice)
+	}
+	if q.Response.Notices[0].Detail != leadingNlTab {
+		t.Errorf("Notice.Detail = %q, want %q", q.Response.Notices[0].Detail, leadingNlTab)
 	}
 }
 

