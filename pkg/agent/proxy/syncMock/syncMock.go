@@ -250,7 +250,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// receiver — it ALWAYS resolves to a non-nil logger and is
 		// safe under the m.mu unlock.
 		if logger := m.dropLogger(); logger != nil {
-			logger.Debug("AddMock: outChan already closed, mock dropped",
+			logger.Info("diag/AddMock: outChan already closed, mock dropped",
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.String("connID", mock.ConnectionID),
 				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
@@ -473,7 +473,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			// post-hoc CI analysis. Sampled via dropLogger to honour
 			// the same flood-prevention as the outChan-overflow path.
 			if logger := m.dropLogger(); logger != nil {
-				logger.Debug("ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
+				logger.Info("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
 					zap.String("mock_name", mock.Name),
 					zap.String("mock_kind", string(mock.Kind)),
 					zap.String("connID", mock.ConnectionID),
@@ -526,7 +526,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// for buffer-flow events on this manager. Only logged when there
 	// was actual state change to avoid log noise on idle resolves.
 	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
-		logger.Debug("ResolveRange: buffer transition",
+		logger.Info("diag/ResolveRange: buffer transition",
 			zap.String("test_name", testName),
 			zap.Time("window_start", start),
 			zap.Time("window_end", end),

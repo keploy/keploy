@@ -3088,7 +3088,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			// confirm whether the mock was on disk at all vs filtered
 			// out. Aggregate count is preserved below for parity.
 			if logger != nil {
-				logger.Debug("strict-mode drop: per-test mock outside window",
+				// Info-level (not Debug) so this surfaces in default CI
+				// runs without --debug. Tagged with "diag/" so it is
+				// obviously diagnostic. Will be demoted/removed once the
+				// strict-window regression on listmonk + pgtype-tour is
+				// root-caused.
+				logger.Info("diag/strict-mode drop: per-test mock outside window",
 					zap.String("mock", p.Name),
 					zap.String("kind", string(p.Kind)),
 					zap.String("connID", p.ConnectionID),
@@ -3257,7 +3262,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			// two-tier filterByTimeStampTierAware so callers using
 			// either path get the visibility uniformly.
 			if logger != nil {
-				logger.Debug("strict-mode drop (3-tier): per-test mock outside window",
+				logger.Info("diag/strict-mode drop (3-tier): per-test mock outside window",
 					zap.String("mock", p.Name),
 					zap.String("kind", string(p.Kind)),
 					zap.String("connID", p.ConnectionID),
