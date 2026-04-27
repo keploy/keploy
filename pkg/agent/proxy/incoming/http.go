@@ -99,6 +99,58 @@ type timedChunk struct {
 	readAt time.Time
 }
 
+// wireTimeConn wraps a net.Conn and stamps the time of the most recent
+// non-empty Read on an atomic field. The sync-path HTTP capture loop
+// uses this to sample the wire-arrival time of an HTTP request: when
+// http.ReadRequest had to drive at least one new socket Read during
+// this iteration, the latest stamp is the tightest available upper
+// bound on actual wire arrival of THIS request's bytes, and is < the
+// time at which parsing completed.
+//
+// The capture loop clamps the resulting timestamp at no earlier than
+// the loop iteration's entry time (iterStart) — see the call site for
+// why: on HTTP/1.1 keepalive, bufio.Reader may serve request N
+// entirely from bytes prefetched during the prior iteration's Read
+// (which was consuming request N-1's tail). In that case lastReadNano
+// is from request N-1's read window — DURING the previous test's
+// handler — so using it raw would push the per-test mock-window left
+// edge backwards across the previous test boundary.
+//
+// This matters because per-test mock windowing (mockmanager
+// GetFilteredMocksInWindow) does strict containment of recorded
+// invocation reqTimestampMock against [HTTPReq.Timestamp,
+// HTTPResp.Timestamp]. If the HTTP recorder stamps reqTimestamp from
+// time.Now() AFTER parse, downstream parser recorders (postgres v3)
+// that stamp their own captures at decode time can produce
+// reqTimestampMock values a few microseconds EARLIER than the HTTP
+// reqTimestamp, falling outside the window's left edge and causing
+// otherwise-correct mocks to be filtered out at replay. See
+// https://github.com/keploy/integrations/pull/151 for the related
+// pgtype-tour-postgres flake symptom (`candidates: 0` for SQL hashes
+// that exist in the recorded mocks.yaml).
+type wireTimeConn struct {
+	net.Conn
+	lastReadNano atomic.Int64
+}
+
+func (c *wireTimeConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.lastReadNano.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// LastReadTime returns the time of the most recent non-empty Read on
+// the wrapped conn, or the zero time if no bytes have been read yet.
+func (c *wireTimeConn) LastReadTime() time.Time {
+	n := c.lastReadNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
 // Global cap on the bytes held in flight across every asyncPipeFeeder's
 // channel. The per-feeder channel is sized to tolerate large response
 // bodies (5 MB needs ~160 slots at 32 KB/chunk), so under stress workloads
@@ -497,10 +549,38 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		return
 	}
 
-	clientReader := bufio.NewReader(clientConn)
+	// Wrap clientConn so the sync-path bufio.Reader's underlying socket
+	// reads stamp wire-arrival time onto wireConn.lastReadNano. We sample
+	// that AFTER http.ReadRequest returns rather than time.Now() so the
+	// recorded HTTPReq.Timestamp tracks when the request bytes arrived
+	// on the wire — not when parsing completed. Strict per-test windowing
+	// of downstream parser captures (postgres v3, etc.) depends on this
+	// not lagging the wire by parser-iteration time + bufio fill jitter.
+	wireConn := &wireTimeConn{Conn: clientConn}
+	clientReader := bufio.NewReader(wireConn)
 	upstreamReader := bufio.NewReader(upConn)
 
 	for {
+		// iterStart is the loop entry time, captured BEFORE ReadRequest
+		// blocks. It serves two purposes downstream:
+		//   1. If ReadRequest blocks waiting for bytes, iterStart < the
+		//      eventual wireConn.LastReadTime; the LastReadTime path is
+		//      preferred — it's a tighter upper bound on actual wire
+		//      arrival.
+		//   2. On HTTP/1.1 keepalive, bufio.Reader may serve request N
+		//      ENTIRELY from bytes that arrived during the read which
+		//      consumed request N-1's tail. In that case
+		//      wireConn.LastReadTime is from request N-1's read window —
+		//      i.e. DURING the previous test's handler. Using it as
+		//      request N's reqTimestamp pushes the per-test mock-window
+		//      left edge backwards into the previous test's territory,
+		//      so mocks captured during test N-1's handler fall inside
+		//      both windows. Clamping the floor at iterStart prevents
+		//      that: iterStart is always AFTER the previous iteration
+		//      finished (i.e. after the previous response was written),
+		//      so the previous test's mocks are guaranteed to be outside
+		//      this test's window.
+		iterStart := time.Now()
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -508,7 +588,22 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 			return
 		}
-		reqTimestamp := time.Now()
+		// LastReadTime() is the timestamp of the most recent non-empty
+		// underlying socket Read. If a Read fired during this iteration
+		// (the common case — bufio buffer was empty when ReadRequest
+		// was called and had to refill from the socket), LastReadTime
+		// > iterStart and is the tightest available upper bound on
+		// when THIS request's bytes arrived on the wire. If no Read
+		// fired during this iteration (bufio served entirely from a
+		// buffer prefetched on a prior iteration's Read), LastReadTime
+		// is from that prior iteration — possibly DURING the previous
+		// test's handler — so we fall back to iterStart, which is after
+		// the previous response was written and is a safe left edge for
+		// the per-test mock window.
+		reqTimestamp := wireConn.LastReadTime()
+		if !reqTimestamp.After(iterStart) {
+			reqTimestamp = iterStart
+		}
 
 		// streamingExchange tracks whether EITHER side (request or response)
 		// lacked a concrete Content-Length or used Transfer-Encoding:
