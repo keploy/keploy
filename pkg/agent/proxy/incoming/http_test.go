@@ -340,6 +340,102 @@ func TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion(t *testing.T) {
 	}
 }
 
+// TestReqTimestampClampedAtIterStartUnderBufioPrefetch is the regression
+// test for the gin-mongo `record_build_replay_build` failure on
+// keploy/keploy#4147 review iteration: HTTP/1.1 keepalive can have
+// bufio.Reader serve request N entirely from bytes prefetched during
+// the prior iteration's socket Read (which was consuming request N-1's
+// tail). When that happens, wireConn.LastReadTime is from request N-1's
+// read window — DURING the previous test's handler — and using it raw
+// as request N's reqTimestamp pushes the per-test mock-window left
+// edge backwards across the previous test boundary, contaminating
+// request N's mock pool with mocks captured during request N-1.
+//
+// The capture loop's clamp `if !lastRead.After(iterStart) { ts =
+// iterStart }` defends against this. iterStart is captured AFTER the
+// previous iteration finished (i.e. after the previous response was
+// written), so the previous test's mocks are guaranteed to be outside
+// this test's window.
+//
+// The test simulates the prefetch scenario by:
+//   1. Pre-stamping wireTimeConn.lastReadNano to a moment in the past
+//      (representing a Read that fired during the prior iteration).
+//   2. Capturing iterStart = time.Now().
+//   3. Driving a ReadRequest entirely from bytes already in bufio's
+//      buffer (no underlying socket Read this iteration).
+//   4. Asserting the clamp falls back to iterStart, NOT the stale
+//      prior-iter lastReadNano.
+func TestReqTimestampClampedAtIterStartUnderBufioPrefetch(t *testing.T) {
+	srvSide, clientSide := net.Pipe()
+	defer srvSide.Close()
+	defer clientSide.Close()
+
+	wire := &wireTimeConn{Conn: srvSide}
+
+	// Step 1: pre-fill bufio's internal buffer in a way that emulates
+	// prefetch: write a full HTTP request to the pipe BEFORE the
+	// capture loop's iterStart is taken, then drive the bufio Read
+	// once so the bytes land in the buffer with lastReadNano stamped
+	// to the prior-iteration time.
+	rawReq := "GET /probe HTTP/1.1\r\nHost: x\r\n\r\n"
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		if _, err := clientSide.Write([]byte(rawReq)); err != nil {
+			t.Errorf("client Write: %v", err)
+		}
+	}()
+
+	br := bufio.NewReader(wire)
+	if _, err := br.Peek(1); err != nil {
+		t.Fatalf("priming bufio buffer: %v", err)
+	}
+	<-writeDone
+
+	priorRead := wire.LastReadTime()
+	if priorRead.IsZero() {
+		t.Fatalf("priming Peek did not stamp lastReadNano")
+	}
+
+	// Step 2: simulate the next iteration starting AFTER the prior
+	// request's response was written. Sleep long enough that
+	// iterStart is strictly later than priorRead even on a low-res
+	// monotonic clock.
+	time.Sleep(2 * time.Millisecond)
+	iterStart := time.Now()
+
+	// Step 3: ReadRequest serves entirely from the prefetched buffer
+	// — no underlying socket Read happens during this iteration.
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		t.Fatalf("http.ReadRequest: %v", err)
+	}
+	if req.URL.Path != "/probe" {
+		t.Fatalf("parsed unexpected request: %+v", req.URL)
+	}
+
+	// Step 4: lastReadNano is unchanged from priorRead because no
+	// new Read fired this iteration. The capture loop's clamp must
+	// detect that and fall back to iterStart.
+	lastRead := wire.LastReadTime()
+	if !lastRead.Equal(priorRead) {
+		t.Fatalf("lastReadNano changed during a buffer-served ReadRequest: prior=%v now=%v", priorRead, lastRead)
+	}
+
+	// Replay the capture loop's clamp logic.
+	reqTimestamp := lastRead
+	if !reqTimestamp.After(iterStart) {
+		reqTimestamp = iterStart
+	}
+
+	if reqTimestamp.Before(iterStart) {
+		t.Fatalf("reqTimestamp %v fell BEFORE iterStart %v — clamp failed and per-test window left edge would bleed into the prior iteration", reqTimestamp, iterStart)
+	}
+	if !reqTimestamp.Equal(iterStart) {
+		t.Fatalf("expected reqTimestamp == iterStart under prefetch (no fresh Read this iter); got reqTimestamp=%v iterStart=%v", reqTimestamp, iterStart)
+	}
+}
+
 func TestNewTeeReadCloserStreamsAndCopies(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
 

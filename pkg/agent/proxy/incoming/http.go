@@ -101,13 +101,20 @@ type timedChunk struct {
 
 // wireTimeConn wraps a net.Conn and stamps the time of the most recent
 // non-empty Read on an atomic field. The sync-path HTTP capture loop
-// uses this to sample the wire-arrival time of an HTTP request: by the
-// time http.ReadRequest returns the parsed request, the bufio.Reader
-// behind it has already pulled the request's bytes off the socket via
-// one or more Read calls on the wrapped conn, each of which updates
-// lastReadNano. Sampling lastReadNano AFTER ReadRequest returns gives
-// the timestamp of when those bytes arrived on the wire, not the
-// (later) time at which parsing completed.
+// uses this to sample the wire-arrival time of an HTTP request: when
+// http.ReadRequest had to drive at least one new socket Read during
+// this iteration, the latest stamp is the tightest available upper
+// bound on actual wire arrival of THIS request's bytes, and is < the
+// time at which parsing completed.
+//
+// The capture loop clamps the resulting timestamp at no earlier than
+// the loop iteration's entry time (iterStart) — see the call site for
+// why: on HTTP/1.1 keepalive, bufio.Reader may serve request N
+// entirely from bytes prefetched during the prior iteration's Read
+// (which was consuming request N-1's tail). In that case lastReadNano
+// is from request N-1's read window — DURING the previous test's
+// handler — so using it raw would push the per-test mock-window left
+// edge backwards across the previous test boundary.
 //
 // This matters because per-test mock windowing (mockmanager
 // GetFilteredMocksInWindow) does strict containment of recorded
@@ -554,6 +561,26 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	upstreamReader := bufio.NewReader(upConn)
 
 	for {
+		// iterStart is the loop entry time, captured BEFORE ReadRequest
+		// blocks. It serves two purposes downstream:
+		//   1. If ReadRequest blocks waiting for bytes, iterStart < the
+		//      eventual wireConn.LastReadTime; the LastReadTime path is
+		//      preferred — it's a tighter upper bound on actual wire
+		//      arrival.
+		//   2. On HTTP/1.1 keepalive, bufio.Reader may serve request N
+		//      ENTIRELY from bytes that arrived during the read which
+		//      consumed request N-1's tail. In that case
+		//      wireConn.LastReadTime is from request N-1's read window —
+		//      i.e. DURING the previous test's handler. Using it as
+		//      request N's reqTimestamp pushes the per-test mock-window
+		//      left edge backwards into the previous test's territory,
+		//      so mocks captured during test N-1's handler fall inside
+		//      both windows. Clamping the floor at iterStart prevents
+		//      that: iterStart is always AFTER the previous iteration
+		//      finished (i.e. after the previous response was written),
+		//      so the previous test's mocks are guaranteed to be outside
+		//      this test's window.
+		iterStart := time.Now()
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -561,17 +588,21 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 			return
 		}
-		// LastReadTime() is the timestamp of the socket Read whose buffer
-		// produced the bytes ReadRequest just consumed. On HTTP/1.1
-		// keepalive, bufio may have prefetched the next request's bytes
-		// during a prior Read; in that case LastReadTime is from that
-		// fetch, which is still on or before the actual wire arrival of
-		// THIS request — never later. Falls back to time.Now() in the
-		// vanishingly-rare case where a non-empty bufio buffer is filled
-		// without going through a Read at all (zero-byte initial state).
+		// LastReadTime() is the timestamp of the most recent non-empty
+		// underlying socket Read. If a Read fired during this iteration
+		// (the common case — bufio buffer was empty when ReadRequest
+		// was called and had to refill from the socket), LastReadTime
+		// > iterStart and is the tightest available upper bound on
+		// when THIS request's bytes arrived on the wire. If no Read
+		// fired during this iteration (bufio served entirely from a
+		// buffer prefetched on a prior iteration's Read), LastReadTime
+		// is from that prior iteration — possibly DURING the previous
+		// test's handler — so we fall back to iterStart, which is after
+		// the previous response was written and is a safe left edge for
+		// the per-test mock window.
 		reqTimestamp := wireConn.LastReadTime()
-		if reqTimestamp.IsZero() {
-			reqTimestamp = time.Now()
+		if !reqTimestamp.After(iterStart) {
+			reqTimestamp = iterStart
 		}
 
 		// streamingExchange tracks whether EITHER side (request or response)
