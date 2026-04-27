@@ -42,8 +42,15 @@ type IngressProxyManager struct {
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 	synchronous  bool
-	sampling     bool
-	samplingSem  chan struct{}
+	// mapping mirrors !cfg.DisableMapping at construction time. Forwarded
+	// to CaptureHook so the synchronous-record path can decide whether
+	// SyncMockManager.ResolveRange should emit a TestMockMapping entry
+	// onto the agent's mappingChan. Without this plumbing the mapping
+	// arg was hardcoded false at the OSS Capture call site, which
+	// silently disabled mappings.yaml production during record (#3905).
+	mapping     bool
+	sampling    bool
+	samplingSem chan struct{}
 
 	ingressHook IngressHook
 }
@@ -55,6 +62,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		mapping:     !cfg.DisableMapping,
 		sampling:    false,
 		samplingSem: make(chan struct{}, func() int {
 			if cfg.Agent.EnableSampling > 0 {

@@ -576,6 +576,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
+	// Forward the operator's --disable-mapping (root-level config) into
+	// the agent container. The keploy.yml directory isn't bind-mounted
+	// into the agent's filesystem, so viper inside the container would
+	// otherwise default to true and disable record-side mapping
+	// production regardless of the host config.
+	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}

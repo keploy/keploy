@@ -126,4 +126,11 @@ type InstrumentState struct {
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// Exists reports whether the mappings.yaml file is present on disk
+	// for the given test-set. Distinct from Get's second return (which
+	// reports "file present AND contains at least one test case with
+	// mocks") because the create-if-not-present write path needs to
+	// distinguish "no file at all" from "file exists but has empty
+	// entries" — only the former should trigger an automatic create.
+	Exists(ctx context.Context, testSetID string) (bool, error)
 }
