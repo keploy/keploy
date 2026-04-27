@@ -277,6 +277,69 @@ func TestHTTPBodyCaptureBufferStopsAtBudget(t *testing.T) {
 	}
 }
 
+// TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion locks in the
+// contract that wireTimeConn.LastReadTime returns the time of the
+// most recent socket Read, which by construction is BEFORE the call
+// site that consumes the buffered bytes (here: an http.ReadRequest
+// that goes through a bufio.Reader on top of the wireTimeConn).
+//
+// This is the wire-arrival timestamp the sync-path HTTP capture loop
+// stamps onto tc.HTTPReq.Timestamp. The whole point of the wrapper is
+// that this timestamp is on-or-before the real arrival of the bytes,
+// so downstream parser captures (postgres v3 reqTimestampMock) sampled
+// at decode time — which is necessarily AFTER the SUT receives and
+// processes the HTTP request — never fall outside the per-test window's
+// left edge.
+func TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion(t *testing.T) {
+	srvSide, clientSide := net.Pipe()
+	defer srvSide.Close()
+	defer clientSide.Close()
+
+	wire := &wireTimeConn{Conn: srvSide}
+	if !wire.LastReadTime().IsZero() {
+		t.Fatalf("expected zero LastReadTime before any Read, got %v", wire.LastReadTime())
+	}
+
+	rawReq := "GET /probe HTTP/1.1\r\nHost: x\r\n\r\n"
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		if _, err := clientSide.Write([]byte(rawReq)); err != nil {
+			t.Errorf("client Write: %v", err)
+		}
+	}()
+
+	br := bufio.NewReader(wire)
+	beforeParse := time.Now()
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		t.Fatalf("http.ReadRequest: %v", err)
+	}
+	afterParse := time.Now()
+	<-writeDone
+
+	if req.URL.Path != "/probe" {
+		t.Fatalf("parsed unexpected request: %+v", req.URL)
+	}
+
+	got := wire.LastReadTime()
+	if got.IsZero() {
+		t.Fatalf("LastReadTime is zero after a successful ReadRequest")
+	}
+	// LastReadTime is sampled inside Read AFTER the syscall returns,
+	// so it must be no earlier than the moment we entered ReadRequest
+	// and no later than the moment ReadRequest returned. The whole
+	// point of the wrapper is that it is also on-or-before the call
+	// site of "after parse" — i.e. on-or-before the time the sync-path
+	// loop would have sampled time.Now() under the old behaviour.
+	if got.Before(beforeParse) {
+		t.Fatalf("LastReadTime %v is before the call to ReadRequest %v", got, beforeParse)
+	}
+	if got.After(afterParse) {
+		t.Fatalf("LastReadTime %v is AFTER ReadRequest returned %v — wrapper sampled too late", got, afterParse)
+	}
+}
+
 func TestNewTeeReadCloserStreamsAndCopies(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
 
