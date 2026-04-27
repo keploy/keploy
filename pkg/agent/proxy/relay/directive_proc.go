@@ -346,6 +346,23 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 
 	if params.DestTLSConfig != nil {
 		dst := *r.dst.Load()
+		// If the D2C forwarder stashed any cleartext bytes beyond the
+		// preamble window (e.g. a protocol that frames more than the
+		// parser's PreambleReadFromDest tells us about), prepend them
+		// to the dst handshake conn so tls.Client.Handshake reads
+		// them as the first bytes of the ServerHello sequence. The
+		// canonical Postgres SSL flow (1-byte 'S'/'N' preamble, then
+		// pure TLS) leaves nothing past the preamble, so this branch
+		// is defensive — but it keeps the contract that no stashed
+		// bytes are ever silently dropped at the upgrade boundary.
+		if stashed := r.takeStashed(fakeconn.FromDest); len(stashed) > 0 {
+			if log != nil {
+				log.Debug("relay: prepending stashed dst bytes to TLS handshake",
+					zap.Int("bytes", len(stashed)),
+				)
+			}
+			dst = newPrependingConn(dst, stashed)
+		}
 		var err error
 		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
 		if err != nil {
@@ -375,6 +392,35 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 
 	if params.ClientTLSConfig != nil {
 		src := *r.src.Load()
+		// If the C2D forwarder stashed any bytes (canonically the
+		// SUT's TLS ClientHello, which can land in the C2D forwarder's
+		// pre-pause Read when the SUT pipelines its SSLRequest tightly
+		// with its ClientHello — observed intermittently with lib/pq
+		// + libpq under sslmode=require, surfaced as the listmonk +
+		// pgtype-tour `candidates: 0` hash misses on TLS-enabled CI
+		// fixtures), prepend them to the src handshake conn. Without
+		// this, tls.Server.Handshake reads from the bare TCP socket,
+		// MISSES the stashed ClientHello bytes (they were already
+		// consumed by the forwarder's Read), and either hangs forever
+		// or returns "tls: server did not echo the legacy session ID"
+		// on the SUT side / "tls: illegal parameter" on the dst side
+		// once whatever bytes DO arrive are interpreted as a partial
+		// handshake state. The connection then falls through to
+		// passthrough, the recorder sees zero queries on it, and
+		// every test that happened to land on that connection misses
+		// at replay time.
+		//
+		// The takeStashed call also clears r.stashedC2D so endPause
+		// does not silently drop those same bytes after the handshake
+		// returns.
+		if stashed := r.takeStashed(fakeconn.FromClient); len(stashed) > 0 {
+			if log != nil {
+				log.Debug("relay: prepending stashed src bytes to TLS handshake",
+					zap.Int("bytes", len(stashed)),
+				)
+			}
+			src = newPrependingConn(src, stashed)
+		}
 		var err error
 		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
 		if err != nil {
