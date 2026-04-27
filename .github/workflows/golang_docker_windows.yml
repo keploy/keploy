@@ -32,7 +32,7 @@ jobs:
       # Create a minimal per-run gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
           $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
@@ -41,6 +41,24 @@ jobs:
           git config --file $gitConfig core.autocrlf false
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # If a prior run on this self-hosted runner left the workspace
+      # populated with files but no .git directory, actions/checkout's
+      # clean:true fails at "git config --local" with "not a git repository".
+      # Wipe in that case so checkout starts fresh; healthy workspaces are
+      # left alone.
+      - name: Recover broken workspace
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws) { return }
+          if (-not (Test-Path $ws)) { return }
+          $gitDir = Join-Path $ws ".git"
+          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasFiles -and -not (Test-Path $gitDir)) {
+            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Checkout repository
         uses: actions/checkout@v4

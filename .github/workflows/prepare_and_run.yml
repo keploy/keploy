@@ -409,6 +409,28 @@ jobs:
           $global:LASTEXITCODE = 0
           exit 0
 
+      # Defensive recovery: if a prior run on this self-hosted runner was
+      # interrupted partway through cleanup, the workspace can end up with
+      # files present but the .git subdirectory missing or corrupt. In that
+      # state actions/checkout@v4 with clean:true fails at "git config
+      # --local" with "not a git repository" because clean tries to operate
+      # on a non-git tree. Wipe the workspace contents in that case so
+      # checkout starts from a fresh init. Healthy workspaces (with a valid
+      # .git) are left untouched so the existing checkout fast path
+      # (clean+fetch over an existing clone) keeps working.
+      - name: Recover broken workspace
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws) { return }
+          if (-not (Test-Path $ws)) { return }
+          $gitDir = Join-Path $ws ".git"
+          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasFiles -and -not (Test-Path $gitDir)) {
+            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -816,6 +838,20 @@ jobs:
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      - name: Recover broken workspace
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws) { return }
+          if (-not (Test-Path $ws)) { return }
+          $gitDir = Join-Path $ws ".git"
+          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasFiles -and -not (Test-Path $gitDir)) {
+            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -882,6 +918,20 @@ jobs:
           git config --file $gitConfig core.autocrlf false
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      - name: Recover broken workspace
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws) { return }
+          if (-not (Test-Path $ws)) { return }
+          $gitDir = Join-Path $ws ".git"
+          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasFiles -and -not (Test-Path $gitDir)) {
+            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Checkout repository
         uses: actions/checkout@v4

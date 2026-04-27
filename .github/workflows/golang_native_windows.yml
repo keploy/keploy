@@ -38,7 +38,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
       - name: Clean up workspace
-        shell: pwsh 
+        shell: pwsh
         continue-on-error: true
         run: |
           Write-Host "== Cleaning keploy artifacts =="
@@ -47,6 +47,21 @@ jobs:
             if (Test-Path $p) {
               Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
             }
+          }
+      # If a prior run left the workspace populated with files but no .git,
+      # actions/checkout's clean:true fails at "git config --local". Wipe in
+      # that case so checkout starts fresh; healthy workspaces are left alone.
+      - name: Recover broken workspace
+        shell: pwsh
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws) { return }
+          if (-not (Test-Path $ws)) { return }
+          $gitDir = Join-Path $ws ".git"
+          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasFiles -and -not (Test-Path $gitDir)) {
+            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
           }
       - name: Checkout repository
         uses: actions/checkout@v4
