@@ -236,25 +236,6 @@ func isNetworkClosedErr(err error) bool {
 // port 3306 through the MySQL integration.
 const defaultMySQLPort uint32 = 3306
 
-func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	proxy := &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort, // default: 26789
-		synchronous:       opts.Agent.Synchronous,
-		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		clientClose:       make(chan bool, 1),
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:          opts.Agent.IsDocker,
-		dnsCache:          newDNSCache(),
-		recordedDNSMocks:  newRecordedDNSMocksCache(),
-		mysqlPorts:        buildMySQLPortSet(opts.MySQLPorts),
 // isPostgresSSLRequest reports whether the first 8 bytes of a connection
 // are a Postgres SSLRequest packet:
 //
@@ -520,6 +501,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		// legitimate direct access and we intentionally do not expose a
 		// setter helper for a one-line test-only override.
 		dnsForwardTimeout: 2 * time.Second,
+		mysqlPorts:        buildMySQLPortSet(opts.MySQLPorts),
 	}
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
