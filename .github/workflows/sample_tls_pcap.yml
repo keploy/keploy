@@ -1,0 +1,70 @@
+name: TLS pcap + keylog (sample-tls-app)
+
+# End-to-end coverage for the --capture-packets feature: drive a real
+# HTTPS workload through the keploy outgoing proxy, then assert the
+# captured pcap can be decrypted by tshark using the streamed
+# sslkeys.log. Catches regressions in:
+#   - the broadcaster / keylog fanout in pkg/agent/proxy
+#   - the streaming HTTP endpoints in pkg/agent/routes
+#   - the recorder-side stream goroutine in pkg/service/record
+#   - any tls.Config site whose KeyLogWriter wiring breaks (HTTP
+#     parser path is the one exercised here; MySQL / Postgres paths
+#     are covered by their own dedicated demos elsewhere).
+
+on:
+  workflow_call:
+
+jobs:
+  sample_tls_pcap:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.config.job }}
+    steps:
+      - name: Checkout keploy repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout sample-tls-app
+        uses: actions/checkout@v4
+        with:
+          repository: ayush3160/sample-tls-app
+          path: sample-tls-app
+          ref: main
+
+      - name: Install tshark for pcap decryption check
+        run: |
+          sudo apt-get update -qq
+          # Pre-accept the wireshark-common dump-cap suid prompt so the
+          # apt install runs non-interactively.
+          echo 'wireshark-common wireshark-common/install-setuid boolean false' | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark
+
+      - name: Run sample-tls-app under keploy --capture-packets
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd sample-tls-app
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/sample-tls-pcap.sh
