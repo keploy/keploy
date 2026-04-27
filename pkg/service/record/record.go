@@ -180,6 +180,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		// Pcap + keylog flow over long-lived HTTP streams started in
+		// Start() right after the agent's broadcaster came up. The
+		// streams unwind on their own when the agent closes the
+		// response or the recorder context is cancelled — there is
+		// no on-disk file on the agent and no fetch step here.
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -295,7 +300,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx, newTestSetID)
+	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -307,6 +312,31 @@ func (r *Recorder) Start(ctx context.Context) error {
 	recordingStarted = true
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+
+	// Kick off the pcap + keylog streams. GetTestAndMockChans above
+	// has already triggered Proxy.Record() on the agent, which
+	// installs the broadcaster — so the stream subscribes against a
+	// live capture. The goroutine ends when ctx is cancelled
+	// (recording stop) or when the agent's HTTP server closes the
+	// response. Any error is logged but never fails the recording.
+	if r.config.Record.CapturePackets {
+		destDir := filepath.Join(r.config.Path, newTestSetID)
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
+				zap.String("destDir", destDir), zap.Error(err))
+		} else {
+			errGrp, _ := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if errGrp != nil {
+				errGrp.Go(func() error {
+					if err := r.instrumentation.StreamPcapArtifacts(ctx, destDir); err != nil {
+						utils.LogError(r.logger, err, "pcap stream ended with error",
+							zap.String("destDir", destDir))
+					}
+					return nil
+				})
+			}
+		}
 	}
 
 	if r.config.CommandType == string(utils.DockerCompose) {
@@ -510,7 +540,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context, testSetID string) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -573,27 +603,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, testSetID string) (F
 		tlsPrivateKey = string(keyBytes)
 	}
 
-	var pcapPath string
-	if r.config.Record.CapturePackets {
-		// Each test-set gets its own pcap so users can correlate
-		// captured traffic with the freshly recorded test cases.
-		// The directory is created up-front because the agent (which
-		// writes the file) can race with the testDB upsert that
-		// otherwise creates this folder lazily.
-		testSetDir := filepath.Join(r.config.Path, testSetID)
-		if err := os.MkdirAll(testSetDir, 0o755); err != nil {
-			cancel()
-			return FrameChan{}, fmt.Errorf("failed to create test-set dir %s: %w", testSetDir, err)
-		}
-		pcapPath = filepath.Join(testSetDir, "traffic.pcap")
-	}
-
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
 		TLSPrivateKey:  tlsPrivateKey,
 		CapturePackets: r.config.Record.CapturePackets,
-		PcapPath:       pcapPath,
 	})
 	if err != nil {
 

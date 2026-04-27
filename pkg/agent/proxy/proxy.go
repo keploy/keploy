@@ -204,16 +204,19 @@ type Proxy struct {
 	// does not bind a port. DNS, parser init, and session state still run.
 	skipListener bool
 
-	// pcapMu guards pcapCancel, pcapDone, and keyLogFile. The lifecycle
-	// is: startPacketCapture sets all three, stopPacketCapture cancels
-	// and waits on done, then closes the keylog file and clears the
-	// fields. Record() may be invoked across multiple test-sets, each
-	// one stops the previous capture before starting a fresh one
-	// targeting the new test-set's pcap and keylog paths.
-	pcapMu     sync.Mutex
-	pcapCancel context.CancelFunc
-	pcapDone   chan struct{}
-	keyLogFile *os.File
+	// pcapMu guards the pcap-lifecycle fields below. The lifecycle is:
+	// startPacketCapture spins up the afpacket goroutines and
+	// installs a fresh broadcaster; stopPacketCapture cancels, waits
+	// on done, and clears the broadcaster. Subscribers join via
+	// SubscribePcap and receive every captured frame fanned out from
+	// the capture loop — there is NO on-disk pcap file. In the k8s
+	// live-recording use case the session never ends, so "fetch on
+	// stop" is the wrong model; the recorder holds a long-lived
+	// HTTP stream from the moment Record() is called.
+	pcapMu          sync.Mutex
+	pcapCancel      context.CancelFunc
+	pcapDone        chan struct{}
+	pcapBroadcaster *pcapBroadcaster
 }
 
 // SetSkipListener disables the TCP accept loop.
@@ -592,6 +595,24 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	// finalised before the agent is allowed to exit.
 	p.stopPacketCapture()
 	return nil
+}
+
+// SubscribePcap registers w to receive every captured packet as a
+// pcap byte stream (file header + one record per frame). The flush
+// callback, if non-nil, is invoked after each record — agent HTTP
+// handlers pass http.Flusher.Flush so packets reach the recorder
+// over chunked transfer-encoding without buffering. Returns the
+// unsubscribe func; safe to call once. Errors when no capture is
+// active for this proxy (i.e., --capture-packets was not set on
+// the recording session).
+func (p *Proxy) SubscribePcap(w io.Writer, flush func()) (func(), error) {
+	p.pcapMu.Lock()
+	b := p.pcapBroadcaster
+	p.pcapMu.Unlock()
+	if b == nil {
+		return nil, errors.New("packet capture is not active")
+	}
+	return b.subscribe(w, flush)
 }
 
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
@@ -2068,14 +2089,18 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	})
 	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
-	if opts.CapturePackets && opts.PcapPath != "" {
+	if opts.CapturePackets {
+		// Agent picks its own scratch dir on its OWN filesystem; the
+		// recorder cannot pass a path here because the two processes
+		// usually run in separate filesystems (Docker, k8s, separate
+		// hosts). The recorder pulls the finalised bytes back via the
+		// agent's /agent/pcap/{traffic,keylog} HTTP endpoints.
 		// Use a context detached from the per-call ctx so the capture
 		// outlives this Record() call and runs for the full session;
 		// stopPacketCapture is invoked on the next Record()/Mock() or
 		// when the proxy shuts down.
-		if err := p.startPacketCapture(context.Background(), opts.PcapPath); err != nil {
-			utils.LogError(p.logger, err, "failed to start packet capture; continuing without pcap",
-				zap.String("pcapPath", opts.PcapPath))
+		if err := p.startPacketCapture(context.Background(), ""); err != nil {
+			utils.LogError(p.logger, err, "failed to start packet capture; continuing without pcap")
 		}
 	} else {
 		// New session without capture — make sure any previous capture

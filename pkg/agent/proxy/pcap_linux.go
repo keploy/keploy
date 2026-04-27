@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -19,29 +17,8 @@ import (
 	"github.com/gopacket/gopacket/afpacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
-	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.uber.org/zap"
 )
-
-// keyLogFileName is the NSS-format key log file written next to the
-// pcap so Wireshark can decrypt the captured TLS sessions in-place.
-const keyLogFileName = "sslkeys.log"
-
-// syncWriter serialises writes to an underlying io.Writer. Go's
-// crypto/tls calls KeyLogWriter.Write from each handshake goroutine,
-// so the writer must be safe for concurrent use; *os.File alone is
-// not (writes are atomic only up to PIPE_BUF and we want fully
-// ordered lines anyway for Wireshark).
-type syncWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (s *syncWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(p)
-}
 
 const (
 	pcapSnaplen      = 65535
@@ -52,82 +29,115 @@ const (
 	pcapNumBlocks    = 64
 )
 
-// startPacketCapture begins capturing packets matching the proxy's
-// outgoing and incoming proxy ports on every up interface and writes
-// them to outPath. Any in-flight capture from a previous test-set is
-// stopped first so each test-set gets its own pcap. Safe to call
-// concurrently with stopPacketCapture.
-func (p *Proxy) startPacketCapture(parent context.Context, outPath string) error {
-	if outPath == "" {
-		return errors.New("pcap output path is empty")
-	}
+// pcapBroadcaster fans out every captured frame to its current
+// subscribers. Each subscriber owns a private pcapgo.Writer wrapping
+// its own io.Writer (typically an http.ResponseWriter wrapped with a
+// flush callback) so the subscribers never share Writer state and
+// concurrent serialisation is fine. A subscriber that returns an
+// error from WritePacket is marked failed and skipped on subsequent
+// frames; the agent HTTP handler's defer cleans it up when the
+// underlying request context cancels.
+type pcapBroadcaster struct {
+	mu   sync.RWMutex
+	subs []*pcapSubscriber
+	next atomic.Int64
+}
 
+type pcapSubscriber struct {
+	id     int64
+	w      *pcapgo.Writer
+	flush  func()
+	failed atomic.Bool
+}
+
+// write fans the (ci, data) pair out to every active subscriber.
+// Held under RLock so subscribe/unsubscribe can run concurrently
+// without blocking the capture loop, except briefly when the
+// subscriber slice itself is being mutated.
+func (b *pcapBroadcaster) write(ci gopacket.CaptureInfo, data []byte) {
+	b.mu.RLock()
+	subs := b.subs
+	b.mu.RUnlock()
+	for _, s := range subs {
+		if s.failed.Load() {
+			continue
+		}
+		if err := s.w.WritePacket(ci, data); err != nil {
+			s.failed.Store(true)
+			continue
+		}
+		if s.flush != nil {
+			s.flush()
+		}
+	}
+}
+
+// subscribe registers w to receive captured frames as a pcap byte
+// stream. The pcap file header is emitted onto w synchronously
+// before this returns so the consumer always sees a well-formed
+// stream regardless of how soon frames arrive. flush, when non-nil,
+// runs after each WritePacket so chunked HTTP responses push bytes
+// per-frame rather than holding them in transport buffers.
+func (b *pcapBroadcaster) subscribe(w io.Writer, flush func()) (func(), error) {
+	pw := pcapgo.NewWriter(w)
+	if err := pw.WriteFileHeader(uint32(pcapSnaplen), layers.LinkTypeEthernet); err != nil {
+		return nil, fmt.Errorf("write pcap header to subscriber: %w", err)
+	}
+	if flush != nil {
+		flush()
+	}
+	s := &pcapSubscriber{
+		id:    b.next.Add(1),
+		w:     pw,
+		flush: flush,
+	}
+	b.mu.Lock()
+	b.subs = append(b.subs, s)
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for i, sub := range b.subs {
+			if sub.id == s.id {
+				b.subs = append(b.subs[:i], b.subs[i+1:]...)
+				return
+			}
+		}
+	}, nil
+}
+
+// startPacketCapture spins up the afpacket capture goroutines on
+// every up interface and installs a fresh broadcaster. The outPath
+// argument is ignored — kept for the cross-platform signature only;
+// the streaming model writes nothing to disk on the agent side.
+func (p *Proxy) startPacketCapture(parent context.Context, _ string) error {
 	p.stopPacketCapture()
-
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return fmt.Errorf("create pcap dir: %w", err)
-	}
-
-	f, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("create pcap file %s: %w", outPath, err)
-	}
-
-	w := pcapgo.NewWriter(f)
-	if err := w.WriteFileHeader(uint32(pcapSnaplen), layers.LinkTypeEthernet); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write pcap header: %w", err)
-	}
-
-	// Open the NSS key log alongside the pcap. Append rather than
-	// truncate so each new TLS session adds to whatever has already
-	// been written for this test-set (Record() may be re-entered).
-	keyLogPath := filepath.Join(filepath.Dir(outPath), keyLogFileName)
-	keyLogF, err := os.OpenFile(keyLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("create keylog file %s: %w", keyLogPath, err)
-	}
-	pTls.SetKeyLogWriter(&syncWriter{w: keyLogF})
 
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		pTls.SetKeyLogWriter(nil)
-		_ = keyLogF.Close()
-		_ = f.Close()
 		return fmt.Errorf("list interfaces: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
+	broadcaster := &pcapBroadcaster{}
 
 	outPort := uint16(p.Port)
 	inPort := p.IncomingProxyPort
 
 	go func() {
 		defer close(done)
-		defer func() {
-			if err := f.Close(); err != nil {
-				p.logger.Warn("failed to close pcap file", zap.String("outPath", outPath), zap.Error(err))
-			}
-		}()
 
-		var (
-			wg      sync.WaitGroup
-			writeMu sync.Mutex
-		)
-
+		var wg sync.WaitGroup
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagUp == 0 {
 				continue
 			}
 			wg.Add(1)
-			go p.captureOnInterface(ctx, iface.Name, w, &writeMu, outPort, inPort, &wg)
+			go p.captureOnInterface(ctx, iface.Name, broadcaster, outPort, inPort, &wg)
 		}
-
 		wg.Wait()
 		p.logger.Info("packet capture stopped",
-			zap.String("outPath", outPath),
 			zap.Uint16("outgoingProxyPort", outPort),
 			zap.Uint16("incomingProxyPort", inPort),
 		)
@@ -136,29 +146,27 @@ func (p *Proxy) startPacketCapture(parent context.Context, outPath string) error
 	p.pcapMu.Lock()
 	p.pcapCancel = cancel
 	p.pcapDone = done
-	p.keyLogFile = keyLogF
+	p.pcapBroadcaster = broadcaster
 	p.pcapMu.Unlock()
 
-	p.logger.Info("packet capture started",
-		zap.String("outPath", outPath),
-		zap.String("keyLogPath", keyLogPath),
+	p.logger.Info("packet capture started (streaming mode)",
 		zap.Uint16("outgoingProxyPort", outPort),
 		zap.Uint16("incomingProxyPort", inPort),
 	)
 	return nil
 }
 
-// stopPacketCapture cancels any running capture, waits for the writer
-// goroutines to flush, and closes the keylog file. Safe to call when
-// no capture is active.
+// stopPacketCapture cancels the in-flight capture loop and waits
+// for the goroutines to drain. Subscribers see EOF on their
+// streams shortly after this returns (the broadcaster slice goes
+// empty and the request handlers exit).
 func (p *Proxy) stopPacketCapture() {
 	p.pcapMu.Lock()
 	cancel := p.pcapCancel
 	done := p.pcapDone
-	keyLogF := p.keyLogFile
 	p.pcapCancel = nil
 	p.pcapDone = nil
-	p.keyLogFile = nil
+	p.pcapBroadcaster = nil
 	p.pcapMu.Unlock()
 
 	if cancel != nil {
@@ -167,17 +175,9 @@ func (p *Proxy) stopPacketCapture() {
 	if done != nil {
 		<-done
 	}
-	// Detach the package-level writer before closing the file so a
-	// late TLS handshake cannot write to a closed fd.
-	if keyLogF != nil {
-		pTls.SetKeyLogWriter(nil)
-		if err := keyLogF.Close(); err != nil {
-			p.logger.Warn("failed to close keylog file", zap.String("path", keyLogF.Name()), zap.Error(err))
-		}
-	}
 }
 
-func (p *Proxy) captureOnInterface(ctx context.Context, ifaceName string, w *pcapgo.Writer, writeMu *sync.Mutex, outPort, inPort uint16, wg *sync.WaitGroup) {
+func (p *Proxy) captureOnInterface(ctx context.Context, ifaceName string, b *pcapBroadcaster, outPort, inPort uint16, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	tp, err := afpacket.NewTPacket(
@@ -197,8 +197,6 @@ func (p *Proxy) captureOnInterface(ctx context.Context, ifaceName string, w *pca
 		return
 	}
 	defer tp.Close()
-
-	var matched uint64
 
 	for ctx.Err() == nil {
 		data, ci, err := tp.ZeroCopyReadPacketData()
@@ -240,20 +238,13 @@ func (p *Proxy) captureOnInterface(ctx context.Context, ifaceName string, w *pca
 			data = data[:pcapSnaplen]
 		}
 
-		writeMu.Lock()
-		writeErr := w.WritePacket(ci, data)
-		writeMu.Unlock()
-		if writeErr != nil {
-			p.logger.Warn("pcap write error",
-				zap.String("iface", ifaceName), zap.Error(writeErr))
-			continue
-		}
-		atomic.AddUint64(&matched, 1)
+		// Copy the slice — afpacket reuses the buffer on the next
+		// ZeroCopyReadPacketData; the broadcaster may hand it to a
+		// subscriber whose pcapgo.Writer queues writes asynchronously.
+		buf := make([]byte, len(data))
+		copy(buf, data)
+		b.write(ci, buf)
 	}
-
-	p.logger.Debug("packet capture interface drained",
-		zap.String("iface", ifaceName),
-		zap.Uint64("matched", atomic.LoadUint64(&matched)))
 }
 
 func portMatches(srcPort, dstPort, outPort, inPort uint16) bool {

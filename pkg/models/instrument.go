@@ -66,16 +66,16 @@ type OutgoingOptions struct {
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
 	// CapturePackets toggles raw packet capture on the agent's proxy ports
-	// for the duration of a Record() session. The recorder enables this via
-	// --capture-packets so the agent can dump traffic into the test-set's
-	// pcap file under PcapPath. Replay (Mock) sessions ignore this flag.
+	// for the duration of a Record() session. The recorder flips this via
+	// --capture-packets; the agent then stages traffic.pcap + sslkeys.log
+	// under its own scratch dir (typically os.TempDir()) — the recorder
+	// MUST NOT pass a path here because agent and recorder usually live
+	// in different filesystems (separate containers, separate pods,
+	// separate hosts). The recorder pulls the bytes back at session end
+	// via the agent's /agent/pcap/{traffic,keylog} endpoints and writes
+	// them into the local test-set directory itself. Replay (Mock)
+	// sessions ignore this flag.
 	CapturePackets bool
-	// PcapPath is the absolute path of the pcap file the agent should write
-	// when CapturePackets is set. The recorder computes this path from the
-	// freshly created test-set directory so each test-set gets its own
-	// capture. Empty string disables capture even when CapturePackets is
-	// true.
-	PcapPath string
 }
 
 type ConditionalDstCfg struct {

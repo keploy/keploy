@@ -74,6 +74,15 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
+		// Long-lived streaming endpoints. /pcap/traffic emits a
+		// pcap-format byte stream (file header + one record per
+		// packet) over chunked transfer-encoding; /pcap/keylog
+		// emits NSS keylog lines as TLS handshakes happen. The
+		// recorder holds these connections open for the entire
+		// recording session — they exit only when the recorder
+		// closes the request or capture stops.
+		r.Get("/pcap/traffic", a.HandlePcapStream)
+		r.Get("/pcap/keylog", a.HandleKeylogStream)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
 		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
@@ -190,6 +199,75 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
+}
+
+// HandlePcapStream is a long-lived chunked response that emits a
+// pcap-format byte stream — the file header followed by one record
+// per captured frame, flushed to the wire as packets arrive.
+// Returns 503 when capture is not active so the recorder can
+// distinguish "feature off" from a transport failure.
+func (a *Agent) HandlePcapStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by transport", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.tcpdump.pcap")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	// Probe the broadcaster up-front so a "capture not active"
+	// error surfaces as 503 rather than as an empty-but-OK stream.
+	// StreamPcap blocks until ctx is done, so the actual subscribe
+	// happens inside it; we call it synchronously and rely on its
+	// fast-path error.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush() // commit the response head before the long block
+	if err := a.svc.StreamPcap(r.Context(), w, flusher.Flush); err != nil {
+		// Headers are already sent; we cannot signal failure as a
+		// status code. Log and let the client see a short body.
+		a.logger.Warn("pcap stream ended with error",
+			zap.Error(err))
+	}
+}
+
+// HandleKeylogStream is a long-lived chunked response that emits
+// NSS keylog lines as stdlib crypto/tls writes them during
+// handshakes. Subscriber-style: lines arrive only while the
+// connection is held; recorders that connect late see only future
+// handshakes, not historical ones.
+func (a *Agent) HandleKeylogStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by transport", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	// Wrap so each Write flushes immediately — keylog lines are
+	// short and bursty, and Wireshark wants them as soon as the
+	// matching encrypted frames arrive in the parallel pcap stream.
+	if err := a.svc.StreamKeylog(r.Context(), &flushOnWrite{w: w, flusher: flusher}); err != nil {
+		a.logger.Warn("keylog stream ended with error", zap.Error(err))
+	}
+}
+
+// flushOnWrite invokes http.Flusher.Flush after every Write so
+// streamed bytes leave the agent's buffer immediately.
+type flushOnWrite struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+}
+
+func (f *flushOnWrite) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if n > 0 {
+		f.flusher.Flush()
+	}
+	return n, err
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
