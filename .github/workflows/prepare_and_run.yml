@@ -460,7 +460,7 @@ jobs:
               $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
               $hasFiles = $items.Count -gt 0
               if ($hasFiles -and -not (Test-Path $gitDir)) {
-                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
                 Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
               }
             }
@@ -919,7 +919,7 @@ jobs:
               $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
               $hasFiles = $items.Count -gt 0
               if ($hasFiles -and -not (Test-Path $gitDir)) {
-                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
                 Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
               }
             }
@@ -1038,7 +1038,7 @@ jobs:
               $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
               $hasFiles = $items.Count -gt 0
               if ($hasFiles -and -not (Test-Path $gitDir)) {
-                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
                 Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
               }
             }
