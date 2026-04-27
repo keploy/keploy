@@ -1631,9 +1631,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
 		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
 		if !isHTTP || isCONNECT {
-			logger.Debug("Offering H2 for ALPN", zap.Strings("nextProtos", nextProtos))
+			logger.Debug("Offering H2 (prioritized for gRPC/CONNECT)", zap.Strings("nextProtos", nextProtos))
 		} else {
-			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
+			logger.Debug("Offering H2 (standard HTTP/1.1 with upgrade support)", zap.Strings("nextProtos", nextProtos))
 		}
 
 		serverName := dstURL
