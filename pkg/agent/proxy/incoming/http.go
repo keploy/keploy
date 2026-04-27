@@ -117,6 +117,25 @@ const feederGlobalLimitBytes = 80 * 1024 * 1024 // 80 MB
 
 var feederInFlightBytes atomic.Int64
 
+// captureHookConcurrency caps the number of CaptureHook goroutines
+// running at the same time across every parseStreamingHTTP invocation.
+// Each goroutine takes a reference to the parsed *http.Request /
+// *http.Response (each carrying up to MaxTestCaseSize=5MB of body) and
+// runs io.ReadAll a second time inside Capture to materialise its own
+// reqBody/respBody copy, so peak transient memory per in-flight
+// goroutine is ~10 MB. Without a cap the parser launches one goroutine
+// per HTTP exchange unconditionally; the go-memory-load workload
+// (k6 firing 42 concurrent VUs against /large_payload endpoints)
+// piles hundreds of these goroutines up faster than the unbuffered
+// tcChan can drain them, taking the agent past the 250 MiB CI guard
+// even with the 80 MB feeder cap holding firm. 16 in-flight × ~10 MB
+// = ~160 MB worst-case, leaving headroom inside the 200 MB Docker
+// memory limit alongside the feeder cap (80 MB) and the rest of agent
+// state.
+const captureHookConcurrency = 16
+
+var captureHookSem = make(chan struct{}, captureHookConcurrency)
+
 // asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
 // io.Copy on the forwarding path writes into it via Write (non-blocking,
 // drops on backpressure); the parseStreamingHTTP goroutine reads from
@@ -1001,9 +1020,24 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 			respTimestamp = reqTimestamp
 		}
 
-		// Emit in a goroutine so the parser loop is never blocked by
-		// CaptureHook (e.g. if the test case channel is temporarily full).
-		go hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, pm.mapping, appPort)
+		// Emit in a goroutine so the parser loop is never blocked by a
+		// slow CaptureHook (e.g. if the unbuffered tcChan or downstream
+		// disk write stalls). Acquire from captureHookSem before forking
+		// to bound peak goroutine count: under high concurrency we'd
+		// otherwise launch one goroutine per HTTP exchange and each holds
+		// references to req/resp body buffers (up to ~10MB combined,
+		// since CaptureHook itself runs io.ReadAll on the NopCloser-
+		// wrapped bodies the parser already buffered). Letting them
+		// stack unbounded blew through the 250 MiB go-memory-load CI
+		// guard. The acquire blocks the parser if the semaphore is
+		// saturated — that backpressure is what prevents the next
+		// in-flight allocation, so it must be on the parser goroutine,
+		// not inside the launched goroutine.
+		captureHookSem <- struct{}{}
+		go func(req *http.Request, resp *http.Response, reqTs, respTs time.Time) {
+			defer func() { <-captureHookSem }()
+			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTs, respTs, pm.incomingOpts, pm.synchronous, pm.mapping, appPort)
+		}(req, resp, reqTimestamp, respTimestamp)
 	}
 }
 

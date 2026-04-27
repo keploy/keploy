@@ -165,6 +165,55 @@ func TestAsyncPipeFeederShutdownDrainWaitsForParser(t *testing.T) {
 	}
 }
 
+// TestCaptureHookSemaphoreMatchesConcurrencyConstant guards the link
+// between captureHookConcurrency and captureHookSem's buffer size. If
+// the constant is bumped without re-allocating the channel (or vice
+// versa), the parser would silently lose its concurrency cap and
+// regress the go-memory-load CI guard. Cap is asserted on the live
+// channel so a future refactor that swaps the type still has to keep
+// the invariant true.
+func TestCaptureHookSemaphoreMatchesConcurrencyConstant(t *testing.T) {
+	if got := cap(captureHookSem); got != captureHookConcurrency {
+		t.Fatalf("captureHookSem cap=%d, want %d (must equal captureHookConcurrency)", got, captureHookConcurrency)
+	}
+}
+
+// TestCaptureHookSemaphoreBackpressuresParser verifies that once
+// captureHookConcurrency permits are held, a further send on
+// captureHookSem blocks — i.e. the parser goroutine in
+// parseStreamingHTTP would block before launching another CaptureHook
+// goroutine. Without this backpressure the unbounded `go
+// hooksUtils.CaptureHook(...)` call piled goroutines (each holding ~10MB
+// in body buffers) past the 250 MiB go-memory-load CI threshold.
+func TestCaptureHookSemaphoreBackpressuresParser(t *testing.T) {
+	// Save and restore the global so this test doesn't poison sibling
+	// tests that may run before parseStreamingHTTP fires CaptureHook.
+	saved := captureHookSem
+	t.Cleanup(func() { captureHookSem = saved })
+	captureHookSem = make(chan struct{}, captureHookConcurrency)
+
+	for i := 0; i < captureHookConcurrency; i++ {
+		select {
+		case captureHookSem <- struct{}{}:
+		default:
+			t.Fatalf("acquire %d unexpectedly blocked before reaching capacity", i)
+		}
+	}
+
+	// One more acquire must NOT succeed in non-blocking mode — that's
+	// the backpressure the parser relies on.
+	select {
+	case captureHookSem <- struct{}{}:
+		t.Fatal("acquire past captureHookConcurrency succeeded; semaphore is not backpressuring")
+	default:
+	}
+
+	// Drain so the channel is left empty for any later subtests.
+	for i := 0; i < captureHookConcurrency; i++ {
+		<-captureHookSem
+	}
+}
+
 func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
 	paused := false
 	stubIngressPaused(t, func() bool { return paused })
