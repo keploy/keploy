@@ -419,17 +419,25 @@ jobs:
       # .git) are left untouched so the existing checkout fast path
       # (clean+fetch over an existing clone) keeps working.
       - name: Recover broken workspace
+        continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
-          $ws = $env:GITHUB_WORKSPACE
-          if (-not $ws) { return }
-          if (-not (Test-Path $ws)) { return }
-          $gitDir = Join-Path $ws ".git"
-          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-          if ($hasFiles -and -not (Test-Path $gitDir)) {
-            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
-            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          $ErrorActionPreference = 'Continue'
+          try {
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover broken workspace: $_"
           }
+          exit 0
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -840,17 +848,25 @@ jobs:
 
       # See build-windows-amd64's "Recover broken workspace" step for rationale.
       - name: Recover broken workspace
+        continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
-          $ws = $env:GITHUB_WORKSPACE
-          if (-not $ws) { return }
-          if (-not (Test-Path $ws)) { return }
-          $gitDir = Join-Path $ws ".git"
-          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-          if ($hasFiles -and -not (Test-Path $gitDir)) {
-            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
-            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          $ErrorActionPreference = 'Continue'
+          try {
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover broken workspace: $_"
           }
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -921,17 +937,25 @@ jobs:
 
       # See build-windows-amd64's "Recover broken workspace" step for rationale.
       - name: Recover broken workspace
+        continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
-          $ws = $env:GITHUB_WORKSPACE
-          if (-not $ws) { return }
-          if (-not (Test-Path $ws)) { return }
-          $gitDir = Join-Path $ws ".git"
-          $hasFiles = (Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-          if ($hasFiles -and -not (Test-Path $gitDir)) {
-            Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
-            Remove-Item -Path "$ws\*" -Recurse -Force -ErrorAction SilentlyContinue
+          $ErrorActionPreference = 'Continue'
+          try {
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git — wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover broken workspace: $_"
           }
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4
