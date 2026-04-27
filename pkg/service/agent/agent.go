@@ -148,8 +148,38 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
+// outgoingMockChanCap is the buffer depth of the agent → CLI mock
+// stream. The channel pipes typed mocks captured by the recorder
+// goroutines into the gob-encoded HTTP stream the CLI consumes; a
+// deeper buffer absorbs producer bursts at the cost of holding that
+// many in-flight Mocks in memory inside the agent.
+//
+// Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
+// request/response body strings, postgres v3 bind values whose raw
+// bytes are now capped per-value via the integrations recorder fix
+// in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
+// mock — multiple Bind parameters, plus DataRow cells on the
+// response side). At 100 entries the worst-case pinned memory for
+// a "fat" mock workload (e.g. the 60-VU × 1 MiB inserts shape that
+// triggered the OOM observed on PR #4135's go-memory-load CI run
+// 24990909605, job 73176710440) is bounded; 1000 was unsafe because
+// the slow CLI consumer (gob-encoded over HTTP, then disk-write per
+// mock) reliably underran the producer and let the channel fill,
+// pinning ~1 GiB of bodies before memoryguard's 500 ms tick could
+// react.
+//
+// 100 was chosen so that it stays well above any normal-traffic
+// micro-burst (typical postgres recordings emit ~10–30 mocks/s) yet
+// the ceiling is reached fast enough that syncMock's existing
+// outChan-overflow drop-with-Error path becomes the dominant
+// backpressure signal long before the cgroup limit is hit. The
+// drop path is intentional: it is far better to lose a mock and
+// keep recording than to OOM-kill the agent and lose every mock
+// captured in the run.
+const outgoingMockChanCap = 100
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 1000)
+	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
