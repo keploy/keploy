@@ -123,11 +123,9 @@ committed fixtures.
 | `keploy templatize`          | `pkg/service/tools`              | Replaces dynamic values with templates in test sets                              |
 | `keploy config --generate`   | `cli/config.go`                  | Writes a default `keploy.yml`                                                    |
 | `keploy contract ...`        | `pkg/service/contract`           | OpenAPI contract generation / testing                                            |
-| `keploy mock {up,down}load`  | `pkg/service/tools`              | Mock registry sync                                                               |
 | `keploy diff <r1> <r2>`      | `pkg/service/diff`               | Diff two test runs                                                               |
 | `keploy report`              | `pkg/service/report`             | Summarize a previous test run                                                    |
 | `keploy export` / `import`   | `cli/export.go`, `cli/import.go` | Move test-sets between repos                                                     |
-| `keploy login`               | `cli/login.go`                   | Authenticate against the Keploy backend                                          |
 | `keploy update`              | `cli/update.go`                  | Self-update the binary                                                           |
 | `keploy agent`               | `cli/agent.go`                   | Internal — used by the Docker image entrypoint                                   |
 
