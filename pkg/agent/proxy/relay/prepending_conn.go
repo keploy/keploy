@@ -2,6 +2,8 @@ package relay
 
 import (
 	"net"
+	"sync/atomic"
+	"time"
 )
 
 // prependingConn wraps a net.Conn and yields a fixed prefix of bytes
@@ -34,7 +36,9 @@ import (
 // "drain stash into TLS handshake" use case).
 type prependingConn struct {
 	net.Conn
-	prefix []byte
+	prefix       []byte
+	prefixReadAt time.Time
+	lastReadNano atomic.Int64
 }
 
 // newPrependingConn returns a net.Conn that reads `prefix` first,
@@ -42,10 +46,18 @@ type prependingConn struct {
 // unchanged so callers don't pay the wrapper cost on the common
 // path where no bytes were stashed.
 func newPrependingConn(c net.Conn, prefix []byte) net.Conn {
+	return newPrependingConnWithReadAt(c, prefix, time.Time{})
+}
+
+func newPrependingConnWithReadAt(c net.Conn, prefix []byte, readAt time.Time) net.Conn {
 	if len(prefix) == 0 {
 		return c
 	}
-	return &prependingConn{Conn: c, prefix: prefix}
+	return &prependingConn{
+		Conn:         c,
+		prefix:       append([]byte(nil), prefix...),
+		prefixReadAt: readAt,
+	}
 }
 
 // Read drains the prefix first. Once the prefix is exhausted, future
@@ -60,7 +72,22 @@ func (p *prependingConn) Read(b []byte) (int, error) {
 	if len(p.prefix) > 0 {
 		n := copy(b, p.prefix)
 		p.prefix = p.prefix[n:]
+		if !p.prefixReadAt.IsZero() {
+			p.lastReadNano.Store(p.prefixReadAt.UnixNano())
+		}
 		return n, nil
 	}
-	return p.Conn.Read(b)
+	n, err := p.Conn.Read(b)
+	if n > 0 {
+		p.lastReadNano.Store(observedReadAt(p.Conn, time.Now()).UnixNano())
+	}
+	return n, err
+}
+
+func (p *prependingConn) LastReadTime() time.Time {
+	n := p.lastReadNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
 }

@@ -184,20 +184,9 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	var preamblePayload []byte
 	if params.PreambleReadFromDest > 0 {
 		// 1a. Try the D2C stash first.
-		if stashed := r.takeStashed(fakeconn.FromDest); len(stashed) > 0 {
-			if len(stashed) >= params.PreambleReadFromDest {
-				preamblePayload = stashed[:params.PreambleReadFromDest]
-				// If the forwarder stashed more than we needed
-				// (unlikely for a 1-byte preamble but defensive
-				// against future protocols), the surplus is dropped
-				// — the upgraded socket has no clean way to
-				// consume cleartext bytes captured pre-upgrade.
-				if log != nil && len(stashed) > params.PreambleReadFromDest {
-					log.Debug("relay: dropping stashed surplus past preamble window",
-						zap.Int("requested", params.PreambleReadFromDest),
-						zap.Int("stashed", len(stashed)),
-					)
-				}
+		if stashed := r.takeStashedPrefix(fakeconn.FromDest, params.PreambleReadFromDest); stashed.len() > 0 {
+			if stashed.len() >= params.PreambleReadFromDest {
+				preamblePayload = stashed.bytes[:params.PreambleReadFromDest]
 			} else {
 				// Stash fell short of what the parser asked for;
 				// top up by reading the remainder directly from
@@ -206,15 +195,15 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				// single byte — but keeps the contract strict for
 				// future protocols.
 				preamblePayload = make([]byte, params.PreambleReadFromDest)
-				copy(preamblePayload, stashed)
+				copy(preamblePayload, stashed.bytes)
 				clearDeadline(r.dst.Load())
 				dst := *r.dst.Load()
-				_, err := readFullPreamble(dst, preamblePayload[len(stashed):])
+				_, err := readFullPreamble(dst, preamblePayload[stashed.len():])
 				if err != nil {
 					if log != nil {
 						log.Debug("relay: TLS upgrade preamble read (post-stash) failed",
 							zap.Error(err),
-							zap.Int("stashed", len(stashed)),
+							zap.Int("stashed", stashed.len()),
 							zap.Int("requested", params.PreambleReadFromDest),
 							zap.String("directive_reason", d.Reason),
 							zap.String("next_step", "the upstream closed mid-preamble; verify the destination is the protocol the parser was matched to and consider KEPLOY_DISABLE_PARSING=1 to bypass parsing"),
@@ -225,7 +214,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 						Kind:            d.Kind,
 						OK:              false,
 						Err:             fmt.Errorf("TLS upgrade preamble read: %w", err),
-						PreamblePayload: preamblePayload[:len(stashed)],
+						PreamblePayload: preamblePayload[:stashed.len()],
 					}
 				}
 			}
@@ -266,22 +255,6 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 					PreamblePayload: preamblePayload[:n],
 				}
 			}
-		}
-
-		// 1c. Drop the stashed C2D payload if any. The forwarder
-		// captured the client's reply to the server's preamble
-		// (e.g. TLS ClientHello after seeing 'S') without writing
-		// it to the live dest socket. The upgraded src conn will
-		// run its own handshake from a fresh ClientHello; the
-		// stashed bytes have no place to go. We log the size at
-		// debug so a future operator can correlate it with a
-		// supervisor warning if the discard ever turns out to drop
-		// genuine application bytes.
-		if c2dStash := r.takeStashed(fakeconn.FromClient); len(c2dStash) > 0 && log != nil {
-			log.Debug("relay: dropping stashed client-side bytes captured during pause",
-				zap.Int("dropped_bytes", len(c2dStash)),
-				zap.String("directive_reason", d.Reason),
-			)
 		}
 
 		if params.PreambleForwardToSrc {
@@ -355,16 +328,17 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		// pure TLS) leaves nothing past the preamble, so this branch
 		// is defensive — but it keeps the contract that no stashed
 		// bytes are ever silently dropped at the upgrade boundary.
-		if stashed := r.takeStashed(fakeconn.FromDest); len(stashed) > 0 {
+		if stashed := r.takeStashed(fakeconn.FromDest); stashed.len() > 0 {
 			if log != nil {
 				log.Debug("relay: prepending stashed dst bytes to TLS handshake",
-					zap.Int("bytes", len(stashed)),
+					zap.Int("bytes", stashed.len()),
 				)
 			}
-			dst = newPrependingConn(dst, stashed)
+			dst = newPrependingConnWithReadAt(dst, stashed.bytes, stashed.readAt)
 		}
+		trackedDst := newReadTrackingConn(dst)
 		var err error
-		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
+		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, trackedDst, true, params.DestTLSConfig)
 		if err != nil {
 			if log != nil {
 				// Debug-level: TLS upgrade failures are expected on some
@@ -388,6 +362,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				PreamblePayload: preamblePayload,
 			}
 		}
+		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
 	}
 
 	if params.ClientTLSConfig != nil {
@@ -413,16 +388,17 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		// The takeStashed call also clears r.stashedC2D so endPause
 		// does not silently drop those same bytes after the handshake
 		// returns.
-		if stashed := r.takeStashed(fakeconn.FromClient); len(stashed) > 0 {
+		if stashed := r.takeStashed(fakeconn.FromClient); stashed.len() > 0 {
 			if log != nil {
 				log.Debug("relay: prepending stashed src bytes to TLS handshake",
-					zap.Int("bytes", len(stashed)),
+					zap.Int("bytes", stashed.len()),
 				)
 			}
-			src = newPrependingConn(src, stashed)
+			src = newPrependingConnWithReadAt(src, stashed.bytes, stashed.readAt)
 		}
+		trackedSrc := newReadTrackingConn(src)
 		var err error
-		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
+		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, trackedSrc, false, params.ClientTLSConfig)
 		if err != nil {
 			if log != nil {
 				// Debug-level: see dest-side upgrade comment above.
@@ -449,6 +425,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				PreamblePayload: preamblePayload,
 			}
 		}
+		upgradedSrc = newReadTimeReportingConn(upgradedSrc, trackedSrc)
 	}
 
 	// Both handshakes (or only those requested) succeeded. Publish

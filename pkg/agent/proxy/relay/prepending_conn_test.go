@@ -78,6 +78,29 @@ func TestPrependingConn_PrefixOnly(t *testing.T) {
 	}
 }
 
+func TestPrependingConn_LastReadTimeUsesPrefixReadAt(t *testing.T) {
+	raw := &fakeReadConn{chunks: [][]byte{[]byte("LIVE")}}
+	readAt := time.Unix(1_700_000_000, 42)
+	c := newPrependingConnWithReadAt(raw, []byte("STASH"), readAt)
+
+	buf := make([]byte, 100)
+	n, err := c.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := string(buf[:n]); got != "STASH" {
+		t.Fatalf("Read = %q; want STASH", got)
+	}
+
+	provider, ok := c.(interface{ LastReadTime() time.Time })
+	if !ok {
+		t.Fatalf("prepending conn does not expose LastReadTime")
+	}
+	if got := provider.LastReadTime(); !got.Equal(readAt) {
+		t.Fatalf("LastReadTime = %v, want prefix readAt %v", got, readAt)
+	}
+}
+
 func TestPrependingConn_PrefixSpansMultipleReads(t *testing.T) {
 	// Prefix longer than the read buffer; multiple Reads are needed
 	// to drain it. The contract is "never mix prefix + live in one

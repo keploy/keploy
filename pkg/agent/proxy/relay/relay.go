@@ -87,8 +87,8 @@ type Relay struct {
 	// owns those bytes and the upgraded socket has no way to consume
 	// them sensibly.
 	stashMu    sync.Mutex
-	stashedC2D []byte
-	stashedD2C []byte
+	stashedC2D []stashedPayload
+	stashedD2C []stashedPayload
 
 	// seqC2D and seqD2C are the per-direction monotonic Chunk sequence
 	// numbers, scoped to this connection.
@@ -379,6 +379,9 @@ func (r *Relay) forward(
 		src := *srcPtr.Load()
 		n, err := src.Read(buf)
 		readAt := time.Now()
+		if n > 0 {
+			readAt = observedReadAt(src, readAt)
+		}
 
 		// Re-check the pause barrier AFTER Read returns and BEFORE
 		// any Write/Tee. Without this, a directive issued while the
@@ -404,7 +407,7 @@ func (r *Relay) forward(
 			if n > 0 {
 				stash := make([]byte, n)
 				copy(stash, buf[:n])
-				r.stashInflightFromPause(dir, stash)
+				r.stashInflightFromPause(dir, stash, readAt)
 				if log != nil {
 					log.Debug("relay: stashing in-flight bytes across pause boundary",
 						zap.String("dir", dir.String()),
@@ -718,38 +721,107 @@ func clearDeadline(c *net.Conn) {
 // Bytes are appended to any existing stash so two consecutive Read+
 // pause-recheck iterations don't lose data; in practice the forwarder
 // only ever reaches this path once per pause window.
-func (r *Relay) stashInflightFromPause(dir fakeconn.Direction, payload []byte) {
+func (r *Relay) stashInflightFromPause(dir fakeconn.Direction, payload []byte, readAt time.Time) {
 	if len(payload) == 0 {
 		return
+	}
+	stashed := stashedPayload{
+		bytes:  append([]byte(nil), payload...),
+		readAt: readAt,
 	}
 	r.stashMu.Lock()
 	defer r.stashMu.Unlock()
 	switch dir {
 	case fakeconn.FromClient:
-		r.stashedC2D = append(r.stashedC2D, payload...)
+		r.stashedC2D = append(r.stashedC2D, stashed)
 	case fakeconn.FromDest:
-		r.stashedD2C = append(r.stashedD2C, payload...)
+		r.stashedD2C = append(r.stashedD2C, stashed)
 	}
 }
 
 // takeStashed returns and clears the stash for the given direction.
 // Used by the directive handler under the pause barrier to claim
 // bytes the forwarder captured at the moment the barrier was raised.
-// Returns nil if there is no stash; takeStashed is safe to call
-// before any forwarder Read has fired.
-func (r *Relay) takeStashed(dir fakeconn.Direction) []byte {
+// Returns a zero payload if there is no stash; takeStashed is safe to
+// call before any forwarder Read has fired.
+func (r *Relay) takeStashed(dir fakeconn.Direction) stashedPayload {
 	r.stashMu.Lock()
 	defer r.stashMu.Unlock()
-	var out []byte
+	var parts []stashedPayload
 	switch dir {
 	case fakeconn.FromClient:
-		out = r.stashedC2D
+		parts = r.stashedC2D
 		r.stashedC2D = nil
 	case fakeconn.FromDest:
-		out = r.stashedD2C
+		parts = r.stashedD2C
 		r.stashedD2C = nil
 	}
-	return out
+	return joinStashed(parts)
+}
+
+// takeStashedPrefix returns up to n bytes from the given direction's
+// stash, leaving any surplus bytes queued for a later takeStashed call.
+func (r *Relay) takeStashedPrefix(dir fakeconn.Direction, n int) stashedPayload {
+	if n <= 0 {
+		return stashedPayload{}
+	}
+	r.stashMu.Lock()
+	defer r.stashMu.Unlock()
+
+	switch dir {
+	case fakeconn.FromClient:
+		prefix, rest := splitStashedPrefix(r.stashedC2D, n)
+		r.stashedC2D = rest
+		return prefix
+	case fakeconn.FromDest:
+		prefix, rest := splitStashedPrefix(r.stashedD2C, n)
+		r.stashedD2C = rest
+		return prefix
+	default:
+		return stashedPayload{}
+	}
+}
+
+func splitStashedPrefix(parts []stashedPayload, n int) (stashedPayload, []stashedPayload) {
+	if n <= 0 || len(parts) == 0 {
+		return stashedPayload{}, parts
+	}
+	out := make([]byte, 0, n)
+	var outReadAt time.Time
+	rest := parts
+	for n > 0 && len(rest) > 0 {
+		part := rest[0]
+		if len(part.bytes) == 0 {
+			rest = rest[1:]
+			continue
+		}
+		if outReadAt.IsZero() && !part.readAt.IsZero() {
+			outReadAt = part.readAt
+		}
+		take := len(part.bytes)
+		if take > n {
+			take = n
+		}
+		out = append(out, part.bytes[:take]...)
+		n -= take
+		if take == len(part.bytes) {
+			rest = rest[1:]
+			continue
+		}
+		remainder := stashedPayload{
+			bytes:  append([]byte(nil), part.bytes[take:]...),
+			readAt: part.readAt,
+		}
+		newRest := make([]stashedPayload, 0, len(rest))
+		newRest = append(newRest, remainder)
+		newRest = append(newRest, rest[1:]...)
+		rest = newRest
+		break
+	}
+	if len(out) == 0 {
+		return stashedPayload{}, rest
+	}
+	return stashedPayload{bytes: out, readAt: outReadAt}, rest
 }
 
 // nudgeDeadline sets a deadline in the past on the conn if non-nil.
