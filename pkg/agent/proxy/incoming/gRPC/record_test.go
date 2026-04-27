@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -64,6 +66,50 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 	require.Len(t, streams, 1)
 	assert.Equal(t, requestAt, streams[0].GRPCReq.Timestamp)
 	assert.Equal(t, responseAt, streams[0].GRPCResp.Timestamp)
+}
+
+func TestForwardAndTeeStampsResponsesAfterClientWrite(t *testing.T) {
+	logger := zap.NewNop()
+	srcRead, srcWrite := net.Pipe()
+	dstRead, dstWrite := net.Pipe()
+	for _, c := range []net.Conn{srcRead, srcWrite, dstRead, dstWrite} {
+		require.NoError(t, c.SetDeadline(time.Now().Add(5*time.Second)))
+		defer c.Close()
+	}
+
+	ch := make(chan frameChunk, 1)
+	go forwardAndTee(srcRead, dstWrite, ch, logger, "app→client", true)
+
+	payload := []byte("response-frame")
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := srcWrite.Write(payload)
+		writeDone <- err
+	}()
+
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("source write did not complete")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	cutoff := time.Now()
+
+	buf := make([]byte, len(payload))
+	_, err := io.ReadFull(dstRead, buf)
+	require.NoError(t, err)
+	assert.Equal(t, payload, buf)
+
+	select {
+	case chunk := <-ch:
+		assert.Equal(t, payload, chunk.data)
+		assert.False(t, chunk.timestamp.Before(cutoff),
+			"response timestamp should be captured after the proxy writes to the client")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for teed frame chunk")
+	}
 }
 
 func headersFrameBytes(t *testing.T, streamID uint32, fields []hpack.HeaderField, endStream bool) []byte {
