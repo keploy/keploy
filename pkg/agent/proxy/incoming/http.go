@@ -99,6 +99,24 @@ type timedChunk struct {
 	readAt time.Time
 }
 
+// Global cap on the bytes held in flight across every asyncPipeFeeder's
+// channel. The per-feeder channel is sized to tolerate large response
+// bodies (5 MB needs ~160 slots at 32 KB/chunk), so under stress workloads
+// with many concurrent connections (go-memory-load: hundreds of in-flight
+// requests, parser unable to drain channels at wire speed) memory growth
+// per feeder × N feeders rapidly exceeds the agent's 250 MiB record-time
+// guard. Counter is decremented when Read pulls a chunk off a channel
+// or when shutdown drains residual chunks; pre-check in Write is the
+// fast path that prevents new allocations once the cap is reached.
+//
+// Value chosen to leave headroom for the rest of the agent (proxy state,
+// mock storage, postgres v3 cohort indexes) under the 200 MiB memory
+// limit set by the CI memory-load harness, while still allowing >2 MB of
+// in-flight capture per active connection in the steady state.
+const feederGlobalLimitBytes = 80 * 1024 * 1024 // 80 MB
+
+var feederInFlightBytes atomic.Int64
+
 // asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
 // io.Copy on the forwarding path writes into it via Write (non-blocking,
 // drops on backpressure); the parseStreamingHTTP goroutine reads from
@@ -184,6 +202,10 @@ func (f *asyncPipeFeeder) Read(p []byte) (int, error) {
 		if !ok {
 			return 0, io.EOF
 		}
+		// Bytes leave the feeder's in-flight pool the moment they're
+		// pulled off the channel — they live on the parser goroutine's
+		// stack/heap until consumed and freed naturally by GC.
+		feederInFlightBytes.Add(-int64(len(chunk.data)))
 		f.cur = chunk.data
 		if !chunk.readAt.IsZero() {
 			f.lastReadNano.Store(chunk.readAt.UnixNano())
@@ -209,6 +231,25 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 		f.shutdown()
 		return len(p), nil
 	}
+	// Pre-allocation pressure check: if the global feeder in-flight
+	// counter is already saturated, refuse this chunk and shut the
+	// feeder down rather than allocating into a memory-pressured agent.
+	// Approximate on the Load side (a parallel feeder could push us
+	// over by one chunk) — exactly accurate increment happens below
+	// after the channel send succeeds. Captures-lost is an acceptable
+	// trade for not OOM'ing the agent under stress workloads.
+	chunkSize := int64(len(p))
+	if feederInFlightBytes.Load()+chunkSize > feederGlobalLimitBytes {
+		f.shutdown()
+		if f.logger != nil {
+			f.logger.Debug("Global feeder in-flight cap reached — dropping remaining capture on this connection.",
+				zap.Int64("global_limit_bytes", feederGlobalLimitBytes),
+				zap.Int64("current_in_flight", feederInFlightBytes.Load()),
+				zap.Int("chunk_size", len(p)),
+			)
+		}
+		return len(p), nil
+	}
 	// Copy data — the original slice belongs to io.Copy's reusable buffer.
 	// Capture the arrival time NOW (right after io.Copy.Read returned bytes
 	// from the source socket); this is the timestamp the parser will see
@@ -218,6 +259,9 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 	chunk := timedChunk{data: buf, readAt: time.Now()}
 	select {
 	case f.ch <- chunk:
+		// Account for the bytes now sitting in the channel; Read or the
+		// shutdown drain decrement on consumption.
+		feederInFlightBytes.Add(chunkSize)
 	default:
 		// Channel full — parser can't keep up. Stop capture entirely
 		// so the parser goroutine sees io.EOF and exits.
@@ -238,9 +282,24 @@ func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
 // the channel. Safe to call from both Write() (capture disabled mid-stream)
 // and Close() (connection ended). The sync.Once ensures the channel is
 // closed exactly once regardless of which path fires first.
+//
+// After close, residual chunks still sitting in f.ch are drained off-thread
+// and their bytes returned to the global in-flight counter. Without the
+// drain those bytes would stay accounted-for (counter never decrements)
+// even though the parser goroutine has already exited on io.EOF — which
+// would slowly leak the global cap over the lifetime of the agent. The
+// drain is fire-and-forget because no caller cares when it finishes; Go
+// GC reclaims the chunks once the goroutine exits.
 func (f *asyncPipeFeeder) shutdown() {
 	f.closed.Store(true)
-	f.closeOnce.Do(func() { close(f.ch) })
+	f.closeOnce.Do(func() {
+		close(f.ch)
+		go func() {
+			for chunk := range f.ch {
+				feederInFlightBytes.Add(-int64(len(chunk.data)))
+			}
+		}()
+	})
 }
 
 // Close signals the parser goroutine to exit by closing the chunk channel.
