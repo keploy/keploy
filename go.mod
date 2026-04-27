@@ -75,7 +75,7 @@ require (
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.50.0
 	golang.org/x/text v0.34.0
-	golang.org/x/tools v0.41.0 // indirect
+	golang.org/x/tools v0.41.0
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
 
@@ -92,7 +92,6 @@ require (
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/render v1.0.3
-	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/keploy/jsonDiff v1.0.8
@@ -149,6 +148,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
 	github.com/minio/minlz v1.0.0 // indirect

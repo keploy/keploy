@@ -32,8 +32,8 @@ jobs:
             script_dir: http_pokeapi
         config:
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-windows
+            replay_src: build-windows
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:

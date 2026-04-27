@@ -153,7 +153,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 			continue
 		}
 		if testCaseResult.FailureInfo.Risk == models.High && !t.config.Normalize.AllowHighRisk {
-			t.logger.Warn(fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name))
+			t.logger.Info(fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name))
 			continue
 		}
 		if hasLastUpdated {
