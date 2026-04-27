@@ -76,6 +76,13 @@ type OutgoingOptions struct {
 	// them into the local test-set directory itself. Replay (Mock)
 	// sessions ignore this flag.
 	CapturePackets bool
+	// OpportunisticTLSIntercept turns on the sniff-and-hijack
+	// passthrough variant: the proxy lets app and upstream relay
+	// bytes verbatim while peeking for a TLS ClientHello, and
+	// hijacks both halves into a MITM the moment one appears.
+	// Surfaced via --opportunistic-tls-intercept so the agent can
+	// pick the right per-connection branch in handleConnection.
+	OpportunisticTLSIntercept bool
 }
 
 type ConditionalDstCfg struct {

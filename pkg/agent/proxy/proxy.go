@@ -138,12 +138,13 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsSwitchMutex     sync.Mutex
-	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer      *dns.Server
-	TCPDNSServer      *dns.Server
-	GlobalPassthrough bool
-	IsDocker          bool
+	nsSwitchMutex             sync.Mutex
+	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer              *dns.Server
+	TCPDNSServer              *dns.Server
+	GlobalPassthrough         bool
+	OpportunisticTLSIntercept bool
+	IsDocker                  bool
 
 	// EnableIPv6Redirect mirrors config.Agent.EnableIPv6Redirect. When
 	// true (the default), the synthetic DNS fallback answers AAAA
@@ -1174,6 +1175,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	// Opportunistic TLS intercept: a separate passthrough variant
+	// where we relay bytes verbatim AND peek for a TLS handshake;
+	// when one shows up, we hijack and MITM both halves so the keys
+	// land in the keylog fanout sink. Strictly more capable than
+	// GlobalPassthrough for sessions where MITM is acceptable, but
+	// lives on its own flag so deployments that need true
+	// no-MITM passthrough (cert pinning, channel-binding clients,
+	// other parser-incompatible workloads) keep their existing
+	// semantics. Takes precedence over GlobalPassthrough.
+	if p.OpportunisticTLSIntercept {
+		if err := p.opportunisticTLSIntercept(parserCtx, srcConn, dstAddr, rule.Backdate); err != nil {
+			utils.LogError(p.logger, err, "opportunistic TLS intercept failed",
+				zap.String("server address", dstAddr))
+			return err
+		}
+		return nil
+	}
+
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 		dstConn, err = net.Dial("tcp", dstAddr)
@@ -2082,6 +2101,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
+	// Lift the per-session opportunistic-TLS toggle onto the proxy
+	// for handleConnection to read. Independent of GlobalPassthrough.
+	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
