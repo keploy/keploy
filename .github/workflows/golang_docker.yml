@@ -61,6 +61,25 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          # RCA instrumentation for postgres-v3 per-test window misalignment
+          # (see PR #4126). Only echo-sql is postgres-touching in this matrix;
+          # the env var is a no-op for the non-PG apps so we set it
+          # unconditionally and gate the artifact upload below.
+          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker.sh
+
+      - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
+        # Only upload for the postgres-touching variant to keep artifact
+        # storage tight. TODO(postgres-v3 RCA): broaden if other matrix
+        # apps regress on PG.
+        if: ${{ always() && matrix.app.name == 'echo-sql' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
+          path: |
+            samples-go/${{ matrix.app.path }}/keploy/
+            samples-go/${{ matrix.app.path }}/echoApp.txt
+          if-no-files-found: warn
+          retention-days: 7

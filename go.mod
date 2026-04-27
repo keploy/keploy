@@ -148,6 +148,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
 	github.com/minio/minlz v1.0.0 // indirect

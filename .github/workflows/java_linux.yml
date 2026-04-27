@@ -56,9 +56,28 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          # RCA instrumentation for postgres-v3 per-test window misalignment
+          # (see PR #4126 / feat/postgres-v3-copy-schema). Logs the live PG
+          # bind values on every replay-time matcher miss so the recorded
+          # mocks.yaml + test_logs.txt artifacts below can be cross-checked
+          # offline. Logging is a no-op when the matcher succeeds.
+          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"
         run: |
           cd samples-java/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/${{ matrix.app.script_dir }}/java-linux.sh
+
+      - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/${{ matrix.app.path }}/keploy/
+            samples-java/${{ matrix.app.path }}/test_logs.txt
+            samples-java/${{ matrix.app.path }}/javaApp_*.txt
+            samples-java/${{ matrix.app.path }}/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
 
   mysql_dual_conn:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
