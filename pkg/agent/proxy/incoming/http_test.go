@@ -358,13 +358,13 @@ func TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion(t *testing.T) {
 // this test's window.
 //
 // The test simulates the prefetch scenario by:
-//   1. Pre-stamping wireTimeConn.lastReadNano to a moment in the past
-//      (representing a Read that fired during the prior iteration).
-//   2. Capturing iterStart = time.Now().
-//   3. Driving a ReadRequest entirely from bytes already in bufio's
-//      buffer (no underlying socket Read this iteration).
-//   4. Asserting the clamp falls back to iterStart, NOT the stale
-//      prior-iter lastReadNano.
+//  1. Pre-stamping wireTimeConn.lastReadNano to a moment in the past
+//     (representing a Read that fired during the prior iteration).
+//  2. Capturing iterStart = time.Now().
+//  3. Driving a ReadRequest entirely from bytes already in bufio's
+//     buffer (no underlying socket Read this iteration).
+//  4. Asserting the clamp falls back to iterStart, NOT the stale
+//     prior-iter lastReadNano.
 func TestReqTimestampClampedAtIterStartUnderBufioPrefetch(t *testing.T) {
 	srvSide, clientSide := net.Pipe()
 	defer srvSide.Close()
