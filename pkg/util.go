@@ -3080,6 +3080,26 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 				preservedStartup++
 				continue
 			}
+			// Per-mock diagnostic: emit the hash + window + actual ts
+			// at Debug for the strict-drop path so a CI log can
+			// pinpoint which postgres / http / mongo mock the per-test
+			// cohort lost. Without this, "candidates: 0" downstream is
+			// the only visible signal and operators have no way to
+			// confirm whether the mock was on disk at all vs filtered
+			// out. Aggregate count is preserved below for parity.
+			if logger != nil {
+				logger.Debug("strict-mode drop: per-test mock outside window",
+					zap.String("mock", p.Name),
+					zap.String("kind", string(p.Kind)),
+					zap.String("connID", p.ConnectionID),
+					zap.Time("mock_req_ts", p.Spec.ReqTimestampMock),
+					zap.Time("mock_res_ts", p.Spec.ResTimestampMock),
+					zap.Time("window_after", afterTime),
+					zap.Time("window_before", beforeTime),
+					zap.Duration("delta_before_after", p.Spec.ReqTimestampMock.Sub(afterTime)),
+					zap.Duration("delta_before_before", p.Spec.ReqTimestampMock.Sub(beforeTime)),
+				)
+			}
 			droppedOutOfWindow++
 		} else {
 			// Legacy: anything out-of-window goes to the unfiltered pool
@@ -3229,6 +3249,25 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 				startup = append(startup, p)
 				preservedStartup++
 				continue
+			}
+			// Per-mock diagnostic: emit hash + window deltas at Debug
+			// for the three-tier strict-drop path so a CI log can
+			// identify which postgres / mongo / etc. mock the per-test
+			// cohort lost. Mirrors the same diagnostic added to the
+			// two-tier filterByTimeStampTierAware so callers using
+			// either path get the visibility uniformly.
+			if logger != nil {
+				logger.Debug("strict-mode drop (3-tier): per-test mock outside window",
+					zap.String("mock", p.Name),
+					zap.String("kind", string(p.Kind)),
+					zap.String("connID", p.ConnectionID),
+					zap.Time("mock_req_ts", p.Spec.ReqTimestampMock),
+					zap.Time("mock_res_ts", p.Spec.ResTimestampMock),
+					zap.Time("window_after", afterTime),
+					zap.Time("window_before", beforeTime),
+					zap.Duration("delta_before_after", p.Spec.ReqTimestampMock.Sub(afterTime)),
+					zap.Duration("delta_before_before", p.Spec.ReqTimestampMock.Sub(beforeTime)),
+				)
 			}
 			droppedOutOfWindow++
 		} else {

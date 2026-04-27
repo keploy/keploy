@@ -241,6 +241,22 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	switch {
 	case closed:
 		m.mu.Unlock()
+		// Per-mock diagnostic: visible signal when AddMock drops a
+		// mock because the outChan has already been closed by
+		// CloseOutChan. This usually only fires during shutdown but
+		// in CI a poorly-ordered teardown can race the recorder's
+		// final emit and silently lose mocks captured in the last
+		// few milliseconds of the run. The dropLogger is the right
+		// receiver — it ALWAYS resolves to a non-nil logger and is
+		// safe under the m.mu unlock.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Debug("AddMock: outChan already closed, mock dropped",
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("connID", mock.ConnectionID),
+				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+			)
+		}
 		return
 	case bound && !m.firstReqSeen:
 		m.mu.Unlock()
@@ -450,6 +466,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// lifetime carve-out at the top of the loop and never reach
 		// this branch.)
 		if mockTime.Before(cutoffTime) {
+			// Per-mock diagnostic: a per-test mock that fell off the
+			// stale-buffer cutoff almost always means the recorder
+			// kept emitting after the dedup queue had advanced past
+			// the matching test's window — log enough context for
+			// post-hoc CI analysis. Sampled via dropLogger to honour
+			// the same flood-prevention as the outChan-overflow path.
+			if logger := m.dropLogger(); logger != nil {
+				logger.Debug("ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
+					zap.String("mock_name", mock.Name),
+					zap.String("mock_kind", string(mock.Kind)),
+					zap.String("connID", mock.ConnectionID),
+					zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+					zap.Time("mock_req_ts", mockTime),
+					zap.Time("window_start", start),
+					zap.Time("window_end", end),
+					zap.Time("cutoff", cutoffTime),
+					zap.String("test_name", testName),
+				)
+			}
 			continue
 		}
 
@@ -459,6 +494,10 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		m.buffer[keepIdx] = mock
 		keepIdx++
 	}
+
+	// Snapshot pre-truncation length so the diagnostic can report
+	// "shrunk from N to M" rather than the post-truncation length.
+	bufferLenBefore := len(m.buffer)
 
 	// MEMORY CLEANUP: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {
@@ -475,7 +514,30 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		}
 	}
 
+	bufferLenAfter := len(m.buffer)
+	mocksToSendLen := len(mocksToSend)
+
 	m.mu.Unlock()
+
+	// Per-resolve diagnostic: surface buffer-state transitions per
+	// test-window resolve so a CI log can show when a per-test cohort
+	// flushed zero mocks or when stale-buffer cutoff started reaping.
+	// Sampled via dropLogger which is the standard observability sink
+	// for buffer-flow events on this manager. Only logged when there
+	// was actual state change to avoid log noise on idle resolves.
+	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
+		logger.Debug("ResolveRange: buffer transition",
+			zap.String("test_name", testName),
+			zap.Time("window_start", start),
+			zap.Time("window_end", end),
+			zap.Int("buffer_len_before", bufferLenBefore),
+			zap.Int("buffer_len_after", bufferLenAfter),
+			zap.Int("mocks_flushed", mocksToSendLen),
+			zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
+			zap.Bool("outChan_bound", outChanBound),
+			zap.Bool("mapping_enabled", mapping),
+		)
+	}
 
 	// Route mock sends through sendToOutChan so the close-vs-send
 	// race is serialized the same way AddMock does it. Mapping
