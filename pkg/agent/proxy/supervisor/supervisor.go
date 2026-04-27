@@ -340,7 +340,24 @@ func (s *Supervisor) classifyReturn(outerCtx context.Context, panicked bool, pan
 	if errors.Is(fnErr, context.Canceled) && outerCtx.Err() != nil {
 		return Result{Status: StatusCanceled, Err: fnErr}
 	}
-	return Result{Status: StatusError, Err: fnErr}
+	// G1 fix: a parser that returned a non-nil error on its own
+	// (decode failure, malformed wire frame, decompression error,
+	// etc.) is in the same situation as a panic from the user-traffic
+	// perspective — the bytes have already been forwarded by the
+	// relay, and the parser's failure to record a clean mock has no
+	// bearing on whether the application's connection should survive.
+	// Set FallthroughToPassthrough so the dispatcher leaves the relay
+	// alone and bytes keep flowing until peer close. fireOnAbort is
+	// invoked so the SessionOnAbort callback can pause the tees and
+	// close the FakeConns; without it the tees keep accumulating
+	// chunks for a parser that will never read them, eventually
+	// dropping at DropChannelFull and spamming Debug logs.
+	s.fireOnAbort()
+	return Result{
+		Status:                   StatusError,
+		Err:                      fnErr,
+		FallthroughToPassthrough: true,
+	}
 }
 
 // reportPanic invokes cfg.PanicReporter guarded against reporter
