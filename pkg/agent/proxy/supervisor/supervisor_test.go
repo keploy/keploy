@@ -53,8 +53,17 @@ func TestRunError(t *testing.T) {
 	if !errors.Is(res.Err, sentinel) {
 		t.Fatalf("err: got %v, want %v", res.Err, sentinel)
 	}
-	if res.FallthroughToPassthrough {
-		t.Fatalf("fallthrough: got true, want false (errors alone don't fall through)")
+	// Parser-side decode/state errors must fall through to passthrough.
+	// The bytes have already been forwarded by the relay; the parser's
+	// inability to record a clean mock has no bearing on whether the
+	// application's connection should survive. The dispatcher reads
+	// FallthroughToPassthrough and skips relayCancel when true, leaving
+	// the relay alive to forward subsequent traffic until peer close.
+	// See pkg/agent/proxy/integrations/http/recordv2.go for the call
+	// sites this contract protects (invalid Content-Length, gzip
+	// decompression failure, malformed status line).
+	if !res.FallthroughToPassthrough {
+		t.Fatalf("fallthrough: got false, want true (parser errors must not tear down the application's connection)")
 	}
 }
 
