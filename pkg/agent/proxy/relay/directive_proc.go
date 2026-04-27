@@ -33,7 +33,7 @@ func (r *Relay) processDirectives(ctx context.Context, stopping <-chan struct{})
 			if !ok {
 				return
 			}
-			ack := r.handleDirective(ctx, d)
+			ack := r.handleDirective(ctx, stopping, d)
 			select {
 			case r.acks <- ack:
 			default:
@@ -49,10 +49,13 @@ func (r *Relay) processDirectives(ctx context.Context, stopping <-chan struct{})
 }
 
 // handleDirective dispatches on Kind. Returns the Ack to emit.
-func (r *Relay) handleDirective(ctx context.Context, d directive.Directive) directive.Ack {
+// stopping is the relay-wide teardown signal; handlers that need to
+// wait for forwarder coordination (currently only KindUpgradeTLS) plumb
+// it through to avoid an indefinite block during shutdown.
+func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	switch d.Kind {
 	case directive.KindUpgradeTLS:
-		return r.handleUpgradeTLS(ctx, d)
+		return r.handleUpgradeTLS(ctx, stopping, d)
 	case directive.KindPauseDir:
 		return r.handlePauseDir(d)
 	case directive.KindResumeDir:
@@ -75,12 +78,29 @@ func (r *Relay) handleDirective(ctx context.Context, d directive.Directive) dire
 // handleUpgradeTLS runs the TLS upgrade choreography:
 //  1. Install the pause barrier. Forwarders park on their next loop
 //     iteration — i.e. after finishing any Read already in flight.
-//  2. Handshake dest first (keploy = TLS client to real server),
+//  2. (Optional) Read [UpgradeTLSParams.PreambleReadFromDest] bytes
+//     from the real destination socket directly, bypassing the
+//     forwarders' tee, so a synchronous protocol-preamble exchange
+//     (e.g. Postgres SSLResponse byte) is observed before the
+//     forwarders reawaken. If [UpgradeTLSParams.PreambleForwardToSrc]
+//     is true, write those bytes to the real source socket before
+//     touching TLS — closing the race where the C2D forwarder would
+//     otherwise pick up the client's TLS ClientHello bytes (sent in
+//     reaction to the preamble) and deliver them upstream as
+//     cleartext, corrupting the upstream wire before the handshake
+//     even starts.
+//  3. (Optional) Gate handshakes on
+//     [UpgradeTLSParams.ProceedOnPreamble] matching the read preamble.
+//     A mismatch is OK=true with TLSUpgraded=false: it lets a
+//     protocol that allows the server to decline TLS at the preamble
+//     stage (Postgres 'N') return without forcing the whole mock
+//     incomplete.
+//  4. Handshake dest first (keploy = TLS client to real server),
 //     then client (keploy = TLS server, presenting MITM cert).
-//  3. On either failure, release the pause and return OK=false; the
+//  5. On either failure, release the pause and return OK=false; the
 //     relay stays on the original (cleartext) conns. The supervisor
 //     is expected to fall through to raw passthrough.
-//  4. On success, replace the atomic conn pointers with the upgraded
+//  6. On success, replace the atomic conn pointers with the upgraded
 //     versions, release the pause, and return OK=true with boundary
 //     timestamps.
 //
@@ -92,8 +112,13 @@ func (r *Relay) handleDirective(ctx context.Context, d directive.Directive) dire
 // sends next. If the parser sends the directive while a real Read
 // was about to return TLS-handshake bytes, those bytes are forwarded
 // as-is, which is wrong — but the contract puts the responsibility
-// for boundary detection on the parser.
-func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) directive.Ack {
+// for boundary detection on the parser. The PreambleReadFromDest /
+// PreambleForwardToSrc fields exist precisely to give the parser a
+// way to satisfy that precondition for protocols (Postgres SSL) where
+// the boundary is "the byte the server is about to send AND the
+// reaction the client is about to write" rather than something the
+// parser can detect from already-forwarded bytes alone.
+func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	log := r.cfg.Logger
 	if r.cfg.TLSUpgradeFn == nil {
 		return directive.Ack{Kind: d.Kind, OK: false, Err: ErrNoTLSUpgrader}
@@ -104,26 +129,216 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 	}
 
 	// Barrier up. Forwarders will park on their next loop iteration.
-	// We don't have a precise "forwarders have parked" signal, but
-	// that is acceptable: any bytes they read just before parking
-	// will still be forwarded on cleartext; the parser will have
-	// already marked the prelude mock complete. The new TLS stream
-	// starts from whatever the real peer sends next.
+	// beginPause also nudges SetReadDeadline on both live sockets so
+	// any forwarder blocked in Read wakes up promptly.
 	r.beginPause()
+
+	// Wait for both forwarders to actually be parked on the pause
+	// channel before proceeding. This is the synchronisation point
+	// that lets takeStashed below observe any bytes a forwarder Read
+	// returned in flight (Postgres SSLResponse 'S' is the canonical
+	// case: D2C's blocked Read wakes from the deadline kick with the
+	// 'S' byte, the post-Read pause check stashes it onto the relay,
+	// then the forwarder calls markForwarderParked). Without this
+	// wait the directive handler races the forwarder, sees an empty
+	// stash, falls through to readFullPreamble on the live socket,
+	// and deadlocks because the byte the parser is asking us to read
+	// has already been consumed by the forwarder Read that just woke
+	// up.
+	r.waitForwardersParked(ctx, stopping)
 
 	boundaryReadAt := time.Now()
 
-	// Atomic two-sided upgrade: run both handshakes FIRST (keeping
-	// the new *tls.Conn values in local vars), only publish the
-	// upgraded conn pointers via r.{dst,src}.Store AFTER both
-	// handshakes succeed. A naive two-step "upgrade dest, publish;
-	// upgrade client, publish" would leave the relay in a mixed state
-	// if the second handshake failed (e.g. dest already TLS-wrapped,
-	// client still cleartext) — the forwarders would then be moving
-	// TLS bytes one way and plaintext the other, corrupting any
-	// traffic in flight before the outer layer torn the sockets
-	// down. The local-then-store pattern keeps the corruption window
-	// at zero.
+	// Step 1 — synchronous preamble exchange. The preamble (e.g.
+	// Postgres SSLResponse byte) may already have been read by the
+	// D2C forwarder before the pause barrier was raised; in that
+	// case the forwarder stashed it via stashInflightFromPause
+	// rather than writing it to the live src socket, and we claim it
+	// here. If the stash is empty we read directly from the live
+	// dest socket — the byte is still in flight from the server and
+	// no forwarder consumed it.
+	//
+	// Either path completes synchronously under the pause, so the
+	// directive handler is the sole owner of the protocol state at
+	// this boundary. Without this two-source design, the obvious
+	// "always read from real_dst" approach would race with D2C: in
+	// the case where D2C already consumed 'S' from the server, the
+	// next byte on real_dst is whatever the server sends after 'S'
+	// (the start of TLS ServerHello, if the C2D forwarder also
+	// already forwarded the client's TLS ClientHello to the server).
+	// We saw 0x16 ('handshake' TLS record type) instead of 'S' /
+	// 0x53 from postgres in exactly that case before this fix.
+	// Clear the past-time deadline beginPause installed on the live
+	// sockets so the synchronous TLS handshakes (and the
+	// preamble-from-real-dst Read on the no-stash branch) aren't
+	// instantly aborted by the same kick. A blocking forwarder Read
+	// has already woken up by now and the post-Read recheck has
+	// already parked it on the pause channel; clearing the deadline
+	// here is safe because the forwarder won't issue another Read
+	// until the pause channel closes (which happens in endPause,
+	// after this function returns). endPause clears the deadline
+	// again — that's a no-op here but keeps the invariant tidy.
+	clearDeadline(r.dst.Load())
+	clearDeadline(r.src.Load())
+
+	var preamblePayload []byte
+	if params.PreambleReadFromDest > 0 {
+		// 1a. Try the D2C stash first.
+		if stashed := r.takeStashed(fakeconn.FromDest); len(stashed) > 0 {
+			if len(stashed) >= params.PreambleReadFromDest {
+				preamblePayload = stashed[:params.PreambleReadFromDest]
+				// If the forwarder stashed more than we needed
+				// (unlikely for a 1-byte preamble but defensive
+				// against future protocols), the surplus is dropped
+				// — the upgraded socket has no clean way to
+				// consume cleartext bytes captured pre-upgrade.
+				if log != nil && len(stashed) > params.PreambleReadFromDest {
+					log.Debug("relay: dropping stashed surplus past preamble window",
+						zap.Int("requested", params.PreambleReadFromDest),
+						zap.Int("stashed", len(stashed)),
+					)
+				}
+			} else {
+				// Stash fell short of what the parser asked for;
+				// top up by reading the remainder directly from
+				// the live socket. This branch is rare in
+				// practice — the Postgres SSL preamble is a
+				// single byte — but keeps the contract strict for
+				// future protocols.
+				preamblePayload = make([]byte, params.PreambleReadFromDest)
+				copy(preamblePayload, stashed)
+				clearDeadline(r.dst.Load())
+				dst := *r.dst.Load()
+				_, err := readFullPreamble(dst, preamblePayload[len(stashed):])
+				if err != nil {
+					if log != nil {
+						log.Debug("relay: TLS upgrade preamble read (post-stash) failed",
+							zap.Error(err),
+							zap.Int("stashed", len(stashed)),
+							zap.Int("requested", params.PreambleReadFromDest),
+							zap.String("directive_reason", d.Reason),
+							zap.String("next_step", "the upstream closed mid-preamble; verify the destination is the protocol the parser was matched to and consider KEPLOY_DISABLE_PARSING=1 to bypass parsing"),
+						)
+					}
+					r.endPause()
+					return directive.Ack{
+						Kind:            d.Kind,
+						OK:              false,
+						Err:             fmt.Errorf("TLS upgrade preamble read: %w", err),
+						PreamblePayload: preamblePayload[:len(stashed)],
+					}
+				}
+			}
+		} else {
+			// 1b. No stash; read straight from the live dest
+			// socket. This path runs when the parser sent the
+			// directive before the D2C forwarder's Read returned
+			// — i.e. before the server replied with the preamble
+			// byte at all. The Read here blocks until the
+			// preamble arrives; ctx-cancel propagates via the
+			// underlying conn's deadline plumbing.
+			//
+			// beginPause set a past-time SetReadDeadline on dst
+			// to wake any blocked forwarder Read; we now need a
+			// clean deadline so this synchronous Read isn't
+			// instantly aborted by the same kick. clearDeadline
+			// drops the deadline; endPause will reapply it later
+			// (no-op since it sets the zero deadline anyway).
+			preamblePayload = make([]byte, params.PreambleReadFromDest)
+			clearDeadline(r.dst.Load())
+			dst := *r.dst.Load()
+			n, err := readFullPreamble(dst, preamblePayload)
+			if err != nil {
+				if log != nil {
+					log.Debug("relay: TLS upgrade preamble read failed",
+						zap.Error(err),
+						zap.Int("requested", params.PreambleReadFromDest),
+						zap.Int("read", n),
+						zap.String("directive_reason", d.Reason),
+						zap.String("next_step", "the upstream closed the connection or returned fewer bytes than the parser expected for its preamble; verify the destination is the protocol the parser was matched to (Postgres on a non-Postgres port, etc.) and consider KEPLOY_DISABLE_PARSING=1 to bypass parsing"),
+					)
+				}
+				r.endPause()
+				return directive.Ack{
+					Kind:            d.Kind,
+					OK:              false,
+					Err:             fmt.Errorf("TLS upgrade preamble read: %w", err),
+					PreamblePayload: preamblePayload[:n],
+				}
+			}
+		}
+
+		// 1c. Drop the stashed C2D payload if any. The forwarder
+		// captured the client's reply to the server's preamble
+		// (e.g. TLS ClientHello after seeing 'S') without writing
+		// it to the live dest socket. The upgraded src conn will
+		// run its own handshake from a fresh ClientHello; the
+		// stashed bytes have no place to go. We log the size at
+		// debug so a future operator can correlate it with a
+		// supervisor warning if the discard ever turns out to drop
+		// genuine application bytes.
+		if c2dStash := r.takeStashed(fakeconn.FromClient); len(c2dStash) > 0 && log != nil {
+			log.Debug("relay: dropping stashed client-side bytes captured during pause",
+				zap.Int("dropped_bytes", len(c2dStash)),
+				zap.String("directive_reason", d.Reason),
+			)
+		}
+
+		if params.PreambleForwardToSrc {
+			// Clear any past-time deadline on src as well; though
+			// SetReadDeadline does not affect Write blocking on
+			// most net.Conn implementations, some wrappers
+			// propagate deadlines to both directions, so the
+			// belt-and-braces clear keeps the Write below clean.
+			clearDeadline(r.src.Load())
+			src := *r.src.Load()
+			if _, werr := src.Write(preamblePayload); werr != nil {
+				if log != nil {
+					log.Debug("relay: TLS upgrade preamble forward failed",
+						zap.Error(werr),
+						zap.String("directive_reason", d.Reason),
+					)
+				}
+				r.endPause()
+				return directive.Ack{
+					Kind:            d.Kind,
+					OK:              false,
+					Err:             fmt.Errorf("TLS upgrade preamble forward: %w", werr),
+					PreamblePayload: preamblePayload,
+				}
+			}
+		}
+		// Optional gate: if the parser said "only proceed when the
+		// preamble matches X", short-circuit on mismatch. This is
+		// OK=true (the directive carried out its protocol-aware job)
+		// with TLSUpgraded=false (no actual handshake happened) so
+		// the parser can record the alternate-path mock without
+		// marking it incomplete.
+		if len(params.ProceedOnPreamble) > 0 && !bytesEqual(params.ProceedOnPreamble, preamblePayload) {
+			boundaryWrittenAt := time.Now()
+			r.endPause()
+			return directive.Ack{
+				Kind:              d.Kind,
+				OK:                true,
+				PreamblePayload:   preamblePayload,
+				TLSUpgraded:       false,
+				BoundaryReadAt:    boundaryReadAt,
+				BoundaryWrittenAt: boundaryWrittenAt,
+			}
+		}
+	}
+
+	// Step 2 — TLS handshakes. Atomic two-sided upgrade: run both
+	// handshakes FIRST (keeping the new *tls.Conn values in local
+	// vars), only publish the upgraded conn pointers via
+	// r.{dst,src}.Store AFTER both handshakes succeed. A naive
+	// two-step "upgrade dest, publish; upgrade client, publish"
+	// would leave the relay in a mixed state if the second handshake
+	// failed (e.g. dest already TLS-wrapped, client still cleartext)
+	// — the forwarders would then be moving TLS bytes one way and
+	// plaintext the other, corrupting any traffic in flight before
+	// the outer layer torn the sockets down. The local-then-store
+	// pattern keeps the corruption window at zero.
 	var (
 		upgradedDst net.Conn
 		upgradedSrc net.Conn
@@ -131,6 +346,23 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 
 	if params.DestTLSConfig != nil {
 		dst := *r.dst.Load()
+		// If the D2C forwarder stashed any cleartext bytes beyond the
+		// preamble window (e.g. a protocol that frames more than the
+		// parser's PreambleReadFromDest tells us about), prepend them
+		// to the dst handshake conn so tls.Client.Handshake reads
+		// them as the first bytes of the ServerHello sequence. The
+		// canonical Postgres SSL flow (1-byte 'S'/'N' preamble, then
+		// pure TLS) leaves nothing past the preamble, so this branch
+		// is defensive — but it keeps the contract that no stashed
+		// bytes are ever silently dropped at the upgrade boundary.
+		if stashed := r.takeStashed(fakeconn.FromDest); len(stashed) > 0 {
+			if log != nil {
+				log.Debug("relay: prepending stashed dst bytes to TLS handshake",
+					zap.Int("bytes", len(stashed)),
+				)
+			}
+			dst = newPrependingConn(dst, stashed)
+		}
 		var err error
 		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, dst, true, params.DestTLSConfig)
 		if err != nil {
@@ -150,15 +382,45 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 			}
 			r.endPause()
 			return directive.Ack{
-				Kind: d.Kind,
-				OK:   false,
-				Err:  fmt.Errorf("dest TLS upgrade: %w", err),
+				Kind:            d.Kind,
+				OK:              false,
+				Err:             fmt.Errorf("dest TLS upgrade: %w", err),
+				PreamblePayload: preamblePayload,
 			}
 		}
 	}
 
 	if params.ClientTLSConfig != nil {
 		src := *r.src.Load()
+		// If the C2D forwarder stashed any bytes (canonically the
+		// SUT's TLS ClientHello, which can land in the C2D forwarder's
+		// pre-pause Read when the SUT pipelines its SSLRequest tightly
+		// with its ClientHello — observed intermittently with lib/pq
+		// + libpq under sslmode=require, surfaced as the listmonk +
+		// pgtype-tour `candidates: 0` hash misses on TLS-enabled CI
+		// fixtures), prepend them to the src handshake conn. Without
+		// this, tls.Server.Handshake reads from the bare TCP socket,
+		// MISSES the stashed ClientHello bytes (they were already
+		// consumed by the forwarder's Read), and either hangs forever
+		// or returns "tls: server did not echo the legacy session ID"
+		// on the SUT side / "tls: illegal parameter" on the dst side
+		// once whatever bytes DO arrive are interpreted as a partial
+		// handshake state. The connection then falls through to
+		// passthrough, the recorder sees zero queries on it, and
+		// every test that happened to land on that connection misses
+		// at replay time.
+		//
+		// The takeStashed call also clears r.stashedC2D so endPause
+		// does not silently drop those same bytes after the handshake
+		// returns.
+		if stashed := r.takeStashed(fakeconn.FromClient); len(stashed) > 0 {
+			if log != nil {
+				log.Debug("relay: prepending stashed src bytes to TLS handshake",
+					zap.Int("bytes", len(stashed)),
+				)
+			}
+			src = newPrependingConn(src, stashed)
+		}
 		var err error
 		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, src, false, params.ClientTLSConfig)
 		if err != nil {
@@ -181,9 +443,10 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 			}
 			r.endPause()
 			return directive.Ack{
-				Kind: d.Kind,
-				OK:   false,
-				Err:  fmt.Errorf("client TLS upgrade: %w", err),
+				Kind:            d.Kind,
+				OK:              false,
+				Err:             fmt.Errorf("client TLS upgrade: %w", err),
+				PreamblePayload: preamblePayload,
 			}
 		}
 	}
@@ -205,9 +468,52 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, d directive.Directive) dir
 	return directive.Ack{
 		Kind:              d.Kind,
 		OK:                true,
+		PreamblePayload:   preamblePayload,
+		TLSUpgraded:       upgradedDst != nil || upgradedSrc != nil,
 		BoundaryReadAt:    boundaryReadAt,
 		BoundaryWrittenAt: boundaryWrittenAt,
 	}
+}
+
+// readFullPreamble reads exactly len(buf) bytes from conn into buf.
+// Returns the number of bytes read and the first error encountered.
+// io.ErrUnexpectedEOF is returned on a partial read with EOF.
+//
+// We keep this as a thin wrapper rather than calling io.ReadFull
+// directly so the loop is visible in stack traces and so future
+// changes (e.g. a deadline / cancellation hook) have a single place
+// to land.
+func readFullPreamble(conn net.Conn, buf []byte) (int, error) {
+	total := 0
+	for total < len(buf) {
+		n, err := conn.Read(buf[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			// A zero-byte non-error Read shouldn't happen on a TCP
+			// socket; treat as protocol error to avoid an infinite
+			// busy loop.
+			return total, fmt.Errorf("zero-byte read after %d/%d bytes", total, len(buf))
+		}
+	}
+	return total, nil
+}
+
+// bytesEqual reports whether a and b are byte-for-byte equal.
+// Used to gate ProceedOnPreamble on an exact match. Inlined here so
+// the relay package does not pull in bytes.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // handlePauseDir pauses tee delivery for d.Dir. Real forwarding is

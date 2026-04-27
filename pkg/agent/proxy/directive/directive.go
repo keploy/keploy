@@ -75,9 +75,68 @@ func (k Kind) String() string {
 // A nil config for either side means "do not upgrade that side" —
 // useful if the parser knows one peer is already on TLS or does
 // not require symmetric upgrade.
+//
+// PreambleReadFromDest, PreambleForwardToSrc, and ProceedOnPreamble
+// support synchronous protocol-preamble exchanges that race against
+// the relay's pause barrier. The Postgres SSL choreography is the
+// canonical case: client→SSLRequest, server→one of {'S','N'}, client
+// →TLS-ClientHello (immediately after seeing 'S'). The legacy parser-
+// owned path read the SSLResponse byte off the real dest socket and
+// did the TLS handshake atomically; the V2 relay forwarder reads
+// continuously from the real client, so by the time the parser sees
+// 'S' on its FakeConn the client may already have written TLS bytes
+// that the C2D forwarder forwards as plaintext to the server. That
+// in turn corrupts the upstream wire — the server processes part of
+// the client's ClientHello and then keploy's tls.Client.Handshake
+// sends a second ClientHello, which the server rejects ("bad key
+// share" / "tls: illegal parameter"). The race is fundamental to
+// "forwarder reads autonomously" + "parser drives upgrade decisions"
+// without a synchronous handshake op in the directive contract.
+//
+// When PreambleReadFromDest > 0, the relay (under the pause barrier)
+// reads exactly that many bytes from the real dest socket directly
+// (bypassing the C2D/D2C forwarders' tee), forwards them to the real
+// src socket if PreambleForwardToSrc is true, and then decides:
+//
+//   - If ProceedOnPreamble is empty, always proceed with the TLS
+//     handshakes specified by DestTLSConfig / ClientTLSConfig.
+//   - If ProceedOnPreamble is non-empty and the read bytes match it
+//     byte-for-byte, proceed; otherwise return OK=true with no
+//     handshake performed (Ack.PreamblePayload populated, Ack.TLS
+//     Upgraded=false). The caller distinguishes "preamble matched
+//     and TLS is up" from "preamble did not match and TLS was
+//     skipped" via Ack.TLSUpgraded.
+//
+// The Ack also reports Ack.PreamblePayload so the parser can record
+// what the server actually said in its mock. Errors at any stage
+// (Read on dest, Write on src, mismatched length) surface via OK=false
+// just like a handshake failure.
 type UpgradeTLSParams struct {
 	DestTLSConfig   *tls.Config
 	ClientTLSConfig *tls.Config
+
+	// PreambleReadFromDest, when > 0, instructs the relay to read
+	// exactly that many bytes from the real destination socket
+	// before any TLS handshake. Reads use the live socket directly
+	// and bypass the parser's FakeConns; the bytes are returned to
+	// the caller via Ack.PreamblePayload regardless of forwarding.
+	PreambleReadFromDest int
+
+	// PreambleForwardToSrc, when true, asks the relay to write the
+	// preamble bytes back to the real source socket before the TLS
+	// handshakes begin. Used by the Postgres parser to deliver the
+	// SSLResponse byte ('S' / 'N') to the real client without ever
+	// letting the C2D forwarder pick up the client's reply (TLS
+	// ClientHello after 'S') as cleartext.
+	PreambleForwardToSrc bool
+
+	// ProceedOnPreamble, when non-empty, gates the TLS handshakes on
+	// an exact byte-for-byte match against the read preamble. A
+	// mismatch is not an error — the relay returns OK=true with
+	// TLSUpgraded=false so the parser can adapt (e.g. Postgres 'N'
+	// means the server declined SSL and the rest of the session
+	// stays cleartext).
+	ProceedOnPreamble []byte
 }
 
 // Directive is a control message from a parser to the supervisor /
@@ -121,6 +180,21 @@ type Ack struct {
 	Err               error
 	BoundaryReadAt    time.Time
 	BoundaryWrittenAt time.Time
+
+	// PreamblePayload carries the bytes the relay read from the real
+	// destination socket when [UpgradeTLSParams.PreambleReadFromDest]
+	// was > 0. Populated whether or not the TLS handshake actually
+	// ran; an empty slice means no preamble read was requested.
+	PreamblePayload []byte
+
+	// TLSUpgraded reports whether the relay actually performed a TLS
+	// handshake. True when both (or only the requested) sides
+	// completed; false when the preamble gate
+	// [UpgradeTLSParams.ProceedOnPreamble] short-circuited (Postgres
+	// 'N' decline) — the directive still acks OK=true in that case
+	// because the caller's contract was satisfied; the parser uses
+	// PreamblePayload to interpret the outcome.
+	TLSUpgraded bool
 }
 
 // ErrDirectiveClosed is returned from helpers that try to send on a
