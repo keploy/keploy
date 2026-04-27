@@ -1617,7 +1617,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
-		nextProtos := []string{"http/1.1"} // default safe
+		nextProtos := []string{"h2", "http/1.1"}
 
 		isHTTP := util.IsHTTPReq(initialBuf)
 		isCONNECT := bytes.HasPrefix(initialBuf, []byte("CONNECT "))
@@ -1631,8 +1631,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
 		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
 		if !isHTTP || isCONNECT {
-			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
-			nextProtos = []string{"h2", "http/1.1"}
 			logger.Debug("Offering H2 for ALPN", zap.Strings("nextProtos", nextProtos))
 		} else {
 			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
