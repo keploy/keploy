@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -26,6 +27,66 @@ type Runner struct {
 	mappingDB       MappingDB
 	config          *config.Config
 	globalNoise     models.GlobalNoise
+
+	// Per-test-set setup is cached so MockOutgoing / GetMocks / StoreMocks
+	// run once per TestSetID instead of once per step. Mirrors replay.go's
+	// RunTestSet layout — load the full mock pool for the set, then issue
+	// per-test UpdateMockParams as each step runs. Stateful-protocol
+	// matchers (PostgresV2 / MySQL) key off per-connID sortOrder across
+	// tests in a set; replacing the pool between steps invalidates that
+	// progression and produces spurious mock-miss errors on reused
+	// connections (HikariCP, pgBouncer).
+	setupMu    sync.Mutex
+	currentSet *testSetSetup
+}
+
+// testSetSetup holds the cached per-test-set state so repeated RunTest
+// calls for the same TestSetID skip the heavy setup path.
+//
+// mockKindByName is built from the loaded mock pool so mismatch
+// reporting can filter DNS entries — DNS resolution order is
+// non-deterministic and MockEntry.Kind on mappings is frequently empty,
+// so replay.go:1499-1510 uses the same name→Kind fallback.
+//
+// useMappingBased mirrors replay's determineMockingStrategy output
+// (replay.go:3443) so the DisableMapping config flag is honoured
+// instead of being hardcoded to true.
+//
+// totalConsumed accumulates across every step in the set. It is sent
+// on each UpdateMockParams as TotalConsumedMocks so stateful matchers
+// (PostgresV2 / MySQL / Mongo v2) can see which mocks earlier steps
+// already consumed — replay.go maintains the equivalent local map
+// inside RunTestSet.
+type testSetSetup struct {
+	id              string
+	mappings        map[string][]models.MockEntry
+	mockKindByName  map[string]models.Kind
+	useMappingBased bool
+	cleanup         func()
+
+	consumedMu    sync.Mutex
+	totalConsumed map[string]models.MockState
+}
+
+func (s *testSetSetup) mergeConsumed(mocks []models.MockState) {
+	if len(mocks) == 0 {
+		return
+	}
+	s.consumedMu.Lock()
+	defer s.consumedMu.Unlock()
+	for _, m := range mocks {
+		s.totalConsumed[m.Name] = m
+	}
+}
+
+func (s *testSetSetup) snapshotConsumed() map[string]models.MockState {
+	s.consumedMu.Lock()
+	defer s.consumedMu.Unlock()
+	out := make(map[string]models.MockState, len(s.totalConsumed))
+	for k, v := range s.totalConsumed {
+		out[k] = v
+	}
+	return out
 }
 
 // NewRunner creates a Runner with all dependencies.
@@ -49,6 +110,21 @@ func New(
 	}
 }
 
+// Close tears down the current test-set's instrumentation state
+// (NotifyGracefulShutdown + MockOutgoing errgroup). Callers that hold a
+// Runner across multiple test-sets should invoke this when the session
+// ends so the final set's resources are released; transitions between
+// test-sets during normal operation call the same teardown internally.
+func (r *Runner) Close() error {
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
+	if r.currentSet != nil && r.currentSet.cleanup != nil {
+		r.currentSet.cleanup()
+	}
+	r.currentSet = nil
+	return nil
+}
+
 func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 
 	if opts.TestSetID == "" {
@@ -69,11 +145,9 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("failed to load test case: %v", err)}
 	}
 
-	// 2. Load mocks and get the expected mock names for this test case.
-	expectedMocks, cleanup, err := r.loadMocks(ctx, opts.TestSetID, tc.Name, tc.HTTPReq.Timestamp)
-	if cleanup != nil {
-		defer cleanup()
-	}
+	// 2. Set up the test-set (idempotent per TestSetID — runs MockOutgoing,
+	//    GetMocks, StoreMocks once per set, then caches).
+	setup, err := r.ensureTestSetLoaded(ctx, opts.TestSetID, tc.HTTPReq.Timestamp)
 	if err != nil {
 		r.logger.Error("failed to load mocks; verify the recorded mocks exist and the mock store is accessible, then rerun the test",
 			zap.String("testCase", tc.Name),
@@ -83,32 +157,47 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("failed to load mocks for test case %q: %v", tc.Name, err), Noise: tc.Noise}
 	}
 
-	// 3. Wait for app.
+	// 3. Wait for app. Do this before per-test filter params so the
+	//    agent's initial wide-window UpdateMockParams (set in setup)
+	//    remains active for any startup-init traffic the app emits
+	//    before this step's narrower window kicks in. Matches replay's
+	//    ordering where the initial broad UpdateMockParams precedes
+	//    the first per-test one (replay.go:1047 / 1156 → 1433).
 	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
-	// 4. Global noise.
-	noise := r.globalNoise
-
-	// to rule out config mocks from consumed list
-	_, err = r.instrumentation.GetConsumedMocks(ctx)
-	if err != nil {
-		return &TestResult{
-			Passed: false,
-			Error:  fmt.Sprintf("failed to get consumed mocks: %v. Verify the instrumentation is running correctly and retry the test", err),
-			Noise:  tc.Noise,
-		}
+	// 4. Apply this step's per-test filter parameters. TotalConsumedMocks
+	//    carries the cumulative consumption from earlier steps so
+	//    stateful-protocol matchers can advance sortOrder correctly.
+	expectedMocks := expectedMocksForTest(setup, tc.Name)
+	if err := r.sendPerTestParams(ctx, setup, expectedMocks, tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp); err != nil {
+		return &TestResult{Passed: false, Error: fmt.Sprintf("failed to apply per-test filter params: %v", err), Noise: tc.Noise}
 	}
 
-	// 5. Execute: rewrite URL, fire HTTP request, compare response.
+	// 5. Global noise.
+	noise := r.globalNoise
+
+	// 6. Execute: rewrite URL, fire HTTP request, compare response.
 	passed, respCompare, execErr := r.executeAndCompare(ctx, tc, opts.ServiceURL, noise)
 	if execErr != nil {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("test execution failed: %v", execErr), Noise: tc.Noise}
 	}
 
-	// 6. Check mock mismatches (expected from mapping vs actually consumed).
-	mismatch := r.checkMockMismatches(ctx, expectedMocks)
+	// 7. Capture this step's consumed mocks — used both for mismatch
+	//    reporting and merged into the set-level totalConsumed that's
+	//    sent on subsequent UpdateMockParams (replay.go:1470-1486).
+	consumed, consumedErr := r.instrumentation.GetConsumedMocks(ctx)
+	if consumedErr != nil {
+		r.logger.Debug("failed to get consumed mocks", zap.Error(consumedErr))
+	}
+	setup.mergeConsumed(consumed)
+
+	// 8. Check mock mismatches (DNS-filtered — DNS resolution order is
+	//    non-deterministic, so it would produce spurious diffs). The
+	//    mismatch report carries kind for every entry so downstream
+	//    consumers never fall back to name-substring heuristics.
+	mismatch := r.checkMockMismatches(setup, expectedEntriesForTest(setup, tc.Name), consumed)
 
 	diffJSON, err := json.Marshal(respCompare)
 	if err != nil {
@@ -167,51 +256,113 @@ func (r *Runner) loadTestCase(ctx context.Context, testSetID, testCaseName strin
 	return r.testCaseDB.GetTestCase(ctx, testSetID, testCaseName)
 }
 
-func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, backdate time.Time) ([]string, func(), error) {
-
+// ensureTestSetLoaded is idempotent per TestSetID. It primes the agent
+// with the full mock pool for the set — MockOutgoing, GetFiltered/
+// UnFilteredMocks, StoreMocks, MakeAgentReadyForDockerCompose — once,
+// then caches the setup. Subsequent calls for the same TestSetID are
+// a noop. A new TestSetID tears down the previous set before re-running
+// the setup.
+//
+// The "once per set, not per step" design mirrors replay.go:RunTestSet
+// (pkg/service/replay/replay.go:960-1055). Stateful-protocol matchers
+// track per-connID sortOrder across tests in a set; replacing the pool
+// between steps invalidates that progression and starves reused
+// connections (HikariCP, pgBouncer) of their matching per-test mocks.
+func (r *Runner) ensureTestSetLoaded(ctx context.Context, testSetID string, backdate time.Time) (*testSetSetup, error) {
 	if r.instrumentation == nil && r.mockDB == nil {
-		return nil, nil, fmt.Errorf("mock loading requires instrumentation and mockDB; initialize both dependencies before running integration tests with mocks")
+		return nil, fmt.Errorf("mock loading requires instrumentation and mockDB; initialize both dependencies before running integration tests with mocks")
 	}
 	if r.instrumentation == nil {
-		return nil, nil, fmt.Errorf("mock loading requires instrumentation; initialize the instrumentation dependency before running integration tests with mocks")
+		return nil, fmt.Errorf("mock loading requires instrumentation; initialize the instrumentation dependency before running integration tests with mocks")
 	}
 	if r.mockDB == nil {
-		return nil, nil, fmt.Errorf("mock loading requires mockDB; initialize the mock database dependency before running integration tests with mocks")
+		return nil, fmt.Errorf("mock loading requires mockDB; initialize the mock database dependency before running integration tests with mocks")
 	}
 
-	g, ctx := errgroup.WithContext(ctx)
-	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
 
-	// cleanup tears down the instrumentation context. The caller must defer
-	// this so mocks remain active throughout test execution.
+	if r.currentSet != nil && r.currentSet.id == testSetID {
+		return r.currentSet, nil
+	}
+
+	if r.currentSet != nil && r.currentSet.cleanup != nil {
+		r.currentSet.cleanup()
+	}
+	r.currentSet = nil
+
+	setup, err := r.setupTestSet(ctx, testSetID, backdate)
+	if err != nil {
+		return nil, err
+	}
+	r.currentSet = setup
+	return setup, nil
+}
+
+// setupTestSet runs the one-shot per-set work: errgroup-wrapped
+// MockOutgoing + disk-level GetMocks + StoreMocks. Returns the setup
+// record with a cleanup closure the caller stores on r.currentSet.
+func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backdate time.Time) (*testSetSetup, error) {
+	g, gCtx := errgroup.WithContext(parentCtx)
+	gCtx, cancel := context.WithCancel(context.WithValue(gCtx, models.ErrGroupKey, g))
+
+	cleanupOnce := sync.Once{}
 	cleanup := func() {
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
-		}
-		cancel()
-		if err := g.Wait(); err != nil {
-			r.logger.Error("mock teardown failed; check agent shutdown and cleanup logs to identify the failing teardown step",
-				zap.Error(err),
-				zap.String("testSetID", testSetID),
-				zap.String("testCaseName", testCaseName),
-			)
-		}
+		cleanupOnce.Do(func() {
+			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+			cancel()
+			if err := g.Wait(); err != nil {
+				r.logger.Error("mock teardown failed; check agent shutdown and cleanup logs to identify the failing teardown step",
+					zap.Error(err),
+					zap.String("testSetID", testSetID),
+				)
+			}
+		})
 	}
+	// Until the setup succeeds, abort via cleanup on error.
+	success := false
+	defer func() {
+		if !success {
+			cleanup()
+		}
+	}()
 
-	// Setup eBPF hooks / proxy.
 	if r.config != nil {
-		if err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
+		if err := r.instrumentation.Setup(gCtx, r.config.Command, models.SetupOptions{
 			Container:   r.config.ContainerName,
 			CommandType: r.config.CommandType,
 			DockerDelay: r.config.BuildDelay,
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
 		}); err != nil {
-			return nil, cleanup, fmt.Errorf("setup failed: %w", err)
+			return nil, fmt.Errorf("setup failed: %w", err)
 		}
 	}
 
-	// Enable mock-outgoing mode with full config options.
+	// Gate every subsequent instrumentation call on the Keploy agent
+	// actually being reachable. In sandbox / docker-compose runs the
+	// keploy container was created moments ago and its host port forward
+	// is still settling — firing MockOutgoing immediately produces a
+	// "connect: connection refused" on the agent URL. Mirrors replay's
+	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
+	if r.config != nil && r.config.Agent.AgentURI != "" {
+		agentCtx, cancel := context.WithTimeout(gCtx, 120*time.Second)
+		agentReadyCh := make(chan bool, 1)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		select {
+		case <-gCtx.Done():
+			cancel()
+			return nil, gCtx.Err()
+		case <-agentCtx.Done():
+			cancel()
+			return nil, fmt.Errorf("keploy-agent at %s did not become ready within 120s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI)
+		case <-agentReadyCh:
+		}
+		cancel()
+	}
+
 	outOpts := models.OutgoingOptions{
 		Mocking:  true,
 		Backdate: backdate,
@@ -219,120 +370,245 @@ func (r *Runner) loadMocks(ctx context.Context, testSetID, testCaseName string, 
 	if r.config != nil {
 		outOpts.Rules = r.config.BypassRules
 		outOpts.MongoPassword = r.config.Test.MongoPassword
-		outOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 	}
-	// Extract header noise for mock matching (mirrors replay behavior).
 	if headerNoise, ok := r.globalNoise["header"]; ok {
 		outOpts.NoiseConfig = map[string]map[string][]string{"header": headerNoise}
 	}
-	if err := r.instrumentation.MockOutgoing(ctx, outOpts); err != nil {
-		return nil, cleanup, fmt.Errorf("mock-outgoing failed: %w", err)
+	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
+		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
 
-	// Resolve which mocks are needed.
-	mocksThatHaveMappings, mocksWeNeed, expected, err := r.resolveMockSets(ctx, testSetID, testCaseName)
+	mappings, mocksThatHaveMappings, mocksWeNeed, err := r.loadMappingsForSet(gCtx, testSetID)
 	if err != nil {
-		return nil, cleanup, fmt.Errorf("failed to resolve mock sets: %w", err)
+		return nil, err
 	}
 
-	// Fetch mocks.
-	afterTime := models.BaseTime
-	beforeTime := time.Now()
-	filtered, err := r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	// Disk fetch uses the widest window; per-test containment is
+	// enforced by the agent via UpdateMockParams at step time.
+	filtered, err := r.mockDB.GetFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return expected, cleanup, fmt.Errorf("failed to get filtered mocks: %w", err)
+		return nil, fmt.Errorf("failed to get filtered mocks: %w", err)
 	}
-	unfiltered, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
+	unfiltered, err := r.mockDB.GetUnFilteredMocks(gCtx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return expected, cleanup, fmt.Errorf("failed to get unfiltered mocks: %w", err)
+		return nil, fmt.Errorf("failed to get unfiltered mocks: %w", err)
 	}
 
-	// Push to proxy.
-	if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		return expected, cleanup, fmt.Errorf("failed to store mocks: %w", err)
+	// mockKindByName lets the mismatch-reporting path filter DNS
+	// entries even when the mapping-entry Kind is empty
+	// (replay.go:1499-1510 uses the same name→Kind fallback).
+	mockKindByName := make(map[string]models.Kind, len(filtered)+len(unfiltered))
+	for _, m := range filtered {
+		mockKindByName[m.Name] = m.Kind
+	}
+	for _, m := range unfiltered {
+		mockKindByName[m.Name] = m.Kind
 	}
 
-	// Send filter params.
-	params := models.MockFilterParams{
-		AfterTime:       afterTime,
-		BeforeTime:      beforeTime,
-		UseMappingBased: true,
-		MockMapping:     expected,
-	}
-	// When config is nil (unit tests, embedders), follow the shipped
-	// config.Test.StrictMockWindow default (false in Phase 1, opt-in
-	// via keploy.yaml or KEPLOY_STRICT_MOCK_WINDOW=1). The env override
-	// still applies at the agent, so users can force strict without
-	// editing code.
-	if r.config != nil {
-		params.StrictMockWindow = r.config.Test.StrictMockWindow
-	} else {
-		params.StrictMockWindow = false
-	}
-	if err := r.instrumentation.UpdateMockParams(ctx, params); err != nil {
-		return expected, cleanup, fmt.Errorf("failed to update mock params: %w", err)
+	// Seed the process-wide sort counter past the highest recorded
+	// mock sortOrder so any live-generated mocks during replay don't
+	// collide with the recorded mock ordering — replay.go:1128 does
+	// the same on the non-compose path.
+	keployPkg.InitSortCounter(int64(max(len(filtered), len(unfiltered))))
+
+	if err := r.instrumentation.StoreMocks(gCtx, filtered, unfiltered); err != nil {
+		return nil, fmt.Errorf("failed to store mocks: %w", err)
 	}
 
-	if err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx); err != nil {
+	if err := r.instrumentation.MakeAgentReadyForDockerCompose(gCtx); err != nil {
 		r.logger.Debug("failed to mark agent ready", zap.Error(err))
 	}
 
+	// useMappingBased mirrors replay's determineMockingStrategy
+	// (replay.go:3443). Mapping-based filtering is enabled when
+	// mappings exist AND DisableMapping is not set.
+	useMappingBased := len(mappings) > 0
+	if r.config != nil && r.config.DisableMapping {
+		useMappingBased = false
+	}
+
+	// Send an initial wide-window UpdateMockParams with empty
+	// MockMapping so the agent has a valid filter active for any
+	// startup-init traffic (HikariCP pool warm-up, driver handshakes)
+	// that lands before the first per-test RunTest narrows the
+	// window. Matches replay.go:1047 / 1156.
+	initialParams := models.MockFilterParams{
+		AfterTime:          models.BaseTime,
+		BeforeTime:         time.Now(),
+		MockMapping:        []string{},
+		UseMappingBased:    useMappingBased,
+		TotalConsumedMocks: map[string]models.MockState{},
+		StrictMockWindow:   r.strictMockWindow(),
+	}
+	if err := r.instrumentation.UpdateMockParams(gCtx, initialParams); err != nil {
+		return nil, fmt.Errorf("failed to set initial mock filter params: %w", err)
+	}
+
 	r.logger.Info("mocks loaded", zap.String("testSetID", testSetID),
-		zap.Int("filtered", len(filtered)), zap.Int("unfiltered", len(unfiltered)))
-	return expected, cleanup, nil
+		zap.Int("filtered", len(filtered)), zap.Int("unfiltered", len(unfiltered)),
+		zap.Bool("useMappingBased", useMappingBased))
+
+	success = true
+	return &testSetSetup{
+		id:              testSetID,
+		mappings:        mappings,
+		mockKindByName:  mockKindByName,
+		useMappingBased: useMappingBased,
+		totalConsumed:   map[string]models.MockState{},
+		cleanup:         cleanup,
+	}, nil
 }
 
-func (r *Runner) resolveMockSets(ctx context.Context, testSetID, testCaseName string) (mocksThatHaveMappings, mocksWeNeed map[string]bool, expected []string, err error) {
-	mocksThatHaveMappings = make(map[string]bool)
-	mocksWeNeed = make(map[string]bool)
-
-	if r.mappingDB == nil {
-		err = fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
-		return
+// strictMockWindow resolves the strict-window flag. cfg==nil
+// (embedders) follows the shipped default of true; the agent-side env
+// override KEPLOY_STRICT_MOCK_WINDOW=0 still wins.
+func (r *Runner) strictMockWindow() bool {
+	if r.config == nil {
+		return true
 	}
-	testMockMappings, hasMeaningful, getErr := r.mappingDB.Get(ctx, testSetID)
-	if getErr != nil {
-		err = fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, getErr)
-		return
+	return r.config.Test.StrictMockWindow
+}
+
+// loadMappingsForSet returns the full per-test-case mapping and the
+// set-level UNION of expected mocks across every test in the set.
+// The UNION is what we pass to GetFilteredMocks / GetUnFilteredMocks
+// so the StoreMocks call covers every step — per-step filtering then
+// happens via UpdateMockParams.
+func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[string][]models.MockEntry, map[string]bool, map[string]bool, error) {
+	if r.mappingDB == nil {
+		return nil, nil, nil, fmt.Errorf("mappingDB not configured; initialize the mapping database dependency to resolve which mocks are needed for test execution")
+	}
+	testMockMappings, hasMeaningful, err := r.mappingDB.Get(ctx, testSetID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
 	}
 	if !hasMeaningful {
-		err = fmt.Errorf("no mock mappings found for test set %q", testSetID)
-		return
+		return nil, nil, nil, fmt.Errorf("no mock mappings found for test set %q", testSetID)
 	}
+	mocksThatHaveMappings := make(map[string]bool)
+	mocksWeNeed := make(map[string]bool)
 	for _, mocks := range testMockMappings {
 		for _, m := range mocks {
 			mocksThatHaveMappings[m.Name] = true
+			mocksWeNeed[m.Name] = true
 		}
 	}
-
-	mocks, ok := testMockMappings[testCaseName]
-	if !ok {
-		return
-	}
-	for _, m := range mocks {
-		mocksWeNeed[m.Name] = true
-		expected = append(expected, m.Name)
-	}
-	return
+	return testMockMappings, mocksThatHaveMappings, mocksWeNeed, nil
 }
 
-func (r *Runner) checkMockMismatches(ctx context.Context, expected []string) *MockMismatch {
+// expectedMocksForTest returns this step's expected mock-name list from
+// the cached mapping. Used by sendPerTestParams for the agent's
+// MockMapping filter — the agent only needs names. No error case — a
+// missing test case name means the step has no mapped mocks, which is
+// legal.
+func expectedMocksForTest(setup *testSetSetup, testCaseName string) []string {
+	if setup == nil {
+		return nil
+	}
+	entries, ok := setup.mappings[testCaseName]
+	if !ok {
+		return nil
+	}
+	expected := make([]string, 0, len(entries))
+	for _, m := range entries {
+		expected = append(expected, m.Name)
+	}
+	return expected
+}
+
+// expectedEntriesForTest returns this step's expected mocks as
+// {name, kind} pairs for the mismatch report. Kind is sourced from the
+// mapping entry when present; otherwise falls back to the name→Kind
+// registry built from the loaded pool (mapping entries frequently have
+// empty Kind, same issue replay.go:1499-1510 guards against).
+func expectedEntriesForTest(setup *testSetSetup, testCaseName string) []MockRef {
+	if setup == nil {
+		return nil
+	}
+	entries, ok := setup.mappings[testCaseName]
+	if !ok {
+		return nil
+	}
+	out := make([]MockRef, 0, len(entries))
+	for _, m := range entries {
+		kind := m.Kind
+		if kind == "" {
+			if k, ok := setup.mockKindByName[m.Name]; ok {
+				kind = string(k)
+			}
+		}
+		out = append(out, MockRef{Name: m.Name, Kind: kind})
+	}
+	return out
+}
+
+// sendPerTestParams issues the per-step UpdateMockParams. The window
+// [tcReqTime, tcRespTime] is what the agent's strict-window filter
+// uses to bucket per-test mocks for this specific step.
+// TotalConsumedMocks is a snapshot of everything consumed so far in
+// the set so stateful matchers can advance sortOrder correctly across
+// steps — replay.go:2440-2447 does the same.
+func (r *Runner) sendPerTestParams(ctx context.Context, setup *testSetSetup, expected []string, tcReqTime, tcRespTime time.Time) error {
+	params := models.MockFilterParams{
+		AfterTime:          tcReqTime,
+		BeforeTime:         tcRespTime,
+		UseMappingBased:    setup.useMappingBased,
+		MockMapping:        expected,
+		TotalConsumedMocks: setup.snapshotConsumed(),
+		StrictMockWindow:   r.strictMockWindow(),
+	}
+	return r.instrumentation.UpdateMockParams(ctx, params)
+}
+
+// checkMockMismatches filters DNS entries from both the expected and
+// consumed sets before reporting — DNS resolution order is
+// non-deterministic (replay.go:1499-1517 does the same). MockEntry.Kind
+// in mappings is frequently empty, so we fall back to the kind registry
+// built from the loaded mock pool.
+//
+// Both lists carry {Name, Kind} so downstream consumers (UI, stored
+// reports) don't need to re-derive kind from the name. Kind on consumed
+// entries comes from MockState.Kind (what the agent's matcher actually
+// classified the mock as); on expected entries it comes from the
+// mapping with a fallback to the loaded-pool kind registry for
+// mappings that shipped without Kind fields.
+func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, consumed []models.MockState) *MockMismatch {
 	if r.instrumentation == nil {
 		return nil
 	}
-	states, err := r.instrumentation.GetConsumedMocks(ctx)
-	if err != nil {
-		r.logger.Debug("failed to get consumed mocks", zap.Error(err))
-		return nil
+	isDNS := func(name string, kind models.Kind) bool {
+		if kind == models.DNS {
+			return true
+		}
+		if setup != nil {
+			if k, ok := setup.mockKindByName[name]; ok && k == models.DNS {
+				return true
+			}
+		}
+		return false
 	}
-	var consumed []string
-	for _, s := range states {
-		consumed = append(consumed, s.Name)
+
+	filteredExpected := make([]MockRef, 0, len(expected))
+	for _, e := range expected {
+		if !isDNS(e.Name, models.Kind(e.Kind)) {
+			filteredExpected = append(filteredExpected, e)
+		}
+	}
+	filteredConsumed := make([]MockRef, 0, len(consumed))
+	for _, s := range consumed {
+		if isDNS(s.Name, s.Kind) {
+			continue
+		}
+		filteredConsumed = append(filteredConsumed, MockRef{
+			Name: s.Name,
+			Kind: string(s.Kind),
+		})
 	}
 	return &MockMismatch{
-		ExpectedMocks: expected,
-		ConsumedMocks: consumed,
+		ExpectedMocks: filteredExpected,
+		ConsumedMocks: filteredConsumed,
 	}
 }
 

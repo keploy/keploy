@@ -89,6 +89,33 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
+// shouldCacheDNSResponse reports whether a DNS resolution result is
+// eligible for the per-proxy dnsCache.
+//
+// Only real upstream responses are cached (FromUpstream == true), in
+// both record and test modes. Replayed-mock responses and
+// synthetic/fallback responses are intentionally NOT cached: mock
+// responses already come from an in-memory store and adding another
+// layer only complicates invalidation, and caching a fallback would
+// pin it for 30 s after transient upstream failures.
+//
+// Record-mode caching is safe against duplicate DNS-mock emission
+// because a cache hit short-circuits before resolveUncachedDNSResponse
+// is called — which is the only site that invokes recordDNSMock. As a
+// second line of defense recordDNSMock has its own (name, qtype)
+// dedupe tracker (p.recordedDNSMocks), so even if the cache were
+// bypassed the mock stream would still see each query at most once.
+// A 30 s TTL is short enough to pick up DNS record changes during a
+// long recording session yet long enough to amortise repeated
+// resolutions from client libraries that open one TCP connection per
+// request.
+func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
+	if !resp.FromUpstream {
+		return false
+	}
+	return mode == models.MODE_TEST || mode == models.MODE_RECORD
+}
+
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
@@ -117,51 +144,6 @@ func dnsQuestionFields(question dns.Question) []zap.Field {
 		zap.String("query", question.Name),
 		zap.String("qtype", dnsTypeString(question.Qtype)),
 		zap.Uint16("qclass", question.Qclass),
-	}
-}
-
-func dnsMessageFields(prefix string, msg *dns.Msg) []zap.Field {
-	if msg == nil {
-		return []zap.Field{zap.Bool(prefix+"_nil", true)}
-	}
-
-	fields := []zap.Field{
-		zap.Int(prefix+"_rcode", msg.Rcode),
-		zap.String(prefix+"_rcode_name", dnsRcodeString(msg.Rcode)),
-		zap.Bool(prefix+"_authoritative", msg.Authoritative),
-		zap.Bool(prefix+"_recursion_available", msg.RecursionAvailable),
-		zap.Bool(prefix+"_truncated", msg.Truncated),
-		zap.Int(prefix+"_answer_count", len(msg.Answer)),
-		zap.Int(prefix+"_ns_count", len(msg.Ns)),
-		zap.Int(prefix+"_extra_count", len(msg.Extra)),
-	}
-
-	if len(msg.Answer) > 0 {
-		fields = append(fields, zap.Strings(prefix+"_answers", encodeDNSRRs(msg.Answer)))
-	}
-	if len(msg.Ns) > 0 {
-		fields = append(fields, zap.Strings(prefix+"_ns", encodeDNSRRs(msg.Ns)))
-	}
-	if len(msg.Extra) > 0 {
-		fields = append(fields, zap.Strings(prefix+"_extra", encodeDNSRRs(msg.Extra)))
-	}
-
-	return fields
-}
-
-func resolverConfigFields(config *dns.ClientConfig, question dns.Question) []zap.Field {
-	if config == nil {
-		return nil
-	}
-
-	return []zap.Field{
-		zap.Strings("resolver_servers", config.Servers),
-		zap.String("resolver_port", config.Port),
-		zap.Strings("resolver_search", config.Search),
-		zap.Int("resolver_ndots", config.Ndots),
-		zap.Int("resolver_timeout_seconds", config.Timeout),
-		zap.Int("resolver_attempts", config.Attempts),
-		zap.Strings("resolver_name_list", config.NameList(question.Name)),
 	}
 }
 
@@ -199,13 +181,6 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		mockingEnabled = session.Mocking
 	}
 
-	p.logger.Debug("received dns request",
-		zap.String("source", w.RemoteAddr().String()),
-		zap.String("mode", string(mode)),
-		zap.Bool("mocking_enabled", mockingEnabled),
-		zap.Int("question_count", len(r.Question)),
-	)
-
 	flagsSet := false
 
 	for _, question := range r.Question {
@@ -213,23 +188,23 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		reqTimestamp := time.Now().UTC()
 
 		resp, found := p.dnsCache.Get(key)
-		logFields := append([]zap.Field{
-			zap.String("mode", string(mode)),
-			zap.Bool("cache_hit", found),
-			zap.String("cache_key", key),
-		}, dnsQuestionFields(question)...)
 		if !found {
-			p.logger.Debug("dns cache miss", logFields...)
+			// Only log cache misses. App DNS traffic during recording can
+			// burst into the thousands per second once cached, and a per-query
+			// hit log would fill the agent's log file with no diagnostic value.
+			// On a miss we still want to see the resolver path that was taken.
+			p.logger.Debug("dns cache miss",
+				append([]zap.Field{
+					zap.String("mode", string(mode)),
+					zap.String("cache_key", key),
+				}, dnsQuestionFields(question)...)...,
+			)
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// Only cache real mock responses in test mode.
-			// Never cache synthetic/fallback responses, and never cache in record mode.
-			if mode == models.MODE_TEST && resp.FromUpstream {
+			if shouldCacheDNSResponse(mode, resp) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
-		} else {
-			p.logger.Debug("dns cache hit", logFields...)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)
@@ -246,15 +221,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Answer = append(msg.Answer, resp.Answer...)
 		msg.Ns = append(msg.Ns, resp.Ns...)
 		msg.Extra = append(msg.Extra, resp.Extra...)
-
-		responseFields := append([]zap.Field{
-			zap.Bool("from_upstream", resp.FromUpstream),
-		}, dnsQuestionFields(question)...)
-		responseFields = append(responseFields, dnsMessageFields("resolved", resp.Msg)...)
-		p.logger.Debug("resolved dns question", responseFields...)
 	}
-
-	p.logger.Debug("sending dns response to client", dnsMessageFields("outgoing", msg)...)
 
 	err := w.WriteMsg(msg)
 	if err != nil {
@@ -270,7 +237,44 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
 				return resp
 			}
-			// Send mock not found error if we couldn't match any DNS mock.
+		}
+		// Mock miss (or mocking disabled). Before falling back to a
+		// synthetic/NXDOMAIN response, try forwarding to the cluster's
+		// real resolver (typically CoreDNS). This is the fix for the
+		// sap-demo / mysql.svc.cluster.local case: cluster-internal
+		// hostnames are not — and should not be — recorded as mocks, so
+		// a miss in replay mode is the expected shape for in-cluster
+		// DB / cache / queue connections. Faking them with the proxy's
+		// 127.0.0.1 (the legacy default) steers the app at the wrong
+		// IP and crashes the DB driver.
+		//
+		// When mocking is explicitly disabled the operator's intent is
+		// "use real traffic", so forwarding is even more clearly the
+		// right behaviour than returning a synthetic proxy IP.
+		//
+		// If the forward succeeds we return the real answer as
+		// FromUpstream so the outer cache layer retains it for the
+		// usual 30 s — subsequent queries don't hit the network.
+		// If the forward fails we fall through to the existing
+		// "mock not found" path: same error, same log line, same
+		// NXDOMAIN / synthetic fallback. Forwarding is strictly
+		// additive.
+		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+			p.logger.Debug("DNS mock miss resolved via upstream forward",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Int("rcode", fwdResp.Rcode),
+				zap.Int("answers", len(fwdResp.Answer)))
+			return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+		} else if fwdErr != nil {
+			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Error(fwdErr))
+		}
+		if mockingEnabled {
+			// Send mock not found error if we couldn't match any DNS
+			// mock and upstream forwarding also failed.
 			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
 				zap.String("query", question.Name),
@@ -291,7 +295,6 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		return p.defaultDNSResponse(question)
 
 	case models.MODE_RECORD:
-		p.logger.Debug("resolving dns question in record mode", dnsQuestionFields(question)...)
 		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
 			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
@@ -336,9 +339,35 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	case dns.TypeAAAA:
-		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
-		// clients prefer an unreachable ::1 destination in IPv4-only environments.
-		p.logger.Debug("no synthesized AAAA fallback; returning empty AAAA response", dnsQuestionFields(question)...)
+		// When EnableIPv6Redirect is set, the BPF cgroup program rewrites
+		// v6 destinations (including ::1) to the v4-mapped proxy address,
+		// so it is safe — and in fact required on modern Linux distros
+		// where glibc prefers ::1 over 127.0.0.1 — to answer AAAA with
+		// the proxy's v6 address. Mirror the TypeA path symmetrically.
+		//
+		// With the flag disabled we preserve the legacy behaviour of
+		// returning an empty AAAA answer: synthesising ::1 in a v4-only
+		// environment (no v6 redirect) would point clients at an
+		// unreachable destination.
+		if p.EnableIPv6Redirect {
+			proxyIP6 := net.ParseIP(p.IP6)
+			if proxyIP6 == nil {
+				// Fallback to v4-mapped ::ffff:<IP4> if p.IP6 is not a
+				// valid address (defensive — p.IP6 is hard-coded to ::1
+				// in New() today but could be overridden in docker mode).
+				if v4 := net.ParseIP(p.IP4); v4 != nil {
+					proxyIP6 = v4.To16()
+				}
+			}
+			if proxyIP6 != nil {
+				resp.Answer = []dns.RR{&dns.AAAA{
+					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: proxyIP6,
+				}}
+				return resp
+			}
+			// fall through to empty AAAA response if we could not build an answer
+		}
 		return resp
 
 	case dns.TypeSRV:
@@ -379,7 +408,7 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		return resp
 
 	default:
-		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
+		p.logger.Debug("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 		return resp
 	}
 }
@@ -504,30 +533,31 @@ func generateDNSDedupeKey(question dns.Question) string {
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
-	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	// Prefer the upstream resolver list captured once at proxy
+	// startup (see captureDNSUpstream). This is critical in sidecar
+	// deployments where the app-container resolv.conf has been
+	// rewritten so the `nameserver` entry is 127.0.0.1 and DNS
+	// traffic is redirected to the agent's port 26789 via iptables/
+	// eBPF (resolv.conf entries themselves are IP-only and carry no
+	// port). Re-reading the file here would either (a) discover the
+	// loopback entry and forward queries back at ourselves, or
+	// (b) discover nothing at all. Capturing once at startup pins
+	// the REAL cluster resolvers.
+	//
+	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
+	// rare local-dev case where the proxy runs outside a cluster AND
+	// resolv.conf is entirely missing — the forwarder treats this as
+	// "no upstream" and we would otherwise be stuck.
 	var servers []string
 	port := "53"
-
-	if err == nil {
-		servers = config.Servers
-		port = config.Port
-		fields := append(dnsQuestionFields(question), resolverConfigFields(config, question)...)
-		if resolvConfBytes, readErr := os.ReadFile("/etc/resolv.conf"); readErr == nil {
-			fields = append(fields, zap.String("resolv_conf", strings.TrimSpace(string(resolvConfBytes))))
-		} else {
-			fields = append(fields, zap.NamedError("resolv_conf_read_error", readErr))
-		}
-		p.logger.Debug("loaded resolver configuration for record-mode DNS", fields...)
+	if p.hasDNSUpstream() {
+		servers = p.dnsUpstreamServers
+		port = p.dnsUpstreamPort
 	} else {
-		// Fallback to public DNS if resolv.conf fails
+		// captureDNSUpstream already logs once at startup if it cannot
+		// snapshot a real resolver, so we don't re-log per-query here
+		// (that path runs on every cache miss and would burst the log).
 		servers = []string{"8.8.8.8", "1.1.1.1"}
-		p.logger.Debug("failed to parse /etc/resolv.conf for record-mode DNS; using fallback resolvers",
-			append(dnsQuestionFields(question),
-				zap.Error(err),
-				zap.Strings("resolver_servers", servers),
-				zap.String("resolver_port", port),
-			)...,
-		)
 	}
 
 	c := new(dns.Client)
@@ -545,13 +575,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	for _, server := range servers {
 		addr := net.JoinHostPort(server, port)
 
+		// Per-server-attempt logs fire on every cache miss (worst case, multiple
+		// servers per miss) so we keep only the diagnostic ones — silent success
+		// path, log the rare failure / truncation / TCP-retry transitions.
 		c.Net = "udp"
-		p.logger.Debug("sending DNS query upstream",
-			append(dnsQuestionFields(question),
-				zap.String("upstream_addr", addr),
-				zap.String("transport", c.Net),
-			)...,
-		)
 		resp, _, err := c.Exchange(m, addr)
 		if err != nil {
 			resolveErr = err
@@ -564,13 +591,6 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			)
 			continue
 		}
-
-		p.logger.Debug("received upstream DNS response",
-			append(append(dnsQuestionFields(question),
-				zap.String("upstream_addr", addr),
-				zap.String("transport", c.Net),
-			), dnsMessageFields("upstream", resp)...)...,
-		)
 
 		if resp != nil && resp.Truncated {
 			p.logger.Debug("upstream DNS response truncated; retrying over TCP",
@@ -589,13 +609,6 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 				)
 				continue
 			}
-
-			p.logger.Debug("received upstream DNS response after TCP retry",
-				append(append(dnsQuestionFields(question),
-					zap.String("upstream_addr", addr),
-					zap.String("transport", c.Net),
-				), dnsMessageFields("upstream", resp)...)...,
-			)
 		}
 
 		if resp != nil {
@@ -625,8 +638,15 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
 	// These are often noise from search domain expansion or external transient issues.
 	if in.Rcode != dns.RcodeSuccess {
-		fields := append(dnsQuestionFields(question), dnsMessageFields("upstream", in)...)
-		p.logger.Debug("skipping DNS mock recording due to non-zero rcode", fields...)
+		// search-domain expansion makes NXDOMAIN very repetitive, so we
+		// keep this log compact (no answer/ns/extra body) to avoid
+		// filling the log on misses.
+		p.logger.Debug("skipping DNS mock recording due to non-zero rcode",
+			append(dnsQuestionFields(question),
+				zap.Int("rcode", in.Rcode),
+				zap.String("rcode_name", dnsRcodeString(in.Rcode)),
+			)...,
+		)
 		return resp, nil
 	}
 
@@ -674,8 +694,17 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		},
 	}
 
+	// One log per UNIQUE (name, qtype) — bounded by recordedDNSMocksMaxSize
+	// (1024) so this is naturally rate-limited. Keep counts only; full
+	// answer/ns/extra string dumps would balloon log size for chatty clients.
 	p.logger.Debug("Recording new DNS mock",
-		append(append(dnsQuestionFields(question), zap.String("dedupe_key", dedupeKey)), dnsMessageFields("upstream", in)...)...,
+		append(dnsQuestionFields(question),
+			zap.String("dedupe_key", dedupeKey),
+			zap.Int("rcode", in.Rcode),
+			zap.Int("answer_count", len(in.Answer)),
+			zap.Int("ns_count", len(in.Ns)),
+			zap.Int("extra_count", len(in.Extra)),
+		)...,
 	)
 
 	// DNS is a separate key-value map, not a streaming parser; each

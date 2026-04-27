@@ -414,19 +414,54 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	return initialBuf, nil
 }
 
+// handshakeEOFRetryBudget caps the number of EOF retry attempts for
+// empty-buffer handshake reads. Kept small so the worst-case wall time is
+// HandshakeEOFRetryMax * HandshakeEOFRetrySleep (3 * 50ms = 150ms) — ~3x
+// better than the pre-Track-D 500ms loop while still giving a slow
+// upstream time to finish its first write.
+const (
+	HandshakeEOFRetryMax   = 3
+	HandshakeEOFRetrySleep = 50 * time.Millisecond
+)
+
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
+//
+// History:
+//   - Pre Track D: a 100ms x 5 retry loop sat on EOF unconditionally, adding
+//     up to 500ms of pure wait on every connection close during record.
+//   - Track D (96df8446): the loop and sleep were removed, so EOF was
+//     returned immediately. This regressed listmonk's Postgres handshake:
+//     during replay boot, the v3 replayer is still finishing its startup
+//     response when the app issues its first Read on the proxied conn. A
+//     0-byte EOF surfaces before the response lands, and listmonk halts
+//     with "error connecting to DB: EOF" before any test runs.
+//
+// Current behaviour:
+//   - Mid-stream fast-return is preserved: once any bytes have been read
+//     inside a given ReadBytes call (the common "short-data-then-EOF" and
+//     "mid-stream peer close after a message" cases), EOF returns
+//     immediately with whatever was collected.
+//   - Handshake-phase EOF (zero bytes collected in this call) is treated
+//     as potentially spurious and retried up to HandshakeEOFRetryMax
+//     times with HandshakeEOFRetrySleep between attempts. This window
+//     is bounded at 150ms — substantially tighter than the 500ms sleep
+//     Track D removed — so the record hot path perf win is preserved.
+//   - Non-EOF errors are always authoritative and surface immediately.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
+	emptyEOFRetries := 0
 
-	// Channel to communicate read results
+	// Channel to communicate read results. Buffered with capacity 1 so the
+	// read goroutine's send never blocks even if the outer select has already
+	// returned on ctx.Done — otherwise the deferred g.Wait() could deadlock
+	// waiting for a goroutine that is itself blocked sending on an
+	// unbuffered channel.
 	readResult := make(chan struct {
 		n   int
 		err error
 		buf []byte
-	})
+	}, 1)
 
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -462,19 +497,36 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 		case result := <-readResult:
 			if result.n > 0 {
 				buffer = append(buffer, result.buf[:result.n]...)
-				emptyReads = 0 // Reset the counter because we got some data
 			}
 
 			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
+				// Non-EOF errors always surface immediately.
+				if result.err != io.EOF {
+					return buffer, result.err
 				}
-				return buffer, result.err
+				// EOF with data already collected in this call is
+				// authoritative (short-data-then-EOF / mid-stream peer
+				// close on a clean message boundary). Fast-return as
+				// Track D intended.
+				if len(buffer) > 0 {
+					return buffer, result.err
+				}
+				// Zero-byte EOF on an empty buffer: apply the
+				// bounded handshake retry budget. This protects the
+				// Postgres v3 handshake race where the replayer's
+				// startup response is still being written when the
+				// app issues its first Read. Budget is capped so
+				// mid-stream closes surface within 150ms.
+				if emptyEOFRetries >= HandshakeEOFRetryMax {
+					return buffer, result.err
+				}
+				emptyEOFRetries++
+				select {
+				case <-ctx.Done():
+					return buffer, ctx.Err()
+				case <-time.After(HandshakeEOFRetrySleep):
+				}
+				continue
 			}
 			if result.n < len(result.buf) {
 				return buffer, nil
@@ -836,6 +888,45 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	}
 
 	return "", fmt.Errorf("java.home not found in command output")
+}
+
+// RecoverWithoutClose catches a panic in a parser goroutine, logs
+// it, reports it to Sentry, and returns. Unlike [Recover] it does
+// NOT close any connections — parsers in the new architecture do
+// not hold real sockets and the relay is responsible for socket
+// lifecycle. Call sites:
+//
+//	defer pUtil.RecoverWithoutClose(logger)
+//
+// The recovered panic value (if any) is swallowed; the enclosing
+// function returns with whatever named return value it had (or
+// zero value). If you need to transform the panic into a returned
+// error, wrap this in a named-return-value defer that sets err.
+func RecoverWithoutClose(logger *zap.Logger) {
+	if logger == nil {
+		// Mirror Recover's safe-fallback behaviour: the enclosing
+		// function is already unwinding and the caller asked us to
+		// swallow the panic, so the least-bad thing we can do
+		// without a logger is announce ourselves on stderr (stdout
+		// is reserved for CLI output and writing there from library
+		// code can corrupt tool-parseable streams) and still
+		// recover() so the goroutine doesn't crash the process.
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, Emoji+"Recovered from panic in parser (no logger available)")
+		}
+		return
+	}
+
+	if r := recover(); r != nil {
+		logger.Error("Recovered from panic in parser",
+			zap.Any("panic", r),
+			zap.String("next_step", "the supervisor (if wrapping this call) will fall through to raw passthrough so user traffic continues; file the panic with the parser owner using the Sentry issue that was just captured, or set KEPLOY_NEW_RELAY=off to force the legacy path for this parser until the root cause is fixed"),
+		)
+		utils.HandleRecovery(logger, r, "Recovered from panic")
+		// Flush only on the panic path so the happy path (defer
+		// running on clean return) doesn't pay the flush cost.
+		sentry.Flush(time.Second * 2)
+	}
 }
 
 // Recover recovers from a panic in any parser and logs the stack trace to Sentry.

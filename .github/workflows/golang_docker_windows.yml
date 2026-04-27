@@ -1,11 +1,6 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
-    inputs:
-      image_tag:
-        description: "Docker image tag or digest to pull"
-        required: false
-        type: string
 
 concurrency:
   group: windows-docker-runner
@@ -27,8 +22,8 @@ jobs:
             script_dir: go-dedup
         config:
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-windows
+            replay_src: build-windows
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
@@ -90,7 +85,7 @@ jobs:
       - id: image
         uses: ./.github/actions/download-image
         with:
-          image_tag: ${{ inputs.image_tag }}
+          artifact_name: docker-image-linux-amd64
           version: ${{ github.sha }}
 
       - name: Checkout the samples-go repository

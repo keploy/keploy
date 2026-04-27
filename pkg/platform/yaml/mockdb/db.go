@@ -39,24 +39,6 @@ const mockFormatGob = "gob"
 // decoding to a corrupt struct.
 const gobMockMagic = "keploy-gob-v1\n"
 
-// isUnfilteredMockKind classifies which mock kinds belong to the
-// "unfiltered config" bucket returned by GetUnFilteredMocks, versus
-// the per-testcase bucket returned by GetFilteredMocks. The YAML and
-// gob read paths must share this classification verbatim so replay
-// behavior does not diverge based on on-disk format.
-//
-// PostgresV2 is intentionally listed here even though it also passes
-// the GetFilteredMocks path (matches YAML's current behavior — both
-// paths include it; a mock shows up in both buckets). Changing that
-// semantics is out of scope for this PR.
-func isUnfilteredMockKind(kind models.Kind) bool {
-	switch kind {
-	case "Generic", "Postgres", "PostgresV2", "Http", "Http2", "Redis", "MySQL", "DNS":
-		return true
-	}
-	return false
-}
-
 // configuredMockFormat holds the mock format selected via config file
 // (record.mockFormat). The env var KEPLOY_MOCK_FORMAT takes precedence
 // so ad-hoc runs can override the file without editing it.
@@ -121,6 +103,24 @@ type MockYaml struct {
 	// or permission-change shutdown.
 	gobFlushErr error
 }
+
+// prunedMockInfo is the structured per-mock entry logged when
+// UpdateMocks drops a mock. Collected into a single slice and emitted
+// once per prune call so operators can see exactly which mocks were
+// dropped without flooding the log with one line per mock.
+type prunedMockInfo struct {
+	Name     string            `json:"name"`
+	Kind     string            `json:"kind"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// maxPrunedMocksLogged caps how many per-mock entries get attached to
+// the "pruned mocks successfully" debug log. Replays on large test
+// sets can prune ~10^5 mocks; logging every entry would produce a
+// single multi-MB log line that slows down encoding and overwhelms
+// ingestion. Above the cap we set prunedMocksTruncated=true and rely
+// on the pruned-count total for the overall picture.
+const maxPrunedMocksLogged = 100
 
 type gobWriteJob struct {
 	mock *models.Mock
@@ -347,8 +347,17 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		return err
 	}
 
+	// Only build the per-mock log slice when debug logging is enabled
+	// — on large test sets the allocation and reflection cost of
+	// collecting names/kinds/metadata is a significant overhead if
+	// the emitted log will be dropped by the logger anyway.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
 	newMocks := make([]*models.Mock, 0, len(mocks))
 	prunedCount := 0
+	var prunedMocks []prunedMockInfo
+	if debugEnabled {
+		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+	}
 	for _, mock := range mocks {
 		if mock.Spec.Metadata["type"] == "config" {
 			newMocks = append(newMocks, mock)
@@ -374,6 +383,13 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			continue
 		}
 		prunedCount++
+		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
+			prunedMocks = append(prunedMocks, prunedMockInfo{
+				Name:     mock.Name,
+				Kind:     string(mock.Kind),
+				Metadata: mock.Spec.Metadata,
+			})
+		}
 	}
 
 	if err := ys.writeMocksAtomically(path, mockFileName, newMocks); err != nil {
@@ -385,6 +401,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
 		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 
 	return nil
@@ -432,8 +450,17 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
+	// See the YAML path above for why per-mock collection is gated on
+	// debug level — the gob path is the one most likely to hit
+	// ~10^5-mock test sets, so skipping the allocation when the log
+	// is a no-op matters more here.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
 	newMocks := make([]*models.Mock, 0, len(mocks))
 	prunedCount := 0
+	var prunedMocks []prunedMockInfo
+	if debugEnabled {
+		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+	}
 	for i, mock := range mocks {
 		// Check ctx every 1024 entries so a very large filter loop
 		// still responds to cancellation without paying the syscall
@@ -461,6 +488,13 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			continue
 		}
 		prunedCount++
+		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
+			prunedMocks = append(prunedMocks, prunedMockInfo{
+				Name:     mock.Name,
+				Kind:     string(mock.Kind),
+				Metadata: mock.Spec.Metadata,
+			})
+		}
 	}
 
 	// Atomic rewrite: write to a sibling tmp file under the same
@@ -544,6 +578,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.Int("total", len(mocks)),
 		zap.Int("kept", len(newMocks)),
 		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 	return nil
 }
@@ -652,10 +688,14 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	// RecordHooks.AfterMockInsert that tags telemetry fields on the
 	// same pointer, or a producer pool that reuses Mock structs)
 	// would otherwise race with the async gob encoder and persist
-	// an unintended payload. DeepCopy handles the nested Noise /
-	// Metadata / per-protocol-slice fields. The copy cost is
-	// bounded by the mock's own size and is acceptable vs. the
-	// alternative (encoding to bytes synchronously on every
+	// an unintended payload. DeepCopy clones Mock's top-level
+	// MockSpec slices, maps, and pointers so the usual
+	// after-InsertMock field tagging is safe; it does not
+	// transitively clone every nested object reachable through a
+	// protocol payload, so callers should still avoid mutating
+	// deeply nested state in a mock they have handed off. The copy
+	// cost is bounded by the mock's own size and is acceptable vs.
+	// the alternative (encoding to bytes synchronously on every
 	// InsertMock, which would defeat the whole async-writer win).
 	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
 	select {
@@ -987,18 +1027,22 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
-			if mock.Spec.Metadata["type"] == "config" {
-				continue
-			}
-			// Shared classifier with GetUnFilteredMocks and with the
-			// YAML read path. Kinds that belong to the unfiltered
-			// bucket (HTTP, Postgres, Redis, ...) are excluded here;
-			// per-testcase kinds (Mongo, gRPC, ...) fall through to
-			// the append. PostgresV2 is a special case: YAML's
-			// GetFilteredMocks keeps it in the tcs bucket while
-			// GetUnFilteredMocks also picks it up as unfiltered, so
-			// the YAML reader yields it from both. Mirror that here.
-			if !isUnfilteredMockKind(mock.Kind) || mock.Kind == models.PostgresV2 {
+			// Unification: lifetime-only routing via DeriveLifetime —
+			// the same classifier the YAML path below uses. Aligns the
+			// gob and YAML read paths so an explicit per-test tag
+			// (metadata["type"] == "mocks") on a kind that isUnfiltered-
+			// MockKind lists as implicit-session (HTTP, Postgres, ...)
+			// correctly lands in the per-test pool instead of being
+			// shunted to unfiltered on-read. Previously the gob path
+			// gated on kind + config-tag only, which silently dropped
+			// every per-test HTTP mock from the filtered pool even
+			// when the recorder had explicitly tagged it per-test.
+			//
+			// PostgresV2 keeps its dual-pool quirk (present in BOTH
+			// filtered and unfiltered) — the YAML path mirrors this
+			// via its sibling GetUnFilteredMocks reader.
+			mock.DeriveLifetime()
+			if mock.TestModeInfo.Lifetime == models.LifetimePerTest || mock.Kind == models.PostgresV2 {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -1109,10 +1153,17 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			if isMappedToSpecificTest && !isNeededForCurrentRun {
 				continue
 			}
-			// Shared classifier with GetFilteredMocks and the YAML
-			// path. Include config-tagged mocks plus the unfiltered
-			// kinds; everything else goes to GetFilteredMocks.
-			if mock.Spec.Metadata["type"] == "config" || isUnfilteredMockKind(mock.Kind) {
+			// Unification: lifetime-only routing via DeriveLifetime —
+			// the same classifier the YAML path uses. A mock lands in
+			// the session/config pool iff DeriveLifetime classified it
+			// as Session or Connection. Untagged mocks of the legacy
+			// implicit-session kinds (HTTP, Postgres, MySQL, ...) still
+			// resolve to Session via DeriveLifetime's kind-fallback
+			// branch, so pre-tag recordings keep replaying byte-for-
+			// byte identically. metadata["scope"] is NOT consulted.
+			mock.DeriveLifetime()
+			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+				mock.TestModeInfo.Lifetime == models.LifetimeConnection {
 				configMocks = append(configMocks, mock)
 			}
 		}

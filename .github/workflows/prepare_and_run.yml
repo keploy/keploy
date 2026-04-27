@@ -5,8 +5,48 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  # One group per PR / branch spanning all three platform legs. A new
+  # push cancels in-progress Linux, macOS, and Windows jobs together,
+  # which means a concurrency-cancel also aborts `cleanup_windows` /
+  # `clean_up_docker_macos` mid-run and can leak the run's
+  # workflow-lock file or long-running containers on self-hosted
+  # runners. The subsequent push schedules fresh cleanup jobs with
+  # their own `if: always()`, so state converges within one extra
+  # push. Splitting into per-OS sub-groups would avoid the
+  # blast-radius, but self-hosted queueing already serialises the
+  # macOS / Windows runners in practice; keeping one group keeps the
+  # workflow simple.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match the default $IsoRoot in setup-git-isolation.ps1 / cleanup-git-isolation.ps1
+  _ISO_ROOT: .git-isolation
+  # Central ref for the keploy/integrations commit every build leg in
+  # this workflow checks out. Keeping it in one place means the 4
+  # Add-Private-Parsers steps below (linux/amd64, linux/arm64,
+  # darwin/arm64, windows/amd64) cannot drift apart when the ref is
+  # bumped. Prefer the repo-level `vars.INTEGRATION_REF` when set (so
+  # operators can override without editing this file), falling back to
+  # `main`. Kept in sync with release.yml + golangci-lint.yml so all
+  # three workflows track the same integrations ref. Pin to a specific
+  # SHA via the repo var if a feat branch needs to carry a cross-repo
+  # change.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
 jobs:
+  # -------------------------------------------------------------------
+  # Binary builds
+  # -------------------------------------------------------------------
+
   build-and-upload:
+    # Linux amd64 binaries (race + non-race). `build` = race,
+    # consumed by most linux docker tests via download-binary.
+    # `build-no-race` = non-race, consumed by the linux/amd64
+    # docker image (race runtime's memory baseline trips
+    # go-memory-load's threshold; race coverage is preserved in the
+    # native-linux test path that uses `build`).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +57,18 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Build Keploy (non-race)
+        # CGO_ENABLED=1 explicit so the pg_query_go (libpg_query) cgo
+        # link succeeds. ubuntu-latest ships gcc out-of-the-box; on
+        # native linux Go already defaults CGO_ENABLED to 1, but we
+        # pin it so a cross-compile slipping in here fails loud
+        # instead of silently producing a non-cgo binary that
+        # panics on first pg_query.Parse call.
+        env:
+          CGO_ENABLED: "1"
         run: |
           mkdir -p out/build-no-race
           go build -tags=viper_bind_struct -o out/build-no-race/keploy
@@ -38,6 +88,413 @@ jobs:
           name: build
           path: out/build/keploy
 
+  build-linux-arm64:
+    # Non-race native arm64 linux build — consumed only by the
+    # linux/arm64 docker image (which the macOS self-hosted runner
+    # loads). Native build avoids qemu emulation on amd64 runners.
+    #
+    # We deliberately drop -race for docker images: the race
+    # runtime roughly doubles binary size and inflates baseline
+    # memory (enough to trip go-memory-load's 250 MiB in-container
+    # threshold), and any genuine data-race should be caught by
+    # the native linux job's race-enabled `build` artifact —
+    # docker-replay coverage is about integration semantics, not
+    # race detection. This mirrors the effective historic
+    # behaviour where update-docker.sh's add_race_flag regex
+    # silently failed to match, so the previous linux docker image
+    # was also non-race despite the CI script's intent.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Build Keploy (non-race, linux/arm64)
+        # CGO_ENABLED=1 explicit — see the build-and-upload job
+        # comment. ubuntu-24.04-arm ships gcc; the aarch64 default
+        # CGO_ENABLED matches the amd64 one.
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p out/build-no-race-linux-arm64
+          go build -tags=viper_bind_struct -o out/build-no-race-linux-arm64/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-no-race-linux-arm64
+          path: out/build-no-race-linux-arm64/keploy
+
+  build-darwin-arm64:
+    # darwin/arm64 binary for the macOS self-hosted native tests.
+    #
+    # Session P: moved from ubuntu-latest (linux→darwin/arm64
+    # cross-compile, CGO_ENABLED=0) to macos-latest (native arm64
+    # build, CGO_ENABLED=1). pg_query_go links libpg_query via cgo
+    # and a linux runner cannot cross-compile darwin cgo without an
+    # osxcross toolchain, which is heavy to maintain for a single
+    # build leg. macos-latest is already arm64 on the GitHub-hosted
+    # fleet so the build is native (no cross-compile).
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Build Keploy (darwin/arm64)
+        # Native arm64 build — macos-latest GHA runners are
+        # Apple-silicon as of 2024. GOOS/GOARCH left unset so the
+        # build uses the host arch (darwin/arm64); CGO_ENABLED
+        # defaults to 1 on native builds.
+        run: |
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-darwin
+          path: keploy
+
+  build-windows-amd64:
+    # Native windows/amd64 cgo build on self-hosted runner.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, Windows, X64]
+    # Bound wall-clock so a hung cgo link step (historically: a
+    # deadlock inside libwindows_redirector.a's shutdown path) cannot
+    # sit on a self-hosted Windows runner for 6h. Healthy runs are
+    # ~5 min; 30 gives 6x headroom.
+    timeout-minutes: 30
+    steps:
+      # Bootstrap a consistent shell environment on every self-hosted
+      # Windows runner. Some runners in the fleet ship without pwsh
+      # (PowerShell Core) or with a Restricted ExecutionPolicy that
+      # blocks subsequent step scripts from running. This step makes
+      # every downstream `shell: powershell` and `shell: pwsh`
+      # invocation succeed regardless of which runner the scheduler
+      # picks. Run it unconditionally with explicit -ExecutionPolicy
+      # Bypass so it itself is not subject to the restriction it
+      # repairs.
+      - name: Bootstrap PowerShell environment
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          # CurrentUser scope persists across subsequent GitHub Actions
+          # steps (each is a fresh powershell invocation, so Process scope
+          # would not carry over). Bypass here is scoped to the runner
+          # user account, not the machine.
+          try { Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force } catch { Write-Host "::warning::CurrentUser scope write failed: $_" }
+          if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+            Write-Host "pwsh not found; repairing runner (one-shot per-runner install)."
+            # Try choco first (fastest when present), then fall back to
+            # a portable ZIP download from the official PowerShell
+            # GitHub release so runners without choco are still
+            # repaired. 7.4.6 is the current LTS at time of writing;
+            # pinned to a known-good version so behaviour is
+            # reproducible.
+            $pwshVersion = "7.4.6"
+            $pwshBase = Join-Path $env:USERPROFILE ".pwsh-portable"
+            $pwshBin = Join-Path $pwshBase ("PowerShell-" + $pwshVersion + "-win-x64")
+            $pwshExe = Join-Path $pwshBin "pwsh.exe"
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              try {
+                & choco install pwsh -y --no-progress
+                $env:Path = "$env:ProgramFiles\PowerShell\7;" + $env:Path
+                "$env:ProgramFiles\PowerShell\7" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              } catch {
+                Write-Host "::warning::choco install failed: $_. Falling back to portable ZIP."
+              }
+            }
+            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue) -and -not (Test-Path $pwshExe)) {
+              New-Item -Path $pwshBase -ItemType Directory -Force | Out-Null
+              $zipUrl = "https://github.com/PowerShell/PowerShell/releases/download/v$pwshVersion/PowerShell-$pwshVersion-win-x64.zip"
+              $zipPath = Join-Path $pwshBase ("pwsh-" + $pwshVersion + ".zip")
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+              Expand-Archive -Path $zipPath -DestinationPath $pwshBin -Force
+              Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path $pwshExe) {
+              $env:Path = "$pwshBin;" + $env:Path
+              $pwshBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              Write-Host "Installed portable pwsh at $pwshExe"
+            }
+            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+              Write-Host "::warning::pwsh still unavailable after install attempts. Runner needs manual repair."
+            }
+          } else {
+            Write-Host "pwsh already available: $((Get-Command pwsh).Source)"
+          }
+
+      - name: Free runner disk space
+        # Use Windows PowerShell 5.1 (always preinstalled) instead of
+        # pwsh. The new win-runner-[1-4] pool doesn't ship
+        # PowerShell 7 - job 71974521109 failed at the first pwsh
+        # step with 'pwsh: command not found'. Every cmdlet used
+        # below (Get-PSDrive, Get-ChildItem, Where-Object, etc.) is
+        # PS5.1-compatible.
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The shared self-hosted Windows runners have hit "not
+          # enough space on the disk" mid-build (go build writes
+          # importcfg into SystemTemp and gets ENOSPC). Tiered
+          # cleanup: fast-path on healthy disk (>=4 GB free), light
+          # sweep (stale go-build temp + other runners' _diag /
+          # _temp + other-repo _work >7d), heavy sweep (user %TEMP%
+          # + Windows Update download cache), then last-resort go
+          # module/cache purge. Hard-fail under 2 GB so subsequent
+          # CGO builds don't die confused.
+          $targetFree = 4GB
+          $beforeC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: before cleanup: {0:N0} bytes" -f $beforeC)
+          if ($beforeC -ge $targetFree) {
+            Write-Host ("Already have {0:N0} bytes free (>= {1:N0}); skipping cleanup" -f $beforeC, $targetFree)
+            exit 0
+          }
+
+          # 1. Stale go-build intermediate directories under SystemTemp.
+          foreach ($base in @("C:\WINDOWS\SystemTemp", "C:\Windows\Temp")) {
+            if (Test-Path $base) {
+              Get-ChildItem -Path $base -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'go-build*' } |
+                ForEach-Object {
+                  Write-Host "Removing $($_.FullName)"
+                  Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+          }
+
+          # 2. Other runners' _diag/_temp + stale other-repo _work checkouts (>7 days).
+          $runnersRoot = "C:\actions-runners"
+          if (Test-Path $runnersRoot) {
+            foreach ($rel in @("_diag", "_temp")) {
+              Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $p = Join-Path $_.FullName $rel
+                if (Test-Path $p) {
+                  Write-Host "Purging $p (entries older than 1 day)"
+                  Get-ChildItem -Path $p -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                }
+              }
+            }
+            $thisRepoDir = $env:GITHUB_REPOSITORY.Split('/')[-1]
+            Get-ChildItem -Path $runnersRoot -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+              $work = Join-Path $_.FullName "_work"
+              if (Test-Path $work) {
+                Get-ChildItem -Path $work -Directory -Force -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -ne $thisRepoDir -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
+                  ForEach-Object {
+                    Write-Host "Removing stale work dir $($_.FullName)"
+                    Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+              }
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            $userTemp = $env:TEMP
+            if ($userTemp -and (Test-Path $userTemp)) {
+              Write-Host "Sweeping $userTemp"
+              Get-ChildItem -Path $userTemp -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $sd = "C:\Windows\SoftwareDistribution\Download"
+            if (Test-Path $sd) {
+              Write-Host "Sweeping $sd"
+              Get-ChildItem -Path $sd -Force -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          if ((Get-PSDrive C).Free -lt $targetFree) {
+            foreach ($cache in @("$env:USERPROFILE\go\pkg\mod", "$env:LOCALAPPDATA\go-build")) {
+              if (Test-Path $cache) {
+                Write-Host "Removing $cache"
+                Remove-Item -Path $cache -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          $afterC = (Get-PSDrive C).Free
+          Write-Host ("Free on C: after cleanup:  {0:N0} bytes (freed {1:N0})" -f $afterC, ($afterC - $beforeC))
+          if ($afterC -lt 2GB) {
+            Write-Error "Free on C: is under 2 GB after cleanup - not enough headroom for a CGO Windows build. The self-hosted runner operator should expand the C: volume; this job will fail during go build otherwise."
+            exit 1
+          }
+
+      - name: Create workflow start lock
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
+          $timestamp = (Get-Date -UFormat %s)
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Set-Content -Path $lockPath -Value "started-$timestamp"
+          Write-Host "Created workflow start lock: $lockPath"
+
+      # Inline because this runs BEFORE checkout (workspace may not exist).
+      # Logic mirrors .github/scripts/windows/setup-git-isolation.ps1.
+      - name: Setup per-run git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE "${{ env._ISO_ROOT }}") $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+
+          # Seed per-run gitconfig from the global one (if it exists)
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          $globalCfg = Join-Path $env:USERPROFILE '.gitconfig'
+          if (Test-Path $globalCfg) { Copy-Item $globalCfg $gitConfig -Force } else { New-Item -Path $gitConfig -ItemType File -Force | Out-Null }
+
+          # Remove inherited SSH redirect settings so the initial
+          # actions/checkout always uses HTTPS (before ssh-agent is loaded).
+          $staleKeys = @(
+              'url."git@github.com:".insteadOf',
+              'url."ssh://git@github.com/".insteadOf',
+              'core.sshCommand'
+          )
+          $savedPref = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($key in $staleKeys) {
+              git config --file $gitConfig --unset-all $key 2>$null
+          }
+          $PSNativeCommandUseErrorActionPreference = $savedPref
+
+          Set-Content -Path (Join-Path $isoDir '.active') -Value (Get-Date -UFormat '%s')
+
+          git config --file $gitConfig core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw "git config core.autocrlf failed (exit $LASTEXITCODE)" }
+          git config --file $gitConfig core.eol lf
+          if ($LASTEXITCODE -ne 0) { throw "git config core.eol failed (exit $LASTEXITCODE)" }
+
+          # Per-run SSH known_hosts. Prefer ssh-keyscan so we pick up
+          # any host-key rotation automatically; fall back to GitHub's
+          # published keys (https://api.github.com/meta .ssh_keys) when
+          # ssh-keyscan returns nothing. Some self-hosted runners in
+          # this fleet ship without the OpenSSH client, or have egress
+          # policies that block port 22, so ssh-keyscan can be silent
+          # even though HTTPS git clones work fine.
+          $knownHosts = Join-Path $isoDir 'known_hosts'
+          $hostKeys = $null
+          if (Get-Command ssh-keyscan -ErrorAction SilentlyContinue) {
+              $hostKeys = & ssh-keyscan github.com 2>$null
+          }
+          if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
+              Write-Host "ssh-keyscan unavailable or empty; using GitHub published host keys."
+              $hostKeys = @(
+                  'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+                  'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
+                  'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
+              )
+          }
+          $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
+
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=`"$knownHosts`" -o GlobalKnownHostsFile=NUL -o StrictHostKeyChecking=yes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Git isolation setup complete for run $env:GITHUB_RUN_ID"
+          Write-Host "  GIT_CONFIG_GLOBAL = $gitConfig"
+
+          $global:LASTEXITCODE = 0
+          exit 0
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: false
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
+
+      - name: Add MinGW gcc to PATH
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $candidates = @(
+            "C:\msys64\mingw64\bin",
+            "C:\mingw64\bin",
+            "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin",
+            "C:\tools\mingw64\bin",
+            "$env:USERPROFILE\.mingw64-portable\mingw64\bin"
+          )
+          $gccBin = $null
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "gcc.exe")) { $gccBin = $c; break }
+          }
+          if (-not $gccBin) {
+            $onPath = Get-Command gcc -ErrorAction SilentlyContinue
+            if ($onPath) { $gccBin = Split-Path $onPath.Source }
+          }
+          if (-not $gccBin) {
+            Write-Host "No MinGW found in known paths; installing portable MinGW-w64 14.2.0 (WinLibs ZIP)."
+            $portableRoot = Join-Path $env:USERPROFILE ".mingw64-portable"
+            $portableBin = Join-Path $portableRoot "mingw64\bin"
+            if (-not (Test-Path (Join-Path $portableBin "gcc.exe"))) {
+              New-Item -Path $portableRoot -ItemType Directory -Force | Out-Null
+              $mingwUrl = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-12.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r3.zip"
+              $archive = Join-Path $portableRoot "mingw64.zip"
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $mingwUrl -OutFile $archive -UseBasicParsing
+              Expand-Archive -Path $archive -DestinationPath $portableRoot -Force
+              Remove-Item -Path $archive -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path (Join-Path $portableBin "gcc.exe")) {
+              $gccBin = $portableBin
+            } else {
+              throw "MinGW install did not produce gcc.exe at $portableBin"
+            }
+          }
+          Write-Host "Using mingw gcc at $gccBin"
+          echo $gccBin >> $env:GITHUB_PATH
+          $env:Path = "$gccBin;$env:Path"
+          where.exe gcc
+          gcc --version
+
+      - name: CGO toolchain sanity
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          Write-Host "PATH=$env:PATH"
+          where.exe gcc
+          gcc --version
+          go env CGO_ENABLED CC CXX GOOS GOARCH
+
+      - name: Build Keploy (PR) - Windows (windows/amd64)
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $env:CGO_ENABLED = "1"
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
+
+      - name: Upload build artifact (Windows CLI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows
+          path: keploy.exe
+
+      - name: Prune stale git isolation dirs
+        if: always()
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   upload-latest:
     runs-on: ubuntu-latest
@@ -52,38 +509,95 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
 
-  build-docker-image:
+  # -------------------------------------------------------------------
+  # Docker image builds — produce tarballs as artifacts that every
+  # downstream docker test job (linux / macOS / windows) loads via
+  # actions/download-artifact + docker load. Replaces the previous
+  # ttl.sh pipeline; saves the in-docker `go build` step because the
+  # binary is already produced by build-and-upload / build-linux-arm64.
+  # -------------------------------------------------------------------
+
+  build-docker-image-amd64:
+    # Fork-guard: linux/amd64 consumers (run_*_docker) all skip on
+    # fork PRs, and the Windows self-hosted leg is gated too. Building
+    # and uploading an image tarball that no downstream job will load
+    # just burns runner minutes.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [build-and-upload]
     runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.tag.outputs.image_tag }}
-      image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-        uses: ./.github/actions/setup-private-parsers
+      # Use the non-race amd64 binary: see build-linux-arm64's
+      # header comment for the rationale. go-memory-load and
+      # proxy-stress-test both rely on docker binaries not carrying
+      # race-runtime overhead (memory baseline / data-race noise).
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v4
         with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+          name: build-no-race
+          path: dist/keploy-linux-amd64
 
-      - name: Build image
-        run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
-      
-      - name: Make unique tag for this run
-        id: tag
-        env:
-          PRNUM: ${{ github.event.pull_request.number }}
-        run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_RUN_ID}-${GITHUB_SHA}-1h"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
-          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Push unique tag
+      - name: Build image (linux/amd64)
         run: |
-          docker push "${{ steps.tag.outputs.image_tag }}"
+          chmod +x dist/keploy-linux-amd64/keploy
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --file Dockerfile.runtime \
+            --output type=docker,dest=image.tar \
+            -t keploy/keploy:ci \
+            .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-linux-amd64
+          path: image.tar
+          # 7 days so re-running a failed downstream gate within a
+          # week still finds the image. Two tarballs per run is cheap.
+          retention-days: 7
+
+  build-docker-image-arm64:
+    needs: [build-linux-arm64]
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: build-no-race-linux-arm64
+          path: dist/keploy-linux-arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (linux/arm64)
+        run: |
+          chmod +x dist/keploy-linux-arm64/keploy
+          docker buildx build \
+            --platform linux/arm64 \
+            --provenance=false \
+            --file Dockerfile.runtime \
+            --output type=docker,dest=image.tar \
+            -t keploy/keploy:ci \
+            .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-linux-arm64
+          path: image.tar
+          # 7 days so re-running a failed downstream gate within a
+          # week still finds the image. Two tarballs per run is cheap.
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # Linux test jobs
+  # -------------------------------------------------------------------
 
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
@@ -98,22 +612,16 @@ jobs:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_linux.yml
   run_node_docker:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    with:
-      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/node_docker.yml
   run_python_docker:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    with:
-      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/python_docker.yml
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
   run_golang_docker:
-    needs: [build-and-upload, upload-latest,build-docker-image]
-    with:
-      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
   run_fuzzer_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -122,9 +630,6 @@ jobs:
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
-  run_node_mapping:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_mapping.yml
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
@@ -132,15 +637,299 @@ jobs:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/schema_match_linux.yml
 
-  # Gate job: the single required status check for branch protection.
-  # Re-running only this job is pointless — it re-checks all upstream results.
+  # -------------------------------------------------------------------
+  # macOS test jobs — self-hosted runner loads the linux/arm64 image
+  # (Docker Desktop on Apple Silicon runs linux containers natively).
+  # -------------------------------------------------------------------
+
+  precheck-macos:
+    # Pre-flight sanity on the self-hosted macOS runner: create the
+    # workflow start lock that clean_up_docker_macos consumes, unlock
+    # the keychain, and confirm Docker Desktop is up. Fails fast
+    # BEFORE the parallel test jobs spin up, so a runner that booted
+    # without Docker Desktop doesn't waste 10 min of downstream time.
+    # The docker image itself is loaded inside each downstream test
+    # job via the download-image composite action — pre-loading here
+    # would duplicate the artifact download + docker load for every
+    # test job.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, macOS, native]
+    timeout-minutes: 10
+    steps:
+      - name: Create workflow start lock
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          mkdir -p "$LOCK_DIR"
+          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Verify Docker Desktop is running (macOS)
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
+          fi
+          echo "Docker Desktop is running."
+
+  run_python_docker_macos:
+    needs: [build-darwin-arm64, precheck-macos, build-docker-image-arm64]
+    uses: ./.github/workflows/python_docker_macos.yml
+    secrets:
+      MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+  run_golang_docker_macos:
+    needs: [build-darwin-arm64, precheck-macos, build-docker-image-arm64]
+    uses: ./.github/workflows/golang_docker_macos.yml
+    secrets:
+      MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+  clean_up_docker_macos:
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    runs-on: [self-hosted, macOS, native]
+    needs: [run_python_docker_macos, run_golang_docker_macos]
+    timeout-minutes: 10
+    steps:
+      - name: Verify Docker Desktop is running (macOS)
+        continue-on-error: true
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "Docker Desktop is running."
+          else
+            echo "WARNING: Docker Desktop is not running. Cleanup will be skipped."
+          fi
+
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Remove workflow lock file
+        if: always()
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          LOCK_FILE="$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+
+          if [ -f "$LOCK_FILE" ]; then
+            echo "Removing workflow lock file: $LOCK_FILE"
+            rm -f "$LOCK_FILE"
+          else
+            echo "Lock file not found (may have been cleaned up already): $LOCK_FILE"
+          fi
+
+          echo "Cleaning up stale lock files older than 24 hours..."
+          find "$LOCK_DIR" -name "prepare-macos-workflow-*.lock" -type f -mtime +1 -delete 2>/dev/null || true
+
+      - name: Stop long-running containers (macOS)
+        id: stop_longrunning
+        run: |
+          # Stop containers running longer than 30 minutes, except buildx containers.
+          stopped_any=0
+          now=$(date +%s)
+          while read -r cid cname; do
+            started=$(docker inspect --format '{{.State.StartedAt}}' "$cid" 2>/dev/null || true)
+            if [ -z "$started" ]; then
+              continue
+            fi
+            started_norm=$(echo "$started" | sed -E 's/\.[0-9]+//; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+            epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$started_norm" "+%s" 2>/dev/null || echo 0)
+            if [ -z "$epoch" ] || [ "$epoch" -eq 0 ]; then
+              echo "Could not parse start time for container $cid: $started"
+              continue
+            fi
+            if [ "$epoch" -lt $((now - 1800)) ]; then
+              if [[ "$cname" == buildx* ]]; then
+                echo "Skipping buildx container $cid ($cname)"
+                continue
+              fi
+              echo "Removing long-running container $cid ($cname) started at $started"
+              docker rm -f "$cid" || true
+              stopped_any=1
+            fi
+          done < <(docker ps -a --format '{{.ID}} {{.Names}}')
+          echo "stopped_any=$stopped_any" >> $GITHUB_OUTPUT
+
+      - name: Docker cleanup (scoped to this workflow run)
+        run: |
+          echo "Cleaning up resources for run ${{ github.run_id }}..."
+
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker is not available, skipping cleanup."
+            exit 0
+          fi
+
+          RUN_ID="${{ github.run_id }}"
+          for prefix in ginApp_ mongoDb_ keploy_ginmongo_ echoApp_ postgresDb_ keploy_ flaskApp_ mongo_; do
+            ids=$(docker ps -aq --filter "name=${prefix}${RUN_ID}" 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done
+
+          for net in $(docker network ls --format '{{.Name}}' | grep -E "^keploy-network-${RUN_ID}-" 2>/dev/null); do
+            docker network rm "$net" 2>/dev/null || true
+          done
+
+          echo "Pruning dangling Docker images..."
+          docker image prune -f 2>/dev/null || true
+          echo "Pruning dangling Docker volumes..."
+          docker volume prune -f 2>/dev/null || true
+
+          echo "Docker cleanup completed."
+
+  # -------------------------------------------------------------------
+  # Windows test jobs — self-hosted runner loads the linux/amd64 image
+  # (Docker Desktop on Windows runs linux containers via WSL2).
+  # -------------------------------------------------------------------
+
+  precheck-windows:
+    # Pre-flight sanity on the self-hosted Windows runner: set up
+    # per-run git isolation and confirm Docker Desktop is up. Fails
+    # fast BEFORE the parallel Windows test jobs spin up. The docker
+    # image itself is loaded inside each downstream test job via the
+    # download-image composite action — pre-loading here would
+    # duplicate the artifact download + docker load for every test.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, Windows, X64]
+    # Same rationale as build-windows-amd64: bound the wall-clock so a
+    # hung self-hosted Windows runner cannot stall the whole pipeline.
+    timeout-minutes: 30
+    steps:
+      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # concurrent jobs' SSH redirects from leaking into our checkout.
+      - name: Pre-checkout git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup per-run git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
+
+      - name: Ensure Docker is running
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+          if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+
+      - name: Wait for Docker to be ready
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $maxAttempts = 30
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            $attempt++
+            try {
+              $result = docker info 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Docker is ready after $attempt attempts"
+                break
+              }
+            } catch {}
+            Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+            Start-Sleep -Seconds 2
+          }
+          if ($attempt -eq $maxAttempts) {
+            Write-Error "Docker did not become ready in time"
+            exit 1
+          }
+
+      - name: Prune stale git isolation dirs
+        if: always()
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
+
+  run_golang_docker_windows:
+    needs: [build-windows-amd64, build-docker-image-amd64, precheck-windows]
+    uses: ./.github/workflows/golang_docker_windows.yml
+
+  run_golang_native_windows:
+    needs: [build-windows-amd64]
+    uses: ./.github/workflows/golang_native_windows.yml
+
+  cleanup_windows:
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    runs-on: [self-hosted, Windows, X64]
+    needs: [run_golang_docker_windows, run_golang_native_windows]
+    steps:
+      - name: Pre-checkout git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $env:GITHUB_RUN_ID
+          New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
+          $gitConfig = Join-Path $isoDir 'gitconfig'
+          New-Item -Path $gitConfig -ItemType File -Force | Out-Null
+          git config --file $gitConfig core.autocrlf false
+          git config --file $gitConfig core.eol lf
+          "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup per-run git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
+
+      - name: Remove workflow start lock
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+
+      - name: Check and cleanup long-running containers (Windows helper)
+        id: count_stash
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/cleanup-windows.ps1'
+          if (Test-Path $script) {
+            & $script
+          } else {
+            Write-Error "Cleanup script not found at $script"
+            exit 1
+          }
+
+      - name: Prune stale git isolation dirs
+        if: always()
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
+
+  # -------------------------------------------------------------------
+  # Per-platform gates. Names preserved for branch protection so the
+  # required-check set does not need to change on merge.
+  # -------------------------------------------------------------------
+
   gate:
     name: CI Gate (Linux)
     if: always()
     needs:
       - build-and-upload
       - upload-latest
-      - build-docker-image
+      - build-docker-image-amd64
       - run_golang_linux
       - run_golang_wsl
       - run_java_linux
@@ -150,7 +939,6 @@ jobs:
       - run_python_linux
       - run_golang_docker
       - run_fuzzer_linux
-      - run_node_mapping
       - run_grpc_linux
       - run_schema_match_linux
     runs-on: ubuntu-latest
@@ -160,7 +948,7 @@ jobs:
           results=( \
             "${{ needs.build-and-upload.result }}" \
             "${{ needs.upload-latest.result }}" \
-            "${{ needs.build-docker-image.result }}" \
+            "${{ needs.build-docker-image-amd64.result }}" \
             "${{ needs.run_golang_linux.result }}" \
             "${{ needs.run_golang_wsl.result }}" \
             "${{ needs.run_java_linux.result }}" \
@@ -170,9 +958,70 @@ jobs:
             "${{ needs.run_python_linux.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
-            "${{ needs.run_node_mapping.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."
+
+  gate_macos:
+    name: CI Gate (macOS)
+    if: always()
+    needs:
+      - build-darwin-arm64
+      - build-linux-arm64
+      - build-docker-image-arm64
+      - precheck-macos
+      - run_python_docker_macos
+      - run_golang_docker_macos
+      - clean_up_docker_macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-darwin-arm64.result }}" \
+            "${{ needs.build-linux-arm64.result }}" \
+            "${{ needs.build-docker-image-arm64.result }}" \
+            "${{ needs.precheck-macos.result }}" \
+            "${{ needs.run_python_docker_macos.result }}" \
+            "${{ needs.run_golang_docker_macos.result }}" \
+            "${{ needs.clean_up_docker_macos.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."
+
+  gate_windows:
+    name: CI Gate (Windows)
+    if: always()
+    needs:
+      - build-windows-amd64
+      - build-docker-image-amd64
+      - precheck-windows
+      - run_golang_docker_windows
+      - run_golang_native_windows
+      - cleanup_windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-windows-amd64.result }}" \
+            "${{ needs.build-docker-image-amd64.result }}" \
+            "${{ needs.precheck-windows.result }}" \
+            "${{ needs.run_golang_docker_windows.result }}" \
+            "${{ needs.run_golang_native_windows.result }}" \
+            "${{ needs.cleanup_windows.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

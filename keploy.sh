@@ -412,7 +412,7 @@ installKeploy (){
 
     cleanup_tmp() {
         # Remove extracted files /tmp directory
-        tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
+        tmp_files=("LICENSE" "README.md" "READMEes-Es.md")
         for file in "${tmp_files[@]}"; do
             if [ -f "/tmp/$file" ]; then
                 if [ "$NO_ROOT" = "true" ]; then

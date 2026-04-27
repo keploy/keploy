@@ -839,7 +839,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				})
 			}
 		} else {
-			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
+			idc.logger.Debug("Failed to get current working directory for pprof mount", zap.Error(err))
 		}
 	}
 
