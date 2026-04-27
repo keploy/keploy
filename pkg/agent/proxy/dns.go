@@ -132,13 +132,6 @@ func dnsTypeString(qtype uint16) string {
 	return strconv.Itoa(int(qtype))
 }
 
-func dnsRcodeString(rcode int) string {
-	if rcodeName, ok := dns.RcodeToString[rcode]; ok {
-		return rcodeName
-	}
-	return strconv.Itoa(rcode)
-}
-
 func dnsQuestionFields(question dns.Question) []zap.Field {
 	return []zap.Field{
 		zap.String("query", question.Name),
@@ -189,16 +182,13 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		resp, found := p.dnsCache.Get(key)
 		if !found {
-			// Only log cache misses. App DNS traffic during recording can
-			// burst into the thousands per second once cached, and a per-query
-			// hit log would fill the agent's log file with no diagnostic value.
-			// On a miss we still want to see the resolver path that was taken.
-			p.logger.Debug("dns cache miss",
-				append([]zap.Field{
-					zap.String("mode", string(mode)),
-					zap.String("cache_key", key),
-				}, dnsQuestionFields(question)...)...,
-			)
+			// No per-cache-miss log: the dnsCache TTL is 30s, so any
+			// unique query (including NXDOMAIN-heavy search-domain
+			// expansion that we never record as a mock) cycles through
+			// here every 30s and would fill the log on long sessions.
+			// Diagnostic value is captured downstream — by upstream
+			// failure logs in record mode, by mock-not-found SendError
+			// in test mode, and by the deduped "Recording new DNS mock".
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
 			if shouldCacheDNSResponse(mode, resp) {
@@ -637,27 +627,23 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
 	// These are often noise from search domain expansion or external transient issues.
+	// Silent on this path: negatives are not deduped via recordedDNSMocks (we only
+	// add successful responses there), so they re-enter recordDNSMock every 30s
+	// once the dnsCache TTL elapses. A debug log here would fill the agent log
+	// for the full lifetime of a recording session against a chatty client.
 	if in.Rcode != dns.RcodeSuccess {
-		// search-domain expansion makes NXDOMAIN very repetitive, so we
-		// keep this log compact (no answer/ns/extra body) to avoid
-		// filling the log on misses.
-		p.logger.Debug("skipping DNS mock recording due to non-zero rcode",
-			append(dnsQuestionFields(question),
-				zap.Int("rcode", in.Rcode),
-				zap.String("rcode_name", dnsRcodeString(in.Rcode)),
-			)...,
-		)
 		return resp, nil
 	}
 
 	// ========== DNS MOCK DEDUPLICATION ==========
 	// Generate a unique key based on the DNS query (ignoring response IPs).
 	// If we've already recorded a mock for this query, skip recording.
+	// Silent on the dedup-hit path: this fires on every cache miss after
+	// the first record (every 30s once the dnsCache TTL elapses) for the
+	// duration of the dedup tracker TTL — a debug log here would burst
+	// just like the negative-rcode path above.
 	dedupeKey := generateDNSDedupeKey(question)
 	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
-		p.logger.Debug("Skipping duplicate DNS mock",
-			append(dnsQuestionFields(question), zap.String("dedupe_key", dedupeKey))...,
-		)
 		return resp, nil
 	}
 	// Mark as recorded
