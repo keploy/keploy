@@ -93,16 +93,7 @@ record:
   memoryLimit: 0
 configPath: ""
 bypassRules: []
-# disableMapping=false enables the test→mock attribution table written to
-# mappings.yaml during synchronous record. determineMockingStrategy at
-# replay prefers mappings.yaml for per-test mock filtering and falls back
-# to timestamp-window matching when the file is absent — so leaving this
-# false does not break recordings that predate mapping support. Hardcoding
-# true here forced replay onto the brittle timestamp path even when the
-# recorder produced a correct mappings.yaml, which lost tightly-spaced
-# per-test mocks (listmonk-postgres pipelines 604/605, 2-3 tests racing on
-# the postgres session-lookup query at ~117 µs window boundaries).
-disableMapping: false
+disableMapping: true
 contract:
   driven: "consumer"
   mappings:
