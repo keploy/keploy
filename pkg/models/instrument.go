@@ -65,6 +65,17 @@ type OutgoingOptions struct {
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// CapturePackets toggles raw packet capture on the agent's proxy ports
+	// for the duration of a Record() session. The recorder enables this via
+	// --capture-packets so the agent can dump traffic into the test-set's
+	// pcap file under PcapPath. Replay (Mock) sessions ignore this flag.
+	CapturePackets bool
+	// PcapPath is the absolute path of the pcap file the agent should write
+	// when CapturePackets is set. The recorder computes this path from the
+	// freshly created test-set directory so each test-set gets its own
+	// capture. Empty string disables capture even when CapturePackets is
+	// true.
+	PcapPath string
 }
 
 type ConditionalDstCfg struct {

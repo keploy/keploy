@@ -81,6 +81,10 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
+	// CapturePackets toggles raw network packet capture on the proxy ports
+	// during recording. When enabled, a pcap file is written into the
+	// freshly-created test-set directory under the keploy folder.
+	CapturePackets bool `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
 }
 
 type Contract struct {

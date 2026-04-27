@@ -96,10 +96,11 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
+	IP4               string
+	IP6               string
+	Port              uint32
+	IncomingProxyPort uint16
+	DNSPort           uint32
 
 	DestInfo     agent.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -202,6 +203,17 @@ type Proxy struct {
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
 	skipListener bool
+
+	// pcapMu guards pcapCancel, pcapDone, and keyLogFile. The lifecycle
+	// is: startPacketCapture sets all three, stopPacketCapture cancels
+	// and waits on done, then closes the keylog file and clears the
+	// fields. Record() may be invoked across multiple test-sets, each
+	// one stops the previous capture before starting a fresh one
+	// targeting the new test-set's pcap and keylog paths.
+	pcapMu     sync.Mutex
+	pcapCancel context.CancelFunc
+	pcapDone   chan struct{}
+	keyLogFile *os.File
 }
 
 // SetSkipListener disables the TCP accept loop.
@@ -463,6 +475,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:             logger,
 		Port:               opts.ProxyPort,
+		IncomingProxyPort:  opts.IncomingProxyPort,
 		DNSPort:            opts.DNSPort, // default: 26789
 		synchronous:        opts.Agent.Synchronous,
 		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
@@ -575,6 +588,9 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
+	// Flush any in-flight packet capture so the test-set's pcap is
+	// finalised before the agent is allowed to exit.
+	p.stopPacketCapture()
 	return nil
 }
 
@@ -1445,6 +1461,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					InsecureSkipVerify: true, // nolint:gosec
 					ServerName:         sni,
 					NextProtos:         []string{"h2", "http/1.1"},
+					KeyLogWriter:       pTls.KeyLogWriter(),
 				}
 				speculativeDial = startSpeculativeUpstreamTLS(ctx, addr, specCfg)
 				speculativeDialAddr = addr
@@ -1650,6 +1667,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         serverName,
 			NextProtos:         nextProtos,
+			KeyLogWriter:       pTls.KeyLogWriter(),
 		}
 
 		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
@@ -2038,7 +2056,7 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 	return nil
 }
 
-func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
@@ -2050,12 +2068,30 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 	})
 	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
+	if opts.CapturePackets && opts.PcapPath != "" {
+		// Use a context detached from the per-call ctx so the capture
+		// outlives this Record() call and runs for the full session;
+		// stopPacketCapture is invoked on the next Record()/Mock() or
+		// when the proxy shuts down.
+		if err := p.startPacketCapture(context.Background(), opts.PcapPath); err != nil {
+			utils.LogError(p.logger, err, "failed to start packet capture; continuing without pcap",
+				zap.String("pcapPath", opts.PcapPath))
+		}
+	} else {
+		// New session without capture — make sure any previous capture
+		// from a prior test-set is torn down.
+		p.stopPacketCapture()
+	}
+
 	return nil
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	// Mock is replay; no pcap capture during replay. Tear down any
+	// capture left over from a previous record session.
+	p.stopPacketCapture()
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,

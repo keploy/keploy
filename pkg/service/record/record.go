@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -294,7 +295,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx)
+	frames, err := r.GetTestAndMockChans(reqCtx, newTestSetID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -509,7 +510,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, testSetID string) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -572,10 +573,27 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		tlsPrivateKey = string(keyBytes)
 	}
 
+	var pcapPath string
+	if r.config.Record.CapturePackets {
+		// Each test-set gets its own pcap so users can correlate
+		// captured traffic with the freshly recorded test cases.
+		// The directory is created up-front because the agent (which
+		// writes the file) can race with the testDB upsert that
+		// otherwise creates this folder lazily.
+		testSetDir := filepath.Join(r.config.Path, testSetID)
+		if err := os.MkdirAll(testSetDir, 0o755); err != nil {
+			cancel()
+			return FrameChan{}, fmt.Errorf("failed to create test-set dir %s: %w", testSetDir, err)
+		}
+		pcapPath = filepath.Join(testSetDir, "traffic.pcap")
+	}
+
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:         r.config.BypassRules,
-		MongoPassword: r.config.Test.MongoPassword,
-		TLSPrivateKey: tlsPrivateKey,
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		TLSPrivateKey:  tlsPrivateKey,
+		CapturePackets: r.config.Record.CapturePackets,
+		PcapPath:       pcapPath,
 	})
 	if err != nil {
 
