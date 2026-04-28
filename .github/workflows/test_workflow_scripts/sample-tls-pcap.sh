@@ -86,9 +86,27 @@ openssl req -new -key server.key -out server.csr -config server.cnf >/dev/null 2
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 1 -extfile server.cnf -extensions ext >/dev/null 2>&1
 
-# Postgres expects ssl_key_file mode 0600 inside the container; we
-# pin perms here so the bind mount carries them through.
-chmod 600 server.key
+# Bind-mounts preserve host file ownership/perms inside the container,
+# but each DB image's daemon runs as a different non-root UID and
+# refuses to read keys it cannot match:
+#   - MySQL 8.4 (`mysql:8.4`): daemon runs as user `mysql` (UID 999).
+#     With chmod 600 on a key owned by the GHA runner, the mysql user
+#     gets EACCES → "Unable to get private key" / "Failed to set up SSL".
+#   - Postgres 16-alpine: hard-coded sanity check refuses to start
+#     unless the keyfile is owned by the database user (postgres,
+#     UID 70 in alpine) or by root, with mode <= 0600 (or <=0640 if
+#     root-owned).
+#
+# Make a per-DB copy of the key chowned to that image's daemon UID.
+# `sudo` is available on the GHA runner; the host workspace is
+# scratch so leaving root-owned files behind is fine.
+sudo cp server.key server-key-mysql.pem
+sudo chown 999:999 server-key-mysql.pem
+sudo chmod 0600 server-key-mysql.pem
+
+sudo cp server.key server-key-postgres.pem
+sudo chown 70:70 server-key-postgres.pem
+sudo chmod 0600 server-key-postgres.pem
 
 cd "$GITHUB_WORKSPACE/sample-tls-app"
 
@@ -112,7 +130,7 @@ services:
     volumes:
       - ../.ci/certs/ca.crt:/etc/mysql/certs/ca.pem:ro
       - ../.ci/certs/server.crt:/etc/mysql/certs/server-cert.pem:ro
-      - ../.ci/certs/server.key:/etc/mysql/certs/server-key.pem:ro
+      - ../.ci/certs/server-key-mysql.pem:/etc/mysql/certs/server-key.pem:ro
     command:
       - --ssl-ca=/etc/mysql/certs/ca.pem
       - --ssl-cert=/etc/mysql/certs/server-cert.pem
@@ -133,7 +151,7 @@ services:
     ports: ["5433:5432"]
     volumes:
       - ../.ci/certs/server.crt:/etc/postgres-certs/server.crt:ro
-      - ../.ci/certs/server.key:/etc/postgres-certs/server.key:ro
+      - ../.ci/certs/server-key-postgres.pem:/etc/postgres-certs/server.key:ro
       - ../.ci/pg_hba.conf:/etc/postgres-certs/pg_hba.conf:ro
     command: >
       postgres
