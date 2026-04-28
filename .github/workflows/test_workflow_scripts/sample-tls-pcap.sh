@@ -108,6 +108,9 @@ sudo cp server.key server-key-postgres.pem
 sudo chown 70:70 server-key-postgres.pem
 sudo chmod 0600 server-key-postgres.pem
 
+echo "== cert dir perms =="
+ls -l ca.crt server.crt server-key-mysql.pem server-key-postgres.pem
+
 cd "$GITHUB_WORKSPACE/sample-tls-app"
 
 # Postgres pg_hba.conf — require SSL for the TCP rule
@@ -167,6 +170,25 @@ services:
 EOF
 
 docker compose -f .ci/compose.yml up -d --wait
+
+# Compose's healthcheck for MySQL is a non-TLS mysqladmin ping, so a
+# container that fails TLS init can still pass --wait. Verify the TLS
+# listener directly with openssl s_client; failure here surfaces a
+# MySQL/Postgres TLS misconfig BEFORE we lose context inside keploy.
+echo "== mysql TLS sanity =="
+echo Q | openssl s_client -connect 127.0.0.1:3306 -starttls mysql \
+  -CAfile .ci/certs/ca.crt -verify_return_error 2>&1 | tail -8 || {
+  echo "::error::MySQL TLS handshake failed";
+  docker logs sample-mysql-tls 2>&1 | tail -40;
+  false;
+}
+echo "== postgres TLS sanity =="
+echo Q | openssl s_client -connect 127.0.0.1:5433 -starttls postgres \
+  -CAfile .ci/certs/ca.crt -verify_return_error 2>&1 | tail -8 || {
+  echo "::error::Postgres TLS handshake failed";
+  docker logs sample-pg-tls 2>&1 | tail -40;
+  false;
+}
 endsec
 
 section "Install CA into OS trust store"
@@ -195,7 +217,10 @@ endsec
 section "Drive HTTP / MySQL / Postgres traffic"
 if ! wait_for_http "http://localhost:8080/" 120; then
   echo "::error::sample-tls-app did not become healthy on :8080"
-  exit 1
+  # Explicit dump_state — `exit 1` on a control-flow branch like
+  # this does not trigger the ERR trap under `set -e`, so we'd
+  # otherwise lose keploy's stderr. False, by contrast, fires ERR.
+  false
 fi
 
 # HTTP routes — outbound TLS to public APIs
