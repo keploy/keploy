@@ -591,10 +591,11 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 		return
 	}
 
-	// If the test case already has an entry, append the new mocks to it.
+	// If the test case already has an entry, replace its mocks (not append).
+	// Appending would attribute mocks from a drained queue to the wrong test.
 	for i := range actualTestMockMappings.TestCases {
 		if actualTestMockMappings.TestCases[i].ID == testCaseID {
-			actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
+			actualTestMockMappings.TestCases[i].Mocks = newMocks
 			return
 		}
 	}

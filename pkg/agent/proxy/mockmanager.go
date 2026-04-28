@@ -165,13 +165,6 @@ type MockManager struct {
 	closeOnce   sync.Once
 	closed      atomic.Bool
 
-	// invalidOrderWarnOnce fires the first-time Info log when
-	// SetMocksWithWindow drops a mock because its response timestamp
-	// precedes its request timestamp. Logging policy disallows Warn
-	// for this; Info is prominent enough that operators see the first
-	// hit. Subsequent drops stay at Debug level (via the per-call
-	// counter) so a pathological recording doesn't flood logs.
-	invalidOrderWarnOnce sync.Once
 
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
@@ -230,6 +223,13 @@ func SetConnectionIdleRetention(d time.Duration) {
 	}
 	connectionIdleRetentionNanos.Store(int64(d))
 }
+
+// invalidOrderWarnOnce fires the first-time Info log when
+// SetMocksWithWindow drops a mock because its response timestamp
+// precedes its request timestamp. Package-level so it fires at most
+// once per process regardless of how many MockManager instances are
+// created (one per test-set run), preventing per-test-set log spam.
+var invalidOrderWarnOnce sync.Once
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	if filtered == nil {

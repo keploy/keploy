@@ -88,6 +88,9 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	if err := models.SetMode(a.config.Agent.Mode); err != nil {
+		a.logger.Debug("failed to set agent mode", zap.Error(err))
+	}
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
