@@ -29,6 +29,191 @@ func stubIngressPaused(t *testing.T, fn func() bool) {
 	})
 }
 
+// TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk locks in the contract
+// that LastReadTime, when called after a successful Read, returns the readAt
+// of the chunk whose data the most recent Read returned bytes from — never
+// a chunk that is queued but not yet consumed.
+//
+// This is the exact race that broke listmonk-postgres on PR #4130's first
+// pass: the previous bridge+pipe design stored chunk N+1's ts BEFORE
+// pipe.Write blocked, so a parser that finished consuming chunk N and
+// queried LastReadTime before the bridge advanced past pipe.Write would
+// observe the next chunk's ts as the current request's reqTimestamp,
+// pushing per-test postgres mocks out of the window. Empty-body GETs
+// hit it deterministically because the parser never re-entered Read
+// between ReadRequest and LastReadTime.
+func TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	f := newAsyncPipeFeeder(0, zap.NewNop())
+
+	// Enqueue three chunks at distinct times.
+	t1 := time.Now()
+	t2 := t1.Add(15 * time.Millisecond)
+	t3 := t2.Add(15 * time.Millisecond)
+	f.ch <- timedChunk{data: []byte("AAA"), readAt: t1}
+	f.ch <- timedChunk{data: []byte("BBB"), readAt: t2}
+	f.ch <- timedChunk{data: []byte("CCC"), readAt: t3}
+	close(f.ch)
+
+	// Before any Read, LastReadTime is zero.
+	if !f.LastReadTime().IsZero() {
+		t.Fatalf("expected zero LastReadTime before any Read, got %v", f.LastReadTime())
+	}
+
+	read := func(n int) string {
+		buf := make([]byte, n)
+		got, err := f.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("unexpected Read error: %v", err)
+		}
+		return string(buf[:got])
+	}
+
+	// Consume chunk 1 fully. LastReadTime should equal t1, NOT t2 — even
+	// though chunk 2 is already queued.
+	if got := read(3); got != "AAA" {
+		t.Fatalf("first read: want AAA, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t1) {
+		t.Fatalf("after chunk 1: want %v, got %v (overshoot to next chunk)", t1, f.LastReadTime())
+	}
+
+	// Consume chunk 2 fully. LastReadTime should equal t2.
+	if got := read(3); got != "BBB" {
+		t.Fatalf("second read: want BBB, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t2) {
+		t.Fatalf("after chunk 2: want %v, got %v", t2, f.LastReadTime())
+	}
+
+	// Partial read of chunk 3 still updates LastReadTime to t3 (the
+	// chunk was popped on the partial read; subsequent reads draw
+	// from the same chunk).
+	if got := read(2); got != "CC" {
+		t.Fatalf("third read partial: want CC, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t3) {
+		t.Fatalf("after partial chunk 3: want %v, got %v", t3, f.LastReadTime())
+	}
+	// Drain the rest from the same chunk.
+	if got := read(8); got != "C" {
+		t.Fatalf("third read drain: want C, got %q", got)
+	}
+	if !f.LastReadTime().Equal(t3) {
+		t.Fatalf("after full chunk 3: want %v, got %v", t3, f.LastReadTime())
+	}
+
+	// Channel closed, no more chunks. EOF.
+	buf := make([]byte, 4)
+	if _, err := f.Read(buf); err != io.EOF {
+		t.Fatalf("expected EOF after drain, got %v", err)
+	}
+}
+
+// TestAsyncPipeFeederShutdownDrainWaitsForParser guards the regression
+// fixed alongside python-schema-match's missing /edge/nested_null capture:
+// shutdown's residual-chunk drain MUST wait for the parser goroutine to
+// exit before it consumes anything from the channel. Otherwise the drain
+// races the parser's Read for closed-channel data and silently steals
+// chunks the parser has not yet seen.
+//
+// Repro shape: short-lived HTTP/1.0 + Connection: close exchange where the
+// upstream socket EOFs immediately after the response, triggering Close
+// (and thus shutdown) on the feeder before the parser goroutine has been
+// scheduled. The parser then reads from a channel the drain has already
+// emptied, returns EOF, and emits nothing.
+func TestAsyncPipeFeederShutdownDrainWaitsForParser(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+
+	f := newAsyncPipeFeeder(0, zap.NewNop())
+
+	// Enqueue a chunk, mimicking io.Copy's Write of a single response.
+	if _, err := f.Write([]byte("HELLO")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Forwarder finished — close the feeder. This used to spawn a drain
+	// goroutine that started consuming f.ch immediately, racing with the
+	// not-yet-scheduled parser.
+	f.Close()
+
+	// Give the (pre-fix) drain goroutine ample time to win the race and
+	// empty the channel. With the fix in place the drain blocks on the
+	// parserExited signal and stays out of the channel.
+	time.Sleep(20 * time.Millisecond)
+
+	// Now play parser: read the chunk. With the fix this must succeed —
+	// the chunk is still in the channel waiting for us. Pre-fix the
+	// channel is empty and Read returns EOF.
+	buf := make([]byte, 8)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read: unexpected error %v", err)
+	}
+	if string(buf[:n]) != "HELLO" {
+		t.Fatalf("parser was supposed to consume HELLO before drain — got %q (drain raced and stole the chunk)", string(buf[:n]))
+	}
+
+	// Signal parser exit so shutdown's drain can proceed and the goroutine
+	// doesn't leak past test end.
+	f.signalParserExit()
+
+	// EOF after drain.
+	if _, err := f.Read(buf); err != io.EOF {
+		t.Fatalf("expected EOF after drain, got %v", err)
+	}
+}
+
+// TestCaptureHookSemaphoreMatchesConcurrencyConstant guards the link
+// between captureHookConcurrency and captureHookSem's buffer size. If
+// the constant is bumped without re-allocating the channel (or vice
+// versa), the parser would silently lose its concurrency cap and
+// regress the go-memory-load CI guard. Cap is asserted on the live
+// channel so a future refactor that swaps the type still has to keep
+// the invariant true.
+func TestCaptureHookSemaphoreMatchesConcurrencyConstant(t *testing.T) {
+	if got := cap(captureHookSem); got != captureHookConcurrency {
+		t.Fatalf("captureHookSem cap=%d, want %d (must equal captureHookConcurrency)", got, captureHookConcurrency)
+	}
+}
+
+// TestCaptureHookSemaphoreBackpressuresParser verifies that once
+// captureHookConcurrency permits are held, a further send on
+// captureHookSem blocks — i.e. the parser goroutine in
+// parseStreamingHTTP would block before launching another CaptureHook
+// goroutine. Without this backpressure the unbounded `go
+// hooksUtils.CaptureHook(...)` call piled goroutines (each holding ~10MB
+// in body buffers) past the 250 MiB go-memory-load CI threshold.
+func TestCaptureHookSemaphoreBackpressuresParser(t *testing.T) {
+	// Save and restore the global so this test doesn't poison sibling
+	// tests that may run before parseStreamingHTTP fires CaptureHook.
+	saved := captureHookSem
+	t.Cleanup(func() { captureHookSem = saved })
+	captureHookSem = make(chan struct{}, captureHookConcurrency)
+
+	for i := 0; i < captureHookConcurrency; i++ {
+		select {
+		case captureHookSem <- struct{}{}:
+		default:
+			t.Fatalf("acquire %d unexpectedly blocked before reaching capacity", i)
+		}
+	}
+
+	// One more acquire must NOT succeed in non-blocking mode — that's
+	// the backpressure the parser relies on.
+	select {
+	case captureHookSem <- struct{}{}:
+		t.Fatal("acquire past captureHookConcurrency succeeded; semaphore is not backpressuring")
+	default:
+	}
+
+	// Drain so the channel is left empty for any later subtests.
+	for i := 0; i < captureHookConcurrency; i++ {
+		<-captureHookSem
+	}
+}
+
 func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
 	paused := false
 	stubIngressPaused(t, func() bool { return paused })
@@ -89,6 +274,165 @@ func TestHTTPBodyCaptureBufferStopsAtBudget(t *testing.T) {
 	}
 	if got := len(capture.Bytes()); got != 0 {
 		t.Fatalf("expected over-budget capture buffer to be cleared, got %d bytes", got)
+	}
+}
+
+// TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion locks in the
+// contract that wireTimeConn.LastReadTime returns the time of the
+// most recent socket Read, which by construction is BEFORE the call
+// site that consumes the buffered bytes (here: an http.ReadRequest
+// that goes through a bufio.Reader on top of the wireTimeConn).
+//
+// This is the wire-arrival timestamp the sync-path HTTP capture loop
+// stamps onto tc.HTTPReq.Timestamp. The whole point of the wrapper is
+// that this timestamp is on-or-before the real arrival of the bytes,
+// so downstream parser captures (postgres v3 reqTimestampMock) sampled
+// at decode time — which is necessarily AFTER the SUT receives and
+// processes the HTTP request — never fall outside the per-test window's
+// left edge.
+func TestWireTimeConn_LastReadTimePrecedesBufioParseCompletion(t *testing.T) {
+	srvSide, clientSide := net.Pipe()
+	defer srvSide.Close()
+	defer clientSide.Close()
+
+	wire := &wireTimeConn{Conn: srvSide}
+	if !wire.LastReadTime().IsZero() {
+		t.Fatalf("expected zero LastReadTime before any Read, got %v", wire.LastReadTime())
+	}
+
+	rawReq := "GET /probe HTTP/1.1\r\nHost: x\r\n\r\n"
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		if _, err := clientSide.Write([]byte(rawReq)); err != nil {
+			t.Errorf("client Write: %v", err)
+		}
+	}()
+
+	br := bufio.NewReader(wire)
+	beforeParse := time.Now()
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		t.Fatalf("http.ReadRequest: %v", err)
+	}
+	afterParse := time.Now()
+	<-writeDone
+
+	if req.URL.Path != "/probe" {
+		t.Fatalf("parsed unexpected request: %+v", req.URL)
+	}
+
+	got := wire.LastReadTime()
+	if got.IsZero() {
+		t.Fatalf("LastReadTime is zero after a successful ReadRequest")
+	}
+	// LastReadTime is sampled inside Read AFTER the syscall returns,
+	// so it must be no earlier than the moment we entered ReadRequest
+	// and no later than the moment ReadRequest returned. The whole
+	// point of the wrapper is that it is also on-or-before the call
+	// site of "after parse" — i.e. on-or-before the time the sync-path
+	// loop would have sampled time.Now() under the old behaviour.
+	if got.Before(beforeParse) {
+		t.Fatalf("LastReadTime %v is before the call to ReadRequest %v", got, beforeParse)
+	}
+	if got.After(afterParse) {
+		t.Fatalf("LastReadTime %v is AFTER ReadRequest returned %v — wrapper sampled too late", got, afterParse)
+	}
+}
+
+// TestReqTimestampClampedAtIterStartUnderBufioPrefetch is the regression
+// test for the gin-mongo `record_build_replay_build` failure on
+// keploy/keploy#4147 review iteration: HTTP/1.1 keepalive can have
+// bufio.Reader serve request N entirely from bytes prefetched during
+// the prior iteration's socket Read (which was consuming request N-1's
+// tail). When that happens, wireConn.LastReadTime is from request N-1's
+// read window — DURING the previous test's handler — and using it raw
+// as request N's reqTimestamp pushes the per-test mock-window left
+// edge backwards across the previous test boundary, contaminating
+// request N's mock pool with mocks captured during request N-1.
+//
+// The capture loop's clamp `if !lastRead.After(iterStart) { ts =
+// iterStart }` defends against this. iterStart is captured AFTER the
+// previous iteration finished (i.e. after the previous response was
+// written), so the previous test's mocks are guaranteed to be outside
+// this test's window.
+//
+// The test simulates the prefetch scenario by:
+//  1. Pre-stamping wireTimeConn.lastReadNano to a moment in the past
+//     (representing a Read that fired during the prior iteration).
+//  2. Capturing iterStart = time.Now().
+//  3. Driving a ReadRequest entirely from bytes already in bufio's
+//     buffer (no underlying socket Read this iteration).
+//  4. Asserting the clamp falls back to iterStart, NOT the stale
+//     prior-iter lastReadNano.
+func TestReqTimestampClampedAtIterStartUnderBufioPrefetch(t *testing.T) {
+	srvSide, clientSide := net.Pipe()
+	defer srvSide.Close()
+	defer clientSide.Close()
+
+	wire := &wireTimeConn{Conn: srvSide}
+
+	// Step 1: pre-fill bufio's internal buffer in a way that emulates
+	// prefetch: write a full HTTP request to the pipe BEFORE the
+	// capture loop's iterStart is taken, then drive the bufio Read
+	// once so the bytes land in the buffer with lastReadNano stamped
+	// to the prior-iteration time.
+	rawReq := "GET /probe HTTP/1.1\r\nHost: x\r\n\r\n"
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		if _, err := clientSide.Write([]byte(rawReq)); err != nil {
+			t.Errorf("client Write: %v", err)
+		}
+	}()
+
+	br := bufio.NewReader(wire)
+	if _, err := br.Peek(1); err != nil {
+		t.Fatalf("priming bufio buffer: %v", err)
+	}
+	<-writeDone
+
+	priorRead := wire.LastReadTime()
+	if priorRead.IsZero() {
+		t.Fatalf("priming Peek did not stamp lastReadNano")
+	}
+
+	// Step 2: simulate the next iteration starting AFTER the prior
+	// request's response was written. Sleep long enough that
+	// iterStart is strictly later than priorRead even on a low-res
+	// monotonic clock.
+	time.Sleep(2 * time.Millisecond)
+	iterStart := time.Now()
+
+	// Step 3: ReadRequest serves entirely from the prefetched buffer
+	// — no underlying socket Read happens during this iteration.
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		t.Fatalf("http.ReadRequest: %v", err)
+	}
+	if req.URL.Path != "/probe" {
+		t.Fatalf("parsed unexpected request: %+v", req.URL)
+	}
+
+	// Step 4: lastReadNano is unchanged from priorRead because no
+	// new Read fired this iteration. The capture loop's clamp must
+	// detect that and fall back to iterStart.
+	lastRead := wire.LastReadTime()
+	if !lastRead.Equal(priorRead) {
+		t.Fatalf("lastReadNano changed during a buffer-served ReadRequest: prior=%v now=%v", priorRead, lastRead)
+	}
+
+	// Replay the capture loop's clamp logic.
+	reqTimestamp := lastRead
+	if !reqTimestamp.After(iterStart) {
+		reqTimestamp = iterStart
+	}
+
+	if reqTimestamp.Before(iterStart) {
+		t.Fatalf("reqTimestamp %v fell BEFORE iterStart %v — clamp failed and per-test window left edge would bleed into the prior iteration", reqTimestamp, iterStart)
+	}
+	if !reqTimestamp.Equal(iterStart) {
+		t.Fatalf("expected reqTimestamp == iterStart under prefetch (no fresh Read this iter); got reqTimestamp=%v iterStart=%v", reqTimestamp, iterStart)
 	}
 }
 
@@ -252,7 +596,7 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 	captureWG.Add(1)
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 		defer captureWG.Done()
 		// Read request+response bodies here so the test can assert them.
 		reqBody, _ := io.ReadAll(req.Body)
@@ -408,7 +752,7 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 	captureWG.Add(1)
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, synchronous bool, appPort uint16) {
+		opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 		defer captureWG.Done()
 		rb, _ := io.ReadAll(req.Body)
 		rsb, _ := io.ReadAll(resp.Body)

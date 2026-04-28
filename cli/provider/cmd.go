@@ -281,6 +281,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+		// Mirrors the root-level --disable-mapping switch so that the
+		// docker-compose / k8s sidecar agent (which reads its config
+		// from CLI args, not from the host's keploy.yml — the config
+		// directory isn't bind-mounted into the agent container) can
+		// honour the operator's choice and gate ResolveRange's
+		// TestMockMapping emission accordingly.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during synchronous record")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
@@ -327,7 +334,16 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test mode")
+		// Default mirrors keploy.yml's `disableMapping` (zero-value false → mapping
+		// enabled). Hardcoding the default to true silently disabled mapping-based
+		// mock filtering in test mode even when mappings.yaml was correctly
+		// produced during record, forcing replay onto the brittle timestamp-window
+		// path that loses tightly-spaced per-test mocks (listmonk-postgres
+		// pipeline 604, 3/38 tests with ~117 µs boundary races on the
+		// session-lookup query). determineMockingStrategy already falls back to
+		// timestamp-based filtering when no mappings.yaml exists, so flipping
+		// the default does not break recordings without mapping data.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
 		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
 		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
@@ -1276,6 +1292,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.Synchronous = synchronous
+
+		// Honour --disable-mapping passed to the agent (typically by the
+		// host CLI when starting the docker-compose / k8s sidecar agent).
+		// Without this, the agent process inside the container falls
+		// back to the embedded default of disableMapping=true and
+		// silently no-ops mappings.yaml production even when the
+		// operator's keploy.yml has disableMapping: false.
+		if cmd.Flags().Changed("disable-mapping") {
+			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+			if err != nil {
+				errMsg := "failed to get the disable-mapping flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.DisableMapping = disableMapping
+		}
 
 		enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 		if err != nil {

@@ -880,6 +880,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
+	// Forward the operator's --disable-mapping (root-level config) so
+	// the native agent process — even though it inherits the same
+	// keploy.yml via --config-path — sees an explicit override on
+	// invocations where the host CLI mutated the in-memory config
+	// after viper load (e.g. --disable-mapping=false on the test
+	// subcommand path that drove this agent start).
+	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}

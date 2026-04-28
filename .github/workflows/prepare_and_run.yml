@@ -409,6 +409,66 @@ jobs:
           $global:LASTEXITCODE = 0
           exit 0
 
+      # Defensive recovery: if a prior run on this self-hosted runner was
+      # interrupted partway through cleanup, the workspace can end up with
+      # files present but the .git subdirectory missing or corrupt. In that
+      # state actions/checkout@v4 with clean:true fails at "git config
+      # --local" with "not a git repository" because clean tries to operate
+      # on a non-git tree. Wipe the workspace contents in that case so
+      # checkout starts from a fresh init. Healthy workspaces (with a valid
+      # .git) are left untouched so the existing checkout fast path
+      # (clean+fetch over an existing clone) keeps working.
+      - name: Recover stale runner state
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            # 1. Kill any keploy processes left over from a prior run on this
+            #    self-hosted runner. They hold open file handles into the
+            #    workspace bin/ (notably WinDivert64.sys, the kernel driver
+            #    keploy uses for Windows traffic redirection), which makes
+            #    actions/checkout's clean step fail with EPERM on unlink.
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # 2. Stop the WinDivert kernel driver if it's still loaded.
+            #    keploy registers it as an SCM service named "WinDivert"
+            #    (or "WinDivert64" on some versions); leaving it running
+            #    pins the .sys file in the workspace and causes the same
+            #    EPERM observed at checkout-clean time.
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+
+            # 3. If a prior run was interrupted partway through cleanup the
+            #    workspace can end up with files but no .git, which makes
+            #    actions/checkout's clean:true fail with "not a git
+            #    repository". Wipe in that case so checkout starts fresh.
+            #    Healthy workspaces (with valid .git) are left alone so the
+            #    existing fast path (clean+fetch over an existing clone)
+            #    keeps working.
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state: $_"
+          }
+          exit 0
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -822,6 +882,58 @@ jobs:
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      - name: Recover stale runner state
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            # 1. Kill any keploy processes left over from a prior run on this
+            #    self-hosted runner. They hold open file handles into the
+            #    workspace bin/ (notably WinDivert64.sys, the kernel driver
+            #    keploy uses for Windows traffic redirection), which makes
+            #    actions/checkout's clean step fail with EPERM on unlink.
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # 2. Stop the WinDivert kernel driver if it's still loaded.
+            #    keploy registers it as an SCM service named "WinDivert"
+            #    (or "WinDivert64" on some versions); leaving it running
+            #    pins the .sys file in the workspace and causes the same
+            #    EPERM observed at checkout-clean time.
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+
+            # 3. If a prior run was interrupted partway through cleanup the
+            #    workspace can end up with files but no .git, which makes
+            #    actions/checkout's clean:true fail with "not a git
+            #    repository". Wipe in that case so checkout starts fresh.
+            #    Healthy workspaces (with valid .git) are left alone so the
+            #    existing fast path (clean+fetch over an existing clone)
+            #    keeps working.
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state: $_"
+          }
+          exit 0
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -888,6 +1000,58 @@ jobs:
           git config --file $gitConfig core.autocrlf false
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # See build-windows-amd64's "Recover broken workspace" step for rationale.
+      - name: Recover stale runner state
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            # 1. Kill any keploy processes left over from a prior run on this
+            #    self-hosted runner. They hold open file handles into the
+            #    workspace bin/ (notably WinDivert64.sys, the kernel driver
+            #    keploy uses for Windows traffic redirection), which makes
+            #    actions/checkout's clean step fail with EPERM on unlink.
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # 2. Stop the WinDivert kernel driver if it's still loaded.
+            #    keploy registers it as an SCM service named "WinDivert"
+            #    (or "WinDivert64" on some versions); leaving it running
+            #    pins the .sys file in the workspace and causes the same
+            #    EPERM observed at checkout-clean time.
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+
+            # 3. If a prior run was interrupted partway through cleanup the
+            #    workspace can end up with files but no .git, which makes
+            #    actions/checkout's clean:true fail with "not a git
+            #    repository". Wipe in that case so checkout starts fresh.
+            #    Healthy workspaces (with valid .git) are left alone so the
+            #    existing fast path (clean+fetch over an existing clone)
+            #    keeps working.
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state: $_"
+          }
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4
