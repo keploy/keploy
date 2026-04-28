@@ -192,7 +192,14 @@ func (p *Proxy) captureOnInterface(ctx context.Context, ifaceName string, b *pca
 		afpacket.OptTPacketVersion(afpacket.TPacketVersion3),
 	)
 	if err != nil {
-		p.logger.Warn("packet capture: failed to open interface",
+		// Per-interface open failures are routine — interface
+		// enumeration includes things like virtual / down / wireguard
+		// devices that NewTPacket can refuse, and loopback variants
+		// that need extra capabilities. Capture is best-effort across
+		// all interfaces, so we keep this at debug; if no interface
+		// ever yields packets the resulting empty pcap is itself the
+		// aggregate signal.
+		p.logger.Debug("packet capture: failed to open interface",
 			zap.String("iface", ifaceName), zap.Error(err))
 		return
 	}
