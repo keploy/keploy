@@ -458,23 +458,11 @@ check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
 
-section "Recording Diagnostics"
-echo "=== Recorded data summary ==="
-echo "Test cases: $(find ./keploy -name 'test-*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)"
-echo "Mock files: $(find ./keploy -name 'mocks.yaml' 2>/dev/null | wc -l)"
-echo "Mapping files: $(find ./keploy -name 'mappings.yaml' 2>/dev/null | wc -l)"
-echo "Total keploy dir size: $(du -sh ./keploy 2>/dev/null || echo 'N/A')"
-echo "Mock file sizes:"
-find ./keploy -name 'mocks.yaml' -exec ls -lh {} \; 2>/dev/null || true
-echo "RECORD_BIN version: $($RECORD_BIN --version 2>&1 || echo unknown)"
-echo "REPLAY_BIN version: $($REPLAY_BIN --version 2>&1 || echo unknown)"
-echo "=== End diagnostics ==="
-
 section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false --debug 2>&1 | tee test.txt &
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
 replay_pid=$!
 echo "Started Keploy test process with PID: $replay_pid"
 
