@@ -1,15 +1,29 @@
 name: TLS pcap + keylog (sample-tls-app)
 
-# End-to-end coverage for the --capture-packets feature: drive a real
-# HTTPS workload through the keploy outgoing proxy, then assert the
-# captured pcap can be decrypted by tshark using the streamed
-# sslkeys.log. Catches regressions in:
-#   - the broadcaster / keylog fanout in pkg/agent/proxy
-#   - the streaming HTTP endpoints in pkg/agent/routes
-#   - the recorder-side stream goroutine in pkg/service/record
-#   - any tls.Config site whose KeyLogWriter wiring breaks (HTTP
-#     parser path is the one exercised here; MySQL / Postgres paths
-#     are covered by their own dedicated demos elsewhere).
+# End-to-end coverage for keploy's TLS capture features. The job
+# exercises the proxy in two modes against a heterogeneous workload:
+#
+#   1. capture-only       (--capture-packets, default record path)
+#   2. with-opportunistic (--capture-packets --opportunistic-tls-intercept,
+#                          peek-and-hijack passthrough variant)
+#
+# Workload: ayush3160/sample-tls-app, which emits real outbound
+# TLS to:
+#   - HTTPS  (api.github.com / httpbin.org)
+#   - MySQL  (TLS, brought up locally via docker compose)
+#   - Postgres (TLS, brought up locally via docker compose)
+#
+# Per protocol asserts:
+#   - pcap + keylog stream to disk during recording
+#   - app's TLS validation passes against the OS root pool — proves
+#     keploy's MITM CA is correctly auto-installed
+#   - DB round-trip (INSERT then SELECT) works through the proxy
+#   - For HTTP, tshark + keylog recovers cleartext requests/responses
+#
+# Catches regressions in the broadcaster / keylog fanout, the
+# streaming endpoints, the recorder-side stream goroutine, the
+# opportunistic peek-and-hijack flow, and any tls.Config site whose
+# KeyLogWriter wiring breaks.
 
 on:
   workflow_call:
@@ -31,7 +45,14 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.config.job }}
+        mode:
+          - name: capture-only
+            flags: "--capture-packets"
+            description: "default record path; parsers handle protocol-aware MITM"
+          - name: with-opportunistic
+            flags: "--capture-packets --opportunistic-tls-intercept"
+            description: "peek-and-hijack passthrough; no parser dispatch after MITM"
+    name: ${{ matrix.config.job }} (${{ matrix.mode.name }})
     steps:
       - name: Checkout keploy repository
         uses: actions/checkout@v4
@@ -53,18 +74,20 @@ jobs:
           path: sample-tls-app
           ref: main
 
-      - name: Install tshark for pcap decryption check
+      - name: Install tshark + openssl for pcap decryption check
         run: |
           sudo apt-get update -qq
           # Pre-accept the wireshark-common dump-cap suid prompt so the
           # apt install runs non-interactively.
           echo 'wireshark-common wireshark-common/install-setuid boolean false' | sudo debconf-set-selections
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark openssl
 
-      - name: Run sample-tls-app under keploy --capture-packets
+      - name: Run sample-tls-app under keploy (${{ matrix.mode.name }})
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          KEPLOY_FLAGS: ${{ matrix.mode.flags }}
+          MODE_NAME: ${{ matrix.mode.name }}
         run: |
           cd sample-tls-app
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/sample-tls-pcap.sh
