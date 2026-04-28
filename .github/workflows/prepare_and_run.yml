@@ -49,7 +49,7 @@ jobs:
     # native-linux test path that uses `build`).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Add Private Parsers
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -106,7 +106,7 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
@@ -143,7 +143,7 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
@@ -418,7 +418,7 @@ jobs:
       # Defensive recovery: if a prior run on this self-hosted runner was
       # interrupted partway through cleanup, the workspace can end up with
       # files present but the .git subdirectory missing or corrupt. In that
-      # state actions/checkout@v4 with clean:true fails at "git config
+      # state actions/checkout@v4.2.2 with clean:true fails at "git config
       # --local" with "not a git repository" because clean tries to operate
       # on a non-git tree. Wipe the workspace contents in that case so
       # checkout starts from a fresh init. Healthy workspaces (with a valid
@@ -476,7 +476,7 @@ jobs:
           exit 0
 
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -592,7 +592,7 @@ jobs:
     needs: [build-and-upload]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       # Use the non-race amd64 binary: see build-linux-arm64's
       # header comment for the rationale. go-memory-load and
@@ -631,7 +631,7 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Download linux/arm64 binary
         uses: actions/download-artifact@v4
@@ -941,7 +941,7 @@ jobs:
           exit 0
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup per-job git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
@@ -1066,7 +1066,7 @@ jobs:
           exit 0
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup per-job git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'

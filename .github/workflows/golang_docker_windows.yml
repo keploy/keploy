@@ -86,7 +86,7 @@ jobs:
           exit 0
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           clean: true
 
@@ -132,7 +132,7 @@ jobs:
           version: ${{ github.sha }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go

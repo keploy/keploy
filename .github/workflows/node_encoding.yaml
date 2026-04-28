@@ -21,7 +21,7 @@ jobs:
     name: ${{ matrix.job }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -34,7 +34,7 @@ jobs:
           src: ${{ matrix.replay_src }}
 
       - name: Checkout Encoding sample repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: ayush3160/http-br
           path: http-br

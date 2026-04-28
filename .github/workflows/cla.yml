@@ -14,11 +14,11 @@ jobs:
   cla-assistant:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: "CLA Assistant"
         if: "(github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'"
-        uses: "cla-assistant/github-action@v2.1.3-beta"
+        uses: "cla-assistant/github-action@v2.6.1"
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           PERSONAL_ACCESS_TOKEN: "${{ secrets.PRO_ACCESS_TOKEN }}"

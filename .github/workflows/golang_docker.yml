@@ -34,7 +34,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - id: image
         uses: ./.github/actions/download-image
@@ -52,7 +52,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           ref: main

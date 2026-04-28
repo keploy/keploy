@@ -44,7 +44,7 @@ jobs:
     name: MySQL Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -115,7 +115,7 @@ jobs:
     name: gRPC Fuzzer ${{ matrix.mode }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -196,7 +196,7 @@ jobs:
     name: Postgres Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -289,7 +289,7 @@ jobs:
     name: Mongo Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy

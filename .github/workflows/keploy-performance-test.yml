@@ -35,20 +35,20 @@ jobs:
 
     steps:
       - name: Checkout Keploy (current branch with scripts)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           path: keploy
 
       - name: Checkout Keploy to test (custom repo/branch if manually specified)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
           ref: ${{ github.event.inputs.keploy_branch || 'main' }}
           path: keploy-to-test
 
       - name: Checkout Spring PetClinic
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: spring-projects/spring-petclinic
           path: petclinic

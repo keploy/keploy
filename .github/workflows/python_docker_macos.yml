@@ -37,7 +37,7 @@ jobs:
           git config --global --unset-all core.sshCommand 2>/dev/null || true
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Verify Docker Desktop is running (macOS)
         run: |
@@ -65,7 +65,7 @@ jobs:
           src: ${{ matrix.replay_src }}
 
       - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-python
           path: samples-python

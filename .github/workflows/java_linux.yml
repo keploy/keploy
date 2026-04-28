@@ -26,7 +26,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -39,7 +39,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-java repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-java
           path: samples-java
@@ -98,7 +98,7 @@ jobs:
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -111,7 +111,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-java repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-java
           path: samples-java

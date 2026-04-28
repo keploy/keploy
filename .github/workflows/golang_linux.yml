@@ -58,7 +58,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -84,7 +84,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go
@@ -122,7 +122,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -142,7 +142,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go
@@ -174,7 +174,7 @@ jobs:
     name: dns_dedup - ${{ matrix.config.job }}
     steps:
       - name: Checkout Keploy
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -194,7 +194,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-go
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go
@@ -226,7 +226,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/keploy
 
@@ -247,7 +247,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go

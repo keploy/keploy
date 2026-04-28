@@ -46,7 +46,7 @@ jobs:
           git config --global --unset-all core.sshCommand 2>/dev/null || true
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Verify Docker Desktop is running (macOS)
         run: |
@@ -74,7 +74,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: keploy/samples-go
           path: samples-go
