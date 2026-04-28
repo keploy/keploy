@@ -956,7 +956,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	go func() {
 		var dst io.Writer = upConn
 		if reqFeeder != nil {
-			dst = io.MultiWriter(upConn, reqFeeder)
+			// Order matters: reqFeeder first samples time.Now() inside its
+			// Write before upConn forwards bytes to the app. This guarantees
+			// HTTP req timestamp ≤ forward instant ≤ any SQL the app fires
+			// in response — preserves causality between HTTP and DB stamps.
+			dst = io.MultiWriter(reqFeeder, upConn)
 		}
 		_, _ = io.Copy(dst, clientConn)
 		if reqFeeder != nil {
