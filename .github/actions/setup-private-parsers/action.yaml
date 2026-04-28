@@ -23,7 +23,7 @@ inputs:
     # Set that repo variable to feat/v2-native-parsers during the
     # review window; unset it (or it falls back to 'main') after
     # merge — no action.yaml changes needed.
-    default: 'fix/mock-timestamp'
+    default: 'main'
 
 runs:
   using: composite

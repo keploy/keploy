@@ -62,9 +62,6 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		return res, err
 	}
 
-	// Set the timestamp of the initial request
-	res.reqTimestamp = models.CapturedReqTime(ctx)
-
 	// Decode server handshake packet
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
@@ -105,6 +102,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 		return res, err
 	}
+
+	// Stamp reqTimestamp from the actual handshake-response arrival.
+	// CapturedReqTime tracks the most recent request chunk on this
+	// connection, so reading it here pins the timestamp to the wire
+	// arrival of the client's first packet rather than to whatever
+	// stale value was carried forward from a prior request.
+	res.reqTimestamp = models.CapturedReqTime(ctx)
 
 	_, err = destConn.Write(handshakeResponse)
 	if err != nil {
