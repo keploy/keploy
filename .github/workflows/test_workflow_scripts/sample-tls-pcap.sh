@@ -113,11 +113,27 @@ ls -l ca.crt server.crt server-key-mysql.pem server-key-postgres.pem
 
 cd "$GITHUB_WORKSPACE/sample-tls-app"
 
-# Postgres pg_hba.conf — require SSL for the TCP rule
+# Postgres pg_hba.conf — require SSL for the TCP rule.
+#
+# Auth method is "trust" (no password exchange) on purpose. Postgres
+# 14+ stores the user's password as scram-sha-256 by default, and
+# pgx auto-negotiates SCRAM-SHA-256-PLUS when the connection is over
+# TLS. SCRAM-PLUS hashes the server's TLS certificate into the
+# channel-binding token; under keploy MITM the client sees keploy's
+# synthesized cert while the server has the real one, so the
+# binding hashes diverge and every login fails with
+# "FATAL: SCRAM channel binding check failed". This is a deliberate
+# anti-MITM property of SCRAM-PLUS — there is no client-side flag
+# that makes it pass cleanly through a sniff-and-decrypt proxy.
+#
+# Skipping auth keeps the test focused on the TLS handshake / wire
+# layer, which is what --capture-packets and
+# --opportunistic-tls-intercept actually exercise. We still require
+# `hostssl`, so plaintext connections are rejected.
 cat > .ci/pg_hba.conf <<EOF
 local   all all                     trust
 host    all all 127.0.0.1/32 trust
-hostssl all all 0.0.0.0/0    md5
+hostssl all all 0.0.0.0/0    trust
 EOF
 
 # Compose: minimal mysql + postgres, both speaking TLS.
