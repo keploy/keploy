@@ -466,10 +466,28 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		firstWindowStart = reader.FirstTestWindowStart()
 	}
 
+	// Cross-window autopromote: BEFORE the per-test window-partition
+	// runs, scan the full per-test pool for postgres-v3 cohorts that
+	// satisfy the autopromote heuristic across windows. Promoted mocks
+	// are mutated in place (Lifetime → Session, LifetimeDerived=true)
+	// and routed onto the session pool below so the strict per-test
+	// window filter no longer drops them as out-of-window.
+	//
+	// This is the upstream complement to integrations-side
+	// PerTestProvider.ApplyAutopromote, which only sees the windowed
+	// slice and therefore cannot resolve cohorts that fire once per
+	// test across N tests (listmonk auth-middleware session-lookup
+	// being the canonical case). Env off-switch:
+	// KEPLOY_PG_V3_CROSS_WINDOW_AUTOPROMOTE=0.
+	originalFiltered, crossWindowPromoted := applyCrossWindowAutopromote(a.logger, originalFiltered)
+
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
 		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+		if len(crossWindowPromoted) > 0 {
+			unfilteredMocks = append(unfilteredMocks, crossWindowPromoted...)
+		}
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves
 		// out-of-window non-config per-test mocks into its "unfiltered"
@@ -487,6 +505,18 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		filteredMocks = perTestIn
 		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
+		if len(crossWindowPromoted) > 0 {
+			// Cross-window-promoted mocks are LifetimeSession by the
+			// time the helper returns; appending them to the session
+			// pool BEFORE the lax-promoted slice keeps the session
+			// tier's iteration order stable (cross-window decisions
+			// run first, lax-promote stragglers last). The downstream
+			// MockManager partitions by lifetime, not by slice order,
+			// so the only consumer this ordering matters for is the
+			// Mongo-style cross-version handshake matcher discussed
+			// in the lax branch below.
+			unfilteredMocks = append(unfilteredMocks, crossWindowPromoted...)
+		}
 		if len(promotedToSession) > 0 {
 			unfilteredMocks = append(unfilteredMocks, promotedToSession...)
 			// Ordering: both FilterConfigMocks and FilterPerTestAndLaxPromoted
