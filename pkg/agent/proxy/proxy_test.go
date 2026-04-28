@@ -12,6 +12,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // newTLSTestServer spins up a TLS listener with a self-signed cert. The
@@ -272,5 +274,55 @@ func TestNextProtosSubset(t *testing.T) {
 				t.Fatalf("nextProtosSubset(%v, %v) = %v; want %v", tc.want, tc.offered, got, tc.expected)
 			}
 		})
+	}
+}
+
+// TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify locks in the
+// MITM-correct dest-side posture: when the upgrade fn is invoked with
+// isClient=true (keploy dialing the real upstream), it MUST handshake
+// without verifying the upstream cert, regardless of what
+// InsecureSkipVerify the caller-supplied cfg held. The supplied cfg
+// must NOT be mutated — only the per-dial clone gets the flag flipped.
+//
+// This is a regression test for the dest-side passthrough drop reported
+// as `dest TLS handshake failed: x509: certificate is valid for
+// 127.0.0.1, not 10.224.0.152` against in-cluster K8s services whose
+// upstream cert SAN doesn't match the ClusterIP keploy sees.
+func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
+	// Self-signed cert with CN "test.local"; we'll dial it asking for
+	// a different ServerName to force the strict-verify path to fail
+	// if the fix is missing.
+	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
+	defer ln.Close()
+
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop())
+
+	rawConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial upstream: %v", err)
+	}
+	defer rawConn.Close()
+
+	// Strict cfg: deliberately wrong ServerName, no InsecureSkipVerify.
+	// Without the fix, tls.Client(...).Handshake would fail with an
+	// x509 hostname error.
+	caller := &tls.Config{
+		ServerName: "wrong.example.invalid",
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tlsConn, err := upgrade(ctx, rawConn, true, caller)
+	if err != nil {
+		t.Fatalf("dest-side upgrade should ignore upstream cert validity, got: %v", err)
+	}
+	defer tlsConn.Close()
+
+	// The caller's cfg must remain pristine — clone-on-dial, never mutate
+	// what the parser handed us.
+	if caller.InsecureSkipVerify {
+		t.Fatalf("caller cfg.InsecureSkipVerify was mutated to true; expected the upgrade fn to clone before flipping the flag")
 	}
 }
