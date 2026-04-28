@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -479,6 +480,15 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
 	disableCompression := !hasAcceptEncoding
 
+	// Replay HTTP client always skips TLS verification: captured test cases
+	// for HTTPS endpoints typically point at self-signed certs (sample apps,
+	// short-lived replay pods regenerated on each run). The replayer dials
+	// localhost:<port> through a kubectl port-forward, so the cert's CN
+	// won't match anyway. The mock comparison happens on the decoded HTTP
+	// payload, not on the wire layer — failing to verify the cert here
+	// turns every HTTPS test case into a guaranteed false negative.
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+
 	var client *http.Client
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
@@ -490,6 +500,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			},
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
+				TLSClientConfig:    tlsCfg,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -502,6 +513,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    tlsCfg,
 			},
 		}
 	} else {
@@ -515,6 +527,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  false,
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    tlsCfg,
 			},
 		}
 	}
