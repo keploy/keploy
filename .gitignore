@@ -63,3 +63,4 @@ testdata
 __debug_bin*
 keploy
 extraparsers.go
+postgres_autopromote_wire.go
