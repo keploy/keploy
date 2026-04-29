@@ -138,7 +138,9 @@ docker compose down
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
-$REPLAY_BIN test -c "python3 manage.py runserver" --delay 10    2>&1 | tee test_logs.txt
+# Django can take longer to boot after the database is stopped and Keploy is
+# replaying the recorded Postgres mocks, especially on shared CI runners.
+$REPLAY_BIN test -c "python3 manage.py runserver" --delay 20    2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
         echo "Error found in pipeline..."

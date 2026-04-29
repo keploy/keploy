@@ -222,12 +222,18 @@ runs:
         # extractors below already treat empty as "no override".
         PR_BODY: ${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}
       run: |
-        # Use per-run config when isolation is active, otherwise fall back to --global
+        # Use job-scoped config when isolation is active, otherwise fall back to --global
         if ($env:GIT_CONFIG_GLOBAL) {
           git config --file $env:GIT_CONFIG_GLOBAL url."git@github.com:".insteadOf "https://github.com/"
         } else {
           git config --global url."git@github.com:".insteadOf "https://github.com/"
         }
+        # Go shells out to git for module fetches. Keep the rewrite in the
+        # current process environment too, so go's child git process cannot
+        # miss it if a self-hosted runner has stale global config state.
+        $env:GIT_CONFIG_COUNT = "1"
+        $env:GIT_CONFIG_KEY_0 = "url.git@github.com:.insteadOf"
+        $env:GIT_CONFIG_VALUE_0 = "https://github.com/"
 
         $env:GOPRIVATE = "github.com/keploy/integrations"
         $Fetched = $false
