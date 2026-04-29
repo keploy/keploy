@@ -102,6 +102,13 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// JSON-path spec for Postgres: serialise the raw PacketBundle
 		// structs directly instead of going through req.Message.Encode
 		// (yaml.Node) → MarshalDoc → yaml→JSON round-trip.
+		// Timestamp tags are lowercase (matching the YAML side and the
+		// models.*Schema types used for HTTP/DNS/etc.) so the on-disk
+		// shape is consistent across kinds. They're typed as time.Time
+		// rather than interface{} so a zero ReqTimestampMock — common
+		// for connection-setup config mocks captured before any test —
+		// gets dropped by the encoder rather than emitted as the
+		// confusing "0001-01-01T00:00:00Z" sentinel.
 		type pgRequest struct {
 			Meta         map[string]string     `json:"meta,omitempty"`
 			PacketBundle postgres.PacketBundle `json:"packet_bundle"`
@@ -115,8 +122,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Requests         []pgRequest       `json:"requests"`
 			Response         []pgResponse      `json:"responses"`
 			CreatedAt        int64             `json:"created,omitempty"`
-			ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 		}
 		reqs := make([]pgRequest, 0, len(mock.Spec.PostgresRequestsV2))
 		for _, v := range mock.Spec.PostgresRequestsV2 {
@@ -140,13 +147,14 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// `interface{}` with json tags on every concrete wire-message
 		// type (MongoOpMessage, MongoOpQuery, MongoOpReply, …), so
 		// encoding/json handles them natively — no yaml.Node round-trip.
+		// See PostgresV2 above for why timestamps are lowercase + time.Time.
 		type mgSpec struct {
 			Metadata         map[string]string      `json:"metadata"`
 			Requests         []models.MongoRequest  `json:"requests"`
 			Response         []models.MongoResponse `json:"responses"`
 			CreatedAt        int64                  `json:"created,omitempty"`
-			ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
 		}
 		spec = mgSpec{
 			Metadata:         mock.Spec.Metadata,
@@ -161,19 +169,56 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// PacketBundle whose Message is `interface{}` with JSON-ready
 		// packet types, so we can emit them as-is without the
 		// per-packet req.Message.Encode(...) yaml.Node dance.
+		// See PostgresV2 above for why timestamps are lowercase + time.Time.
 		type mySpec struct {
 			Metadata         map[string]string `json:"metadata"`
 			Requests         []mysql.Request   `json:"requests"`
 			Response         []mysql.Response  `json:"responses"`
 			CreatedAt        int64             `json:"created,omitempty"`
-			ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 		}
 		spec = mySpec{
 			Metadata:         mock.Spec.Metadata,
 			Requests:         mock.Spec.MySQLRequests,
 			Response:         mock.Spec.MySQLResponses,
 			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.PostgresV3:
+		// JSON-path spec for the v3 Postgres parser. Mirrors
+		// postgresV3YamlSpec but with json tags. PostgresV3Spec already has
+		// json tags on every sub-pointer, so encoding/json handles the
+		// discriminated union natively — no yaml.Node round-trip.
+		//
+		// Both nil-spec and Type/sub-pointer mismatches are hard rejects on
+		// the YAML path; mirror that here so the JSON-path recorder cannot
+		// silently persist a malformed mock that would NPE on replay.
+		if mock.Spec.PostgresV3 == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3 mock with nil Spec.PostgresV3 (json path)",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, false, errPostgresV3NilPayload
+		}
+		if err := validatePostgresV3Spec(mock.Spec.PostgresV3); err != nil {
+			utils.LogError(logger, err, "refusing to marshal PostgresV3 mock with inconsistent sub-spec (json path)",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("postgres_v3_type", mock.Spec.PostgresV3.Type),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, false, err
+		}
+		type pgV3Spec struct {
+			Metadata         map[string]string      `json:"metadata,omitempty"`
+			PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
+			ReqTimestampMock interface{}            `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}            `json:"resTimestampMock,omitempty"`
+		}
+		spec = pgV3Spec{
+			Metadata:         mock.Spec.Metadata,
+			PostgresV3:       mock.Spec.PostgresV3,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
@@ -1304,8 +1349,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []pgRequest       `json:"requests"`
 				Response         []pgResponse      `json:"responses"`
 				CreatedAt        int64             `json:"created,omitempty"`
-				ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
 			var s pgSpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1319,16 +1364,14 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			for _, r := range s.Response {
 				resps = append(resps, postgres.Response{PacketBundle: r.PacketBundle})
 			}
-			mockSpec := models.MockSpec{
+			mock.Spec = models.MockSpec{
 				Metadata:            s.Metadata,
 				Created:             s.CreatedAt,
 				PostgresRequestsV2:  reqs,
 				PostgresResponsesV2: resps,
+				ReqTimestampMock:    s.ReqTimestampMock,
+				ResTimestampMock:    s.ResTimestampMock,
 			}
-			if t, ok := s.ReqTimestampMock.(string); ok {
-				_ = t // timestamps preserved as written; left typed as interface{} on purpose
-			}
-			mock.Spec = mockSpec
 		case models.Mongo:
 			// Mongo: Message is interface{} — json.Unmarshal puts a
 			// map[string]interface{} there. We dispatch on
@@ -1339,8 +1382,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []models.MongoRequest  `json:"requests"`
 				Response         []models.MongoResponse `json:"responses"`
 				CreatedAt        int64                  `json:"created,omitempty"`
-				ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
 			}
 			var s mgSpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1363,10 +1406,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				s.Response[i].Message = typed
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:       s.Metadata,
-				Created:        s.CreatedAt,
-				MongoRequests:  s.Requests,
-				MongoResponses: s.Response,
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MongoRequests:    s.Requests,
+				MongoResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
 			}
 		case models.MySQL:
 			type mySpec struct {
@@ -1374,8 +1419,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []mysql.Request   `json:"requests"`
 				Response         []mysql.Response  `json:"responses"`
 				CreatedAt        int64             `json:"created,omitempty"`
-				ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
 			var s mySpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1396,10 +1441,54 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				s.Response[i].Message = typed
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:       s.Metadata,
-				Created:        s.CreatedAt,
-				MySQLRequests:  s.Requests,
-				MySQLResponses: s.Response,
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MySQLRequests:    s.Requests,
+				MySQLResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.PostgresV3:
+			// Mirror of the YAML path's PostgresV3 case (see DecodeMocks),
+			// using json tags. PostgresV3Spec has json tags on every
+			// sub-pointer so encoding/json can reconstruct the
+			// discriminated union directly. Both nil-spec and
+			// Type/sub-pointer mismatches are hard rejects so a corrupt
+			// record cannot round-trip through disk and NPE at replay.
+			type pgV3Spec struct {
+				Metadata         map[string]string      `json:"metadata,omitempty"`
+				PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
+			}
+			var s pgV3Spec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3 json",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
+				return nil, err
+			}
+			if s.PostgresV3 == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3 json block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
+			if err := validatePostgresV3Spec(s.PostgresV3); err != nil {
+				utils.LogError(logger, err, "PostgresV3 json block has inconsistent sub-spec",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("postgres_v3_type", s.PostgresV3.Type),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				PostgresV3:       s.PostgresV3,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
 			}
 		default:
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
