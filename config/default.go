@@ -13,7 +13,7 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = fmt.Sprintf(`
 path: ""
-storageFormat: "json"
+storageFormat: "yaml"
 appId: 0
 appName: ""
 command: ""

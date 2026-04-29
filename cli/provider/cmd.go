@@ -257,7 +257,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
-		cmd.PersistentFlags().String("storage-format", c.cfg.StorageFormat, "Serialization format for testcases/mocks/reports/mappings: json (default) or yaml")
+		cmd.PersistentFlags().String("storage-format", c.cfg.StorageFormat, "Serialization format for testcases/mocks/reports/mappings: yaml (default) or json")
 		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
@@ -685,12 +685,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.logger.Info("Color encoding is disabled")
 	}
 
-	// Validate --storage-format flag (applies to all commands via persistent flag).
-	// NOTE: Temporarily defaulting to "json" so CI pipelines exercise the new
-	// JSON serialization path end-to-end. Flip back to "yaml" once validated.
+	// Validate --storage-format flag (applies to all commands via persistent flag)
 	c.cfg.StorageFormat = strings.ToLower(strings.TrimSpace(c.cfg.StorageFormat))
 	if c.cfg.StorageFormat == "" {
-		c.cfg.StorageFormat = "json"
+		c.cfg.StorageFormat = "yaml"
 	}
 	switch c.cfg.StorageFormat {
 	case "yaml", "json":
