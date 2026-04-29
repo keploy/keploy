@@ -653,6 +653,16 @@ type MockState struct {
 	Timestamp        int64     `json:"timestamp"`
 	ReqTimestampMock string    `json:"reqTimestampMock,omitempty"`
 	ResTimestampMock string    `json:"resTimestampMock,omitempty"`
+	// Lifetime carries the recorder-derived mock tier (per-test, session,
+	// connection, …) through GetConsumedMocks so the test-mode mapping
+	// writer can carve out session/connection mocks from its
+	// record-time-window filter — those mocks are recorded during app
+	// boot before any test fires, so their ReqTimestampMock falls
+	// outside every test window even when they're consumed by a test.
+	// Without this, mappings.yaml comes back empty for postgres v3
+	// workloads whose recorder classifies handshake / pool-warmup /
+	// catalog probes as session-tier (#empty-mapping bug).
+	Lifetime Lifetime `json:"lifetime,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
