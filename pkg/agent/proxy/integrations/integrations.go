@@ -244,10 +244,28 @@ type MockWriter interface {
 // and connection mocks are marked-used for telemetry
 // (MarkMockAsUsed); DeleteUnFilteredMock exists for the rare consumer
 // that eagerly evicts a session-pool entry (e.g. the MySQL prepared-
-// statement teardown path on COM_STMT_CLOSE).
+// statement teardown path on COM_STMT_CLOSE); DeleteStartupMock
+// consumes a startup-tier mock matched during application bootstrap so
+// the next identical query picks the next-recorded mock in chronological
+// order (the boot path's analogue of DeleteFilteredMock for per-test).
 type MockConsumer interface {
 	DeleteFilteredMock(mock models.Mock) bool
 	DeleteUnFilteredMock(mock models.Mock) bool
+	// DeleteStartupMock removes a matched startup-tier mock from the
+	// startup tree. Returns true if the mock was found and removed,
+	// false otherwise (e.g. the mock wasn't classified into startup at
+	// load time, or it has already been consumed by a prior match).
+	//
+	// Required for boot-phase replay correctness when an application
+	// issues the same query repeatedly during recording while DB state
+	// mutates: the recorder captures multiple same-shape mocks with
+	// diverging responses, the boot-phase matcher (with the earliest-
+	// wins tiebreaker) picks them in chronological order, and consumption
+	// here advances through the recorded sequence so the booting app
+	// sees the same response chain it saw at record time. Without this,
+	// the matcher repeatedly picks the same earliest mock and the
+	// booting app's follow-on revalidation queries fail.
+	DeleteStartupMock(mock models.Mock) bool
 	MarkMockAsUsed(mock models.Mock) bool
 }
 
