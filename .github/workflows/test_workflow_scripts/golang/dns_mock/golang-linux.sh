@@ -117,7 +117,7 @@ echo "Recording stopped."
 endsec
 
 # shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
     section "Start Recording (json)"

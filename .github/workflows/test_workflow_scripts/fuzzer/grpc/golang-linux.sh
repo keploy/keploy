@@ -50,8 +50,8 @@ else
 fi
 
 # shellcheck disable=SC1091
-if [ -f "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh" ]; then
-  source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+if [ -f "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh" ]; then
+  source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 else
   json_pass_supported() { return 1; }
   json_scan_reports() { return 1; }

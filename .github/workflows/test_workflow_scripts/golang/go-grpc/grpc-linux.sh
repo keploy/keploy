@@ -167,7 +167,7 @@ rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 
 # shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"

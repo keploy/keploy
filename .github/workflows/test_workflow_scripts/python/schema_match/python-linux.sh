@@ -92,7 +92,7 @@ echo "✅ SUCCESS: Schema match logic and side-by-side visualization verified."
 # scratch directory so the existing 8/5 assertion above is unaffected.
 # Gated on both binaries supporting --storage-format json.
 # shellcheck disable=SC1091
-source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
     echo "Running json-format schema-match pass (scratch path)..."

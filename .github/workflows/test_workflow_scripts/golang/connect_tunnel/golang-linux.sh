@@ -218,7 +218,7 @@ for i in 1 2; do
 done
 
 # shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
     for i in 1 2; do

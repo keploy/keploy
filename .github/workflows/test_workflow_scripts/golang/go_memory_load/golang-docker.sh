@@ -463,7 +463,7 @@ check_recorded_tests
 # on the memory-load path. No replay (replay is intentionally disabled in
 # this workflow — it's a record-side memory regression test).
 # shellcheck disable=SC1091
-source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
     section "Recording load-test traffic (json)"

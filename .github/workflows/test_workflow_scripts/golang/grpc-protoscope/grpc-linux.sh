@@ -145,7 +145,7 @@ echo "🧪 Recording gRPC server with Keploy..."
 do_record
 
 # shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
     echo "🧪 Recording gRPC server with Keploy (json)..."
