@@ -247,6 +247,33 @@ func TestClaimName_RejectsTraversalPath(t *testing.T) {
 	}
 }
 
+func TestUpsert_RejectsTraversalNameComponents(t *testing.T) {
+	// upsert receives testSetID and tc.Name as raw components that
+	// later flow into filepath.Join. filepath.Join calls Clean which
+	// silently collapses ".." segments, so the post-Join ValidatePath
+	// can't catch escapes — the rejection has to happen on the raw
+	// strings before the join.
+	parent := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	tc := httpTC("GET", "http://api.test/users")
+
+	badIDs := []string{"../etc", "..", "foo/bar", `foo\bar`, "."}
+	for _, id := range badIDs {
+		if _, err := ts.upsert(t.Context(), id, tc); err == nil {
+			t.Errorf("expected upsert to reject testSetID %q, got nil", id)
+		}
+	}
+
+	badNames := []string{"../escape", "foo/bar", `foo\bar`, "..", "."}
+	for _, name := range badNames {
+		named := *tc
+		named.Name = name
+		if _, err := ts.upsert(t.Context(), "test-set-0", &named); err == nil {
+			t.Errorf("expected upsert to reject tc.Name %q, got nil", name)
+		}
+	}
+}
+
 func TestClaimName_Basic(t *testing.T) {
 	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
 	dir := filepath.Join(t.TempDir(), "tests")

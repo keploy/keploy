@@ -90,6 +90,23 @@ func ParseNamingStrategy(s string) (NamingStrategy, error) {
 	}
 }
 
+// validateNameComponent rejects raw path components that would let a
+// caller escape the keploy directory once they reach filepath.Join.
+// We must reject path separators and ".." on the *unjoined* string
+// because filepath.Join calls filepath.Clean, which collapses ".."
+// segments before any downstream ValidatePath ever sees them — so
+// inputs like testSetID="../etc" turn into "etc/tests" and pass the
+// post-Join check even though they escape the configured root.
+func validateNameComponent(label, s string) error {
+	if s == "" {
+		return nil
+	}
+	if strings.ContainsAny(s, `/\`) || strings.Contains(s, "..") || s == "." {
+		return fmt.Errorf("invalid %s %q: must not contain path separators or parent references", label, s)
+	}
+	return nil
+}
+
 // nextTestIndex returns the next available test-N index for tcsPath.
 // yaml.FindLastIndex already returns "max existing + 1" (i.e. the
 // next available index on disk), so the first call seeds the counter
@@ -311,16 +328,24 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	// Validate the testcase directory once at the top so every
-	// subsequent reference — claimName, the deferred placeholder
-	// cleanup, saveAssets, WriteFile — sees the same (potentially
-	// normalised) value. Previously claimName re-validated
-	// internally and kept the normalised copy local to its own
-	// scope, leaving this function targeting the raw input for
-	// the cleanup Remove and for downstream writes; any future
-	// hardening of ValidatePath (e.g. calling filepath.Clean)
-	// would silently create a mismatch between the reservation
-	// and the writes.
+	// Reject path-separator/".." injection on the raw components
+	// before filepath.Join cleans them away. yaml.ValidatePath only
+	// runs after Join, by which point the input has already been
+	// normalised through filepath.Clean — so a hostile testSetID
+	// like "../etc" would be silently rewritten into a path that
+	// passes the no-".." check while still escaping ts.TcsPath.
+	if err := validateNameComponent("testSetID", testSetID); err != nil {
+		return tcsInfo{name: "", path: ""}, err
+	}
+	if err := validateNameComponent("test case name", tc.Name); err != nil {
+		return tcsInfo{name: "", path: ""}, err
+	}
+	// Validate the joined testcase directory at the top of upsert so
+	// the deferred placeholder cleanup, saveAssets and the temp-file
+	// rename all operate on the same (potentially Clean'd) value
+	// rather than on the raw input. Helpers such as claimName
+	// validate the path again on their own; this is just the local
+	// invariant for upsert's bookkeeping.
 	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
 	if err != nil {
 		return tcsInfo{name: "", path: ""}, fmt.Errorf("validate testcase directory: %w", err)
