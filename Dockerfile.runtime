@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.6
+# Runtime-only image — expects a prebuilt keploy binary in the build
+# context under dist/keploy-linux-<arch>/keploy. Used by CI (PR build
+# + release) so the binary compiled in a preceding job is reused
+# rather than rebuilt inside docker. Keeps image builds to ~10s
+# (COPY + apt install) and avoids qemu-based arm64 cross-compilation
+# on amd64 runners.
+#
+# External users who want to build from source should use the main
+# Dockerfile, which is self-contained (runs `go build` internally).
+
+FROM debian:trixie-slim
+
+# TARGETARCH is auto-populated by BuildKit on multi-platform builds
+# (linux/amd64 -> amd64, linux/arm64 -> arm64). Callers must ensure
+# dist/keploy-linux-$TARGETARCH/keploy exists for every platform
+# passed to --platform.
+ARG TARGETARCH
+
+ENV KEPLOY_INDOCKER=true
+
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl sudo && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY dist/keploy-linux-${TARGETARCH}/keploy /app/keploy
+COPY entrypoint.sh /app/entrypoint.sh
+
+# windows compatibility (strip CRLF if the file picked it up on a
+# Windows checkout) + make executable.
+RUN sed -i 's/\r$//' /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh /app/keploy
+
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent", "--is-docker"]

@@ -75,7 +75,7 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 	if emptyResponsesExist {
 		if !pi.promptUserForCapture() {
 			pi.toCapture = false
-			pi.logger.Warn("Few test cases will be skipped as responses are missing from the collection")
+			pi.logger.Info("Few test cases will be skipped as responses are missing from the collection")
 		}
 	}
 
@@ -109,7 +109,7 @@ func (pi *PostmanImporter) parsePostmanCollection(collectionBytes []byte) (*Post
 
 func (pi *PostmanImporter) validatePostmanSchema(schema string) {
 	if schema != postmanSchemaVersion {
-		pi.logger.Warn("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
+		pi.logger.Info("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
 	}
 }
 
@@ -292,14 +292,14 @@ func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionSt
 	for _, item := range collection.Items.PostmanItems {
 		for _, testItem := range item.Item {
 			if len(testItem.Response) == 0 {
-				pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
 			}
 		}
 	}
 	for _, testItem := range collection.Items.TestDataItems {
 		if len(testItem.Response) == 0 {
-			pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+			pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 			return true
 		}
 	}

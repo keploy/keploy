@@ -15,7 +15,6 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/platform/auth"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -198,9 +197,8 @@ func start(ctx context.Context) {
 		utils.LogError(logger, err, errMsg)
 		os.Exit(1)
 	}
-	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, conf, auth)
+	svcProvider := provider.NewServiceProvider(logger, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {

@@ -180,20 +180,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	switch cmd.Name() {
-
-	case "upload": //for uploading mocks
-		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
-		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-
 	case "generate", "download":
-		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
-			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
-			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-			cmd.Flags().StringSlice("registry-ids", c.cfg.MockDownload.RegistryIDs, "Registry IDs for direct mock download")
-			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-			return nil
-		}
-
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
 		cmd.Flags().StringP("path", "p", ".", "Specify the path to generate/download contracts")
@@ -217,29 +204,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-	case "gen":
-		cmd.Flags().String("source-file-path", "", "Path to the source file.")
-		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
-		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
-		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
-		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
-		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
-		cmd.Flags().String("test-dir", "", "Path to the test directory.")
-		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
-		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
-		cmd.Flags().String("llm-api-version", "", "API version of the llm")
-		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
-		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
-		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
-		err := cmd.MarkFlagRequired("test-command")
-		if err != nil {
-			errMsg := "failed to mark testCommand as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-
-	case "record", "test", "rerecord":
+	case "record", "test":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -268,7 +233,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 
-		//add rest of the uncommon flags for record, test, rerecord commands
+		// add rest of the uncommon flags for record and test commands
 		c.AddUncommonFlags(cmd)
 
 	case "report":
@@ -293,6 +258,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
 		cmd.PersistentFlags().String("storage-format", c.cfg.StorageFormat, "Serialization format for testcases/mocks/reports/mappings: json (default) or yaml")
+		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -316,12 +282,26 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+		// Mirrors the root-level --disable-mapping switch so that the
+		// docker-compose / k8s sidecar agent (which reads its config
+		// from CLI args, not from the host's keploy.yml — the config
+		// directory isn't bind-mounted into the agent container) can
+		// honour the operator's choice and gate ResolveRange's
+		// TestMockMapping emission accordingly.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during synchronous record")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// --ca-java-home is the manual override for the app-aware Java
+		// truststore install. When the auto-detector in
+		// pkg/agent/proxy/tls/java_detect.go cannot resolve the app's JDK
+		// (exotic launcher, containerised re-exec), operators can point
+		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
+		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
+		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
 
 	default:
 		return errors.New("unknown command name")
@@ -340,49 +320,50 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
-	case "test", "rerecord":
+	case "test":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
+		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for --health-url polling (e.g. 60s, 2m). If no 2xx is seen within this window, replay logs an info message and falls back to --delay.")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
+		// Default mirrors keploy.yml's `disableMapping` (zero-value false → mapping
+		// enabled). Hardcoding the default to true silently disabled mapping-based
+		// mock filtering in test mode even when mappings.yaml was correctly
+		// produced during record, forcing replay onto the brittle timestamp-window
+		// path that loses tightly-spaced per-test mocks (listmonk-postgres
+		// pipeline 604, 3/38 tests with ~117 µs boundary races on the
+		// session-lookup query). determineMockingStrategy already falls back to
+		// timestamp-based filtering when no mappings.yaml exists, so flipping
+		// the default does not break recordings without mapping data.
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test mode")
 		cmd.Flags().Bool("retry-passing-test", c.cfg.RetryPassing, "Enable retry passing test mode")
-		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
-		if cmd.Name() == "rerecord" {
-			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
-			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
-			cmd.Flags().String("branch", c.cfg.ReRecord.Branch, "In which git branch to send the updated config file with new mock hash")
-			cmd.Flags().String("owner", c.cfg.ReRecord.Owner, "Git user to be referenced for commiting config change")
-		}
-		if cmd.Name() == "test" {
-			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
-			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
-			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
-			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
-			_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
-			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
-			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
-			cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
-			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
-			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
-			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
-			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
-			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
-		}
+		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
+		cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
+		cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
+		cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
+		cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
+		cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
+		cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
+		_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
+		cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
+		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
+		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
+		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
+		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 	}
 }
 
@@ -406,16 +387,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
-		"sourceFilePath":        "source-file-path",
-		"testFilePath":          "test-file-path",
-		"testCommand":           "test-command",
-		"coverageFormat":        "coverage-format",
-		"expectedCoverage":      "expected-coverage",
-		"maxIterations":         "max-iterations",
-		"testDir":               "test-dir",
-		"llmBaseUrl":            "llm-base-url",
-		"model":                 "model",
-		"llmApiVersion":         "llm-api-version",
 		"configPath":            "config-path",
 		"path":                  "path",
 		"port":                  "port",
@@ -436,6 +407,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
+		"jsonOutput":            "json",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
 		"enableTesting":         "enable-testing",
@@ -443,6 +415,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployContainer":       "keploy-container",
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
+		"healthUrl":             "health-url",
+		"healthPollTimeout":     "health-poll-timeout",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
 		"protoFile":             "proto-file",
@@ -495,10 +469,26 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Debug("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
+		c.logger.Info("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
-	if !IsConfigFileFound {
+	// The "create config file if missing" behavior is meaningful
+	// only for user-facing commands (record/test/etc.) that are
+	// expected to persist keploy.yml for reuse across invocations.
+	// The `agent` subcommand is a worker process spawned by the
+	// parent keploy: it still reads an existing keploy.yml via
+	// viper.ReadInConfig() in PreProcessFlags to pick up the same
+	// settings the parent resolved, but it has no use for writing
+	// a fresh one if the file is missing — the parent has already
+	// handed it the effective config via CLI flags + env. Running
+	// CreateConfigFile from the agent therefore produces a file
+	// no one reads; worse, on containerised runs the host's
+	// absolute --config-path doesn't resolve inside the agent's
+	// filesystem and the call fails with a misleading ENOENT
+	// "failed to write config file" ERROR (kafka-ecommerce CI
+	// run 2541/10). Skip the create-on-missing branch for the
+	// agent subcommand specifically.
+	if !IsConfigFileFound && cmd.Name() != "agent" {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
@@ -609,9 +599,32 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The --json flag isn't registered on every subcommand (record / agent
+	// don't define it in enterprise builds), so Lookup + fallback avoids
+	// an early-return that would skip every subsequent validation step
+	// below (including the agent-mode wiring that the agent subprocess
+	// needs — without it, the agent starts up with mode="").
+	jsonOutput := false
+	if cmd.Flags().Lookup("json") != nil {
+		if v, err := cmd.Flags().GetBool("json"); err == nil {
+			jsonOutput = v
+		} else {
+			utils.LogError(c.logger, err, "failed to get the json flag")
+		}
+	}
+	c.cfg.JSONOutput = jsonOutput
+
+	// In JSON mode, redirect logs to stderr so they don't contaminate JSON on stdout
+	if c.cfg.JSONOutput {
+		logger, err := log.RedirectToStderr()
+		if err == nil {
+			*c.logger = *logger
+		}
+	}
+
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
+	if cmd.Name() != "agent" && !c.cfg.JSONOutput {
 		PrintLogo(os.Stdout, disableAnsi)
 	}
 	if c.cfg.Debug {
@@ -697,23 +710,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
-
-	case "upload": //for uploading mocks
-		path, err := cmd.Flags().GetString("path")
-		if err != nil {
-			errMsg := "failed to get the path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
-		testSets, err := cmd.Flags().GetStringSlice("test-sets")
-		if err != nil {
-			errMsg := "failed to get the test-sets"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetSelectedTests(c.cfg, testSets)
 
 	case "report":
 		path, err := cmd.Flags().GetString("path")
@@ -850,34 +846,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
-		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
-			path, err := cmd.Flags().GetString("path")
-			if err != nil {
-				errMsg := "failed to get the path"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.Path = utils.ToAbsPath(c.logger, path)
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
-			if err != nil {
-				errMsg := "failed to get the testsets"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			config.SetSelectedTests(c.cfg, testSets)
-
-			registryIDs, err := cmd.Flags().GetStringSlice("registry-ids")
-			if err != nil {
-				errMsg := "failed to get the registry-ids"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.MockDownload.RegistryIDs = registryIDs
-
-			return nil
-		}
-
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
 			errMsg := "failed to get the path"
@@ -928,18 +896,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "record", "test", "rerecord":
-
-		if cmd.Name() == "rerecord" {
-			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
-			if err != nil {
-				errMsg := "failed to get the amend-testset flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.cfg.ReRecord.AmendTestSet = updateTestSet
-		}
-
+	case "record", "test":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
@@ -1028,7 +985,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			// check if the buildDelay is less than 30 seconds
 			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
-				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
+				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
@@ -1113,7 +1070,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Record.EnableSampling = enableSampling
 		}
 
-		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+		if cmd.Name() == "test" {
 			//check if the keploy folder exists
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
@@ -1164,71 +1121,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			if cmd.Name() == "rerecord" {
-				c.cfg.Test.SkipCoverage = true
-				host, err := cmd.Flags().GetString("host")
-				if err != nil {
-					errMsg := "failed to get the provided host"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.Host = host
-				port, err := cmd.Flags().GetUint32("port")
-				if err != nil {
-					errMsg := "failed to get the provided port"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.Port = port
-
-				grpcPort, err := cmd.Flags().GetUint32("grpc-port")
-				if err != nil {
-					errMsg := "failed to get the provided grpcPort"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.GRPCPort = grpcPort
-
-				ssePort, err := cmd.Flags().GetUint32("sse-port")
-				if err != nil {
-					errMsg := "failed to read --sse-port flag; ensure the value is a valid port number"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.SSEPort = ssePort
-
-				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
-				if err != nil {
-					errMsg := "failed to get the provided delay"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				c.cfg.Test.APITimeout, err = cmd.Flags().GetUint64("api-timeout")
-				if err != nil {
-					errMsg := "failed to get the provided api-timeout"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				c.cfg.Test.DisableMockUpload, err = cmd.Flags().GetBool("disableMockUpload")
-				if err != nil {
-					errMsg := "failed to get the provided disableMockUpload"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-
-				// optional flag to show response diffs during rerecord
-				showDiff, err := cmd.Flags().GetBool("show-diff")
-				if err != nil {
-					errMsg := "failed to get the show-diff flag"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.ShowDiff = showDiff
-				return nil
-			}
-
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
 			// and not due to flakiness or our internal issue.
@@ -1241,7 +1133,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			if mustPass {
 				c.cfg.Test.SkipCoverage = true
-				c.cfg.Test.DisableMockUpload = true
 			}
 
 			// in mustpass mode, set the maxFlakyChecks count to 3 explicitly,
@@ -1288,7 +1179,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if c.cfg.Test.Delay <= 5 {
-				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
+				c.logger.Info(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
 					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
@@ -1328,20 +1219,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	case "templatize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
-	case "gen":
-		if os.Getenv("API_KEY") == "" {
-			utils.LogError(c.logger, nil, "API_KEY is not set")
-			return errors.New("API_KEY is not set")
-		}
-		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
-			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
-			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
-			if c.cfg.Gen.TestDir == "" {
-				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
-				return errors.New("TestDir is not set")
-			}
-		}
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -1379,6 +1256,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
 
+		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get ca-java-home flag")
+			return nil
+		}
+		// Trim whitespace so accidental `--ca-java-home=" "` doesn't
+		// short-circuit auto-detection with a junk path that will
+		// stat-fail in installJavaCAForHome and fall back to PATH
+		// keytool anyway (but logged at Debug as a spurious override).
+		c.cfg.Agent.CAJavaHome = strings.TrimSpace(caJavaHome)
+
 		mode, err := cmd.Flags().GetString("mode")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get mode flag")
@@ -1415,6 +1303,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.Synchronous = synchronous
+
+		// Honour --disable-mapping passed to the agent (typically by the
+		// host CLI when starting the docker-compose / k8s sidecar agent).
+		// Without this, the agent process inside the container falls
+		// back to the embedded default of disableMapping=true and
+		// silently no-ops mappings.yaml production even when the
+		// operator's keploy.yml has disableMapping: false.
+		if cmd.Flags().Changed("disable-mapping") {
+			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+			if err != nil {
+				errMsg := "failed to get the disable-mapping flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.DisableMapping = disableMapping
+		}
 
 		enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 		if err != nil {
@@ -1464,7 +1368,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {

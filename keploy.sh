@@ -412,7 +412,7 @@ installKeploy (){
 
     cleanup_tmp() {
         # Remove extracted files /tmp directory
-        tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
+        tmp_files=("LICENSE" "README.md" "READMEes-Es.md")
         for file in "${tmp_files[@]}"; do
             if [ -f "/tmp/$file" ]; then
                 if [ "$NO_ROOT" = "true" ]; then
@@ -477,6 +477,23 @@ installKeploy (){
     fi
 }
 
+# Route to Keploy with paid features installer by default; pass --oss to install Keploy OSS.
+USE_OSS=false
+forwarded_args=()
+for arg in "$@"; do
+    case "$arg" in
+        --oss) USE_OSS=true ;;
+        *) forwarded_args+=("$arg") ;;
+    esac
+done
+set -- "${forwarded_args[@]}"
+
+if [ "$USE_OSS" = false ]; then
+    echo "Installing Keploy (with paid features) by default. Pass '--oss' to install Keploy OSS instead."
+    curl --silent -O -L https://keploy.io/ent/install.sh
+    source install.sh "$@"
+    return 0 2>/dev/null || exit 0
+fi
 
 installKeploy "$@"
 

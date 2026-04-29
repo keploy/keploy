@@ -34,16 +34,25 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
 
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          repository: keploy/samples-python
+          path: samples-python
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: samples-python/${{ matrix.app.path }}/requirements.txt
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -54,11 +63,6 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.replay_src }}
-      - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
-        with:
-          repository: keploy/samples-python
-          path: samples-python
       - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -66,6 +70,11 @@ jobs:
         run: |
           cd samples-python/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh
+
+      # TODO(postgres-v3 RCA): flask-secret is not postgres-touching, so
+      # KEPLOY_PG_V3_LOG_BIND_VALUES + recordings upload are intentionally
+      # skipped here. See django-postgres job below for the instrumented
+      # template; mirror it here only if flask-secret regresses on PG.
 
   python_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -88,16 +97,26 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-      
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          repository: keploy/samples-python
+          path: samples-python
+          ref: native-linux
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: samples-python/${{ matrix.app.path }}/requirements.txt
 
       - name: Setup docker-compose
         run: |
@@ -120,15 +139,26 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.replay_src }}
-      - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
-        with:
-          repository: keploy/samples-python
-          path: samples-python
       - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          # RCA instrumentation for postgres-v3 per-test window misalignment
+          # (see PR #4126). Logs live PG bind values on replay matcher misses
+          # so the uploaded recordings can be cross-checked offline.
+          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"
         run: |
           cd samples-python/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh
+
+      - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
+          path: |
+            samples-python/${{ matrix.app.path }}/keploy/
+            samples-python/${{ matrix.app.path }}/test_logs.txt
+            samples-python/${{ matrix.app.path }}/*App_*.txt
+          if-no-files-found: warn
+          retention-days: 7

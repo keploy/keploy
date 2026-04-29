@@ -1,13 +1,45 @@
 #!/bin/bash
 
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
-
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
+dump_gin_mongo_ci_diagnostics() {
+    echo "===== docker ps -a ====="
+    docker ps -a || true
+
+    echo "===== mongoDb logs (last 200 lines) ====="
+    if docker ps -a --format '{{.Names}}' | grep -qx 'mongoDb'; then
+        docker logs --tail 200 mongoDb || true
+    else
+        echo "mongoDb container not found"
+    fi
+
+    echo "===== candidate Keploy/app log files under $(pwd) ====="
+    if find . -type f \( -iname '*keploy*.log' -o -iname '*app*.log' -o -name '*.txt' \) -print | sed 's|^\./||' | grep -q '.'; then
+        find . -type f \( -iname '*keploy*.log' -o -iname '*app*.log' -o -name '*.txt' \) -print | sed 's|^\./||'
+    else
+        echo "No Keploy/app log files matching '*keploy*.log', '*app*.log', or '*.txt' were found in the workspace"
+    fi
+}
+
 # Start mongo before starting keploy.
+docker rm -f mongoDb >/dev/null 2>&1 || true
 docker run --rm -d -p27017:27017 --name mongoDb mongo
+trap 'docker rm -f mongoDb >/dev/null 2>&1 || true' EXIT
+
+mongo_ready=false
+for mongo_attempt in {1..30}; do
+    if docker exec mongoDb mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q '^1$'; then
+        mongo_ready=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$mongo_ready" != true ]; then
+    echo "::error::MongoDB did not become ready within 60 seconds. Next steps: verify the Docker daemon is available, check for image pull or container startup errors, and inspect the mongoDb logs printed below."
+    dump_gin_mongo_ci_diagnostics
+    exit 1
+fi
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -29,13 +61,64 @@ rm -rf keploy/
 # Build the binary.
 go build -cover -coverpkg=./... -o ginApp
 
+stop_recording(){
+    local kp_pid="${1:-}"
+    local rec_pid
+
+    rec_pid="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    echo "$rec_pid Keploy PID"
+    echo "Killing keploy"
+    if [ -n "$rec_pid" ]; then
+        sudo kill -INT "$rec_pid" 2>/dev/null || true
+        # Wait for keploy to flush and exit (up to 30s).
+        for stop_attempt in {1..30}; do
+            kill -0 "$rec_pid" 2>/dev/null || break
+            sleep 1
+        done
+        # SIGINT-then-SIGKILL escalation. On keploy/keploy#4077 run
+        # 24631193918 a single gin-mongo record iteration hung the
+        # entire job for 140+ minutes because keploy didn't respond
+        # to SIGINT and `wait` at the bottom of the loop blocked
+        # forever on its tee'd stdout. Dumping goroutines before
+        # SIGKILL gives us the actual RCA on the next hang instead
+        # of a blank 6-hour timeout. SIGQUIT is Go-runtime-friendly
+        # and prints all goroutine stacks to stderr, which the
+        # tee above captures into ${app_name}.txt.
+        if kill -0 "$rec_pid" 2>/dev/null; then
+            echo "::error::keploy did not exit within 30s of SIGINT (pid $rec_pid). Dumping goroutines via SIGQUIT, then escalating to SIGKILL."
+            sudo kill -QUIT "$rec_pid" 2>/dev/null || true
+            sleep 3
+            sudo kill -9 "$rec_pid" 2>/dev/null || true
+            # Brief pause so the tee pipe has a chance to drain
+            # before the outer `wait` returns and the loop moves on.
+            sleep 2
+            return 1
+        fi
+    elif [ -n "$kp_pid" ]; then
+        sudo kill -INT "$kp_pid" 2>/dev/null || true
+    else
+        echo "No keploy process found to kill."
+    fi
+}
 
 send_request(){
     local kp_pid="$1"
 
+    # Bound the readiness loop so a never-starting app (keploy
+    # stuck, mongo stuck, docker stuck, anything) fails the
+    # iteration in 5 minutes instead of hanging the whole job
+    # for hours — see run 24631193918 where this loop was the
+    # suspected entry point into a 140-minute gin-mongo hang.
+    local deadline=$(( $(date +%s) + 300 ))
     app_started=false
     while [ "$app_started" = false ]; do
-        if curl --request POST \
+        if [ "$(date +%s)" -gt "$deadline" ]; then
+            echo "::error::gin-mongo app did not respond on http://localhost:8080 within 5 minutes. Next steps: review 'docker ps -a' and the mongoDb logs printed below, then inspect any Keploy/app log files listed for this workspace."
+            dump_gin_mongo_ci_diagnostics
+            stop_recording "$kp_pid"
+            return 1
+        fi
+        if curl --silent --fail --max-time 5 --output /dev/null --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
       --data '{
@@ -45,62 +128,60 @@ send_request(){
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-    echo "App started"      
+    echo "App started"
     # Start making curl calls to record the testcases and mocks.
-    curl --request POST \
+    curl --fail --show-error --max-time 30 --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
       --data '{
       "url": "https://google.com"
-    }'
+    }' || { stop_recording "$kp_pid"; return 1; }
 
-    curl --request POST \
+    curl --fail --show-error --max-time 30 --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
       --data '{
       "url": "https://facebook.com"
-    }'
+    }' || { stop_recording "$kp_pid"; return 1; }
 
-    curl -X GET http://localhost:8080/CJBKJd92
+    curl --fail --show-error --max-time 30 -X GET http://localhost:8080/CJBKJd92 || { stop_recording "$kp_pid"; return 1; }
 
     # Test email verification endpoint
-    curl --request GET \
+    curl --fail --show-error --max-time 30 --request GET \
       --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
-      --header 'Accept: application/json'
+      --header 'Accept: application/json' || { stop_recording "$kp_pid"; return 1; }
 
-    curl --request GET \
+    curl --fail --show-error --max-time 30 --request GET \
       --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
-      --header 'Accept: application/json'
+      --header 'Accept: application/json' || { stop_recording "$kp_pid"; return 1; }
 
     # Wait for keploy to record the tcs and mocks.
     sleep 10
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    if [ -n "$REC_PID" ]; then
-        sudo kill -INT "$REC_PID" 2>/dev/null || true
-        # Wait for keploy to flush and exit (up to 30s)
-        for i in {1..30}; do
-            kill -0 "$REC_PID" 2>/dev/null || break
-            sleep 1
-        done
-    else
-        echo "No keploy process found to kill."
-    fi
+    stop_recording "$kp_pid" || return 1
+}
+
+has_unexpected_errors() {
+    local log_file="$1"
+    grep "ERROR" "$log_file" | grep -Ev "failed to read from connection.*use of closed network connection"
 }
 
 
-for i in {1..2}; do
-    app_name="javaApp_${i}"
+for record_iteration in {1..2}; do
+    app_name="ginMongo_${record_iteration}"
     "$RECORD_BIN" record -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
     
     KEPLOY_PID=$!
 
-    # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
-    send_request "$KEPLOY_PID"
+    # Drive traffic and stop keploy (will fail the pipeline if health never comes up).
+    if ! send_request "$KEPLOY_PID"; then
+        echo "::error::Failed to drive gin-mongo traffic for record iteration ${record_iteration}"
+        cat "${app_name}.txt" || true
+        exit 1
+    fi
 
-    if grep "ERROR" "${app_name}.txt"; then
+    if unexpected_errors="$(has_unexpected_errors "${app_name}.txt")"; then
         echo "Error found in pipeline..."
+        printf '%s\n' "$unexpected_errors"
         cat "${app_name}.txt"
         exit 1
     fi
@@ -111,7 +192,7 @@ for i in {1..2}; do
     fi
     sleep 5
     wait
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${record_iteration}"
 done
 
 # Keep MongoDB running during test replay. Keploy will serve mocks for
@@ -121,8 +202,15 @@ done
 
 # Start the gin-mongo app in test mode.
 "$REPLAY_BIN" test -c "./ginApp" --delay 7   2>&1 | tee test_logs.txt
+replay_status=${PIPESTATUS[0]}
 
 cat test_logs.txt || true
+
+if [ "$replay_status" -ne 0 ]; then
+  echo "::error::Keploy replay failed with exit code ${replay_status}"
+  cat test_logs.txt
+  exit "$replay_status"
+fi
 
 # ✅ Extract and validate coverage percentage from log
 coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
@@ -145,8 +233,9 @@ else
   echo "✅ Coverage meets threshold (>= 50%)"
 fi
 
-if grep "ERROR" "test_logs.txt"; then
+if unexpected_errors="$(has_unexpected_errors "test_logs.txt")"; then
     echo "Error found in pipeline..."
+    printf '%s\n' "$unexpected_errors"
     cat "test_logs.txt"
     exit 1
 fi
@@ -161,21 +250,21 @@ all_passed=true
 
 
 # Get the test results from the testReport file.
-for i in {0..1}
+for test_set in {0..1}
 do
     # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+    report_file="./keploy/reports/test-run-0/test-set-$test_set-report.yaml"
 
     # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
     # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
+    echo "Test status for test-set-$test_set: $test_status"
 
     # Check if any test set did not pass
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        echo "Test-set-$i did not pass."
+        echo "Test-set-$test_set did not pass."
         break # Exit the loop early as all tests need to pass
     fi
 done

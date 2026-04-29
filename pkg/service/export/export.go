@@ -179,6 +179,8 @@ func Export(_ context.Context, logger *zap.Logger) error {
 			}
 			keployRequests := make(map[interface{}]int, 0)
 			for _, testFile := range testFiles {
+				// Pick the unmarshaler based on the file extension so testcases
+				// recorded in either StorageFormat are exported correctly.
 				ext := filepath.Ext(testFile.Name())
 				var format yaml.Format
 				switch ext {
