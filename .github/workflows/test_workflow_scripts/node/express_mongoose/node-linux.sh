@@ -163,7 +163,7 @@ if [[ -n "$target_test" ]]; then
   echo "Patching $target_test: page:1 -> page:4"
   sed -i 's/"page":1/"page":4/' "$target_test"
 else
-  echo "::warning::no recorded testcase contains \"page\":1; skipping page change"
+  echo "::notice::no recorded testcase contains \"page\":1; skipping page change"
 fi
 
 # ---- Replays ----
@@ -281,10 +281,10 @@ if [[ -f "./keploy.yml" ]]; then
     echo "Setting selectedTests to [\"$id1\", \"$id2\"]"
     sed -i "s/selectedTests: {}/selectedTests: {\"test-set-0\": [\"$id1\", \"$id2\"]}/" "./keploy.yml" || true
   else
-    echo "::warning::fewer than 2 recorded testcases; skipping selectedTests"
+    echo "::notice::fewer than 2 recorded testcases; skipping selectedTests"
   fi
 else
-  echo "::warning::keploy.yml missing; cannot set selectedTests"
+  echo "::notice::keploy.yml missing; cannot set selectedTests"
 fi
 
 run_replay 3 "--apiTimeout 30"

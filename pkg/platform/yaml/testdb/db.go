@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -378,7 +379,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
 	}
 
-	if err := os.MkdirAll(tcsPath, 0o777); err != nil {
+	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
@@ -413,8 +414,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	if err := writer.Flush(); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
 	}
-	// Set file permissions to 0777 to match the original CreateYamlFile behavior
-	if err := tmpFile.Chmod(0o777); err != nil {
+	// Match the 0o644 file mode used by the hardened CreateYamlFile —
+	// os.CreateTemp creates with 0o600 by default, so explicitly chmod
+	// to the read-everyone, write-owner mode the rest of the testdb
+	// tree now uses.
+	if err := tmpFile.Chmod(0o644); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to chmod temp file: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
@@ -422,15 +426,34 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 	cleanup = false
 
-	// Use remove-then-rename for cross-platform compatibility (Windows)
-	if _, statErr := os.Stat(yamlPath); statErr == nil {
-		if err := os.Remove(yamlPath); err != nil {
+	// Replace the destination with the freshly-written temp file.
+	//
+	// On POSIX, os.Rename atomically replaces an existing target —
+	// which is what we want, because claimName has already created
+	// a zero-byte placeholder at yamlPath that holds the name
+	// reservation. Skipping the explicit pre-rename Remove on POSIX
+	// keeps that reservation alive throughout the swap, so a
+	// concurrent recorder running claimName can't O_EXCL-claim the
+	// same filename in the gap (and the deferred placeholder
+	// cleanup can't accidentally delete a rival's reservation if
+	// the rename later fails).
+	//
+	// Windows' Rename can't replace an existing file (it errors
+	// EEXIST), so the Stat+Remove dance is still required there.
+	// That platform retains a narrow race between Remove and
+	// Rename which we accept as a stdlib limitation; the
+	// concurrent-recorder scenario this addresses is rare on
+	// Windows in practice.
+	if runtime.GOOS == "windows" {
+		if _, statErr := os.Stat(yamlPath); statErr == nil {
+			if err := os.Remove(yamlPath); err != nil {
+				os.Remove(tmpPath)
+				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase yaml: %w", err)
+			}
+		} else if !os.IsNotExist(statErr) {
 			os.Remove(tmpPath)
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase yaml: %w", err)
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase yaml: %w", statErr)
 		}
-	} else if !os.IsNotExist(statErr) {
-		os.Remove(tmpPath)
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase yaml: %w", statErr)
 	}
 	if err := os.Rename(tmpPath, yamlPath); err != nil {
 		os.Remove(tmpPath)
@@ -477,8 +500,11 @@ const maxNameClaimAttempts = 256
 // same testset directory cannot end up writing to the same path. On a
 // collision (another process wrote that name between our directory
 // scan and the create), it rescans the directory for a new index and
-// retries. WriteFile later truncates the placeholder we created here
-// and replaces it with the encoded testcase body.
+// retries. The zero-length file created here is only a name
+// reservation: upsert later writes the encoded testcase body into a
+// sibling temp file and replaces the reservation in place via
+// os.Rename (POSIX atomically replaces; Windows requires the explicit
+// remove-then-rename guarded in upsert).
 func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
 	// Modes match yaml.CreateYamlFile (0o755 directories, 0o644
 	// files). The effective file mode is further masked by the

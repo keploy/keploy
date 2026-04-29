@@ -106,11 +106,17 @@ func slugForGRPC(tc *models.TestCase) string {
 // Path, which correctly maps inputs like "http://api.test?x=1" to
 // root — and only fall back to manual query/fragment stripping for
 // genuinely bare paths or parse failures.
+// returns :-
+//   - "" for empty input
+//   - "/users/42" for "http://api.test/users/42?x=1"
+//   - "/users/42" for "/users/42?x=1"
 func extractPath(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
+	// url.Parse is surprisingly lenient and will treat a bare path as a URL with an empty scheme and host, which is exactly what we want.
+	// So we can just check if the input looks like it has a scheme or host to decide whether to trust url.Parse or do manual parsing.
 	if u, err := url.Parse(raw); err == nil && (u.Scheme != "" || u.Host != "") {
 		return u.Path
 	}
