@@ -42,18 +42,36 @@ send_request(){
 
 container_name="proxyStressApp"
 
-for i in {1..2}; do
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local log="${container_name}${label}.txt"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-        echo "FAIL: Data race during recording"; exit 1
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
+    if grep "WARNING: DATA RACE" "$log"; then
+        echo "FAIL: Data race during recording${label:+ (json)}"; exit 1
     fi
-    if grep -q "panic:" "${container_name}.txt"; then
-        echo "FAIL: Panic during recording"; cat "${container_name}.txt"; exit 1
+    if grep -q "panic:" "$log"; then
+        echo "FAIL: Panic during recording${label:+ (json)}"; cat "$log"; exit 1
     fi
     sleep 5
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 test_count=$(find ./keploy -name 'test-*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
 echo "Total recorded test cases: $test_count"
@@ -79,4 +97,15 @@ for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
     [ -f "$report_file" ] && echo "$(basename "$report_file"): $(grep 'status:' "$report_file" | head -1 | awk '{print $2}')"
 done
 
-echo "Proxy stress test PASSED — all fixes validated e2e"
+if json_pass_supported; then
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "${test_container}_json" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
+    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
+    if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
+    if ! json_scan_reports; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    echo "Proxy stress test PASSED — yaml + json"
+else
+    echo "Proxy stress test PASSED — yaml only (json pass skipped for compat-matrix cell)"
+fi

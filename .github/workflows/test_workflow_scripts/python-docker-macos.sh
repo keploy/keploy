@@ -120,15 +120,16 @@ send_request_and_shutdown() {
 
 }
 
-# --- Record sessions ---
-for i in 1 2; do
-  container_name="${APP_CONTAINER}_${i}"
+do_record_iteration() {
+  local i="$1"
+  local extra_flags="${2:-}"
+  local label="${extra_flags:+_json}"
+  local container_name="${APP_CONTAINER}_${i}${label}"
 
-  # Run the request and shutdown sequence in the background
   send_request_and_shutdown "$container_name" &
-  
-  # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
-  "$RECORD_BIN" record \
+
+  # shellcheck disable=SC2086
+  "$RECORD_BIN" record $extra_flags \
     -c "docker run -p $APP_PORT:$APP_PORT --net $NETWORK_NAME --rm --name $container_name $APP_IMAGE" \
     --container-name "$container_name" \
     --generate-github-actions=false \
@@ -136,11 +137,6 @@ for i in 1 2; do
     --dns-port $DNS_PORT \
     --keploy-container "$KEPLOY_CONTAINER" \
     --record-timer=40s 2>&1 | tee "${container_name}.txt"
-     
-  
-  # cat "${container_name}.txt"  # For visibility in logs
-  # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
-  # If it fails, the script should fail.
 
   if grep -q "WARNING: DATA RACE" "${container_name}.txt"; then
     echo "Race condition detected during record (${container_name})"
@@ -148,17 +144,22 @@ for i in 1 2; do
     exit 1
   fi
 
-  # Commenting this for now as it is failing for the mongo parser connection eof issue and broken pipe.
-  # Giving false negatives.
+  echo "Successfully recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
 
-  # if grep "ERROR" "${container_name}.txt"; then
-  #   echo "Error found in pipeline..."
-  #   cat "${container_name}.txt"
-  #   exit 1
-  # fi
-
-  echo "Successfully recorded test case and mocks for iteration ${i}"
+# --- Record sessions ---
+for i in 1 2; do
+  do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+  for i in 1 2; do
+    do_record_iteration "$i" "--storage-format json"
+  done
+fi
 
 # --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
@@ -210,9 +211,32 @@ for i in 0 1; do
   fi
 done
 
-if $all_passed; then
-  echo "All tests passed"
-else
+if ! $all_passed; then
   echo "Some tests failed"
   exit 1
+fi
+
+if json_pass_supported; then
+  test_container_json="${APP_CONTAINER}_test_json"
+  "$REPLAY_BIN" test --storage-format json \
+    -c "docker run --rm -p $APP_PORT:$APP_PORT --net $NETWORK_NAME --name $test_container_json $APP_IMAGE" \
+    --container-name "$test_container_json" \
+    --apiTimeout 60 \
+    --delay 12 \
+    --proxy-port $PROXY_PORT \
+    --dns-port $DNS_PORT \
+    --keploy-container "$KEPLOY_CONTAINER" \
+    --generate-github-actions=false 2>&1 | tee "${test_container_json}.txt"
+
+  if grep -q "WARNING: DATA RACE" "${test_container_json}.txt"; then
+    cat "${test_container_json}.txt"
+    exit 1
+  fi
+  if ! json_scan_reports; then
+    cat "${test_container_json}.txt"
+    exit 1
+  fi
+  echo "All tests passed (yaml + json)"
+else
+  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi

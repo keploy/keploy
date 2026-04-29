@@ -479,5 +479,49 @@ if ($status -ne 'PASSED') {
   exit 1
 }
 
-Write-Host "All tests passed successfully!"
+# Json-format replay against the yaml-recorded fixtures (read-side
+# auto-detect path; record happens via the docker workflow once and
+# this validates that both replay formats consume it identically).
+$testLogJson = "$testContainer.test.json.txt"
+$testArgsJson = @(
+  'test',
+  '--storage-format', 'json',
+  '-c', 'docker compose up',
+  '--container-name', $testContainer,
+  '--api-timeout', '60',
+  '--delay', '30',
+  '--port', "$appPort",
+  '--generate-github-actions=false'
+)
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $env:REPLAY_BIN @testArgsJson 2>&1 | Tee-Object -FilePath $testLogJson
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+
+$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
+if (-not $reportFilesJson) {
+  Write-Error "No json report files found."
+  exit 1
+}
+$anyJsonFailed = $false
+foreach ($file in $reportFilesJson) {
+  try {
+    $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+  } catch {
+    Write-Error "Failed to parse json report $($file.Name): $_"
+    $anyJsonFailed = $true
+    continue
+  }
+  Write-Host "json report $($file.Name): $($obj.status)"
+  if ($obj.status -ne "PASSED") { $anyJsonFailed = $true }
+}
+if ($anyJsonFailed) {
+  Write-Error "Some json tests failed."
+  exit 1
+}
+
+Write-Host "All tests passed successfully (yaml + json)!"
 exit 0

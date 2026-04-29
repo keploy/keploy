@@ -217,6 +217,40 @@ for i in 1 2; do
     echo "Recorded test cases for iteration $i"
 done
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in 1 2; do
+        app_name="connect-tunnel_json_${i}"
+        send_request &
+        REQ_PID=$!
+        if ! timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+            "$RECORD_BIN" record --storage-format json -c "./connect-tunnel" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"; then
+            echo "::error::connect-tunnel json recording iteration $i failed or timed out"
+            stop_recording
+            exit 1
+        fi
+
+        if grep "ERROR" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+            echo "::error::Error found in json recording iteration $i"
+            cat "${app_name}.txt"
+            exit 1
+        fi
+        if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
+            echo "::error::Race condition detected in json recording"
+            cat "${app_name}.txt"
+            exit 1
+        fi
+        sleep 5
+        if ! wait "$REQ_PID"; then
+            echo "::error::Request driver failed in json recording iteration $i"
+            exit 1
+        fi
+        echo "Recorded json test cases for iteration $i"
+    done
+fi
+
 echo "Recording complete. Test sets:"
 ls -la keploy/*/tests/ 2>/dev/null || echo "No test sets found"
 ls -la keploy/*/mocks/ 2>/dev/null || echo "No mocks found"
@@ -288,14 +322,41 @@ if [ "$both_build" = true ]; then
         fi
     done
 
-    if [ "$all_passed" = true ]; then
-        echo "All CONNECT tunnel tests passed!"
-        exit 0
-    else
+    if [ "$all_passed" != true ]; then
         echo "::error::Some tests failed. Dumping logs..."
         cat test_logs.txt
         exit 1
     fi
+
+    if json_pass_supported; then
+        set +e
+        timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+            "$REPLAY_BIN" test --storage-format json -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs_json.txt
+        replay_rc_json=${PIPESTATUS[0]}
+        set -e
+        if [ "$replay_rc_json" -eq 124 ] || [ "$replay_rc_json" -eq 137 ]; then
+            echo "::error::connect-tunnel json replay timed out"
+            exit 1
+        fi
+        if grep "ERROR" "test_logs_json.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+            echo "::error::Error found in json replay"
+            cat "test_logs_json.txt"
+            exit 1
+        fi
+        if grep -q "WARNING: DATA RACE" "test_logs_json.txt"; then
+            echo "::error::Race condition detected in json replay"
+            cat "test_logs_json.txt"
+            exit 1
+        fi
+        if ! json_scan_reports; then
+            cat test_logs_json.txt
+            exit 1
+        fi
+        echo "All CONNECT tunnel tests passed (yaml + json)!"
+    else
+        echo "All CONNECT tunnel tests passed (yaml only — json pass skipped)"
+    fi
+    exit 0
 else
     # Partial validation: at least /health tests must pass.
     # /via-proxy failures are expected when latest binary lacks CONNECT support.

@@ -120,27 +120,27 @@ if [[ -z "$JAR_NAME" ]]; then
   exit 1
 fi
 
-for i in 1; do
-  section "Record iteration $i"
+do_record_iteration() {
+  local i="$1"
+  local extra_flags="${2:-}"
+  local label="${extra_flags:+_json}"
+  local app_name="dualConn_${i}${label}"
+  section "Record iteration $i${label:+ (json)}"
 
-  app_name="dualConn_${i}"
-
-  "$RECORD_BIN" record \
+  # shellcheck disable=SC2086
+  "$RECORD_BIN" record $extra_flags \
     -c "java -jar $JAR_NAME" \
     > "${app_name}.txt" 2>&1 &
-  KEPLOY_PID=$!
+  local KEPLOY_PID=$!
 
   send_request "$KEPLOY_PID"
 
   set +e
   wait "$KEPLOY_PID"
-  rc=$?
+  local rc=$?
   set -e
   echo "Record exit code: $rc"
-  [[ $rc -ne 0 ]] && echo "Keploy record exited non-zero (iteration $i), rc=$rc"
-
-  echo "== keploy artifacts after record =="
-  find ./keploy -maxdepth 3 -type f | wc -l || true
+  [[ $rc -ne 0 ]] && echo "Keploy record exited non-zero (iteration $i${label:+ json}), rc=$rc"
 
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
@@ -153,8 +153,21 @@ for i in 1; do
   fi
 
   endsec
-  echo "Recorded test case and mocks for iteration $i"
+  echo "Recorded test case and mocks for iteration $i${label:+ (json)}"
+}
+
+for i in 1; do
+  do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+  for i in 1; do
+    do_record_iteration "$i" "--storage-format json"
+  done
+fi
 
 sleep 5
 
@@ -198,13 +211,33 @@ if [[ "$found_any" == "false" ]]; then
   exit 1
 fi
 
-if [[ "$all_passed" == "true" ]]; then
-  if [[ $REPLAY_RC -ne 0 ]]; then
-    echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
-  fi
-  echo "All tests passed"
-  exit 0
+if [[ "$all_passed" != "true" ]]; then
+  echo "::error::Some tests failed or replay exited non-zero"
+  exit 1
 fi
 
-echo "::error::Some tests failed or replay exited non-zero"
-exit 1
+if [[ $REPLAY_RC -ne 0 ]]; then
+  echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
+fi
+
+if json_pass_supported; then
+  section "Replay (json)"
+  set +e
+  "$REPLAY_BIN" test --storage-format json \
+    -c "java -jar $JAR_NAME" \
+    --delay 20 --api-timeout 60 \
+    2>&1 | tee test_logs_json.txt
+  REPLAY_RC_JSON=$?
+  set -e
+  echo "Replay (json) exit code: $REPLAY_RC_JSON"
+  endsec
+
+  if ! json_scan_reports; then
+    cat test_logs_json.txt
+    exit 1
+  fi
+  echo "All tests passed (yaml + json)"
+else
+  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

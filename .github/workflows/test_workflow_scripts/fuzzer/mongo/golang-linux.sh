@@ -255,6 +255,40 @@ check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
 
+# shellcheck disable=SC1091
+if [ -f "${GITHUB_WORKSPACE:-}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh" ]; then
+    source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+else
+    json_pass_supported() { return 1; }
+    json_scan_reports() { return 1; }
+fi
+
+if json_pass_supported; then
+    section "Start Recording (json)"
+    GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record --storage-format json -c "$MONGO_FUZZER_BIN" 2>&1 | tee record_json.txt &
+    KEPLOY_PID=$!
+    endsec
+
+    section "Generate Fuzzer Traffic (json)"
+    send_requests "$KEPLOY_PID"
+    sleep 7
+    endsec
+
+    section "Stop Recording (json)"
+    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    for i in $(seq 1 15); do
+        kill -0 "$REC_PID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$REC_PID" 2>/dev/null; then
+        sudo kill -9 "$REC_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    check_for_errors "record_json.txt"
+    endsec
+fi
+
 # --- Teardown before Replay ---
 section "Shutting Down Mongo Cluster for Replay"
 # Tear down the entire docker compose environment to ensure replay relies on mocks
@@ -273,6 +307,18 @@ echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID
 check_test_report
 endsec
+
+if json_pass_supported; then
+    section "Replaying Tests (json)"
+    "$REPLAY_KEPLOY_BIN" test --storage-format json -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test_json.txt &
+    TEST_PID=$!
+    wait $TEST_PID
+    if ! json_scan_reports; then
+        cat test_json.txt
+        exit 1
+    fi
+    endsec
+fi
 
 echo "✅ All tests completed successfully."
 exit 0

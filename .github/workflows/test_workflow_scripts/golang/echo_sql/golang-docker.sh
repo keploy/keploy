@@ -56,27 +56,43 @@ send_request(){
 }
 
 
-for i in {1..2}; do
-    container_name="echoApp"
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local log="echoApp${label}.txt"
+    local container_name="echoApp"
     send_request &
-    # get_container_health &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
 
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+    if grep "WARNING: DATA RACE" "$log"; then
         echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
+        cat "$log"
         exit 1
     fi
-    if grep "ERROR" "${container_name}.txt"; then
+    if grep "ERROR" "$log"; then
         echo "Error found in pipeline..."
-        cat "${container_name}.txt"
+        cat "$log"
         cat "docker-compose-tmp.yaml"
         exit 1
     fi
     sleep 5
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
 
-    echo "Recorded test case and mocks for iteration ${i}"
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
@@ -120,11 +136,27 @@ do
     fi
 done
 
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+if [ "$all_passed" != true ]; then
     cat "${test_container}.txt"
     exit 1
 fi
+
+if json_pass_supported; then
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt"
+    if grep "ERROR" "${test_container}_json.txt"; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

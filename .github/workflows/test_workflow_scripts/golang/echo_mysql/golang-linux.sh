@@ -93,15 +93,20 @@ send_request() {
 
 run_record_iteration() {
   local idx="$1"
-  local app_name="urlShort_${idx}"
+  local extra_flags="${2:-}"
+  local label="${extra_flags:+_json}"
+  local app_name="urlShort_${idx}${label}"
 
-  echo "Record iteration $idx"
+  echo "Record iteration $idx${label:+ (json)}"
 
   sudo rm -f /tmp/keploy-logs.txt
 
-  # Start recording in background so we capture its PID explicitly
-  "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
-    2>&1 | tee "${app_name}.txt" & 
+  # Start recording in background so we capture its PID explicitly.
+  # extra_flags is intentionally unquoted so the empty default expands
+  # to nothing; the json pass passes "--storage-format json".
+  # shellcheck disable=SC2086
+  "$RECORD_BIN" record $extra_flags -c "./urlShort" --generateGithubActions=false \
+    2>&1 | tee "${app_name}.txt" &
   local KEPLOY_PID=$!
 
   # Drive traffic + stop keploy
@@ -175,6 +180,16 @@ for i in 1 2; do
   echo "Recorded test case and mocks for iteration $i"
 done
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+  for i in 1 2; do
+    run_record_iteration "$i" "--storage-format json"
+    echo "Recorded json test case and mocks for iteration $i"
+  done
+fi
+
 section "Shutdown MySQL before test mode"
 # Stop MySQL container - Keploy should use mocks for database interactions
 docker stop mysql-container || true
@@ -217,10 +232,34 @@ for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
 done
 endsec
 
-if [[ "$all_passed" == "true" && $REPLAY_RC -eq 0 ]]; then
-  echo "All tests passed"
-  exit 0
+if [[ "$all_passed" != "true" || $REPLAY_RC -ne 0 ]]; then
+  echo "::error::Some yaml tests failed or replay exited non-zero"
+  exit 1
 fi
 
-echo "::error::Some tests failed or replay exited non-zero"
-exit 1
+if json_pass_supported; then
+  section "Replay (json)"
+  set +e
+  sudo rm -f /tmp/keploy-logs.txt
+  "$REPLAY_BIN" test --storage-format json -c "./urlShort" --delay 7 --generateGithubActions=false \
+    2>&1 | tee test_logs_json.txt || true
+  REPLAY_RC_JSON=$?
+  set -e
+  echo "Replay (json) exit code: $REPLAY_RC_JSON"
+  cat test_logs_json.txt || true
+  endsec
+
+  if [[ $REPLAY_RC_JSON -ne 0 ]]; then
+    echo "::error::Json replay exited non-zero"
+    exit 1
+  fi
+
+  if ! json_scan_reports; then
+    cat test_logs_json.txt
+    exit 1
+  fi
+  echo "All tests passed (yaml + json)"
+else
+  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

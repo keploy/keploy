@@ -92,24 +92,38 @@ send_request() {
     sudo kill $pid
 }
 
-for i in {1..2}; do
-    app_name="http-pokeapi_${i}"
-    send_request $i &
-    "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-      echo "Race condition detected in recording, stopping pipeline..."
-      cat "${app_name}.txt"
-      exit 1
-    fi
-    sleep 5
-    wait
-    echo "Recorded test case and mocks for iteration ${i}"
-done
+record_iterations() {
+    local extra_flags="${1:-}"
+    local label="${extra_flags:+_json}"
+    for i in {1..2}; do
+        local app_name="http-pokeapi_${i}${label}"
+        send_request "$i" &
+        # shellcheck disable=SC2086
+        "$RECORD_BIN" record $extra_flags -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
+        if grep "ERROR" "${app_name}.txt"; then
+            echo "Error found in pipeline..."
+            cat "${app_name}.txt"
+            exit 1
+        fi
+        if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+          echo "Race condition detected in recording, stopping pipeline..."
+          cat "${app_name}.txt"
+          exit 1
+        fi
+        sleep 5
+        wait
+        echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+    done
+}
+
+record_iterations
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    record_iterations "--storage-format json"
+fi
 
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
@@ -129,31 +143,49 @@ fi
 
 all_passed=true
 
-# Get the test results from the testReport file.
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
-
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+# Default-format report scan — globbed so json-recorded test-sets
+# (which the yaml replay also produces yaml reports for via auto-detect)
+# are picked up automatically.
+shopt -s nullglob
+yaml_reports=( ./keploy/reports/test-run-0/test-set-*-report.yaml )
+shopt -u nullglob
+if [ ${#yaml_reports[@]} -eq 0 ]; then
+    echo "::error::No yaml test-set reports found under ./keploy/reports/test-run-0/"
     cat "test_logs.txt"
     exit 1
 fi
+for report_file in "${yaml_reports[@]}"; do
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    echo "yaml report $(basename "$report_file"): $test_status"
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        break
+    fi
+done
+
+if [ "$all_passed" != true ]; then
+    cat "test_logs.txt"
+    exit 1
+fi
+
+if json_pass_supported; then
+    "$REPLAY_BIN" test --storage-format json -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_json.txt
+    if grep "ERROR" "test_logs_json.txt"; then
+        echo "Error found in pipeline (json replay)..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+        echo "Race condition detected in json test, stopping pipeline..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat test_logs_json.txt
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

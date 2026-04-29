@@ -380,6 +380,23 @@ sleep 5
 check_for_errors "record.log"
 endsec
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    section "Record Test Cases (json)"
+    $RECORD_BIN record --storage-format json -c "./my-app" 2>&1 | tee record_json.log &
+    KEPLOY_PID=$!
+    wait_for_http 8080
+    bash ./curl.sh
+    sleep 5
+    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    sleep 5
+    check_for_errors "record_json.log"
+    endsec
+fi
+
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
@@ -410,6 +427,17 @@ check_for_errors "final_test.log"
 endsec
 
 check_test_report
+
+if json_pass_supported; then
+    section "Run Keploy Tests (json)"
+    $REPLAY_BIN test --storage-format json -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee final_test_json.log || true
+    check_for_errors "final_test_json.log"
+    if ! json_scan_reports; then
+        cat final_test_json.log
+        exit 1
+    fi
+    endsec
+fi
 
 echo "✅ Full Risk Profile & Normalization Test Pipeline Succeeded!"
 exit 0

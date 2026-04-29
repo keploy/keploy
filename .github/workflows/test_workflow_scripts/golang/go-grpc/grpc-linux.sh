@@ -166,6 +166,9 @@ kill_keploy_process() {
 rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
@@ -184,6 +187,18 @@ if [ "$MODE" = "incoming" ]; then
 
     check_for_errors record_incoming.log
 
+    if json_pass_supported; then
+        ./grpc-client &> client_incoming_json.log &
+        "$RECORD_BIN" record --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming_json.log &
+        wait_for_port 50051
+        sleep 5
+        send_requests
+        sleep 15
+        kill_keploy_process
+        sleep 5
+        check_for_errors record_incoming_json.log
+    fi
+
     # Test: Keploy replays the captured gRPC calls against the server.
     "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_incoming.log || true
 
@@ -193,7 +208,18 @@ if [ "$MODE" = "incoming" ]; then
         cat test_incoming.log
         exit 1
     fi
-    echo "✅ Incoming mode passed."
+
+    if json_pass_supported; then
+        "$REPLAY_BIN" test --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_incoming_json.log || true
+        check_for_errors test_incoming_json.log
+        if ! json_scan_reports; then
+            cat test_incoming_json.log
+            exit 1
+        fi
+        echo "✅ Incoming mode passed (yaml + json)."
+    else
+        echo "✅ Incoming mode passed (yaml only)."
+    fi
 
 elif [ "$MODE" = "outgoing" ]; then
     echo "🧪 Testing outgoing gRPC requests (testing grpc-client)"
@@ -211,6 +237,17 @@ elif [ "$MODE" = "outgoing" ]; then
     
     check_for_errors record_outgoing.log
 
+    if json_pass_supported; then
+        ./grpc-server &> server_outgoing_json.log &
+        wait_for_port 50051
+        "$RECORD_BIN" record --storage-format json -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing_json.log &
+        send_requests
+        sleep 15
+        kill_keploy_process
+        sleep 5
+        check_for_errors record_outgoing_json.log
+    fi
+
     # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
     "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false 2>&1 | tee test_outgoing.log || true
 
@@ -220,7 +257,18 @@ elif [ "$MODE" = "outgoing" ]; then
         cat test_outgoing.log
         exit 1
     fi
-    echo "✅ Outgoing mode passed."
+
+    if json_pass_supported; then
+        "$REPLAY_BIN" test --storage-format json -c "./grpc-client" --generateGithubActions=false 2>&1 | tee test_outgoing_json.log || true
+        check_for_errors test_outgoing_json.log
+        if ! json_scan_reports; then
+            cat test_outgoing_json.log
+            exit 1
+        fi
+        echo "✅ Outgoing mode passed (yaml + json)."
+    else
+        echo "✅ Outgoing mode passed (yaml only)."
+    fi
 
 else
     echo "❌ Invalid mode specified: '$MODE'. Use 'incoming' or 'outgoing'."

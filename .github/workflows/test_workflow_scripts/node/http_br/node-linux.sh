@@ -73,11 +73,14 @@ send_request(){
     sudo kill $pid
 }
 
-# Record and test sessions in a loop
-for i in {1..2}; do
-    app_name="nodeApp_${i}"
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local app_name="nodeApp_${i}${label}"
     send_request &
-    $RECORD_BIN record -c 'node app.js'    &> "${app_name}.txt"
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c 'node app.js'    &> "${app_name}.txt"
     cat "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
@@ -91,8 +94,22 @@ for i in {1..2}; do
     fi
     sleep 5
     wait
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+# Record and test sessions in a loop
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 # Test modes and result checking
 $REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
@@ -170,7 +187,27 @@ if [ "$all_passed" = true ]; then
         cat "test_logs1.txt"
         exit 1
     fi
-    echo "All tests passed"
+    if json_pass_supported; then
+        $REPLAY_BIN test --storage-format json -c 'node app.js' --delay 10    &> test_logs_json.txt
+        cat test_logs_json.txt
+        if grep "ERROR" "test_logs_json.txt"; then
+            echo "Error found in json replay..."
+            cat "test_logs_json.txt"
+            exit 1
+        fi
+        if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+            echo "Race condition detected in json test..."
+            cat "test_logs_json.txt"
+            exit 1
+        fi
+        if ! json_scan_reports; then
+            cat test_logs_json.txt
+            exit 1
+        fi
+        echo "All tests passed (yaml + json)"
+    else
+        echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+    fi
     exit 0
 else
     exit 1
