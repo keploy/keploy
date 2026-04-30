@@ -1,4 +1,4 @@
-# Ensure Docker is running on Windows. This script mirrors the inline logic from the workflow.
+﻿# Ensure Docker is running on Windows. This script mirrors the inline logic from the workflow.
 $ErrorActionPreference = 'Stop'
 
 function Test-Docker {

@@ -38,6 +38,17 @@ type MockFilterParams struct {
 	MockMapping        []string             `json:"mockMapping,omitempty"`
 	UseMappingBased    bool                 `json:"useMappingBased"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// StrictMockWindow controls whether out-of-window non-config mocks are
+	// dropped rather than being promoted into the cross-test config pool.
+	// Default TRUE (see config.Test default) — out-of-window per-test
+	// mocks get dropped, eliminating cross-test bleed. Prepared
+	// statements replay correctly under strict via LifetimeConnection
+	// (per-connID pool). Set false to fall back to legacy lax behaviour
+	// for older recordings that rely on implicit cross-test sharing.
+	// The process-wide env override KEPLOY_STRICT_MOCK_WINDOW is OR-ed
+	// in: an enabling value forces strict; an explicit disabling value
+	// ("0") forces strict off regardless of the per-call flag.
+	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
 }
 
 type UpdateMockParamsReq struct {

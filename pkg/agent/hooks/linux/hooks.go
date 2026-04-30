@@ -58,7 +58,7 @@ type Hooks struct {
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
-	agentRegistartionMap  *ebpf.Map
+	agentRegistrationMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -98,7 +98,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		<-ctx.Done()
 		h.unLoad(ctx, opts)
 
-		//deleting in order to free the memory in case of rerecord.
+		// deleting in order to free the memory on shutdown.
 		h.sess.Delete(uint64(0))
 		return nil
 	})
@@ -155,8 +155,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1773927248001
-	h.agentRegistartionMap = objs.M_1773927248002
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistrationMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -186,6 +186,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		utils.LogError(h.logger, err, "failed to detect the cgroup path")
 		return err
 	}
+
+	// Detect and clean orphaned BPF programs from crashed previous
+	// runs. This must happen BEFORE attaching our new programs to
+	// avoid "program already attached" failures. Safety is enforced
+	// inside the helper: it name-matches keployBPFProgNames and
+	// gates on HasOtherKeployProcesses(os.Getpid()) so it cannot
+	// detach programs belonging to a live keploy sibling. The helper
+	// also emits its own Info log when it cleans anything, so no
+	// log is needed here.
+	DetectAndCleanOrphanedCgroupPrograms(h.logger, cGroupPath)
+
 	h.logger.Debug("Attaching SockOps...")
 	sockops, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
@@ -315,11 +326,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if setupOpts.IsDocker {
 		var ts unix.Timespec
 		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Warn("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
+			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
 		} else {
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
 		}
+	}
+
+	// Allow downstream builds to mutate AgentInfo (e.g. set the Flags
+	// slot consumed by the BPF cgroup hooks) before it is written.
+	if agent.AgentInfoCustomizer != nil {
+		agent.AgentInfoCustomizer(&agentInfo)
 	}
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
@@ -474,11 +491,20 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 			return structs.ProxyInfo{}, err
 		}
 
-		// Keep non-docker behavior backward-compatible with main by default:
-		// do not redirect generic IPv6 traffic to proxy unless an explicit
-		// proxy-port override is configured.
+		// Non-docker v6 redirect: when EnableIPv6Redirect is set (the
+		// default) we publish ::ffff:127.0.0.1 so the BPF cgroup program
+		// rewrites ::1 and other IPv6 destinations to the v4-mapped proxy
+		// address. Without this, modern Linux distros (glibc resolves
+		// localhost → ::1 before 127.0.0.1) would have their traffic
+		// silently bypass the proxy because the cgroup program cannot
+		// redirect to an all-zero address.
+		//
+		// The explicit cfg.Port override path kept the pre-existing
+		// behaviour (non-zero when a per-app port override was given) as
+		// a safety net; with the default flipped, that branch is now
+		// subsumed by the flag but we honour the override unconditionally.
 		var proxyIPv6 [4]uint32
-		if cfg.Port != 0 {
+		if opts.EnableIPv6Redirect || cfg.Port != 0 {
 			proxyIPv6, err = ToIPv4MappedIPv6("127.0.0.1")
 			if err != nil {
 				return structs.ProxyInfo{}, err

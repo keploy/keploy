@@ -7,10 +7,8 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
-	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v3/pkg/service/utgen"
 	"go.uber.org/zap"
 )
 
@@ -19,14 +17,12 @@ var TeleGlobalMap sync.Map
 type ServiceProvider struct {
 	logger *zap.Logger
 	cfg    *config.Config
-	auth   service.Auth
 }
 
-func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Auth) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, cfg *config.Config) *ServiceProvider {
 	return &ServiceProvider{
 		logger: logger,
 		cfg:    cfg,
-		auth:   auth,
 	}
 }
 
@@ -41,12 +37,10 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping(ctx)
 
 	switch cmd {
-	case "gen":
-		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
-	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report", "sanitize", "diff":
-		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
+	case "record", "test", "normalize", "contract", "config", "update", "export", "import", "templatize", "report", "sanitize", "diff":
+		return Get(ctx, cmd, n.cfg, n.logger, tel)
 	case "agent":
-		return GetAgent(ctx, cmd, n.cfg, n.logger, n.auth)
+		return GetAgent(ctx, cmd, n.cfg, n.logger)
 	default:
 		return nil, errors.New("invalid command")
 	}

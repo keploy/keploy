@@ -19,6 +19,37 @@ func IsTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
+// negotiateNextProtos picks the ALPN value list that the keploy TLS
+// MITM server should advertise, given what the real client offered.
+//
+//   - http/1.1 advertised → return ["http/1.1"] (safer than h2 for HTTP apps)
+//   - h2 advertised but not http/1.1 → return ["h2", "http/1.1"]
+//   - anything else (postgresql, mongodb, redis, no ALPN) → return nil so
+//     Go's tls.Server skips ALPN negotiation and the client's offer
+//     stands. Without this the handshake fails with
+//     "tls: client requested unsupported application protocols" for
+//     non-HTTP clients like libpq (ALPN=["postgresql"]).
+func negotiateNextProtos(clientProtos []string) []string {
+	clientSupportsHTTP1 := false
+	clientSupportsH2 := false
+	for _, p := range clientProtos {
+		switch p {
+		case "http/1.1":
+			clientSupportsHTTP1 = true
+		case "h2":
+			clientSupportsH2 = true
+		}
+	}
+	switch {
+	case clientSupportsHTTP1:
+		return []string{"http/1.1"}
+	case clientSupportsH2:
+		return []string{"h2", "http/1.1"}
+	default:
+		return nil
+	}
+}
+
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	// 1. Load the Proxy's Signing CA (Used to generate server certs)
 	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
@@ -34,26 +65,10 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// Check if client supports http/1.1
-			clientSupportsHTTP1 := false
-			for _, proto := range hello.SupportedProtos {
-				if proto == "http/1.1" {
-					clientSupportsHTTP1 = true
-					break
-				}
-			}
-
-			var nextProtos []string
-			if clientSupportsHTTP1 {
-				// Client supports HTTP/1.1, prefer it (safer for HTTP traffic)
-				nextProtos = []string{"http/1.1"}
-				logger.Debug("Client supports http/1.1, using http/1.1 only", zap.Strings("clientProtos", hello.SupportedProtos))
-			} else {
-				// Client only supports H2 (likely gRPC), must offer H2
-				nextProtos = []string{"h2", "http/1.1"}
-				logger.Debug("Client requires H2 (likely gRPC), offering H2", zap.Strings("clientProtos", hello.SupportedProtos))
-			}
-
+			nextProtos := negotiateNextProtos(hello.SupportedProtos)
+			logger.Debug("ALPN negotiation",
+				zap.Strings("clientProtos", hello.SupportedProtos),
+				zap.Strings("serverProtos", nextProtos))
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {

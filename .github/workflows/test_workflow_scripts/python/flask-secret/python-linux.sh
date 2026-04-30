@@ -23,11 +23,27 @@ cleanup_keploy() {
 # Set trap to cleanup on script exit
 trap cleanup_keploy EXIT
 
+wait_for_health() {
+    local mode="$1"
+    for attempt in {1..40}; do
+        if curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null; then
+            echo "App started for mode: $mode"
+            return 0
+        fi
+        echo "Waiting for app health for mode $mode (attempt $attempt/40)"
+        sleep 3
+    done
+
+    echo "::error::App health endpoint did not become ready within 120 seconds for mode: $mode"
+    cleanup_keploy
+    return 1
+}
+
 # Add coverage to requirements.txt
 echo "coverage" >> requirements.txt
 
 # Install dependencies
-pip3 install -r requirements.txt
+python -m pip install -r requirements.txt
 
 rm -rf keploy.yml
 
@@ -41,22 +57,19 @@ send_request(){
 
     # wait for app to be ready
     sleep 10
-    until curl -fsS http://127.0.0.1:8000/health >/dev/null; do
-        sleep 3
-    done
-    echo "App started for mode: $mode"
+    wait_for_health "$mode" || return 1
 
     if [ "$mode" = "astro" ]; then
-        curl -sS http://127.0.0.1:8000/astro >/dev/null
+        curl -fsS --max-time 10 http://127.0.0.1:8000/astro >/dev/null || return 1
     elif [ "$mode" = "secrets" ]; then
         for ep in secret1 secret2 secret3; do
             echo "GET /$ep"
-            curl -sS "http://127.0.0.1:8000/$ep" >/dev/null
+            curl -fsS --max-time 10 "http://127.0.0.1:8000/$ep" >/dev/null || return 1
         done
     else # This handles the "misc" case
         for ep in jwtlab curlmix cdn; do
             echo "GET /$ep"
-            curl -sS "http://127.0.0.1:8000/$ep" >/dev/null
+            curl -fsS --max-time 10 "http://127.0.0.1:8000/$ep" >/dev/null || return 1
         done
     fi
 
@@ -99,11 +112,15 @@ send_request(){
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
+    request_pid=$!
     $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
-    wait
+    if ! wait "$request_pid"; then
+        echo "::error::Request driver failed while recording secrets iteration ${i}"
+        exit 1
+    fi
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
@@ -115,11 +132,15 @@ sleep 5
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
+request_pid=$!
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
 sleep 5
-wait
+if ! wait "$request_pid"; then
+    echo "::error::Request driver failed while recording astro"
+    exit 1
+fi
 echo "Recorded astro test case and mocks"
 
 echo "Shutting down flask before test mode..."
@@ -260,6 +281,7 @@ rm -rf keploy
 # Record the "misc" endpoints as a new test suite
 app_name="flaskMisc"
 send_request "misc" &
+request_pid=$!
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in misc recording..."
@@ -272,7 +294,10 @@ if grep "WARNING: DATA RACE" "${app_name}.txt"; then
     exit 1
 fi
 sleep 5
-wait
+if ! wait "$request_pid"; then
+    echo "::error::Request driver failed while recording misc"
+    exit 1
+fi
 echo "Recorded misc test case and mocks"
 
 # Sanitize the newly created test cases

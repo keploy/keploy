@@ -85,7 +85,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	// Determine pgid (with Setpgid, leader's pgid == pid)
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
-		logger.Warn("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
+		logger.Debug("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
 		// Graceful
 		err = cmd.Process.Signal(syscall.SIGTERM)
 		if err != nil {
@@ -94,7 +94,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 				logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
 				return nil
 			}
-			logger.Warn("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
+			logger.Debug("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
 		}
 		time.Sleep(3 * time.Second)
 		// Force
@@ -103,7 +103,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 
 	// Graceful: SIGTERM group
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
-		logger.Warn("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
+		logger.Debug("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
 
 	return nil

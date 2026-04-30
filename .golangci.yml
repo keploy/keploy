@@ -16,7 +16,6 @@ linters:
     paths-except:
       - pkg/agent/hooks/bpf_arm64_bpfel.go
       - pkg/agent/hooks/bpf_x86_bpfel.go
-      - pkg/service/utgen
 
 formatters:
   enable:

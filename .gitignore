@@ -34,8 +34,6 @@ web/public/*
 !web/public/index.html
 
 
-.vscode
-.env
 ui
 
 coverage.tmp.txt
@@ -63,3 +61,5 @@ testdata
 __debug_bin*
 keploy
 extraparsers.go
+config.bat
+node_modules

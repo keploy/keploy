@@ -1,11 +1,6 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
-    inputs:
-      image_tag:
-        description: "Docker image tag or digest to pull"
-        required: false
-        type: string
 
 concurrency:
   group: windows-docker-runner
@@ -14,6 +9,10 @@ concurrency:
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
+    # Same hung-FFI-shutdown rationale as golang_native_windows -
+    # cap per-job wall-clock at 30 min so a stuck intercepted
+    # process cannot hold a self-hosted Windows runner for 6h.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -23,33 +22,76 @@ jobs:
             script_dir: go-dedup
         config:
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-windows
+            replay_src: build-windows
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
       # Remove stale SSH redirects from global config before checkout
       # so actions/checkout uses HTTPS, not SSH.
-      # Create a minimal per-run gitconfig BEFORE checkout to prevent
+      # Create a minimal per-job gitconfig BEFORE checkout to prevent
       # concurrent jobs' SSH redirects from leaking into our checkout.
       - name: Pre-checkout git isolation
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
         run: |
-          $isoDir = Join-Path $env:USERPROFILE ".git-isolation" $env:GITHUB_RUN_ID
+          $isoName = $env:GIT_ISOLATION_ID
+          if ([string]::IsNullOrWhiteSpace($isoName)) {
+            $isoName = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$env:GITHUB_JOB-$([guid]::NewGuid().ToString('N'))"
+            $isoName = $isoName -replace '[^A-Za-z0-9._-]', '_'
+          }
+          $isoDir = Join-Path (Join-Path $env:USERPROFILE ".git-isolation") $isoName
           New-Item -Path $isoDir -ItemType Directory -Force | Out-Null
           $gitConfig = Join-Path $isoDir 'gitconfig'
           New-Item -Path $gitConfig -ItemType File -Force | Out-Null
           git config --file $gitConfig core.autocrlf false
           git config --file $gitConfig core.eol lf
           "GIT_CONFIG_GLOBAL=$gitConfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GIT_ISOLATION_ID=$isoName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # If a prior run on this self-hosted runner left the workspace
+      # populated with files but no .git directory, actions/checkout's
+      # clean:true fails at "git config --local" with "not a git repository".
+      # Wipe in that case so checkout starts fresh; healthy workspaces are
+      # left alone.
+      - name: Recover stale runner state
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state: $_"
+          }
+          exit 0
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           clean: true
 
-      - name: Setup per-run git isolation
-        shell: pwsh
+      - name: Setup per-job git isolation
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
@@ -62,7 +104,7 @@ jobs:
 
       - name: Install Record Binary
         id: setup_record
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
@@ -77,7 +119,7 @@ jobs:
 
       - name: Install Replay Binary
         id: setup_replay
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
@@ -86,7 +128,7 @@ jobs:
       - id: image
         uses: ./.github/actions/download-image
         with:
-          image_tag: ${{ inputs.image_tag }}
+          artifact_name: docker-image-linux-amd64
           version: ${{ github.sha }}
 
       - name: Checkout the samples-go repository
@@ -103,7 +145,7 @@ jobs:
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
           # DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
           # DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           cd samples-go/${{ matrix.app.path }}
           & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
@@ -111,6 +153,6 @@ jobs:
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"

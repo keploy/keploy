@@ -17,8 +17,34 @@ fi
 
 rm -rf keploy/
 
-# Build go binary
-go build -o http-pokeapi
+# Build go binary.
+#
+# proxy.golang.org intermittently returns a TLS handshake timeout
+# when the WSL/linux runner first reaches it — seen on
+# keploy/keploy#4077 run 24631193918/job/72018929505 fetching
+# github.com/go-chi/chi@v1.5.5. `go build` has no built-in retry
+# for module download, so a single transient DNS/TLS hiccup kills
+# the whole job. Wrap with a bounded retry + GOPROXY fallback so
+# the flake no longer blocks PRs unrelated to this sample.
+build_go_app() {
+  local attempt=1
+  local max_attempts=4
+  local sleep_sec=5
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if GOPROXY="proxy.golang.org,direct" go build -o http-pokeapi; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "::error::go build for http-pokeapi failed after ${max_attempts} attempts"
+      return 1
+    fi
+    echo "go build attempt ${attempt} failed; retrying in ${sleep_sec}s (attempt $((attempt+1))/${max_attempts})…"
+    sleep "$sleep_sec"
+    sleep_sec=$((sleep_sec * 2))
+    attempt=$((attempt + 1))
+  done
+}
+build_go_app
 echo "go binary built"
 
 # Generate the keploy-config file.

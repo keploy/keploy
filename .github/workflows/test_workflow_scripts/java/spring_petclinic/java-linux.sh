@@ -88,6 +88,27 @@ detect_api_prefix() {
   return 1
 }
 
+run_maven_build() {
+  : > mvn_build.log
+
+  for attempt in 1 2 3; do
+    if {
+      echo "===== Maven build attempt ${attempt}/3 ====="
+      mvn -B -U clean install -Dmaven.test.skip=true
+    } 2>&1 | tee -a mvn_build.log; then
+      return 0
+    fi
+
+    echo "Maven build failed on attempt ${attempt}/3. Retrying after backoff; if this keeps failing, review mvn_build.log for the underlying error."
+    if [[ "$attempt" -lt 3 ]]; then
+      sleep $((attempt * 10))
+    fi
+  done
+
+  echo "::error::Maven build failed after 3 attempts. Review mvn_build.log for the underlying error, fix the build, and rerun the workflow."
+  return 1
+}
+
 # --- USER PROVIDED HELPERS START ---
 
 # Configuration
@@ -636,7 +657,7 @@ for i in 1; do
   section "Record iteration $i"
 
   # Build app (captured to log)
-  mvn clean install -Dmaven.test.skip=true | tee -a mvn_build.log
+  run_maven_build
 
   app_name="javaApp_${i}"
 

@@ -12,11 +12,14 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
+	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -27,6 +30,29 @@ type Agent struct {
 	logger *zap.Logger
 	svc    agent.Service
 }
+
+// agentReadyFilePath is the path MakeAgentReady writes on success. It
+// defaults to kdocker.AgentReadyFile (the canonical /tmp/agent.ready
+// location consumed by the docker-compose healthcheck) and is a var
+// only so unit tests can redirect it into a sandbox without writing
+// into /tmp on the host. Production code MUST NOT mutate it.
+var agentReadyFilePath = kdocker.AgentReadyFile
+
+// firstCARefusalLog ensures we emit exactly one Info-level line the
+// first time /agent/ready is called before the CA bundle is written.
+// This is the observability signal operators rely on — subsequent
+// calls log at Debug to avoid flooding logs when docker-compose /
+// kubelet polls readiness aggressively during boot.
+var firstCARefusalLog sync.Once
+
+// firstCAFailureLog ensures we emit exactly one Error-level line the
+// first time /agent/ready observes a terminal SetupCA failure. The
+// condition is latched for the process lifetime (MarkCAFailed records
+// an error that never clears without an agent restart), so every
+// subsequent readiness poll would re-emit the same Error — which
+// floods operator logs and can dominate aggregators during incident
+// response. After the first emission, repeated polls log at Debug.
+var firstCAFailureLog sync.Once
 
 func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
@@ -400,17 +426,103 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 //	healthcheck:
 //	  test: ["CMD", "cat", "/tmp/agent.ready"]
 func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
-	const readyFile = "/tmp/agent.ready"
+	// The Keploy CA bundle MUST be installed before the agent signals
+	// ready — Kubernetes postStart hooks and docker-compose healthchecks
+	// gate app-container start on /tmp/agent.ready, and apps may make
+	// HTTPS calls immediately on boot. Refuse readiness until SetupCA
+	// has completed (see pkg/agent/proxy/tls.CAStatus).
+	//
+	// The install location is mode-dependent: the shared volume at
+	// /tmp/keploy-tls/ca.crt in Docker/k8s mode, the system trust store
+	// (distro-specific path under /etc or /usr/local) in native Linux
+	// mode, or a Windows temp file that is removed on shutdown. We
+	// deliberately do NOT log a ca_path here because no single value is
+	// correct in all modes; operators investigating a 503 should
+	// cross-reference the earlier Error log from pkg/agent/proxy (which
+	// names the actual path that failed).
+	//
+	// Today the ordering is race-free because SetupCA runs synchronously
+	// inside Hook() before the HTTP server starts. This explicit gate
+	// protects against a future refactor that moves SetupCA into a
+	// goroutine — without this check, app containers could boot before
+	// the CA bundle exists and silently fail HTTPS egress.
+	//
+	// CAStatus distinguishes three states: ready, not-yet-ready, and
+	// terminal setup failure. On failure we surface the underlying
+	// error so operators see "CA setup failed: ..." instead of
+	// polling forever on an opaque 503. The log line is Debug (not
+	// Warn) because this endpoint is routinely polled by docker-compose
+	// / kubelet during boot and the 503 itself is the signal; spamming
+	// Warn would drown real warnings.
+	if ready, setupErr := pTls.CAStatus(); !ready {
+		if setupErr != nil {
+			// MarkCAFailed is a latch — operator-driven restart is the
+			// only way to clear it — so the first Error is the
+			// actionable signal. Emit it at Error (with a next_step
+			// field for operator guidance) exactly once, then degrade
+			// to Debug for repeat polls so readiness-poller churn
+			// doesn't drown the aggregator during incident response.
+			firstCAFailureLog.Do(func() {
+				a.logger.Error(
+					"/agent/ready: CA setup failed; readiness will not recover without agent restart",
+					zap.String("next_step",
+						"Restart the agent after fixing the underlying "+
+							"SetupCA failure (see the earlier Error log "+
+							"line from pkg/agent/proxy for the specific "+
+							"install path and next_step — typically "+
+							"write-access to /tmp/keploy-tls in shared-"+
+							"volume mode or to the host CA trust store "+
+							"in native mode)."),
+					zap.Error(setupErr),
+				)
+			})
+			a.logger.Debug(
+				"/agent/ready: CA setup failure still latched",
+				zap.Error(setupErr),
+			)
+			http.Error(
+				w,
+				fmt.Sprintf("CA setup failed: %v", setupErr),
+				http.StatusServiceUnavailable,
+			)
+			return
+		}
+		// Log the first refusal at Info so the gate's behaviour is
+		// visible in default-level logs; subsequent polls during the
+		// boot window go to Debug to avoid flooding.
+		firstCARefusalLog.Do(func() {
+			a.logger.Info(
+				"/agent/ready called before CA bundle is installed; refusing",
+			)
+		})
+		a.logger.Debug(
+			"/agent/ready still refusing: CA bundle not yet installed",
+		)
+		http.Error(w, "CA bundle not yet installed", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Create or overwrite the readiness file with a timestamp
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(readyFile, content, 0644); err != nil {
-		a.logger.Error("failed to create readiness file", zap.String("file", readyFile), zap.Error(err))
+	if err := os.WriteFile(agentReadyFilePath, content, 0644); err != nil {
+		// This path blocks docker-compose / kubelet startup, so the
+		// log line must point operators at the common root causes:
+		// read-only mount, missing parent dir, or disk pressure.
+		a.logger.Error(
+			"failed to create readiness file",
+			zap.String("file", agentReadyFilePath),
+			zap.String("parent_dir", filepath.Dir(agentReadyFilePath)),
+			zap.String("next_step",
+				"ensure the parent directory exists, is writable by the agent "+
+					"user, and that the container filesystem / volume is not "+
+					"read-only or out of space"),
+			zap.Error(err),
+		)
 		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
 		return
 	}
 
-	a.logger.Debug("Agent marked as ready", zap.String("file", readyFile))
+	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))

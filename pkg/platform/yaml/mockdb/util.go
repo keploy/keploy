@@ -3,7 +3,9 @@ package mockdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -12,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
@@ -22,6 +25,15 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Name:         mock.Name,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+	}
+	mapped, err := encodeWithMapper(mock, &yamlDoc)
+	if err != nil {
+		wrapped := fmt.Errorf("mockdb: encode mapper for kind %q: %w", mock.Kind, err)
+		utils.LogError(logger, wrapped, "registered MockYAMLMapper.Encode returned an error; check the mapper for this kind", zap.String("kind", string(mock.Kind)))
+		return nil, wrapped
+	}
+	if mapped {
+		return &yamlDoc, nil
 	}
 	switch mock.Kind {
 	case models.Mongo:
@@ -116,34 +128,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		err := yamlDoc.Spec.Encode(genericSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
-			return nil, err
-		}
-	case models.REDIS:
-		redisSpec := models.RedisSchema{
-			Metadata: mock.Spec.Metadata,
-
-			RedisRequests:    mock.Spec.RedisRequests,
-			RedisResponses:   mock.Spec.RedisResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(redisSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
-			return nil, err
-		}
-	case models.KAFKA:
-		kafkaSpec := models.KafkaSchema{
-			Metadata: mock.Spec.Metadata,
-
-			KafkaRequests:    mock.Spec.KafkaRequests,
-			KafkaResponses:   mock.Spec.KafkaResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(kafkaSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
 			return nil, err
 		}
 	case models.PostgresV2:
@@ -263,12 +247,149 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
 			return nil, err
 		}
+	case models.PostgresV3:
+		// Single top-level Kind for all v3 Postgres sub-types. The sub-type
+		// lives in mock.Spec.PostgresV3.Type and selects which of the
+		// Session/Catalog/Data/Query/Generator sub-pointers is read. A nil
+		// spec or a Type/pointer mismatch is a hard reject (see wave 3).
+		if mock.Spec.PostgresV3 == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3 mock with nil Spec.PostgresV3",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, errPostgresV3NilPayload
+		}
+		if err := validatePostgresV3Spec(mock.Spec.PostgresV3); err != nil {
+			utils.LogError(logger, err, "refusing to marshal PostgresV3 mock with inconsistent sub-spec",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("postgres_v3_type", mock.Spec.PostgresV3.Type),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, err
+		}
+		spec := postgresV3YamlSpec{
+			Metadata:         mock.Spec.Metadata,
+			PostgresV3:       mock.Spec.PostgresV3,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		if err := yamlDoc.Spec.Encode(spec); err != nil {
+			utils.LogError(logger, err, "failed to marshal PostgresV3 mock as yaml",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("postgres_v3_type", mock.Spec.PostgresV3.Type),
+				zap.String("next_step", nextStepPostgresV3Encode))
+			return nil, err
+		}
+		// yaml.v3 v3.0.1's emitter mishandles plain strings that contain
+		// embedded newlines or tabs when those scalars live under a
+		// sequence (the shape PostgresV3Cells, Notices, and Rows produce).
+		// It picks a literal block scalar `|N-` whose indent indicator
+		// races with the parent sequence's offset, so the same document
+		// the recorder just wrote fails to load on replay with either
+		// "found a tab character where an indentation space is expected"
+		// or "did not find expected key". Sanitize the encoded Spec
+		// in-place so every unsafe string scalar moves to a DoubleQuoted
+		// scalar before yamlLib.Marshal flattens the tree to bytes.
+		// Custom MarshalYAML on PostgresV3Cell already covers Cells; the
+		// post-encode walk catches everything else (SQLNormalized, Notice
+		// messages, table-data column values, etc.) without per-field
+		// schema churn.
+		sanitizeYAMLStringNodes(&yamlDoc.Spec)
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
 	}
 
 	return &yamlDoc, nil
+}
+
+// ---------------------------------------------------------------------------
+// PostgresV3 YAML Spec envelopes — one per Kind. Each carries the
+// metadata + the typed payload + timestamps.
+// ---------------------------------------------------------------------------
+
+// Remediation strings attached to PostgresV3 yaml encode/decode errors
+// via the structured `next_step` field. Kept here so both halves of
+// the switch use identical guidance and operators get a consistent
+// signal in logs.
+const (
+	nextStepPostgresV3Encode = "The mock could not be serialised to yaml — inspect mock_name + mock_kind for the offending record, then check the PostgresV3*Spec struct for YAML-specific failure modes: embedded NUL bytes or other control characters (yaml.v3 rejects them outright), invalid UTF-8 in any string field (e.g. raw binary leaking into an un-base64'd column cell), or anchor/alias cycles in map-typed fields. Re-record the affected test-set if the source data is corrupt. (Gob-path issues like nil slice elements are tracked separately — this remediation covers the yaml marshal path only.)"
+	nextStepPostgresV3Decode = "The stored PostgresV3 yaml block could not be parsed — verify `kind: PostgresV3` at the top of the doc and that the spec carries `postgresV3.type` with one of: session, catalog, data, query, generator. If the file was edited by hand, restore from source-of-truth or re-record; otherwise upgrade keploy so the running binary matches the on-disk schema."
+	// nextStepPostgresV3NilPayload — emitted when the kind-specific
+	// payload pointer is nil on either side of the yaml cycle.
+	// Accepting a nil pointer would either write `<field>: null` to
+	// disk (breaking downstream replay code which dereferences the
+	// payload unconditionally), or silently load an invalid mock into
+	// memory. Fail fast and tell the caller what to check.
+	nextStepPostgresV3NilPayload = "The PostgresV3 mock is missing its typed payload — mock.Spec.PostgresV3 must be non-nil AND the sub-pointer matching Type must be non-nil (Type=\"session\" requires Session, Type=\"query\" requires Query, etc.). Check the call site that constructed the mock (recorder encode path or unit-test fixture) and ensure both Type and the matching *Spec are populated before persistence; if this surfaced during a load, the on-disk record is corrupt and the test-set should be re-recorded."
+)
+
+// errPostgresV3NilPayload is returned from EncodeMock / DecodeMocks
+// when a PostgresV3* mock arrives without its kind-specific payload.
+// Kept as a typed error so callers can match on it if they want to
+// skip/repair instead of aborting the whole file — the default mock
+// pipeline surfaces it all the way up and aborts record/replay,
+// which is the right behaviour because a null payload silently
+// corrupts replay.
+var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
+
+// postgresV3YamlSpec is the single on-disk envelope for v3 Postgres
+// mocks. The typed sub-pointer lives under `spec.postgresV3` with its
+// discriminator under `spec.postgresV3.type`. There is no per-sub-type
+// envelope any more — wave 3 collapsed them.
+type postgresV3YamlSpec struct {
+	Metadata         map[string]string      `yaml:"metadata,omitempty"`
+	PostgresV3       *models.PostgresV3Spec `yaml:"postgresV3"`
+	ReqTimestampMock time.Time              `yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time              `yaml:"resTimestampMock,omitempty"`
+}
+
+// validatePostgresV3Spec enforces the PostgresV3Spec invariant: Type
+// names one of the five sub-types, and the matching pointer field must
+// be non-nil. Inconsistent Type (e.g., Type="query" with Query nil) is
+// a hard reject — silently dropping the mismatch would let a corrupt
+// record round-trip through disk and NPE at replay time.
+//
+// Design choice (wave 3): when Type names one pointer but another is
+// also populated (Type="query" with both Query and Session non-nil),
+// the Type-matched pointer wins; the other is silently ignored. This
+// keeps hand-edited mocks tolerant for the common "user pasted the
+// wrong field but set Type correctly" case, and documents the read
+// order so analytics consumers don't have to guess. If both fields
+// were treated as errors, editing mocks would become brittle; if
+// neither were validated, replay-time NPEs would surface in
+// hard-to-diagnose places. Validating Type→pointer presence is the
+// middle ground.
+func validatePostgresV3Spec(s *models.PostgresV3Spec) error {
+	if s == nil {
+		return errPostgresV3NilPayload
+	}
+	switch s.Type {
+	case models.PostgresV3TypeSession:
+		if s.Session == nil {
+			return errPostgresV3NilPayload
+		}
+	case models.PostgresV3TypeCatalog:
+		if s.Catalog == nil {
+			return errPostgresV3NilPayload
+		}
+	case models.PostgresV3TypeData:
+		if s.Data == nil {
+			return errPostgresV3NilPayload
+		}
+	case models.PostgresV3TypeQuery:
+		if s.Query == nil {
+			return errPostgresV3NilPayload
+		}
+	case models.PostgresV3TypeGenerator:
+		if s.Generator == nil {
+			return errPostgresV3NilPayload
+		}
+	default:
+		return fmt.Errorf("postgres_v3 mock has unknown sub-type %q (want one of: session, catalog, data, query, generator)", s.Type)
+	}
+	return nil
 }
 
 func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
@@ -281,6 +402,16 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Kind:         m.Kind,
 			Noise:        m.Noise,
 			ConnectionID: m.ConnectionID,
+		}
+		mapped, err := decodeWithMapper(m, &mock)
+		if err != nil {
+			wrapped := fmt.Errorf("mockdb: decode mapper for mock %q kind %q: %w", m.Name, m.Kind, err)
+			utils.LogError(logger, wrapped, "registered MockYAMLMapper.Decode returned an error; check the mapper for this kind and that the on-disk yaml matches its schema", zap.String("mock name", m.Name), zap.String("kind", string(m.Kind)))
+			return nil, wrapped
+		}
+		if mapped {
+			mocks = append(mocks, &mock)
+			continue
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {
@@ -367,36 +498,6 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
 				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
-		case models.REDIS:
-			redisSpec := models.RedisSchema{}
-			err := m.Spec.Decode(&redisSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.String("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: redisSpec.Metadata,
-
-				RedisRequests:    redisSpec.RedisRequests,
-				RedisResponses:   redisSpec.RedisResponses,
-				ReqTimestampMock: redisSpec.ReqTimestampMock,
-				ResTimestampMock: redisSpec.ResTimestampMock,
-			}
-		case models.KAFKA:
-			kafkaSpec := models.KafkaSchema{}
-			err := m.Spec.Decode(&kafkaSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into kafka mock", zap.String("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: kafkaSpec.Metadata,
-
-				KafkaRequests:    kafkaSpec.KafkaRequests,
-				KafkaResponses:   kafkaSpec.KafkaResponses,
-				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
-				ResTimestampMock: kafkaSpec.ResTimestampMock,
-			}
 		case models.PostgresV2:
 
 			PostSpec := postgres.Spec{}
@@ -441,6 +542,36 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				Created:          http2Spec.Created,
 				ReqTimestampMock: http2Spec.ReqTimestampMock,
 				ResTimestampMock: http2Spec.ResTimestampMock,
+			}
+		case models.PostgresV3:
+			var spec postgresV3YamlSpec
+			if err := m.Spec.Decode(&spec); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3 yaml",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
+				return nil, err
+			}
+			if spec.PostgresV3 == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3 yaml block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
+			if err := validatePostgresV3Spec(spec.PostgresV3); err != nil {
+				utils.LogError(logger, err, "PostgresV3 yaml block has inconsistent sub-spec",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("postgres_v3_type", spec.PostgresV3.Type),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         spec.Metadata,
+				PostgresV3:       spec.PostgresV3,
+				ReqTimestampMock: spec.ReqTimestampMock,
+				ResTimestampMock: spec.ResTimestampMock,
 			}
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
@@ -890,4 +1021,43 @@ func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*mode
 	}
 	mockSpec.PostgresResponsesV2 = resps
 	return &mockSpec, nil
+}
+
+// sanitizeYAMLStringNodes walks a yaml.Node tree and rewrites any
+// string scalar whose plain/auto styling would render as a literal
+// block scalar (`|N-`) that yaml.v3 v3.0.1's parser then refuses on
+// re-read inside a sequence context. The rewrite preserves the value
+// byte-for-byte but switches to DoubleQuotedStyle, which escapes \t /
+// \n / leading whitespace as C-style sequences and round-trips
+// reliably regardless of nesting depth.
+//
+// We only touch nodes that the encoder actually picked the unsafe
+// style for — explicitly tagged scalars (!!binary, !!timestamp, etc.)
+// and already-quoted scalars are left alone, so this is a no-op for
+// values the schema-side MarshalYAML methods (PostgresV3Cell and the
+// like) already handled.
+func sanitizeYAMLStringNodes(node *yamlLib.Node) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yamlLib.DocumentNode, yamlLib.SequenceNode, yamlLib.MappingNode:
+		for _, child := range node.Content {
+			sanitizeYAMLStringNodes(child)
+		}
+	case yamlLib.ScalarNode:
+		// Only intervene on plain or auto-styled string scalars.
+		// Anything with an explicit non-string tag (!!binary, !!int,
+		// !!timestamp, etc.) is the encoder's decision and not a
+		// safe-style candidate.
+		if node.Tag != "" && node.Tag != "!!str" {
+			return
+		}
+		if node.Style == yamlLib.DoubleQuotedStyle || node.Style == yamlLib.SingleQuotedStyle {
+			return
+		}
+		if models.StringNeedsDoubleQuoted(node.Value) {
+			node.Style = yamlLib.DoubleQuotedStyle
+		}
+	}
 }

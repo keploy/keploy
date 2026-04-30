@@ -99,7 +99,7 @@ wait_for_port() {
     local port=$1
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
-        if sudo lsof -i :$port -sTCP:LISTEN >/dev/null 2>&1; then
+        if (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -107,7 +107,7 @@ wait_for_port() {
         sleep 2
     done
     echo "Timed out waiting for port $port."
-    sudo lsof -i -P -n | grep LISTEN
+    ss -ltnp || true
     exit 1
 }
 
@@ -144,7 +144,7 @@ check_for_errors record.log
 
 # Replay: Keploy replays the captured gRPC calls against the server.
 echo "🧪 Replaying recorded tests..."
-"$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false --disableMockUpload 2>&1 | tee test.log || true
+"$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test.log || true
 
 check_for_errors test.log
 if ! check_test_report; then

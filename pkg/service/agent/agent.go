@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -36,6 +39,13 @@ type Agent struct {
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
 	Ip          string
+
+	// strictLogOnce de-dupes the "strict mock window enabled" Info log
+	// so it fires at most once per agent process instead of once per
+	// test. Operators searching agent logs for strict-mode activity
+	// still find a hit; they just don't get swamped by one line per
+	// test on large suites.
+	strictLogOnce sync.Once
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -51,13 +61,33 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 		proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
 	coreAgent.RegisterIncomingProxy(ip)
+	// Propagate the connection-pool idle retention from config into
+	// the MockManager package default. Reset unconditionally — whether
+	// config is present or nil — so a prior setter invocation
+	// (embedder, multi-agent test) does not bleed retention state into
+	// this agent instance. The setter itself treats <=0 as "revert to
+	// the 5-minute default", so both paths below are safe.
+	if config != nil {
+		proxyPkg.SetConnectionIdleRetention(config.Test.ConnectionPoolIdleRetention)
+	} else {
+		proxyPkg.SetConnectionIdleRetention(0)
+	}
 	return instrumentation
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
-	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	// Remove stale readiness file from a previous run so the Docker
+	// healthcheck (`cat <AgentReadyFile>`) does not pass before the
+	// CLI has stored mocks on the agent. The file is re-created later
+	// by the MakeAgentReady HTTP handler in pkg/agent/routes/record.go
+	// once setup is complete.
+	if err := os.Remove(kdocker.AgentReadyFile); err != nil && !os.IsNotExist(err) {
+		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
+	}
+
+	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -118,8 +148,38 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
+// outgoingMockChanCap is the buffer depth of the agent → CLI mock
+// stream. The channel pipes typed mocks captured by the recorder
+// goroutines into the gob-encoded HTTP stream the CLI consumes; a
+// deeper buffer absorbs producer bursts at the cost of holding that
+// many in-flight Mocks in memory inside the agent.
+//
+// Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
+// request/response body strings, postgres v3 bind values whose raw
+// bytes are now capped per-value via the integrations recorder fix
+// in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
+// mock — multiple Bind parameters, plus DataRow cells on the
+// response side). At 100 entries the worst-case pinned memory for
+// a "fat" mock workload (e.g. the 60-VU × 1 MiB inserts shape that
+// triggered the OOM observed on PR #4135's go-memory-load CI run
+// 24990909605, job 73176710440) is bounded; 1000 was unsafe because
+// the slow CLI consumer (gob-encoded over HTTP, then disk-write per
+// mock) reliably underran the producer and let the channel fill,
+// pinning ~1 GiB of bodies before memoryguard's 500 ms tick could
+// react.
+//
+// 100 was chosen so that it stays well above any normal-traffic
+// micro-burst (typical postgres recordings emit ~10–30 mocks/s) yet
+// the ceiling is reached fast enough that syncMock's existing
+// outChan-overflow drop-with-Error path becomes the dominant
+// backpressure signal long before the cgroup limit is hit. The
+// drop path is intentional: it is far better to lose a mock and
+// keep recording than to OOM-kill the agent and lose every mock
+// captured in the run.
+const outgoingMockChanCap = 100
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 1000)
+	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
@@ -206,7 +266,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	if a.proxyStarted {
-		a.logger.Info("Proxy already started")
+		a.logger.Debug("Proxy already started")
 		return nil
 	}
 
@@ -231,6 +291,15 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to start proxy")
+		// StartProxy may have spawned proxy goroutines before the
+		// failure point (TCP accept loop, TCP DNS, UDP DNS) — they
+		// stay live until proxyCtx is cancelled. Before this fix
+		// they leaked until the outer agent context was cancelled,
+		// holding ports and consuming resources. Cancel here so the
+		// partial proxy is torn down immediately. Matters now that
+		// StartProxy propagates auxiliary-hook failures (keploy#4078)
+		// rather than swallowing them.
+		proxyCtxCancel()
 		return hookErr
 	}
 
@@ -246,16 +315,61 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	return a.Proxy.GetMockErrors(ctx)
 }
 
-// StoreMocks stores the filtered and unfiltered mocks for a client ID
+// StoreMocks stores the filtered and unfiltered mocks for a client ID.
+//
+// Unification (Phase 1): every mock is run through DeriveLifetime on
+// entry so TestModeInfo.Lifetime is populated before any matcher reads
+// it. This is a second safety-net — the mockdb disk loader already
+// derives at load time, but StoreMocks is also reachable from other
+// paths (grpc instrumentation transport, in-memory tests, etc.) where
+// no prior DeriveLifetime has run. Calling it again is idempotent
+// thanks to the LifetimeDerived-bool short-circuit in DeriveLifetime
+// (LifetimePerTest is the zero value of Lifetime, so the bool is the
+// only reliable "already classified" signal), so re-deriving here
+// never double-bumps the legacyKindFallbackFires counter or races
+// with concurrent matchers.
+//
+// Caveat: because the stored slices carry pointer copies (not deep
+// copies) of the caller's mocks, DeriveLifetime's write to
+// TestModeInfo.Lifetime is visible through the caller's slice as
+// well. This is the intended semantic — there's exactly ONE Mock
+// object per name per session and every consumer of it (including
+// the caller) benefits from the cached Lifetime. Do NOT introduce a
+// deep copy here unless a concrete mutation-safety regression lands
+// first.
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, len(filtered)),
 		unfiltered: make([]*models.Mock, len(unfiltered)),
 	}
 
-	// Deep copy the mocks to avoid data races
+	// Shallow copy the slices — only the outer backing array is
+	// duplicated, the *models.Mock pointers are shared with the
+	// caller's slices. This is INTENTIONAL and load-bearing: matchers
+	// look up mocks via pointer identity in MockManager's trees and
+	// per-connID pools, and HitCount/Lifetime are bumped on the shared
+	// Mock object so observability is consistent across the stack (see
+	// the caveat block before this function for the full rationale).
+	// Do NOT switch to a deep copy without coordinated updates at
+	// every downstream site.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+
+	// Derive Lifetime once per mock before they enter the runtime pool.
+	// Idempotent: DeriveLifetime short-circuits when the Lifetime
+	// field is already set (i.e. the disk loader has already run),
+	// so re-deriving here is safe and never double-counts the
+	// legacyKindFallbackFires telemetry.
+	for _, m := range storage.filtered {
+		if m != nil {
+			m.DeriveLifetime()
+		}
+	}
+	for _, m := range storage.unfiltered {
+		if m != nil {
+			m.DeriveLifetime()
+		}
+	}
 
 	a.clientMocks.Store(uint64(0), storage)
 
@@ -270,7 +384,38 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Time("afterTime", params.AfterTime),
 		zap.Time("beforeTime", params.BeforeTime),
 		zap.Bool("useMappingBased", params.UseMappingBased),
-		zap.Int("mockMappingCount", len(params.MockMapping)))
+		zap.Int("mockMappingCount", len(params.MockMapping)),
+		zap.Bool("strictMockWindow", params.StrictMockWindow))
+
+	// Strict mock-window is OPT-IN via either the per-call flag
+	// (params.StrictMockWindow) or the process-wide KEPLOY_STRICT_MOCK_WINDOW
+	// env override. Surface the EFFECTIVE state so operators searching
+	// agent logs for "strict mock window enabled" find hits regardless of
+	// which route they used — previously the log fired only on the per-call
+	// flag, making env-only opt-ins invisible.
+	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled {
+		// Fire the activation message at most once per agent process
+		// (sync.Once). Info (project logging policy disallows Warn for
+		// expected-default state); the escape-hatch names are embedded
+		// inline so operators hitting unexpected "missing mock" errors
+		// after an upgrade can opt out without digging through docs.
+		// Per-test diagnostics drop to Debug.
+		a.strictLogOnce.Do(func() {
+			a.logger.Info(
+				"strict mock-window containment is ACTIVE for this session — per-test mocks whose request "+
+					"timestamp falls outside the outer test window will be dropped rather than promoted "+
+					"across tests. If your replays start reporting missing mocks after an upgrade, this "+
+					"is likely why. To opt out: set KEPLOY_STRICT_MOCK_WINDOW=0 in the environment, OR "+
+					"test.strictMockWindow: false in keploy.yaml.",
+				zap.Bool("viaPerCallFlag", params.StrictMockWindow),
+				zap.Bool("viaEnvOverride", !params.StrictMockWindow && strictEnabled),
+				zap.String("escape_hatch_env", "KEPLOY_STRICT_MOCK_WINDOW=0"),
+				zap.String("escape_hatch_config", "test.strictMockWindow: false"))
+		})
+		a.logger.Debug("strict mock window active for test",
+			zap.Time("windowStart", params.AfterTime),
+			zap.Time("windowEnd", params.BeforeTime))
+	}
 
 	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
@@ -292,13 +437,71 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	var filteredMocks, unfilteredMocks []*models.Mock
 
+	// When the proxy supports the windowed extension, MockManager's
+	// SetMocksWithWindow applies the authoritative per-test-window
+	// filter (including startup-init promotion for req < firstWindowStart
+	// — bootstrap traffic like HikariCP pool warm-up that fires before
+	// any test request). Pre-dropping out-of-window per-test mocks at
+	// the agent under strict mode would hide those startup-init mocks
+	// from MockManager and break replay of app-bootstrap DB calls under
+	// strict. So: agent-level strict pre-filtering runs only on the
+	// legacy SetMocks fallback path. For WindowedProxy callers we
+	// pass strict=false to FilterPerTestAndLaxPromoted and let
+	// MockManager.SetMocksWithWindow enforce strict semantics.
+	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
+	agentStrict := params.StrictMockWindow && !isWindowedProxy
+
+	// Tier-aware strictMockWindow: when the proxy exposes the optional
+	// FirstWindowStartReader extension, read the earliest test-window
+	// start the MockManager has observed so filterByTimeStamp can keep
+	// per-test mocks with req < firstWindowStart in the filtered slice
+	// (they are startup-tier, not cross-test bleed). Stale previous-test
+	// mocks (firstWindowStart <= req < currentStart, or req > currentEnd)
+	// are still dropped — that's the containment guarantee strict mode
+	// exists to provide. A zero return from the reader (no test has
+	// fired yet) reverts to the legacy blanket-drop contract so callers
+	// observe behaviour strictly no worse than before.
+	var firstWindowStart time.Time
+	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
+		firstWindowStart = reader.FirstTestWindowStart()
+	}
+
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
 		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
-		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+		// Lax-mode promotion restoration: filterByTimeStamp moves
+		// out-of-window non-config per-test mocks into its "unfiltered"
+		// return slice so they remain reusable across tests (the
+		// pre-Phase-2 kind-fallback used to do this implicitly by
+		// over-promoting anything MySQL/Postgres/... to LifetimeSession
+		// at DeriveLifetime). Round-5 correctly narrowed DeriveLifetime
+		// but FilterTcsMocks was still discarding the promoted slice —
+		// so shared-fixture mocks (SELECT * FROM pet used by every
+		// test in spring-petclinic) were lost at the agent. We now
+		// drain those promoted-to-session mocks out of the per-test
+		// filter and merge them into the session pool passed to the
+		// proxy. Under strict mode this branch doesn't fire because
+		// filterByTimeStamp drops rather than promotes.
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
+		filteredMocks = perTestIn
+		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
+		if len(promotedToSession) > 0 {
+			unfilteredMocks = append(unfilteredMocks, promotedToSession...)
+			// Ordering: both FilterConfigMocks and FilterPerTestAndLaxPromoted
+			// already sort their outputs by ReqTimestampMock deterministically,
+			// so the concatenated slice is stable across runs. We deliberately
+			// DO NOT re-sort the merged pool here — the Mongo v2 matcher
+			// relies on config-tagged session mocks preceding lax-promoted
+			// per-test mocks in the unfiltered iteration order (config tier
+			// wins handshake/ping ties before data-plane mocks get a chance
+			// to steal the match and drop the driver connection mid-handshake).
+			// Re-sorting by timestamp interleaves them and causes the
+			// Mongo fuzzer cross-version replay to hang.
+			a.logger.Debug("lax-promoted per-test mocks into session pool for cross-test reuse",
+				zap.Int("count", len(promotedToSession)))
+		}
 	}
 
 	// Count IsFiltered distribution for debugging
@@ -321,11 +524,20 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 
-	// Set the filtered mocks to the proxy
-	err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to set mocks on proxy")
-		return err
+	// Atomically update mocks AND the active test window when the proxy
+	// supports the WindowedProxy extension. Otherwise fall back to the
+	// stable SetMocks contract — third-party proxies without window
+	// support keep working in legacy lax mode.
+	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
+			return err
+		}
+	} else {
+		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks on proxy")
+			return err
+		}
 	}
 
 	return nil

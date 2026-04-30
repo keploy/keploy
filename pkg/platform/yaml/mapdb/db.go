@@ -176,6 +176,21 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 	return nil
 }
 
+// Exists reports whether mappings.yaml is on disk for the given
+// test-set. Used by the test-mode create-if-not-present write path —
+// distinct from Get's second return (which is "has at least one
+// non-empty test entry"). A file with only empty entries should still
+// count as "exists" so we don't overwrite the operator's intentional
+// empty mapping.
+func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error) {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+}
+
 // Get reads test-mock mappings from a YAML file
 // Returns: testMockMappings, mappingFilePresent, error
 func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {

@@ -29,6 +29,6 @@ type AgentInfo struct {
 	KeployAgentInode   uint64
 	IsDocker           uint32
 	Proxy              ProxyInfo
-	_                  [4]byte
+	Flags              uint32 // extensible flag slot consumed by the BPF cgroup hooks; set via AgentInfoCustomizer. Matches agent_info_t.flags at offset 44 (ebpf#96).
 	RecordingStartTime uint64 // boot-time NS when recording started; pre-existing processes are auto-excluded by eBPF
 }
