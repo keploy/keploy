@@ -319,18 +319,31 @@ check_normalize_warnings() {
     section "Validating Safe Normalize Warnings..."
     local logfile="normalize_safe.log"
     local warning_msg="failed to normalize test case.*due to a high-risk failure"
-    
+
     echo "Checking for high-risk normalization warnings in $logfile..."
-    
+
     local warning_count
     warning_count=$(grep -c "$warning_msg" "$logfile" || true)
-    
-    if [ "$warning_count" -ne 7 ]; then
-        echo "::error::Expected 7 high-risk normalization warnings, but found $warning_count."
+
+    # Each recorded test-set produces 7 high-risk warnings during safe
+    # normalize. Count test-sets dynamically so the supplemental JSON
+    # record pass (added in e6bfcfb3) — which doubles the test-sets to
+    # test-set-0 + test-set-1 — does not break the assertion. Stays
+    # correct if a third format is ever added.
+    local num_test_sets expected_warnings
+    num_test_sets=$(find ./keploy -maxdepth 1 -type d -name "test-set-*" 2>/dev/null | wc -l)
+    if [ "$num_test_sets" -lt 1 ]; then
+        echo "::error::No test-set directories found under ./keploy"
         exit 1
     fi
-    
-    echo "✅ Found exactly 7 high-risk normalization warnings, as expected."
+    expected_warnings=$((7 * num_test_sets))
+
+    if [ "$warning_count" -ne "$expected_warnings" ]; then
+        echo "::error::Expected $expected_warnings high-risk normalization warnings ($num_test_sets test-set × 7), but found $warning_count."
+        exit 1
+    fi
+
+    echo "✅ Found exactly $expected_warnings high-risk normalization warnings ($num_test_sets test-set × 7), as expected."
     endsec
 }
 
