@@ -38,7 +38,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 
 func (j *Java) PreProcess(_ bool) (string, error) {
 	// default location for jar of jacoco agent
-	jacocoAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
+	jacocoAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.13/org.jacoco.agent-0.8.13-runtime.jar"
 	if j.jacocoAgentPath != "" {
 		jacocoAgentPath = j.jacocoAgentPath
 	}
@@ -55,7 +55,7 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 		}
 	}
 	if err != nil {
-		j.logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
+		j.logger.Info("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
 		return j.cmd, err
 	}
 	// downlaod jacoco cli

@@ -1106,25 +1106,30 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // somehow reached the matcher without DeriveLifetime having run) AND
 // the raw tag says "config", treat as session. This mirrors the
 // matcher's session-skip check for consistency.
+// Concurrency note: matchedMock is a shared pointer from the mock
+// pool. See the HTTP equivalent in pkg/agent/proxy/integrations/http/
+// match.go for the rationale — we build a fresh copy and mutate the
+// copy rather than the pool pointer, so concurrent goroutines that
+// match the same session-lifetime mock don't race on TestModeInfo.
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updatedMock := *matchedMock
+	updatedMock.TestModeInfo.IsFiltered = false
+	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 
-	lifetime := matchedMock.TestModeInfo.Lifetime
+	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
-	if matchedMock.Spec.Metadata != nil {
-		rawConfig = matchedMock.Spec.Metadata["type"] == "config"
+	if updatedMock.Spec.Metadata != nil {
+		rawConfig = updatedMock.Spec.Metadata["type"] == "config"
 	}
 	isSessionOrConnection := lifetime == models.LifetimeSession ||
 		lifetime == models.LifetimeConnection ||
 		(lifetime == models.LifetimePerTest && rawConfig)
 
 	if isSessionOrConnection {
-		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+		updated := mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 		if !updated {
 			logger.Debug("failed to update matched session/connection mock",
-				zap.String("mock", matchedMock.Name),
+				zap.String("mock", updatedMock.Name),
 				zap.Stringer("lifetime", lifetime))
 		}
 		return updated
@@ -1136,14 +1141,14 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// SetMocksWithWindow's isInitialStaging branch) — the mock is
 	// still classified as LifetimePerTest but physically lives in
 	// the session tree until the first real test's re-partition.
-	if mockDb.DeleteFilteredMock(originalMatchedMock) {
+	if mockDb.DeleteFilteredMock(*matchedMock) {
 		return true
 	}
-	if mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock) {
+	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
 		return true
 	}
 	logger.Debug("failed to delete or update matched per-test mock",
-		zap.String("mock", matchedMock.Name))
+		zap.String("mock", updatedMock.Name))
 	return false
 }
 

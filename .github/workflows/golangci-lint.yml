@@ -16,6 +16,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: true
 
+env:
+  # Central ref for the keploy/integrations commit this workflow checks
+  # out via setup-private-parsers. Mirrors the default in
+  # prepare_and_run.yml + release.yml so all three workflows track the
+  # same integrations ref. Prefer the repo-level `vars.INTEGRATION_REF`
+  # when set (so operators can override without editing this file),
+  # falling back to `main`. Pin to a specific SHA via the repo var if
+  # a feat branch needs to carry a cross-repo change.
+  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+
 jobs:
   golangci:
     name: lint
@@ -43,6 +53,8 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          # See INTEGRATION_REF in the workflow-level env block.
+          integration-ref: ${{ env.INTEGRATION_REF }}
 
       - name: Configure Git to use SSH
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}

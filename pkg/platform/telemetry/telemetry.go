@@ -148,10 +148,6 @@ func (tel *Telemetry) RecordedTestAndMocks() {
 	tel.ensureFlushLoop()
 }
 
-func (tel *Telemetry) GenerateUT() {
-	tel.SendTelemetry("GenerateUT")
-}
-
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 	mockMap := make(map[string]interface{}, len(mockTotal))
 	for k, v := range mockTotal {

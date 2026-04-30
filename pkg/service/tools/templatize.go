@@ -134,7 +134,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	if len(utils.SecretValues) > 0 {
 		err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
 		if err != nil {
-			t.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+			t.logger.Debug("Failed to add secret files to .gitignore", zap.Error(err))
 		}
 	}
 

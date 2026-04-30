@@ -57,17 +57,22 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
 			}
 
+			// Concurrency note for both branches below: see HTTP's
+			// updateMock — filteredMocks[index] / unfilteredMocks[index]
+			// are pointers into the shared mock pool, so we mutate a
+			// fresh copy rather than the pool pointer and pass the copy
+			// to UpdateUnFilteredMock.
 			if index != -1 {
 				responseMock := make([]models.Payload, len(filteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, filteredMocks[index].Spec.GenericResponses)
-				originalFilteredMock := *filteredMocks[index]
-				filteredMocks[index].TestModeInfo.IsFiltered = false
-				filteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
+				updatedMock := *filteredMocks[index]
+				updatedMock.TestModeInfo.IsFiltered = false
+				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(filteredMocks[index], &updatedMock)
 				if !isUpdated {
 					continue
 				}
-				logger.Debug("Filtered mock found for generic request", zap.String("Mock", filteredMocks[index].Name), zap.Int64("sortOrder", filteredMocks[index].TestModeInfo.SortOrder))
+				logger.Debug("Filtered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 
@@ -79,14 +84,14 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 			if index != -1 {
 				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
-				originalFilteredMock := *unfilteredMocks[index]
-				unfilteredMocks[index].TestModeInfo.IsFiltered = false
-				unfilteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, unfilteredMocks[index])
+				updatedMock := *unfilteredMocks[index]
+				updatedMock.TestModeInfo.IsFiltered = false
+				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(unfilteredMocks[index], &updatedMock)
 				if !isUpdated {
 					continue
 				}
-				logger.Debug("Unfiltered mock found for generic request", zap.String("Mock", unfilteredMocks[index].Name), zap.Int64("sortOrder", unfilteredMocks[index].TestModeInfo.SortOrder))
+				logger.Debug("Unfiltered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 			return false, nil, nil

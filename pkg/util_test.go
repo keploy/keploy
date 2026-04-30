@@ -1255,6 +1255,261 @@ func mockNames(ms []*models.Mock) []string {
 	return out
 }
 
+// TestFilterByTimeStampTierAware_StartupPreservation pins the
+// tier-aware strictMockWindow contract. Given the five cases from the
+// contract (startup, in-window, stale prev-test, session, connection)
+// plus the stale-past-window case, the filter KEEPs startup + session +
+// connection + in-window and DROPs only genuinely stale cross-test
+// per-test mocks. See pkg/util.go's filterByTimeStampTierAware doc.
+func TestFilterByTimeStampTierAware_StartupPreservation(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// firstWindowStart < previousTestEnd < currentStart < currentEnd
+	//         |             |                 |              |
+	//      2:00 UTC      2:30 UTC          3:00 UTC       3:10 UTC
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	previousTestEnd := time.Date(2026, 4, 22, 2, 30, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// startup: per-test mock recorded BEFORE any test fired (req <
+	// firstWindowStart). Legacy blanket-drop killed this; tier-aware
+	// must preserve.
+	startup := &models.Mock{
+		Name: "startup-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// inWindow: per-test mock whose req is inside [currentStart, currentEnd].
+	inWindow := &models.Mock{
+		Name: "in-window-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// stalePrev: per-test mock from a previous test window
+	// (firstWindowStart <= req < currentStart). REAL bleed — must drop.
+	stalePrev := &models.Mock{
+		Name: "stale-prev-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-5 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// session: LifetimeSession is always preserved (spans tests).
+	session := &models.Mock{
+		Name: "session-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-10 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// connection: LifetimeConnection is always preserved (conn-bounded).
+	connection := &models.Mock{
+		Name: "connection-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-15 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-15*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// stalePast: per-test mock whose req is PAST currentEnd (future-test
+	// bleed). Also genuine stale and must be dropped.
+	stalePast := &models.Mock{
+		Name: "stale-past-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentEnd.Add(10 * time.Minute),
+			ResTimestampMock: currentEnd.Add(10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{startup, inWindow, stalePrev, session, connection, stalePast}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// The startup per-test mock survives in `filtered` so MockManager's
+	// SetMocksWithWindow partition-by-firstWindowStart routes it into
+	// the startup tree. The in-window per-test mock also lives in
+	// `filtered` — that's its current tier.
+	assert.ElementsMatch(t, []string{"startup-pertest", "in-window-pertest"}, mockNames(filtered),
+		"startup + in-window per-test mocks must survive in filtered slice")
+
+	// Session and connection mocks go to unfiltered (reusable-across-
+	// tests pool). Stale previous-test and stale future-test per-test
+	// mocks are DROPPED — genuine cross-test bleed.
+	assert.ElementsMatch(t, []string{"session-scoped", "connection-scoped"}, mockNames(unfiltered),
+		"session + connection must survive in unfiltered slice; stale per-test must drop")
+}
+
+// TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback pins the
+// fallback contract: when firstWindowStart is zero (no test has fired
+// yet on the underlying MockManager, or the caller couldn't thread
+// it), the tier-aware filter reverts to the legacy blanket-drop
+// semantics so behaviour is strictly no worse than before the fix.
+func TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict fallback not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	// Per-test mock predating the current window. Under tier-aware with
+	// a known firstWindowStart this would be preserved as startup; under
+	// zero-firstWindowStart fallback it behaves like the legacy blanket
+	// drop (dropped under strict).
+	preWindow := &models.Mock{
+		Name: "pre-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now.Add(-3 * time.Hour),
+			ResTimestampMock: now.Add(-3*time.Hour + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	inWindow := &models.Mock{
+		Name: "in-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{preWindow, inWindow}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, after, before, true, time.Time{})
+
+	// Zero firstWindowStart → legacy blanket-drop — pre-window dropped,
+	// in-window kept.
+	assert.ElementsMatch(t, []string{"in-window"}, mockNames(filtered),
+		"zero firstWindowStart must fall back to legacy blanket drop for per-test mocks")
+	assert.Empty(t, mockNames(unfiltered),
+		"zero firstWindowStart strict mode must leave per-test unfiltered empty")
+}
+
+// TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative
+// pins the mockdb/filter-layer authoritative per-test router contract:
+// pool routing uses ONLY Lifetime + ReqTimestampMock. The recorder-
+// stamped metadata["scope"] string is informational on the wire and
+// MUST NOT influence routing. This regression-guards the debug-bundle
+// symptom where perTest-lifetime mocks with a recorder-stamped
+// scope=session (context-probe captured between test-window
+// transitions) were incorrectly dropped into the session pool.
+//
+// Contract:
+//
+//  1. mock{Lifetime=perTest, metadata.scope=session, req ∈ window} →
+//     per-test pool (filtered). The timestamp attribution wins; scope
+//     is ignored.
+//  2. mock{Lifetime=session, metadata.scope=test:N, req ∈ window} →
+//     session pool (unfiltered). Lifetime-first short-circuit wins;
+//     neither scope nor the fact that req happens to land inside the
+//     current test's window matters for the session-lifetime class.
+//  3. mock{Lifetime=connection, metadata.scope=session, req ∈ window} →
+//     session pool (unfiltered). Same lifetime-first semantics as (2).
+func TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — lifetime-first routing only exercised under strict")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	start := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Second)
+	reqInWindow := start.Add(time.Second)
+	resInWindow := reqInWindow.Add(time.Millisecond)
+
+	// Case 1: the user's exact anomaly shape — a perTest-lifetime mock
+	// with recorder-stamped scope=session, timestamp inside the window.
+	// Must land in the per-test (filtered) pool via timestamp
+	// attribution; the scope tag is noise.
+	perTestWithSessionScope := &models.Mock{
+		Name:    "pertest-scope-session-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			// The recorder stamped scope=session (context-probe
+			// thought it was between tests) AND type=mocks (semantic
+			// class classified the query as per-test). Exactly the
+			// debug-bundle's "lifetime: perTest, scope: session" shape.
+			Metadata: map[string]string{"type": "mocks", "scope": "session"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// Case 2: a session-lifetime mock stamped scope=test:N, req in
+	// window. Lifetime-first short-circuit wins — session pool.
+	sessionWithTestScope := &models.Mock{
+		Name:    "session-scope-test-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "config", "scope": "test:sap-customer360"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// Case 3: a connection-lifetime mock stamped scope=session, req in
+	// window. Lifetime-first short-circuit wins — session/unfiltered
+	// pool (MockManager seeds the per-connID pool from unfiltered).
+	connWithSessionScope := &models.Mock{
+		Name:    "connection-scope-session",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "connection", "scope": "session", "connID": "pg-conn-1"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// Case 4 (baseline sanity): an ordinary perTest-lifetime mock with
+	// no scope tag at all, req in window. Must still land in per-test.
+	// Guards against a regression where the lifetime-first branch
+	// accidentally swallows perTest traffic.
+	perTestNoScope := &models.Mock{
+		Name:    "pertest-no-scope",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "mocks"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{perTestWithSessionScope, sessionWithTestScope, connWithSessionScope, perTestNoScope}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, start, end, true, start)
+
+	assert.ElementsMatch(t,
+		[]string{"pertest-scope-session-anomaly", "pertest-no-scope"},
+		mockNames(filtered),
+		"perTest-lifetime mocks in window must land in the per-test pool irrespective of metadata[\"scope\"]")
+	assert.ElementsMatch(t,
+		[]string{"session-scope-test-anomaly", "connection-scope-session"},
+		mockNames(unfiltered),
+		"Session/Connection-lifetime mocks must land in the session pool irrespective of metadata[\"scope\"] or whether req sits inside the current window")
+}
+
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
 // including IPv4, IPv6, and hostnames, both with and without ports.
 func TestHasExplicitPort_IPv6_777(t *testing.T) {
@@ -1459,4 +1714,233 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	t.Run("GRPC_ConfigHost_ReplaceError", func(t *testing.T) {
 		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
 	})
+}
+
+// --- updateTemplateValuesFromHTTPResp: response-header walk tests ---
+//
+// These cover the gap noted against listmonk's session-cookie round-trip: at replay
+// time the live Set-Cookie/Authorization/etc. values must be pulled out of
+// resp.Header and written into utils.TemplatizedValues so that subsequent tests
+// that render {{.session}}/{{.token}}/... see the fresh value rather than the
+// stale record-time one.
+
+func runHeaderUpdateTest(
+	t *testing.T,
+	recordedHeader, liveHeader map[string]string,
+	initialTemplatedValues map[string]interface{},
+) (changed bool, final map[string]interface{}) {
+	t.Helper()
+	logger := zap.NewNop()
+
+	templated := models.HTTPResp{
+		StatusCode: 302,
+		Header:     recordedHeader,
+		Body:       "",
+	}
+	live := models.HTTPResp{
+		StatusCode: 302,
+		Header:     liveHeader,
+		Body:       "",
+	}
+
+	current := make(map[string]interface{}, len(initialTemplatedValues))
+	prev := make(map[string]interface{}, len(initialTemplatedValues))
+	for k, v := range initialTemplatedValues {
+		current[k] = v
+		prev[k] = v
+	}
+
+	changed = updateTemplateValuesFromHTTPResp(logger, templated, live, current, prev)
+	return changed, current
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_SetCookie(t *testing.T) {
+	recorded := map[string]string{
+		"Set-Cookie": "session={{.session}}; Path=/; HttpOnly",
+	}
+	live := map[string]string{
+		"Set-Cookie": "session=LIVE123; Path=/; HttpOnly",
+	}
+	initial := map[string]interface{}{"session": "RECORDED_VAL"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed, "expected Set-Cookie placeholder update to report changed=true")
+	assert.Equal(t, "LIVE123", final["session"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_BearerAuthorizationHeader(t *testing.T) {
+	recorded := map[string]string{
+		"Authorization": "Bearer {{.token}}",
+	}
+	live := map[string]string{
+		"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+	}
+	initial := map[string]interface{}{"token": "OLD_TOKEN"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "eyJhbGciOiJIUzI1NiJ9.payload.sig", final["token"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_GenericHeader(t *testing.T) {
+	recorded := map[string]string{
+		"X-Request-Id": "{{.reqId}}",
+	}
+	live := map[string]string{
+		"X-Request-Id": "abc-123-def-456",
+	}
+	initial := map[string]interface{}{"reqId": "old-id"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "abc-123-def-456", final["reqId"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_HeaderWithLiteralPrefix(t *testing.T) {
+	recorded := map[string]string{
+		"X-Correlation": "trace-{{.id}}",
+	}
+	live := map[string]string{
+		"X-Correlation": "trace-DEF456",
+	}
+	initial := map[string]interface{}{"id": "OLDID"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "DEF456", final["id"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_NoPlaceholder_NoOp(t *testing.T) {
+	recorded := map[string]string{
+		"X-Foo": "bar",
+	}
+	live := map[string]string{
+		"X-Foo": "bar",
+	}
+	// There's a templated value, but it's unrelated to this header -- must not
+	// leak into the map under a new key, and the existing key must stay untouched.
+	initial := map[string]interface{}{"unrelated": "keepme"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.False(t, changed, "no placeholder in recorded header should mean no template change")
+	assert.Equal(t, "keepme", final["unrelated"])
+	_, foundFoo := final["X-Foo"]
+	assert.False(t, foundFoo, "must not invent a new template key from a literal header")
+}
+
+// TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-
+// pool partition. Contract:
+//   - LifetimeConnection           → startupMocks (connection-scoped reuse)
+//   - LifetimeSession              → unfilteredMocks (session-scoped reuse)
+//   - LifetimePerTest in-window    → filteredMocks
+//   - legacy metadata.type=config  → unfilteredMocks (fallback)
+//   - legacy metadata.type=connection → startupMocks (fallback)
+//   - legacy no-type per-test      → filteredMocks (legacy fallback path)
+//   - startup-init (req < firstWindowStart) under strict → startupMocks
+func TestFilterByTimeStampThreeTier(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// In-window PerTest → filtered.
+	inWindow := &models.Mock{
+		Name: "perTest-in", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Session → unfiltered.
+	session := &models.Mock{
+		Name: "session", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-10 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeSession,
+			LifetimeDerived: true,
+		},
+	}
+	// Connection → startup.
+	conn := &models.Mock{
+		Name: "conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeConnection,
+			LifetimeDerived: true,
+		},
+	}
+	// Startup-init PerTest (req < firstWindowStart) → startup.
+	startupInit := &models.Mock{
+		Name: "startup-init", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-2 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-2*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Legacy config (no Lifetime, just metadata.type=config) → unfiltered.
+	legacyConfig := &models.Mock{
+		Name: "legacy-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: firstWindowStart.Add(-20 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-20*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy connection (no Lifetime, just metadata.type=connection) → startup.
+	legacyConn := &models.Mock{
+		Name: "legacy-conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "connection"},
+			ReqTimestampMock: firstWindowStart.Add(-25 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-25*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy per-test (no Lifetime, metadata.type="mocks") — treated as PerTest.
+	legacyPerTest := &models.Mock{
+		Name: "legacy-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks"},
+			ReqTimestampMock: currentStart.Add(2 * time.Minute),
+			ResTimestampMock: currentStart.Add(2*time.Minute + time.Millisecond),
+		},
+	}
+
+	all := []*models.Mock{inWindow, session, conn, startupInit, legacyConfig, legacyConn, legacyPerTest}
+
+	filtered, unfiltered, startup := FilterByTimeStampThreeTier(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// Helper to collect names.
+	names := func(ms []*models.Mock) []string {
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return out
+	}
+
+	assert.ElementsMatch(t, []string{"perTest-in", "legacy-pertest"}, names(filtered),
+		"perTest in-window mocks land in filtered; legacy-untyped perTest falls through")
+	assert.ElementsMatch(t, []string{"session", "legacy-config"}, names(unfiltered),
+		"session-lifetime + legacy config-tagged land in unfiltered")
+	assert.ElementsMatch(t, []string{"conn", "startup-init", "legacy-conn"}, names(startup),
+		"connection-lifetime + startup-init PerTest + legacy connection-tagged land in startup")
 }

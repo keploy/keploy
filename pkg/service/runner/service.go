@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -16,10 +17,40 @@ type TestResult struct {
 	Noise          map[string][]string
 }
 
+// MockRef identifies a single mock in a mismatch report. Kind
+// carries the protocol (Http / Postgres / MySQL / …) so downstream
+// consumers can render the right icon / classification without running
+// name-substring heuristics at the UI layer.
+type MockRef struct {
+	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// UnmarshalJSON accepts either the new {name, kind} object form or the
+// legacy bare-string form on the wire. Lets older runners / test reports
+// keep round-tripping through code built against the new schema until
+// every producer is upgraded.
+func (e *MockRef) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		e.Name = s
+		return nil
+	}
+	type raw MockRef
+	var r raw
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	*e = MockRef(r)
+	return nil
+}
+
 // MockMismatch captures expected vs consumed mocks for a test step.
+// Entries now carry kind (previously just names) so persisted reports
+// and downstream UI do not need to re-derive kind from the mock name.
 type MockMismatch struct {
-	ExpectedMocks []string `json:"expected_mocks"`
-	ConsumedMocks []string `json:"consumed_mocks"`
+	ExpectedMocks []MockRef `json:"expected_mocks"`
+	ConsumedMocks []MockRef `json:"consumed_mocks"`
 }
 
 // RunTestOpts contains the minimal inputs to run a single integration test.

@@ -30,6 +30,20 @@ func FormatMockTimestamp(ts time.Time) string {
 	return ts.Format(time.RFC3339Nano)
 }
 
+// ParseMockTimestamp is the inverse of FormatMockTimestamp. It accepts both
+// RFC3339Nano (the format written by FormatMockTimestamp) and plain RFC3339
+// for compatibility with older fixtures. An empty input returns the zero
+// time without error.
+func ParseMockTimestamp(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
+}
+
 type Mapping struct {
 	Version   string           `json:"version" yaml:"version" bson:"version"`
 	Kind      string           `json:"kind" yaml:"kind" bson:"kind"`

@@ -4,7 +4,12 @@ description: "Download build or latest Keploy and expose its absolute path"
 inputs:
   src:
     required: true
-    description: "build | latest"
+    # This action only handles Unix-style artifacts — the `chmod +x`
+    # step below assumes the artifact contains a `keploy` binary (no
+    # `.exe`). Windows consumers (golang_docker_windows.yml,
+    # golang_native_windows.yml) call actions/download-artifact@v4
+    # directly and handle `keploy.exe` in powershell themselves.
+    description: "Name of a Unix-style binary artifact whose contents include a `keploy` binary (e.g. build, build-no-race, build-darwin, latest). Do NOT use this for Windows artifacts (which contain `keploy.exe`)."
 
 outputs:
   path:

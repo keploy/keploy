@@ -84,7 +84,7 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 		<-ctx.Done()
 		h.unLoad(ctx)
 
-		//deleting in order to free the memory in case of rerecord.
+		// deleting in order to free the memory on shutdown.
 		h.sess.Delete(uint64(0))
 		return nil
 	})

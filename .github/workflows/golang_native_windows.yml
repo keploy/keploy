@@ -32,13 +32,13 @@ jobs:
             script_dir: http_pokeapi
         config:
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-windows
+            replay_src: build-windows
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
       - name: Clean up workspace
-        shell: pwsh 
+        shell: pwsh
         continue-on-error: true
         run: |
           Write-Host "== Cleaning keploy artifacts =="
@@ -48,6 +48,40 @@ jobs:
               Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
+      # If a prior run left the workspace populated with files but no .git,
+      # actions/checkout's clean:true fails at "git config --local". Wipe in
+      # that case so checkout starts fresh; healthy workspaces are left alone.
+      - name: Recover stale runner state
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
+              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            foreach ($name in @('WinDivert', 'WinDivert64')) {
+              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -ne 'Stopped') {
+                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
+                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+            $ws = $env:GITHUB_WORKSPACE
+            if ($ws -and (Test-Path $ws)) {
+              $gitDir = Join-Path $ws '.git'
+              $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
+              $hasFiles = $items.Count -gt 0
+              if ($hasFiles -and -not (Test-Path $gitDir)) {
+                Write-Host "::warning::Workspace $ws has files but no .git -- wiping for fresh checkout (prior run was interrupted)"
+                Remove-Item -Path (Join-Path $ws '*') -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          } catch {
+            Write-Host "::warning::Recover stale runner state: $_"
+          }
+          exit 0
       - name: Checkout repository
         uses: actions/checkout@v4
         with:

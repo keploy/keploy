@@ -2,6 +2,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,6 +15,17 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// chunkedTerminator is the last-chunk marker defined by RFC 7230 §4.1.
+// A chunked response ends with `0\r\n\r\n` (size=0 chunk + empty trailer
+// section + CRLF). The proxy loop treats this suffix as end-of-response
+// regardless of how many preceding body bytes share the same TLS record
+// with the terminator — the previous strict-equality check failed on
+// the common case where pUtil.ReadBytes returns ""<body>0\r\n\r\n" and
+// left the loop spinning until the upstream closed the idle HTTP/1.1
+// keep-alive connection (~60 s on SAP sandbox, observed on the
+// sap-demo-java /360 fanout).
+var chunkedTerminator = []byte("0\r\n\r\n")
 
 func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) error {
 
@@ -351,7 +363,19 @@ ReadLoop:
 				break ReadLoop
 			}
 
-			if string(resp) == "0\r\n\r\n" {
+			// RFC 7230 §4.1 last-chunk: "0\r\n\r\n" terminates a chunked
+			// body. pUtil.ReadBytes returns whatever was in the latest
+			// TLS record (up to 1 KiB of the 16 KiB record), so the
+			// terminator is almost always concatenated with the tail
+			// of the preceding data chunk — e.g. "<...body>0\r\n\r\n".
+			// The old check `string(resp) == "0\r\n\r\n"` only matched
+			// if the terminator arrived in a dedicated Read call, which
+			// an HTTP/1.1 keep-alive upstream almost never does. The
+			// loop would then call ReadBytes again on the now-idle
+			// conn and block until the upstream's keep-alive timeout
+			// (~60 s on SAP sandbox, reproduced on sap-demo-java /360).
+			// HasSuffix correctly detects both packaging shapes.
+			if bytes.HasSuffix(resp, chunkedTerminator) {
 				return nil
 			}
 		}

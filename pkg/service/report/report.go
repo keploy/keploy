@@ -20,6 +20,7 @@ import (
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -125,7 +126,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		}
 	}
 	if !any {
-		r.logger.Warn("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
+		r.logger.Debug("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
 	}
 	err := r.out.Flush()
 	if err != nil {
@@ -363,7 +364,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return fmt.Errorf("failed to get latest test run ID: %w", err)
 	}
 	if latestRunID == "" {
-		r.logger.Warn("no test runs found")
+		r.logger.Debug("no test runs found")
 		return nil
 	}
 	r.logger.Debug("latest run id is", zap.String("latest_run_id", latestRunID))
@@ -377,7 +378,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			return fmt.Errorf("failed to get test sets for report: %w", err)
 		}
 		if len(testSetIDs) == 0 {
-			r.logger.Warn("No test sets found for report generation")
+			r.logger.Debug("No test sets found for report generation")
 			return nil
 		}
 	}
@@ -395,6 +396,38 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			}
 		}
 		return r.generateJUnit(reports)
+	}
+
+	if r.config.JSONOutput {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for json output: %w", err)
+		}
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			for name, rep := range reports {
+				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				// Recompute all counters to match filtered tests
+				rep.Total = len(rep.Tests)
+				rep.Success = 0
+				rep.Failure = 0
+				rep.Ignored = 0
+				rep.Obsolete = 0
+				for _, t := range rep.Tests {
+					switch t.Status {
+					case models.TestStatusPassed:
+						rep.Success++
+					case models.TestStatusFailed:
+						rep.Failure++
+					case models.TestStatusIgnored:
+						rep.Ignored++
+					case models.TestStatusObsolete:
+						rep.Obsolete++
+					}
+				}
+				reports[name] = rep
+			}
+		}
+		return utils.NewJSONWriter(true).Write(reports)
 	}
 
 	if r.config.Report.Summary {
@@ -454,6 +487,9 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 	var tr models.TestReport
 	err = dec.Decode(&tr)
 	if err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
+		if r.config.JSONOutput {
+			return utils.NewJSONWriter(true).Write(tr)
+		}
 		// Summary-only
 		if r.config.Report.Summary {
 			m := map[string]*models.TestReport{tr.Name: &tr}
@@ -463,7 +499,7 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 		if len(r.config.Report.TestCaseIDs) > 0 {
 			sel := r.filterTestsByIDs(tr.Tests, r.config.Report.TestCaseIDs)
 			if len(sel) == 0 {
-				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
+				r.logger.Debug("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
 			}
 			return r.printTests(ctx, sel)
@@ -505,6 +541,10 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 	if err != nil {
 		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
 		return err
+	}
+
+	if r.config.JSONOutput {
+		return utils.NewJSONWriter(true).Write(lg)
 	}
 
 	// Handle summary request for legacy format
@@ -555,7 +595,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 func (r *Report) processLegacyTestCaseFiltering(ctx context.Context, tests []models.TestResult) error {
 	sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
 	if len(sel) == 0 {
-		r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
+		r.logger.Debug("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 		return nil
 	}
 	return r.printTests(ctx, sel)
@@ -624,7 +664,7 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 		}
 
 		if results == nil {
-			r.logger.Warn("no results found for test set", zap.String("test_set_id", cleanTestSetID))
+			r.logger.Debug("no results found for test set", zap.String("test_set_id", cleanTestSetID))
 			continue
 		}
 

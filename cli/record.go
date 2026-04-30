@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 	recordSvc "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -36,12 +35,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				return nil
 			}
 
-			cfg := models.ReRecordCfg{
-				Rerecord: false,
-				TestSet:  "",
-			}
-
-			err = record.Start(ctx, cfg)
+			err = record.Start(ctx)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")

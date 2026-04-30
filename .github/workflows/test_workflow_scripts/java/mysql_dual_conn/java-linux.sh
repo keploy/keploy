@@ -51,6 +51,27 @@ wait_for_app() {
   endsec; return 1
 }
 
+run_maven_build() {
+  : > mvn_build.log
+
+  for attempt in 1 2 3; do
+    if {
+      echo "===== Maven build attempt ${attempt}/3 ====="
+      mvn -B -U clean package -Dmaven.test.skip=true -q
+    } 2>&1 | tee -a mvn_build.log; then
+      return 0
+    fi
+
+    echo "Maven build failed on attempt ${attempt}/3. The script will retry automatically; if all attempts fail, review mvn_build.log for the root cause."
+    if [[ "$attempt" -lt 3 ]]; then
+      sleep $((attempt * 10))
+    fi
+  done
+
+  echo "::error::Maven build failed after 3 attempts. Review mvn_build.log to inspect the output from all attempts and identify the cause."
+  return 1
+}
+
 send_request() {
   local kp_pid="$1"
 
@@ -90,7 +111,7 @@ endsec
 
 section "Build"
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/update-java.sh"
-mvn clean package -Dmaven.test.skip=true -q | tee mvn_build.log
+run_maven_build
 endsec
 
 JAR_NAME=$(ls target/mysql-dual-conn-*.jar 2>/dev/null | head -n1)

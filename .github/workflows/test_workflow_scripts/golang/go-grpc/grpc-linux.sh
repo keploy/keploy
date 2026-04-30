@@ -25,6 +25,12 @@ echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Build Application ---
 echo "Building gRPC server and client binaries..."
+# Keploy's incoming gRPC proxy binds the original app port on IPv4 in this CI
+# path. GitHub runners can resolve localhost to ::1 first, so keep the sample
+# client on the same loopback family as the readiness check and proxy listener.
+if grep -q '"localhost:50051"' client/client.go; then
+    sed -i 's/"localhost:50051"/"127.0.0.1:50051"/' client/client.go
+fi
 go build -o grpc-server .
 go build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
@@ -110,16 +116,16 @@ check_test_report() {
 send_requests() {
     echo "Waiting for application's HTTP server to start..."
     for i in {1..10}; do
-        if curl -s -o /dev/null -X GET http://localhost:8080/users; then
+        if curl --fail --silent --show-error --max-time 5 -o /dev/null -X GET http://127.0.0.1:8080/health; then
             echo "Application is ready. Sending requests..."
             # 1. POST request
-            curl -s -X POST http://localhost:8080/users -H "Content-Type: application/json" -d '{"name": "test-user", "email": "test@gmail.com", "age": 20}'
+            curl --fail --silent --show-error --max-time 5 -X POST http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"name": "test-user", "email": "test@gmail.com", "age": 20}'
             # 2. GET request
-            curl -s -X GET http://localhost:8080/users
+            curl --fail --silent --show-error --max-time 5 -X GET http://127.0.0.1:8080/users
             # 3. PUT request
-            curl -s -X PUT http://localhost:8080/users -H "Content-Type: application/json" -d '{"id": 1, "name": "test-user-updated", "email": "test@gmail.com", "age": 20}'
+            curl --fail --silent --show-error --max-time 5 -X PUT http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1, "name": "test-user-updated", "email": "test@gmail.com", "age": 20}'
             # 4. DELETE request
-            curl -s -X DELETE http://localhost:8080/users -H "Content-Type: application/json" -d '{"id": 1}'
+            curl --fail --silent --show-error --max-time 5 -X DELETE http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1}'
             echo "Requests sent."
             return 0
         fi
@@ -134,8 +140,7 @@ wait_for_port() {
     local port=$1
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
-        # Use lsof to check if ANY process is listening on the port
-        if sudo lsof -i :$port -sTCP:LISTEN >/dev/null 2>&1; then
+        if (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -143,8 +148,7 @@ wait_for_port() {
         sleep 2
     done
     echo "Timed out waiting for port $port."
-    # List open ports for debugging before failing
-    sudo lsof -i -P -n | grep LISTEN
+    ss -ltnp || true
     exit 1
 }
 
@@ -181,7 +185,7 @@ if [ "$MODE" = "incoming" ]; then
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
-    "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
+    "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_incoming.log || true
 
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -208,7 +212,7 @@ elif [ "$MODE" = "outgoing" ]; then
     check_for_errors record_outgoing.log
 
     # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
-    "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
+    "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false 2>&1 | tee test_outgoing.log || true
 
     check_for_errors test_outgoing.log
     if ! check_test_report; then

@@ -153,24 +153,20 @@ Or via environment variable:
 KEPLOY_STRICT_MOCK_WINDOW=1 keploy test -c "..."
 ```
 
-**Default is `false`** in Phase 1. The PR that introduces
-`LifetimeConnection` + strict-window infrastructure ships it as an
-OPT-IN feature — many real-world apps legitimately reuse data-plane
-mocks across tests (fixture-row SELECTs, long-session fuzzers), so
-flipping the default would silently break those suites on upgrade.
+**Default is `true`** now that every stateful-protocol recorder
+classifies mocks finely enough (session vs per-test for connection-
+alive commands, per-connection data mocks) that legitimate cross-
+test sharing is encoded as Session/Connection lifetime rather than
+implicit out-of-window reuse.
 
-Opt in via `test.strictMockWindow: true` in `keploy.yaml` or
-`KEPLOY_STRICT_MOCK_WINDOW=1` in the environment. The env var OR-es
-with the config: an enabling value forces strict on; an explicit
-disabling value ("0") forces strict off regardless of the config.
-Strict activation logs a one-shot Info message per agent process
-naming both escape hatches, so hunts through docs are unnecessary.
-
-The default will flip to `true` in a follow-up once every stateful-
-protocol recorder classifies mocks finely enough (session vs per-test
-for connection-alive commands, per-connection data mocks) that
-legitimate cross-test sharing is encoded as Session/Connection
-lifetime rather than implicit out-of-window reuse.
+Opt out via `test.strictMockWindow: false` in `keploy.yaml` or
+`KEPLOY_STRICT_MOCK_WINDOW=0` in the environment for older
+recordings that still rely on the legacy lax behaviour. The env
+var OR-es with the config: an enabling value forces strict on;
+an explicit disabling value ("0") forces strict off regardless of
+the config. Strict activation logs a one-shot Info message per
+agent process naming both escape hatches, so hunts through docs
+are unnecessary.
 
 ## Observability — HitCount
 

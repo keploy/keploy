@@ -44,17 +44,6 @@ Keploy n'enregistre pas seulement les appels d'API, mais également les appels d
 
 > 🐰 **Fun fact:** Keploy se teste lui-même ! Admirez notre superbe badge de couverture : [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
 
-## 🚨 Ici pour le [générateur de tests unitaires](README-UnitGen.md) (ut-gen) ? 
-Keploy a récemment lancé le tout premier générateur de tests unitaires (ut-gen) au monde, implémentant le [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), il comprend la sémantique du code et génère des tests unitaires pertinents, visant à :
-
-- **Automatiser la génération de tests unitaires (UTG)** : Générer rapidement des tests unitaires complets et réduire les tests manuels redondants.
-
-- **Améliorer les cas limites** : Étendre la portée des tests automatisés pour couvrir des scénarios complexes souvent oubliés.
-
-- **Augmenter la couverture de tests** : Assurer une couverture exhaustive à mesure que les bases de code grandissent.
-
-### 📜 Consultez le [README du générateur de tests unitaires](README-UnitGen.md) ! ✅
-
 ## 📘 Documentation !
 Maîtrisez Keploy grâce à la **[Documentation Keploy](https://keploy.io/docs/)**.
 

@@ -10,14 +10,13 @@ import (
 	incoming "go.keploy.io/server/v3/pkg/agent/proxy/incoming"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
-	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 
 	"go.uber.org/zap"
 )
 
-func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, _ service.Auth) (interface{}, error) {
+func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger) (interface{}, error) {
 
 	var client docker.Client
 	var err error

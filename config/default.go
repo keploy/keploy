@@ -39,6 +39,8 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  healthUrl: ""
+  healthPollTimeout: 60s
   host: "localhost"
   port: 0
   grpcPort: 0
@@ -62,8 +64,6 @@ test:
   basePath: ""
   mocking: true
   disableLineCoverage: false
-  disableMockUpload: true
-  useLocalMock: false
   updateTemplate: false
   mustPass: false
   maxFailAttempts: 5
@@ -78,18 +78,14 @@ test:
   # (LifetimePerTest) mocks whose request timestamp falls outside the
   # outer test window are dropped rather than promoted across tests.
   #
-  # Phase 1 ships with default FALSE — many real-world apps
-  # legitimately share data-plane mocks across tests (e.g., fixture
-  # rows queried by every test in a suite), and flipping the default
-  # to true would silently break those suites on upgrade. Opt into
-  # strict containment by setting this to true in keploy.yaml or
-  # exporting KEPLOY_STRICT_MOCK_WINDOW=1. A follow-up will flip the
-  # default once every stateful-protocol recorder classifies mocks
-  # finely enough (per-connection data mocks, session vs per-test
-  # distinction for connection-alive commands) that legitimate
-  # cross-test sharing is encoded as session/connection lifetime
-  # rather than implicit out-of-window reuse.
-  strictMockWindow: false
+  # Default TRUE now that every stateful-protocol recorder classifies
+  # mocks finely enough (per-connection data mocks, session vs per-test
+  # distinction for connection-alive commands) that legitimate cross-
+  # test sharing is encoded as session/connection lifetime rather than
+  # implicit out-of-window reuse. If an older recording relies on the
+  # legacy lax behaviour, opt out with strictMockWindow: false here or
+  # export KEPLOY_STRICT_MOCK_WINDOW=0 — the env var wins.
+  strictMockWindow: true
 record:
   recordTimer: 0s
   filters: []
@@ -138,6 +134,11 @@ func New() *Config {
 	if err != nil {
 		panic(err)
 	}
+	// Defaults for fields whose Go zero value is not the desired default.
+	// EnableIPv6Redirect defaults to true so ::1 traffic is redirected to
+	// the proxy on modern Linux distros where glibc resolves localhost to
+	// ::1 first. Setting it false in config is the opt-in rollback knob.
+	config.Agent.EnableIPv6Redirect = true
 	return config
 }
 

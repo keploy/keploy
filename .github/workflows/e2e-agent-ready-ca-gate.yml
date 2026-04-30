@@ -1,0 +1,39 @@
+# E2E regression guard for the /agent/ready gate on CA-bundle readiness.
+#
+# NOTE: this repo does not currently carry a Woodpecker pipeline
+# (only .github/workflows/*). The original implementation spec called
+# for a Woodpecker pipeline with a GitHub Actions fallback — this file
+# is that fallback. If Woodpecker is adopted in the future, mirror
+# this job into .woodpecker/e2e-agent-ready-ca-gate.yml.
+name: e2e-agent-ready-ca-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/agent/routes/**'
+      - 'pkg/agent/proxy/tls/**'
+      - 'tests/e2e/agent-ready-gated-on-ca/**'
+      - '.github/workflows/e2e-agent-ready-ca-gate.yml'
+  pull_request:
+    paths:
+      - 'pkg/agent/routes/**'
+      - 'pkg/agent/proxy/tls/**'
+      - 'tests/e2e/agent-ready-gated-on-ca/**'
+      - '.github/workflows/e2e-agent-ready-ca-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: /agent/ready gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify docker compose available
+        run: docker compose version
+
+      - name: Run e2e regression
+        run: ./tests/e2e/agent-ready-gated-on-ca/run.sh

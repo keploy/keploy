@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,24 +16,52 @@ import (
 )
 
 // mockMemDb is a minimal mock of the MockMemDb interface for testing.
+// updateUnFilteredMockOld / updateUnFilteredMockNew capture the most
+// recent (old, new) pair handed to UpdateUnFilteredMock so tests can
+// assert on the arguments.
+// updateUnFilteredReturn is the value returned to the caller.
+// deletedFiltered captures the argument to DeleteFilteredMock; its
+// return value is driven by deleteFilteredReturn.
 type mockMemDb struct {
-	mocks []*models.Mock
-	err   error
+	mocks                   []*models.Mock
+	err                     error
+	updateUnFilteredMockOld *models.Mock
+	updateUnFilteredMockNew *models.Mock
+	updateUnFilteredReturn  bool
+	deletedFiltered         *models.Mock
+	deleteFilteredReturn    bool
 }
 
-func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error)              { return m.mocks, m.err }
-func (m *mockMemDb) GetFilteredMocks() ([]*models.Mock, error)                { return nil, nil }
-func (m *mockMemDb) UpdateUnFilteredMock(_ *models.Mock, _ *models.Mock) bool { return false }
-func (m *mockMemDb) DeleteFilteredMock(_ models.Mock) bool                    { return false }
-func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool                  { return false }
-func (m *mockMemDb) GetMySQLCounts() (total, config, data int)                { return 0, 0, 0 }
-func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                        { return false }
-func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)                      {}
-func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error)        { return nil, m.err }
-func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)         { return nil, m.err }
-func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)                 { return m.mocks, m.err }
-func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error)      { return nil, nil }
-func (m *mockMemDb) SessionMockHitCounts() map[string]uint64                  { return nil }
+func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error) { return m.mocks, m.err }
+func (m *mockMemDb) GetFilteredMocks() ([]*models.Mock, error)   { return nil, nil }
+func (m *mockMemDb) UpdateUnFilteredMock(oldMock *models.Mock, newMock *models.Mock) bool {
+	m.updateUnFilteredMockOld = oldMock
+	m.updateUnFilteredMockNew = newMock
+	return m.updateUnFilteredReturn
+}
+func (m *mockMemDb) DeleteFilteredMock(mock models.Mock) bool {
+	m.deletedFiltered = &mock
+	return m.deleteFilteredReturn
+}
+func (m *mockMemDb) DeleteUnFilteredMock(_ models.Mock) bool           { return false }
+func (m *mockMemDb) DeleteStartupMock(_ models.Mock) bool              { return false }
+func (m *mockMemDb) GetMySQLCounts() (total, config, data int)         { return 0, 0, 0 }
+func (m *mockMemDb) MarkMockAsUsed(_ models.Mock) bool                 { return false }
+func (m *mockMemDb) SetCurrentTestWindow(_, _ time.Time)               {}
+func (m *mockMemDb) IsTestWindowActive() bool                          { return false }
+func (m *mockMemDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return nil, m.err }
+func (m *mockMemDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return nil, m.err }
+func (m *mockMemDb) GetSessionMocks() ([]*models.Mock, error)          { return m.mocks, m.err }
+func (m *mockMemDb) GetStartupMocks() ([]*models.Mock, error)          { return nil, nil }
+func (m *mockMemDb) GetStartupMocksByKind(_ models.Kind) ([]*models.Mock, error) {
+	return nil, nil
+}
+func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { return m.mocks, m.err }
+func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
+func (m *mockMemDb) FirstTestWindowStart() time.Time                     { return time.Time{} }
+func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot               { return models.WindowSnapshot{} }
+func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
+func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 
 func newHTTP() *HTTP {
 	return &HTTP{Logger: zap.NewNop()}
@@ -629,5 +658,105 @@ func TestStripNoisyJSON_Nested(t *testing.T) {
 	}
 	if data["active"] != true {
 		t.Errorf("expected active=true, got %v", data["active"])
+	}
+}
+
+// TestUpdateMock_DoesNotMutatePoolPointer guards the fix for the
+// proxy-stress-test data race: updateMock must never mutate the
+// shared *models.Mock pointer handed to it. It must clone the mock,
+// mutate the clone, and pass (old=matchedMock, new=&clone) to
+// MockMemDb.UpdateUnFilteredMock. If this invariant regresses,
+// concurrent HTTP requests matching the same session-lifetime mock
+// would again race on TestModeInfo.IsFiltered / SortOrder — exactly
+// the race detector output that motivated match.go's rewrite.
+func TestUpdateMock_DoesNotMutatePoolPointer(t *testing.T) {
+	h := newHTTP()
+	db := &mockMemDb{updateUnFilteredReturn: true}
+
+	original := &models.Mock{
+		Name: "session-mock",
+		Kind: models.Kind(models.HTTP),
+		TestModeInfo: models.TestModeInfo{
+			IsFiltered: true,
+			SortOrder:  42,
+			Lifetime:   models.LifetimeSession,
+		},
+	}
+	beforeIsFiltered := original.TestModeInfo.IsFiltered
+	beforeSortOrder := original.TestModeInfo.SortOrder
+
+	if ok := h.updateMock(context.TODO(), original, db); !ok {
+		t.Fatalf("updateMock returned false; expected true from stubbed UpdateUnFilteredMock")
+	}
+
+	// The pool pointer must be untouched — a future reader of this
+	// same *Mock from the shared pool must still see the original
+	// TestModeInfo.
+	if original.TestModeInfo.IsFiltered != beforeIsFiltered {
+		t.Errorf("updateMock mutated original.TestModeInfo.IsFiltered: before=%v after=%v",
+			beforeIsFiltered, original.TestModeInfo.IsFiltered)
+	}
+	if original.TestModeInfo.SortOrder != beforeSortOrder {
+		t.Errorf("updateMock mutated original.TestModeInfo.SortOrder: before=%v after=%v",
+			beforeSortOrder, original.TestModeInfo.SortOrder)
+	}
+
+	// UpdateUnFilteredMock must have received the untouched original
+	// as "old" and a freshly-allocated clone with updated
+	// TestModeInfo fields as "new".
+	if db.updateUnFilteredMockOld != original {
+		t.Errorf("expected old arg to be the original pool pointer, got a different pointer")
+	}
+	if db.updateUnFilteredMockNew == nil {
+		t.Fatal("expected new arg to be non-nil")
+	}
+	if db.updateUnFilteredMockNew == original {
+		t.Error("new arg must not alias the pool pointer; updateMock is expected to allocate a copy")
+	}
+	if db.updateUnFilteredMockNew.TestModeInfo.IsFiltered {
+		t.Error("new.TestModeInfo.IsFiltered expected to be false after updateMock")
+	}
+	if db.updateUnFilteredMockNew.TestModeInfo.SortOrder == beforeSortOrder {
+		t.Errorf("new.TestModeInfo.SortOrder expected to advance from %d via GetNextSortNum; got %d",
+			beforeSortOrder, db.updateUnFilteredMockNew.TestModeInfo.SortOrder)
+	}
+}
+
+// TestUpdateMock_PerTestPrefersDelete verifies the per-test routing:
+// a per-test (non-config) mock is consumed via DeleteFilteredMock
+// rather than UpdateUnFilteredMock, and the DeleteFilteredMock
+// argument is a value-copy of the original (not the updated clone).
+func TestUpdateMock_PerTestPrefersDelete(t *testing.T) {
+	h := newHTTP()
+	db := &mockMemDb{deleteFilteredReturn: true}
+
+	original := &models.Mock{
+		Name: "per-test-mock",
+		Kind: models.Kind(models.HTTP),
+		TestModeInfo: models.TestModeInfo{
+			IsFiltered: true,
+			SortOrder:  7,
+			Lifetime:   models.LifetimePerTest,
+		},
+	}
+
+	if ok := h.updateMock(context.TODO(), original, db); !ok {
+		t.Fatalf("updateMock returned false; expected true from stubbed DeleteFilteredMock")
+	}
+	if db.deletedFiltered == nil {
+		t.Fatal("expected DeleteFilteredMock to be called for per-test lifetime")
+	}
+	if db.deletedFiltered.Name != original.Name {
+		t.Errorf("DeleteFilteredMock received wrong mock: got name=%q want %q",
+			db.deletedFiltered.Name, original.Name)
+	}
+	// Per-test routing must NOT have reached UpdateUnFilteredMock.
+	if db.updateUnFilteredMockOld != nil || db.updateUnFilteredMockNew != nil {
+		t.Error("UpdateUnFilteredMock should not be called when DeleteFilteredMock succeeds")
+	}
+	// Pool pointer untouched.
+	if !original.TestModeInfo.IsFiltered || original.TestModeInfo.SortOrder != 7 {
+		t.Errorf("updateMock mutated the pool pointer on the per-test path: %+v",
+			original.TestModeInfo)
 	}
 }
