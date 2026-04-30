@@ -164,9 +164,10 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 }
 
 // EncodeDocTo streams a NetworkTrafficDoc to w in the specified format.
-// - For JSON: writes a single compact JSON object followed by '\n' (NDJSON).
-// - For YAML: writes a single YAML document (no trailing document separator);
-//   caller is responsible for writing the `---\n` separator between documents.
+//   - For JSON: writes a single compact JSON object followed by '\n' (NDJSON).
+//   - For YAML: writes a single YAML document (no trailing document separator);
+//     caller is responsible for writing the `---\n` separator between documents.
+//
 // Streaming avoids a full []byte allocation for each document.
 func EncodeDocTo(w io.Writer, format Format, doc *NetworkTrafficDoc) error {
 	switch format {
