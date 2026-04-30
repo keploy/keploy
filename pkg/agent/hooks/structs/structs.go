@@ -27,6 +27,7 @@ type AgentInfo struct {
 	KeployAgentNsPid   uint32
 	DNSPort            int32
 	KeployAgentInode   uint64
+	KeployAgentDev     uint64
 	IsDocker           uint32
 	Proxy              ProxyInfo
 	Flags              uint32 // extensible flag slot consumed by the BPF cgroup hooks; set via AgentInfoCustomizer. Matches agent_info_t.flags at offset 44 (ebpf#96).

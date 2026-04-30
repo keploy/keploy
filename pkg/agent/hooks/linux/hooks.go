@@ -310,9 +310,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	var agentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
-	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, agentInfo.KeployAgentDev, err = GetSelfInodeNumber()
 	if err != nil {
-		h.logger.Error("failed to get the inode number of the keploy process", zap.Error(err))
+		h.logger.Error("failed to read inode and dev of /proc/self/ns/pid for the keploy process; ensure /proc is mounted and accessible (not running under a restrictive procfs / sandbox that hides namespace files)", zap.Error(err))
 		return err
 	}
 	agentInfo.IsDocker = 0
