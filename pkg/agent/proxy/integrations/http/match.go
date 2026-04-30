@@ -719,30 +719,39 @@ func mediaTypesOverlap(a, b []string) bool {
 // connection mocks are RETAINED and updated in place (UpdateUnFilteredMock).
 // See the MySQL equivalent in replayer/match.go for the pre- vs post-
 // Phase-2 routing rationale.
+//
+// Concurrency: matchedMock is a pointer handed out of the shared mock
+// pool. Two requests matching the same session-lifetime mock receive
+// the SAME pointer; mutating matchedMock.TestModeInfo in place races
+// with the other goroutine's read of that same struct (proxy-stress-
+// test surfaced this under -race as "DATA RACE during replay" on
+// match.go:723-725). We build a fresh copy, mutate the copy, and pass
+// (old=matchedMock, new=&updatedMock) to the mock DB — which already
+// takes treesMu internally to swap the pointer atomically.
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updatedMock := *matchedMock
+	updatedMock.TestModeInfo.IsFiltered = false
+	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 
-	lifetime := matchedMock.TestModeInfo.Lifetime
+	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
-	if matchedMock.Spec.Metadata != nil {
-		rawConfig = matchedMock.Spec.Metadata["type"] == "config"
+	if updatedMock.Spec.Metadata != nil {
+		rawConfig = updatedMock.Spec.Metadata["type"] == "config"
 	}
 	isSessionOrConnection := lifetime == models.LifetimeSession ||
 		lifetime == models.LifetimeConnection ||
 		(lifetime == models.LifetimePerTest && rawConfig)
 
 	if isSessionOrConnection {
-		return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+		return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 	}
 	// Per-test: consume via DeleteFilteredMock, with fallback to
 	// UpdateUnFilteredMock for mocks staged into the session pool
 	// during the initial pre-first-test window.
-	if mockDb.DeleteFilteredMock(originalMatchedMock) {
+	if mockDb.DeleteFilteredMock(*matchedMock) {
 		return true
 	}
-	return mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -86,7 +87,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
 	}
 
-	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -147,8 +148,38 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
+// outgoingMockChanCap is the buffer depth of the agent → CLI mock
+// stream. The channel pipes typed mocks captured by the recorder
+// goroutines into the gob-encoded HTTP stream the CLI consumes; a
+// deeper buffer absorbs producer bursts at the cost of holding that
+// many in-flight Mocks in memory inside the agent.
+//
+// Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
+// request/response body strings, postgres v3 bind values whose raw
+// bytes are now capped per-value via the integrations recorder fix
+// in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
+// mock — multiple Bind parameters, plus DataRow cells on the
+// response side). At 100 entries the worst-case pinned memory for
+// a "fat" mock workload (e.g. the 60-VU × 1 MiB inserts shape that
+// triggered the OOM observed on PR #4135's go-memory-load CI run
+// 24990909605, job 73176710440) is bounded; 1000 was unsafe because
+// the slow CLI consumer (gob-encoded over HTTP, then disk-write per
+// mock) reliably underran the producer and let the channel fill,
+// pinning ~1 GiB of bodies before memoryguard's 500 ms tick could
+// react.
+//
+// 100 was chosen so that it stays well above any normal-traffic
+// micro-burst (typical postgres recordings emit ~10–30 mocks/s) yet
+// the ceiling is reached fast enough that syncMock's existing
+// outChan-overflow drop-with-Error path becomes the dominant
+// backpressure signal long before the cgroup limit is hit. The
+// drop path is intentional: it is far better to lose a mock and
+// keep recording than to OOM-kill the agent and lose every mock
+// captured in the run.
+const outgoingMockChanCap = 100
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 1000)
+	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
@@ -235,7 +266,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	if a.proxyStarted {
-		a.logger.Info("Proxy already started")
+		a.logger.Debug("Proxy already started")
 		return nil
 	}
 
@@ -260,6 +291,15 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to start proxy")
+		// StartProxy may have spawned proxy goroutines before the
+		// failure point (TCP accept loop, TCP DNS, UDP DNS) — they
+		// stay live until proxyCtx is cancelled. Before this fix
+		// they leaked until the outer agent context was cancelled,
+		// holding ports and consuming resources. Cancel here so the
+		// partial proxy is torn down immediately. Matters now that
+		// StartProxy propagates auxiliary-hook failures (keploy#4078)
+		// rather than swallowing them.
+		proxyCtxCancel()
 		return hookErr
 	}
 
@@ -411,6 +451,21 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
 	agentStrict := params.StrictMockWindow && !isWindowedProxy
 
+	// Tier-aware strictMockWindow: when the proxy exposes the optional
+	// FirstWindowStartReader extension, read the earliest test-window
+	// start the MockManager has observed so filterByTimeStamp can keep
+	// per-test mocks with req < firstWindowStart in the filtered slice
+	// (they are startup-tier, not cross-test bleed). Stale previous-test
+	// mocks (firstWindowStart <= req < currentStart, or req > currentEnd)
+	// are still dropped — that's the containment guarantee strict mode
+	// exists to provide. A zero return from the reader (no test has
+	// fired yet) reverts to the legacy blanket-drop contract so callers
+	// observe behaviour strictly no worse than before.
+	var firstWindowStart time.Time
+	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
+		firstWindowStart = reader.FirstTestWindowStart()
+	}
+
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
 		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
@@ -429,9 +484,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		// filter and merge them into the session pool passed to the
 		// proxy. Under strict mode this branch doesn't fire because
 		// filterByTimeStamp drops rather than promotes.
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromoted(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict)
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		filteredMocks = perTestIn
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict)
+		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		if len(promotedToSession) > 0 {
 			unfilteredMocks = append(unfilteredMocks, promotedToSession...)
 			// Ordering: both FilterConfigMocks and FilterPerTestAndLaxPromoted

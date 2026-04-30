@@ -372,7 +372,7 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
+REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
@@ -384,7 +384,7 @@ section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
 go build -o my-app
-$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
@@ -405,7 +405,7 @@ endsec
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
-$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee final_test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee final_test.log || true
 check_for_errors "final_test.log"
 endsec
 

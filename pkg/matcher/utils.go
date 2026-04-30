@@ -1332,9 +1332,50 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		return false
 	}
 	match := true
-	_, isHeaderNoisy := noise["header"]
+	// loweredNoise is built once per CompareHeaders call. Its primary benefit is
+	// CORRECTNESS, not perf: it (1) merges regex slices on case-only noise-key
+	// collisions without dropping either entry — the set of regexes is preserved
+	// even though the merged slice order depends on Go map iteration
+	// (e.g. X-Correlation-Id + x-correlation-id),
+	// and (2) lets isHeaderNoisy look up the sentinel "header" key regardless
+	// of the user's casing. Perf-wise it pays one map build + defensive slice
+	// copies per call; strings.ToLower inside SubstringKeyMatch still scans each
+	// map key per call (no allocation on already-lowercase input, but an O(L)
+	// scan per key). We accept that cost to keep the helper idempotent rather
+	// than require a silent precondition on exported callers. A true O(N+M)
+	// fast path would require a skip-ToLower-if-pre-normalized invariant on
+	// the exported helper — we kept the helper idempotent instead to avoid a
+	// silent-failure API.
+	loweredNoise := make(map[string][]string, len(noise))
+	for k, v := range noise {
+		lk := strings.ToLower(k)
+		if existing, ok := loweredNoise[lk]; ok {
+			// Case-collision: build a NEW merged slice rather than appending
+			// onto `existing`. `existing` may share its backing array with a
+			// caller-owned slice (we copy on first insert below, but be
+			// defensive — a future change could reintroduce sharing), and
+			// appending here could otherwise mutate that caller slice across
+			// repeated CompareHeaders calls.
+			merged := make([]string, 0, len(existing)+len(v))
+			merged = append(merged, existing...)
+			merged = append(merged, v...)
+			loweredNoise[lk] = merged
+		} else {
+			// Copy `v` so later case-collision merges (or any downstream
+			// mutation of loweredNoise) can never grow/duplicate the caller's
+			// original noise-map slice. The caller's `noise` is treated as
+			// read-only config.
+			cp := make([]string, len(v))
+			copy(cp, v)
+			loweredNoise[lk] = cp
+		}
+	}
+	// Look up the "header"-scope sentinel via the normalized map so user-supplied
+	// casing (e.g. "Header" / "HEADER") is still recognized as the whole-section
+	// noise marker. The sentinel key is canonically lowercase "header".
+	_, isHeaderNoisy := loweredNoise["header"]
 	for k, v := range h1 {
-		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1411,7 +1452,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(k, loweredNoise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -1460,9 +1501,30 @@ func MapToArray(mp map[string][]string) []string {
 	return result
 }
 
+// SubstringKeyMatch returns the regex list associated with a matching noise
+// key that occurs as a substring of s. The comparison is case-insensitive on
+// BOTH sides: s is folded to lower case internally, and each key in mp is
+// folded to lower case on the fly. This keeps HTTP header key matching
+// case-insensitive regardless of how the user cased the noise pattern in
+// keploy.yml (e.g. "x-correlation-id" vs "X-Correlation-Id").
+//
+// The helper is idempotent to pre-lowering: callers MAY pre-lowercase the
+// map keys to avoid redundant ToLower allocations in hot paths (see
+// CompareHeaders, which hoists the normalization out of a per-header loop),
+// but it is NOT a precondition — correctness is preserved either way. Passing
+// an already-lowercase key makes the inner ToLower a cheap no-op.
+//
+// Go map iteration order is unspecified, so when multiple keys in mp could
+// match s, any one of them may be returned — callers MUST NOT rely on a
+// specific match precedence. Callers cannot impose precedence on this
+// function: it iterates mp internally, so sorting keys before the call has
+// no effect. For call sites that need deterministic match precedence, pass
+// the keys as an ordered slice via a different helper — SubstringKeyMatch
+// does not accept one today.
 func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
+	sLower := strings.ToLower(s)
 	for key, val := range mp {
-		if strings.Contains(s, key) {
+		if strings.Contains(sLower, strings.ToLower(key)) {
 			return val, true
 		}
 	}

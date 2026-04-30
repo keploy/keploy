@@ -66,7 +66,7 @@ wait_for_port_release() {
 
     echo "Waiting for port ${port} to be released..."
     for ((i=0; i<timeout_seconds; i++)); do
-        if ! lsof -tiTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+        if ! (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
             echo "Port ${port} is free"
             return 0
         fi
@@ -74,7 +74,7 @@ wait_for_port_release() {
     done
 
     echo "Port ${port} is still in use after ${timeout_seconds}s"
-    lsof -iTCP:"${port}" -sTCP:LISTEN -Pn || true
+    ss -ltnp | grep ":${port} " || true
     return 1
 }
 
@@ -149,9 +149,23 @@ kill_keploy_process() {
 send_grpc_requests() {
     echo "Waiting for gRPC server to be ready..."
     sleep 10
-    
+
+    # 0. Reflection probes — exercise the LifetimeSession mock path end-to-end.
+    # The grpc-secret server registers grpc.reflection.v1.ServerReflection in
+    # main.go. These two grpcurl invocations issue ServerReflectionInfo RPCs
+    # that the keploy recorder tags as type=="config" / Lifetime==Session, so
+    # replay must serve them from the session pool (not the per-test pool).
+    # Without this, the matcher's per-test-only path could regress silently
+    # because the regular Jwt/Curl/Cdn/GetSecret RPCs all live in per-test.
+    echo "Probing gRPC reflection (list)..."
+    grpcurl -plaintext -v localhost:50051 list >/dev/null 2>&1 || echo "reflection list completed"
+    sleep 1
+    echo "Probing gRPC reflection (describe SecretService)..."
+    grpcurl -plaintext -v localhost:50051 describe secrets.SecretService >/dev/null 2>&1 || echo "reflection describe completed"
+    sleep 1
+
     echo "Sending all 4 gRPC requests..."
-    
+
     # 1. JwtLab
     echo "Sending JwtLab request..."
     grpcurl -plaintext -v \

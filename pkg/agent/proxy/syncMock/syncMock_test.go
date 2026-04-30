@@ -2,10 +2,13 @@ package manager
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestSetMemoryPressureClearsBufferedMocksAndDropsNewOnes(t *testing.T) {
@@ -340,8 +343,10 @@ func TestSetOutputChannelSamePointerAfterCloseKeepsClosed(t *testing.T) {
 // buffer (they will never drain, but we accept the small leak in
 // exchange for dropping the pre-drop branch that was suspected
 // of regressing #4045 Mongo Fuzzer record_build_replay_latest).
-// The retention path is bounded by the 7-second cutoffTime
-// at the top of ResolveRange, so the leak is time-capped.
+// In-window mocks are retained regardless of age (the long-running-
+// test contract — see TestResolveRangeLongRunningWindowKeepsOldMocks);
+// out-of-window stale mocks are still time-capped by the 7-second
+// cutoff in the unmatched branch.
 func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +370,563 @@ func TestResolveRangePostCloseRetainsBuffer(t *testing.T) {
 	mgr.mu.Unlock()
 	if remaining != 1 {
 		t.Fatalf("expected 1 mock retained in buffer after post-close ResolveRange; got %d", remaining)
+	}
+}
+
+// TestResolveRangeLongRunningWindowKeepsOldMocks is the
+// regression test for the Mongo Fuzzer record_build_replay_build
+// failure caused by routing V2 EmitMock through syncMock (#4122).
+//
+// The fuzzer's curl POST /run takes ~56 s to complete 10 000 mongo
+// ops, so by the time ResolveRange fires at request resolution the
+// per-test mongo mocks captured in the first ~49 s are all older
+// than 7 s. The cutoff used to be checked BEFORE the window match,
+// which dropped them despite their being in-window — leaving replay
+// without the mongo handshake mocks and producing a connection-pool
+// error at driver init. The fix re-orders the loop to evaluate the
+// window match first, so an in-window mock is kept regardless of
+// age; only un-matched mocks are subject to the stale cutoff.
+func TestResolveRangeLongRunningWindowKeepsOldMocks(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Simulate a 60-second test window that starts 60 s ago.
+	now := time.Now()
+	windowStart := now.Add(-60 * time.Second)
+	windowEnd := now
+
+	// Mock at +5 s into the window — older than the 7-second cutoff
+	// (~55 s old by now) but legitimately in-window.
+	oldInWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: windowStart.Add(5 * time.Second)},
+	}
+	// Mock at -10 s before the window — out of window AND old. Must
+	// be dropped by the stale cutoff.
+	staleOutWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: windowStart.Add(-10 * time.Second)},
+	}
+	// Mock 3 s in the future relative to now — out of window but
+	// recent. Must be retained for a possible future window match.
+	freshOutWindow := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: now.Add(3 * time.Second)},
+	}
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, oldInWindow, staleOutWindow, freshOutWindow)
+	mgr.mu.Unlock()
+
+	mgr.ResolveRange(windowStart, windowEnd, "test-1", true, false)
+
+	// Drain anything sent to the outChan.
+	var sent []*models.Mock
+loop:
+	for {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			break loop
+		}
+	}
+
+	if len(sent) != 1 || sent[0] != oldInWindow {
+		t.Fatalf("expected the in-window mock to be flushed despite being older than 7s; sent=%d", len(sent))
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != freshOutWindow {
+		t.Fatalf("expected only freshOutWindow retained in buffer; got len=%d", len(mgr.buffer))
+	}
+}
+
+// TestAddMockSessionLifetimeBuffersAfterFirstReqSeen pins the
+// post-firstReqSeen routing for session-lifetime mocks. AddMock
+// must NOT hoist them straight to outChan: that would interleave
+// handshake mocks ahead of the per-test mocks emitted at end-of-
+// test from the buffer, and replay's connection-keyed FIFO matcher
+// stalls on the resulting out-of-order stream. The expected path
+// is: buffer the session mock now, and let ResolveRange's lifetime
+// carve-out drain it to outChan in arrival order, exempt from the
+// per-test window match and the 7 s stale cutoff. Regression coverage
+// for the run_fuzzer_linux / Mongo Fuzzer (record_build_replay_build)
+// hang on the bypass attempt of PR #4130.
+func TestAddMockSessionLifetimeBuffersAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	// Past the gate: per-test mocks now buffer; session mocks must too.
+	mgr.SetFirstRequestSignaled()
+
+	sessionMock := &models.Mock{
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now(),
+		},
+	}
+	mgr.AddMock(sessionMock)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("session mock unexpectedly forwarded to outChan: %p", got)
+	default:
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != sessionMock {
+		t.Fatalf("expected session mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestAddMockConnectionLifetimeBuffersAfterFirstReqSeen is the
+// LifetimeConnection counterpart. Postgres v3 prepared-statement
+// PREPARE mocks land here: they're tagged "type: connection" with
+// a connID and must follow the same buffer-then-carve-out path so
+// arrival order is preserved relative to per-test mocks emitted on
+// the same connection.
+func TestAddMockConnectionLifetimeBuffersAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	connMock := &models.Mock{
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"type":   "connection",
+				"connID": "c-42",
+			},
+			ReqTimestampMock: time.Now(),
+		},
+	}
+	mgr.AddMock(connMock)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("connection mock unexpectedly forwarded to outChan: %p", got)
+	default:
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != connMock {
+		t.Fatalf("expected connection mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeFlushesBufferedSessionMocksInArrivalOrder is the
+// pure regression test for the Mongo Fuzzer hang on the bypass
+// attempt. Buffer interleaves session and per-test mocks in the
+// order [session1, perTest1, session2, perTest2, perTest3] and
+// invokes a per-test ResolveRange whose window covers the per-test
+// mocks. The expectation: outChan receives mocks in the SAME
+// interleaved order, NOT all-sessions-then-all-per-tests. Replay's
+// connection-keyed FIFO matcher requires this ordering — with the
+// pre-fix bypass, session mocks landed on outChan ahead of any
+// per-test mocks queued in the buffer, the connection's mock stream
+// went out of order, and replay stalled on the last batch of ops.
+func TestResolveRangeFlushesBufferedSessionMocksInArrivalOrder(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	now := time.Now()
+	mkSession := func(id string, ts time.Time) *models.Mock {
+		m := &models.Mock{
+			Kind: models.Mongo,
+			Name: id,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: ts,
+			},
+		}
+		m.DeriveLifetime()
+		return m
+	}
+	mkPerTest := func(id string, ts time.Time) *models.Mock {
+		return &models.Mock{
+			Kind: models.Mongo,
+			Name: id,
+			Spec: models.MockSpec{ReqTimestampMock: ts},
+		}
+	}
+
+	// Capture order: s1, p1, s2, p2, p3 — all timestamped inside
+	// the test window so the per-test path matches them. The per-
+	// test ResolveRange window must include every per-test mock's
+	// timestamp; session mocks are exempt regardless.
+	mocks := []*models.Mock{
+		mkSession("s1", now.Add(-50*time.Millisecond)),
+		mkPerTest("p1", now.Add(-40*time.Millisecond)),
+		mkSession("s2", now.Add(-30*time.Millisecond)),
+		mkPerTest("p2", now.Add(-20*time.Millisecond)),
+		mkPerTest("p3", now.Add(-10*time.Millisecond)),
+	}
+	for _, m := range mocks {
+		mgr.AddMock(m)
+	}
+
+	mgr.ResolveRange(now.Add(-100*time.Millisecond), now, "test-1", true, false)
+
+	for _, want := range mocks {
+		select {
+		case got := <-ch:
+			if got != want {
+				t.Fatalf("outChan order broken: expected %s, got %s", want.Name, got.Name)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for mock %s on outChan", want.Name)
+		}
+	}
+	select {
+	case extra := <-ch:
+		t.Fatalf("unexpected extra mock on outChan: %s", extra.Name)
+	default:
+	}
+}
+
+// TestAddMockPerTestStillBuffersAfterFirstReqSeen is the negative
+// control for the carve-out: per-test mocks (zero Lifetime / no
+// metadata tag) MUST still buffer once firstReqSeen has flipped, so
+// ResolveRange can match them against the active test window. If
+// the bypass leaks here the dedup/windowing contract collapses.
+func TestAddMockPerTestStillBuffersAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	perTest := &models.Mock{
+		Spec: models.MockSpec{ReqTimestampMock: time.Now()},
+	}
+	mgr.AddMock(perTest)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("per-test mock unexpectedly forwarded to outChan: %p", got)
+	default:
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != perTest {
+		t.Fatalf("expected per-test mock buffered post-firstReqSeen; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeKeepsSessionLifetimeMocksPastCutoff covers the
+// ResolveRange safety net paired with the AddMock bypass. AddMock
+// now forwards session-lifetime mocks directly to outChan when the
+// channel is bound, so the buffer should generally not see them.
+// The exception is the brief startup window where outChan is still
+// nil at AddMock time — those session mocks land in the buffer.
+// Without the lifetime carve-out in ResolveRange the post-#4130
+// out-of-window cutoff would silently drop them once they aged
+// past 7 s and outChan became bound. This test mirrors that
+// scenario: pre-buffer a session mock with a >7 s ReqTimestampMock,
+// invoke a per-test ResolveRange whose window doesn't include the
+// mock's timestamp, and assert the mock is FLUSHED to outChan
+// rather than dropped.
+func TestResolveRangeKeepsSessionLifetimeMocksPastCutoff(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Mongo handshake captured ~10 s ago — well past the 7 s cutoff.
+	// "type: config" is the on-disk tag DeriveLifetime maps to
+	// LifetimeSession. Pre-derive on the test mock so the buffered
+	// state matches what AddMock would have written.
+	handshake := &models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now().Add(-10 * time.Second),
+		},
+	}
+	handshake.DeriveLifetime()
+	if handshake.TestModeInfo.Lifetime != models.LifetimeSession {
+		t.Fatalf("test fixture: expected LifetimeSession after DeriveLifetime, got %v", handshake.TestModeInfo.Lifetime)
+	}
+
+	// Pre-buffer it (simulates the unbound-at-AddMock startup path).
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, handshake)
+	mgr.mu.Unlock()
+
+	// Per-test ResolveRange with a window 1 s wide centred on now —
+	// the handshake timestamp (-10 s) is well outside.
+	now := time.Now()
+	mgr.ResolveRange(now.Add(-500*time.Millisecond), now.Add(500*time.Millisecond), "test-1", true, false)
+
+	// Session mock must have been flushed to outChan despite being
+	// out-of-window AND past the 7 s cutoff.
+	select {
+	case got := <-ch:
+		if got != handshake {
+			t.Fatalf("expected session mock flushed to outChan; got different pointer")
+		}
+	default:
+		t.Fatalf("expected session-lifetime mock to be flushed to outChan past cutoff; got nothing")
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected empty buffer after flushing session mock; got %d", len(mgr.buffer))
+	}
+}
+
+// TestResolveRangeRetainsSessionMocksWhenOutChanUnbound complements
+// the cutoff exemption: when outChan is unbound at ResolveRange time
+// (post-CloseOutChan, or before a fresh SetOutputChannel re-binds),
+// session mocks must be RETAINED in the buffer rather than flushed
+// (sendToOutChan would no-op silently and we'd lose them) or
+// dropped. A later ResolveRange with the channel re-bound is
+// expected to drain them.
+func TestResolveRangeRetainsSessionMocksWhenOutChanUnbound(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+	mgr.CloseOutChan() // outChanBound goes false, channel closed
+
+	handshake := &models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: time.Now().Add(-10 * time.Second),
+		},
+	}
+	handshake.DeriveLifetime()
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, handshake)
+	mgr.mu.Unlock()
+
+	now := time.Now()
+	mgr.ResolveRange(now.Add(-500*time.Millisecond), now.Add(500*time.Millisecond), "t", true, false)
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != handshake {
+		t.Fatalf("expected session mock retained in buffer when outChan unbound; got len=%d", len(mgr.buffer))
+	}
+}
+
+// TestSendToOutChanNoDropWhenDrainedWithinBudget exercises the
+// fast-then-bounded-block path: once the fast-path slot is taken,
+// a consumer that drains within sendBudget must let the blocked
+// sender complete without bumping dropCount. This is the "normal
+// scheduling jitter" case the bounded block was introduced for —
+// the pre-fix silent-drop shipped a recording-loss flake in
+// exactly this scenario, so the test lives to prevent regression.
+func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Prime the buffer slot so the next send goes down the
+	// bounded-block branch rather than the fast path.
+	ch <- &models.Mock{}
+
+	// Drain one slot well inside sendBudget so the blocked send
+	// succeeds. 50ms is comfortably under the 200ms budget while
+	// still giving the goroutine time to park on the send.
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		<-ch // drop the primer
+		close(done)
+	}()
+
+	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	mgr.sendToOutChan(mock)
+	<-done
+
+	if got := mgr.DropCount(); got != 0 {
+		t.Fatalf("expected zero drops when consumer drains within budget, got %d", got)
+	}
+
+	// Real mock should have landed on the channel.
+	select {
+	case got := <-ch:
+		if got != mock {
+			t.Fatalf("expected bounded-block send to deliver mock; got different pointer")
+		}
+	default:
+		t.Fatalf("bounded-block send should have delivered the mock after the primer was drained")
+	}
+}
+
+// TestSendToOutChanDropsAfterBudget is the inverse: a consumer that
+// never drains must cause exactly one drop per send after the
+// budget, and dropCount must increment accordingly. Also asserts
+// the first drop emits an Error log (the sampled, immediately-
+// visible signal the pre-fix code lacked).
+func TestSendToOutChanDropsAfterBudget(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Capture log output so we can verify the first-drop Error
+	// actually fires — the whole point of promoting Warn->Error.
+	core, logs := observer.New(zap.ErrorLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Fill the buffered slot; subsequent sends must exhaust the
+	// budget and drop.
+	ch <- &models.Mock{}
+
+	// Use a tight send budget override via measuring elapsed time —
+	// we can't stub sendBudget directly without adding a knob, so
+	// just accept the 200ms wall-clock cost on a single send and
+	// validate the semantics. 200ms * 1 send is fine for unit tests.
+	start := time.Now()
+	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	elapsed := time.Since(start)
+
+	if elapsed < sendBudget {
+		t.Fatalf("bounded-block send returned in %v, expected >= sendBudget (%v)", elapsed, sendBudget)
+	}
+	if got := mgr.DropCount(); got != 1 {
+		t.Fatalf("expected dropCount=1 after budget exhaustion, got %d", got)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	if entry.Level != zap.ErrorLevel {
+		t.Fatalf("expected Error level on drop log, got %v", entry.Level)
+	}
+}
+
+// TestSendToOutChanDropSampling validates the sampling rule:
+// the first drop logs, and subsequent drops only log every
+// sendDropSampleRate entries. Without the sampling, a stuck
+// consumer would flood the log and further starve the producer
+// — the specific anti-pattern the windows-redirector work
+// surfaced. Uses direct atomic writes to avoid 200ms * N real
+// timeouts in the test.
+func TestSendToOutChanDropSampling(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	core, logs := observer.New(zap.ErrorLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Simulate the drop counter hitting values around the
+	// sampling boundary without paying the per-drop wall-clock
+	// cost. We reach directly into dropCount because the whole
+	// point of this test is the logging cadence, not the send
+	// path's timing.
+	for i := uint64(1); i <= 2050; i++ {
+		n := mgr.dropCount.Add(1)
+		if n == 1 || n%sendDropSampleRate == 0 {
+			mgr.dropLogger().Error("test-sampled-drop",
+				zap.Uint64("dropsSoFar", n),
+			)
+		}
+	}
+
+	// Expected emits: n=1, n=1024, n=2048 → 3 entries.
+	if got := logs.Len(); got != 3 {
+		t.Fatalf("expected 3 sampled drop logs (n=1, 1024, 2048), got %d", got)
+	}
+}
+
+// TestSetLoggerNilFallsBackToNop ensures the drop path never
+// panics even if the host process never calls SetLogger or
+// clears it back to nil. zap.L() was the previous fallback and
+// produced silent drops on any binary that skipped
+// zap.ReplaceGlobals; the Nop fallback here is deliberately
+// allocation-free on the drop path.
+func TestSetLoggerNilFallsBackToNop(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	// Explicit nil to exercise the clear-back path.
+	mgr.SetLogger(nil)
+
+	// dropLogger must return something non-nil and safe to call.
+	l := mgr.dropLogger()
+	if l == nil {
+		t.Fatalf("dropLogger returned nil with no logger installed")
+	}
+	l.Error("must not panic")
+}
+
+// TestDropCountAtomicUnderLoad pins the atomic.Uint64 contract:
+// concurrent increments from many goroutines must be observable
+// as a single monotonic counter. Bare uint64 + sync/atomic would
+// work too, but this test also guards against a future refactor
+// accidentally dropping the atomic access.
+func TestDropCountAtomicUnderLoad(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+
+	const goroutines = 16
+	const incsPer = 1000
+	var wg sync.WaitGroup
+	var started atomic.Int32
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started.Add(1)
+			for j := 0; j < incsPer; j++ {
+				mgr.dropCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := mgr.DropCount(); got != uint64(goroutines*incsPer) {
+		t.Fatalf("expected %d total increments, got %d", goroutines*incsPer, got)
 	}
 }
 

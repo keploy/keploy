@@ -106,7 +106,33 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return true
 }
 
+// IsV2 declares that the HTTP parser is migrated to the supervisor + relay
+// + FakeConn architecture (pkg/agent/proxy/proxy_v2.go). The dispatcher
+// type-asserts the matchedParser against integrations.IntegrationsV2 and
+// routes to recordViaSupervisor only when IsV2() returns true.
+//
+// Returning true is unconditional — the HTTP parser has no per-instance
+// configuration that could force it back to the legacy path. The rollback
+// knob is the env KEPLOY_NEW_RELAY=off handled in proxy_v2.go.
+func (h *HTTP) IsV2() bool { return true }
+
+// RecordOutgoing dispatches to the V2 path when the supervisor has
+// attached a session via RecordSession.V2, and to the legacy path
+// otherwise. Keeping both paths live lets the dispatcher / rollback
+// knob (KEPLOY_NEW_RELAY) swap between them without code changes.
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	if session != nil && session.V2 != nil {
+		return h.recordV2(ctx, session.V2)
+	}
+	return h.recordLegacy(ctx, session)
+}
+
+// recordLegacy is the original RecordOutgoing body preserved unchanged.
+// It consumes the legacy RecordSession fields (Ingress / Egress / Mocks)
+// and forwards bytes between the real sockets itself. The V2 path in
+// recordV2 relies on the supervisor's relay to do the forwarding and
+// only observes teed chunks via FakeConn streams.
+func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
@@ -116,7 +142,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -147,7 +173,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
@@ -225,26 +251,6 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 
-	// XXX layering: the SQS parser delegates RecordOutgoing to HTTP and has
-	// no post-record hook to re-tag mocks. Pragmatic shortcut: detect SQS
-	// admin ops here and promote them to "config" so they are reusable
-	// across tests. Replace with a generic record-time augmenter registry
-	// when more parsers need cross-cutting metadata. Tracked as tech debt.
-	//
-	// Promote known cross-test idempotent operations to "config" so they
-	// are not subject to the outer test's [req,res] time window:
-	// AWS SQS discovery/admin operations.
-	if target := req.Header.Get("X-Amz-Target"); target != "" {
-		switch target {
-		case "AmazonSQS.GetQueueUrl",
-			"AmazonSQS.GetQueueAttributes",
-			"AmazonSQS.ListQueues",
-			"AmazonSQS.ChangeMessageVisibility":
-			meta["type"] = "config"
-			meta["sqs_op"] = target // namespaced key avoids colliding with HTTP "operation"
-		}
-	}
-
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -276,6 +282,21 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
+		// HTTP is a request-response protocol — every exchange is per-test
+		// by construction. No handshake/session tier exists at the HTTP
+		// layer; outbound calls from an application under test are always
+		// bound to the current test window. Stamp LifetimePerTest + mark
+		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
+		// no-op (the recorder is authoritative at emit time). Leaves
+		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+
+	if onMockRecorded != nil {
+		onMockRecorded(newMock)
 	}
 
 	if mgr := syncMock.Get(); mgr != nil {
