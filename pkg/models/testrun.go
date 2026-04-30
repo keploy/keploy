@@ -132,9 +132,6 @@ func MockSummaryFromSpec(mock *Mock) string {
 		}
 		return "gRPC"
 	}
-	if len(mock.Spec.RedisRequests) > 0 {
-		return "Redis"
-	}
 	if op := mock.Spec.Metadata["operation"]; op != "" {
 		return string(mock.Kind) + " " + op
 	}

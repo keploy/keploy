@@ -197,10 +197,12 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		sm.streams[streamID] = &HTTP2StreamState{
 			ID:        streamID,
 			RequestID: requestID,
-			startTime: frameTime,
 		}
 	}
 	s := sm.streams[streamID]
+	if !isOutgoing && s.startTime.IsZero() {
+		s.startTime = frameTime
+	}
 
 	switch f := frame.(type) {
 

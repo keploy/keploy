@@ -152,7 +152,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: time.Now()}:
+				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
 				default:
 				}
 			}
@@ -179,7 +179,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: time.Now()}:
+				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
 				default:
 				}
 			}
@@ -208,7 +208,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: time.Now()}:
+						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 						default:
 						}
 					}
@@ -225,7 +225,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						cp := make([]byte, len(buf))
 						copy(cp, buf)
 						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: time.Now()}:
+						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 						default:
 						}
 					}
@@ -293,7 +293,35 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		requests := []mysql.Request{{PacketBundle: *pendingCommand}}
 		responses := []mysql.Response{{PacketBundle: *pendingRespBundle}}
 		respOp := pendingRespBundle.Header.Type
-		recordMock(ctx, requests, responses, "mocks", pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
+		// Lifetime classification at record time: prepared-statement
+		// setup (COM_STMT_PREPARE → StmtPrepareOkPacket) is connection-
+		// scoped. The executes that reference the statement by id on
+		// the same connection may land in a different test's window, so
+		// tagging as per-test ("mocks") would have the strict-window
+		// filter drop the setup and break replay. Tagging as session
+		// ("config") would share it across unrelated connections,
+		// which can collide when apps reuse statement names per
+		// connection. LifetimeConnection (= "connection" + connID) is
+		// the correct scope: not window-filtered, scoped to this
+		// connID, matched via GetConnectionMocks(connID) at replay.
+		//
+		// Connection-alive commands (COM_PING, COM_STATISTICS,
+		// COM_DEBUG, COM_RESET_CONNECTION) could semantically be
+		// "config" (input-independent responses, session-reusable) but
+		// we deliberately keep them as "mocks" for BACKWARD COMPAT:
+		// the released keploy replayer skips "config"-tagged mocks at
+		// command phase, so tagging them as "config" from this version
+		// of the recorder would break the released replayer when it
+		// receives a recording made here. The matcher-side
+		// isSessionReusableCommandMock helper still dispatches any
+		// such mock at command phase if it reaches the session pool
+		// (e.g., user-edited recordings), so forward compat is
+		// preserved without burning the bridge behind us.
+		mockType := "mocks"
+		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
+			mockType = "connection"
+		}
+		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil
 		state = stateExpectCommand
@@ -333,9 +361,14 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.
+				// No server response exists on the wire, so use the
+				// request timestamp for both sides; CapturedRespTime
+				// would otherwise carry over the previous exchange's
+				// response time on this keep-alive connection and put
+				// ResTimestampMock before ReqTimestampMock.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
 					pendingCommand = nil
 					pendingRespBundle = nil
 					state = stateExpectCommand
@@ -343,11 +376,12 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				// Unknown/unrecognized packet types — treat as no-response.
+				// Same timestamp reasoning as the explicit no-response branch.
 				if strings.HasPrefix(commandPkt.Header.Type, "0x") {
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
 					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
 					pendingCommand = nil
 					pendingRespBundle = nil
 					state = stateExpectCommand

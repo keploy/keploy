@@ -77,6 +77,26 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		upgrader := tlsUpgrader
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts, upgrader)
 		if err != nil {
+			// EOF during the initial handshake can come from two
+			// different sources, and we can't tell them apart from
+			// this callsite alone:
+			//
+			//   (a) Intentional short-circuit: a capture layer that
+			//       sees the MySQL CLIENT_SSL capability bit may
+			//       close the SimulatedConn so a TLS-aware consumer
+			//       (SSL/GoTLS/JSSE uprobe, upstream TLS proxy, …)
+			//       can take over the plaintext continuation.
+			//   (b) Ordinary disconnect: the client dropped the TCP
+			//       connection mid-handshake.
+			//
+			// Treat both as non-fatal (the connection is gone either
+			// way) but log a neutral message so (b) is not
+			// misreported as a TLS handoff in production logs.
+			if err == io.EOF {
+				logger.Debug("EOF during MySQL handshake; if this was not an expected TLS handoff to an SSL/GoTLS/JSSE uprobe or upstream TLS proxy, verify whether the client disconnected before completing the handshake",
+					zap.String("connKey", opts.ConnKey))
+				return nil
+			}
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
 			return nil
@@ -146,6 +166,21 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	if opts.DstCfg != nil && opts.DstCfg.Addr != "" {
 		meta["destAddr"] = opts.DstCfg.Addr
 	}
+	// Map the recorder's on-disk mockType tag to the typed Lifetime
+	// enum so the filter layer's authoritative routing reads it in a
+	// single enum compare instead of probing Metadata["type"]. The
+	// three-way tag convention is unchanged (config/connection/mocks
+	// stays on the wire for backward compat); we just pre-populate
+	// TestModeInfo.Lifetime at emit time so DeriveLifetime is a no-op
+	// on ingest. Post-Lifetime-elevation contract: every MySQL recorder
+	// mock ships with a derived Lifetime.
+	lifetime := models.LifetimePerTest
+	switch mockType {
+	case "config":
+		lifetime = models.LifetimeSession
+	case "connection":
+		lifetime = models.LifetimeConnection
+	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,
@@ -157,6 +192,10 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
 			ResTimestampMock: resTimestampMock,
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        lifetime,
+			LifetimeDerived: true,
 		},
 	}
 	// Send to the mocks channel for YAML output. Use either the direct

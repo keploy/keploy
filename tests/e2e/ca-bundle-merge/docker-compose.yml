@@ -1,0 +1,58 @@
+# docker-compose.yml — end-to-end reproduction of the CA-bundle-merge fix.
+#
+# Two services share a volume at /shared:
+#
+#   1. `ca-writer`: runs the Go harness that exercises setupSharedVolume in a
+#      debian slim container with ca-certificates installed, writing
+#      /shared/ca.crt (system bundle + keploy MITM CA merged) and
+#      /shared/keploy-ca.crt (keploy MITM CA only).
+#
+#   2. `tls-probe`: reuses the same image (which has curl + ca-certificates)
+#      and stays alive long enough for run.sh to exec curl probes against
+#      https://sts.us-east-1.amazonaws.com/ — once with the merged bundle
+#      (must succeed) and once with keploy-only (must fail with curl exit
+#      60).
+#
+# The test does NOT depend on the Keploy agent or on the admission webhook —
+# it exercises the exact function-under-change (setupSharedVolume) in the
+# exact distro footprint that the webhook injects env vars into (a
+# container with a system trust store and REQUESTS_CA_BUNDLE overriding it).
+
+services:
+  ca-writer:
+    build:
+      # Build context is repo root so the harness can import the tls package.
+      context: ../../../
+      dockerfile: tests/e2e/ca-bundle-merge/Dockerfile.setup
+      args:
+        # Overridable for CI runners with specific images cached. The
+        # defaults point at the ECR Public mirrors (see Dockerfile.setup) so
+        # GHA runners aren't subject to Docker Hub's unauthenticated
+        # pull-rate-limits; runners with a local `golang:1.26-bookworm` layer
+        # cache can export GOLANG_IMAGE=golang:1.26-bookworm to reuse it.
+        GOLANG_IMAGE: ${GOLANG_IMAGE:-public.ecr.aws/docker/library/golang:1.26-bookworm}
+        DEBIAN_IMAGE: ${DEBIAN_IMAGE:-public.ecr.aws/docker/library/debian:trixie-slim}
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-writer
+    environment:
+      - EXPORT_PATH=/shared
+    volumes:
+      - ca-shared:/shared
+    restart: "no"
+
+  tls-probe:
+    # Reuses the writer image (curl + ca-certificates + debian slim). Keeps
+    # the probe's distro matched to the writer's so the OS bundle parity is
+    # exactly what a real customer with a shared-EmptyDir would see.
+    image: kpl-ca-merge:local
+    container_name: kpl-ca-merge-probe
+    depends_on:
+      ca-writer:
+        condition: service_completed_successfully
+    entrypoint: [""]
+    command: ["sleep", "600"]
+    volumes:
+      - ca-shared:/shared:ro
+
+volumes:
+  ca-shared:
