@@ -188,6 +188,12 @@ if [ "$MODE" = "incoming" ]; then
     check_for_errors record_incoming.log
 
     if json_pass_supported; then
+        # The yaml pass left grpc-client (the HTTP→gRPC driver on :8080) alive
+        # because kill_keploy_process only stops keploy and its -c child (the
+        # server). Without this teardown, the new ./grpc-client below fails to
+        # bind :8080 and send_requests races against the stale client.
+        pkill -f grpc-client || true
+        sleep 1
         ./grpc-client &> client_incoming_json.log &
         "$RECORD_BIN" record --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming_json.log &
         wait_for_port 50051
@@ -238,6 +244,14 @@ elif [ "$MODE" = "outgoing" ]; then
     check_for_errors record_outgoing.log
 
     if json_pass_supported; then
+        # The yaml pass spawned grpc-server manually (not under keploy -c), so
+        # kill_keploy_process did NOT take it down. Without this teardown the
+        # new ./grpc-server below silently fails to bind :50051, wait_for_port
+        # succeeds against the stale server, and the send_requests sequence
+        # tries to UpdateUser id=1 — which was deleted at the end of the yaml
+        # pass — producing curl exit 22 / HTTP 500 "user not found".
+        pkill -f grpc-server || true
+        sleep 1
         ./grpc-server &> server_outgoing_json.log &
         wait_for_port 50051
         "$RECORD_BIN" record --storage-format json -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing_json.log &
