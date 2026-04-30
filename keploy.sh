@@ -489,7 +489,7 @@ done
 set -- "${forwarded_args[@]}"
 
 if [ "$USE_OSS" = false ]; then
-    echo "Installing Keploy (with paid features) by default. Pass '--oss' to install Keploy OSS instead."
+    echo "Installing Keploy Community Edition"
     curl --silent -O -L https://keploy.io/ent/install.sh
     source install.sh "$@"
     return 0 2>/dev/null || exit 0
