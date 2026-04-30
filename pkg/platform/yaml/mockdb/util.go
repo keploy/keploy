@@ -115,8 +115,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Requests         []pgRequest       `json:"requests"`
 			Response         []pgResponse      `json:"responses"`
 			CreatedAt        int64             `json:"created,omitempty"`
-			ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock interface{}       `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}       `json:"resTimestampMock,omitempty"`
 		}
 		reqs := make([]pgRequest, 0, len(mock.Spec.PostgresRequestsV2))
 		for _, v := range mock.Spec.PostgresRequestsV2 {
@@ -145,8 +145,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Requests         []models.MongoRequest  `json:"requests"`
 			Response         []models.MongoResponse `json:"responses"`
 			CreatedAt        int64                  `json:"created,omitempty"`
-			ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock interface{}            `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}            `json:"resTimestampMock,omitempty"`
 		}
 		spec = mgSpec{
 			Metadata:         mock.Spec.Metadata,
@@ -166,8 +166,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Requests         []mysql.Request   `json:"requests"`
 			Response         []mysql.Response  `json:"responses"`
 			CreatedAt        int64             `json:"created,omitempty"`
-			ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock interface{}       `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}       `json:"resTimestampMock,omitempty"`
 		}
 		spec = mySpec{
 			Metadata:         mock.Spec.Metadata,
@@ -204,8 +204,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		type pgV3Spec struct {
 			Metadata         map[string]string      `json:"metadata,omitempty"`
 			PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
-			ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-			ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+			ReqTimestampMock interface{}            `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}            `json:"resTimestampMock,omitempty"`
 		}
 		spec = pgV3Spec{
 			Metadata:         mock.Spec.Metadata,
@@ -1340,8 +1340,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []pgRequest       `json:"requests"`
 				Response         []pgResponse      `json:"responses"`
 				CreatedAt        int64             `json:"created,omitempty"`
-				ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
 			var s pgSpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1355,16 +1355,14 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			for _, r := range s.Response {
 				resps = append(resps, postgres.Response{PacketBundle: r.PacketBundle})
 			}
-			mockSpec := models.MockSpec{
+			mock.Spec = models.MockSpec{
 				Metadata:            s.Metadata,
 				Created:             s.CreatedAt,
 				PostgresRequestsV2:  reqs,
 				PostgresResponsesV2: resps,
+				ReqTimestampMock:    s.ReqTimestampMock,
+				ResTimestampMock:    s.ResTimestampMock,
 			}
-			if t, ok := s.ReqTimestampMock.(string); ok {
-				_ = t // timestamps preserved as written; left typed as interface{} on purpose
-			}
-			mock.Spec = mockSpec
 		case models.Mongo:
 			// Mongo: Message is interface{} — json.Unmarshal puts a
 			// map[string]interface{} there. We dispatch on
@@ -1375,8 +1373,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []models.MongoRequest  `json:"requests"`
 				Response         []models.MongoResponse `json:"responses"`
 				CreatedAt        int64                  `json:"created,omitempty"`
-				ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
 			}
 			var s mgSpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1399,10 +1397,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				s.Response[i].Message = typed
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:       s.Metadata,
-				Created:        s.CreatedAt,
-				MongoRequests:  s.Requests,
-				MongoResponses: s.Response,
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MongoRequests:    s.Requests,
+				MongoResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
 			}
 		case models.MySQL:
 			type mySpec struct {
@@ -1410,8 +1410,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				Requests         []mysql.Request   `json:"requests"`
 				Response         []mysql.Response  `json:"responses"`
 				CreatedAt        int64             `json:"created,omitempty"`
-				ReqTimestampMock interface{}       `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}       `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
 			}
 			var s mySpec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1432,10 +1432,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 				s.Response[i].Message = typed
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:       s.Metadata,
-				Created:        s.CreatedAt,
-				MySQLRequests:  s.Requests,
-				MySQLResponses: s.Response,
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MySQLRequests:    s.Requests,
+				MySQLResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
 			}
 		case models.PostgresV3:
 			// Mirror of the YAML path's PostgresV3 case (see DecodeMocks),
@@ -1447,8 +1449,8 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			type pgV3Spec struct {
 				Metadata         map[string]string      `json:"metadata,omitempty"`
 				PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
-				ReqTimestampMock interface{}            `json:"ReqTimestampMock,omitempty"`
-				ResTimestampMock interface{}            `json:"ResTimestampMock,omitempty"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
 			}
 			var s pgV3Spec
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
@@ -1473,14 +1475,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 					zap.String("next_step", nextStepPostgresV3NilPayload))
 				return nil, err
 			}
-			mockSpec := models.MockSpec{
-				Metadata:   s.Metadata,
-				PostgresV3: s.PostgresV3,
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				PostgresV3:       s.PostgresV3,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
 			}
-			if t, ok := s.ReqTimestampMock.(string); ok {
-				_ = t // timestamps preserved as written; left typed as interface{} on purpose
-			}
-			mock.Spec = mockSpec
 		default:
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
 			continue
