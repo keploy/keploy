@@ -314,10 +314,12 @@ check_test_report() {
     return 0
 }
 
-# Checks that the safe normalize run produced the expected warnings
+# Checks that the safe normalize run produced the expected warnings.
+# Optional first argument overrides the default log file path so the same
+# check can be reused for the supplemental --storage-format json pass.
 check_normalize_warnings() {
     section "Validating Safe Normalize Warnings..."
-    local logfile="normalize_safe.log"
+    local logfile="${1:-normalize_safe.log}"
     local warning_msg="failed to normalize test case.*due to a high-risk failure"
 
     echo "Checking for high-risk normalization warnings in $logfile..."
@@ -423,8 +425,21 @@ section "Attempt Safe Normalization (Expected to Warn)"
 echo "Running normalize without force flag. Expecting warnings for high-risk failures..."
 $REPLAY_BIN normalize 2>&1 | tee normalize_safe.log || true
 check_for_errors "normalize_safe.log"
-check_normalize_warnings
+check_normalize_warnings "normalize_safe.log"
 endsec
+
+# Mirror the safe normalize for the supplemental --storage-format json
+# pass. Without this, normalize only writes .yaml updates; the json
+# record-pass test-set's .json files keep their original (pre-normalize)
+# expected bodies, and the json final-validation test on test-set-1 fails
+# even after the testdb reader prefers the format-matching sibling.
+if json_pass_supported; then
+    section "Attempt Safe Normalization — JSON (Expected to Warn)"
+    $REPLAY_BIN normalize --storage-format json 2>&1 | tee normalize_safe_json.log || true
+    check_for_errors "normalize_safe_json.log"
+    check_normalize_warnings "normalize_safe_json.log"
+    endsec
+fi
 
 section "Run Forced Normalization (Expected to Succeed)"
 echo "Running normalize with --allow-high-risk flag..."
@@ -432,6 +447,14 @@ $REPLAY_BIN normalize --allow-high-risk 2>&1 | tee normalize_forced.log || true
 check_for_errors "normalize_forced.log"
 echo "Forced normalization complete. Test cases should now be updated."
 endsec
+
+if json_pass_supported; then
+    section "Run Forced Normalization — JSON (Expected to Succeed)"
+    $REPLAY_BIN normalize --storage-format json --allow-high-risk 2>&1 | tee normalize_forced_json.log || true
+    check_for_errors "normalize_forced_json.log"
+    echo "Forced normalization (json) complete."
+    endsec
+fi
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
