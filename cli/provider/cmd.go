@@ -328,6 +328,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("health-url", c.cfg.Test.HealthURL, "HTTP(S) URL polled before the first test is fired; first 2xx response proceeds immediately. Empty (default) preserves the fixed --delay behavior.")
 		cmd.Flags().Duration("health-poll-timeout", c.cfg.Test.HealthPollTimeout, "Ceiling for --health-url polling (e.g. 60s, 2m). If no 2xx is seen within this window, replay logs an info message and falls back to --delay.")
+		cmd.Flags().Bool("no-app-restart", c.cfg.Test.NoAppRestart, "Run all selected test sets against a single application process instead of restarting before each test set")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
@@ -416,6 +417,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"healthUrl":             "health-url",
 		"healthPollTimeout":     "health-poll-timeout",
+		"noAppRestart":          "no-app-restart",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
 		"protoFile":             "proto-file",

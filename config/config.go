@@ -112,6 +112,7 @@ type Test struct {
 	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
 	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	NoAppRestart                bool                `json:"noAppRestart" yaml:"noAppRestart" mapstructure:"noAppRestart"`                // run all selected test sets against one app process instead of restarting between test sets
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`

@@ -236,6 +236,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
+	var sharedAppCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
@@ -253,6 +254,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
 
+		if sharedAppCancel != nil {
+			sharedAppCancel()
+		}
 		if hookCancel != nil {
 			hookCancel()
 		}
@@ -393,6 +397,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
+
+	noAppRestart := r.config.Test.NoAppRestart && r.instrument
+	if r.config.Test.NoAppRestart && !r.instrument {
+		r.logger.Info("ignoring --no-app-restart because replay is running without an app command")
+	}
+	var sharedAppErrCh <-chan models.AppError
+	if noAppRestart {
+		sharedAppCancel, sharedAppErrCh, err = r.startSharedApplication(ctx, g, testSets)
+		if err != nil {
+			stopReason = fmt.Sprintf("failed to start shared application for --no-app-restart: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
+		}
+	}
+
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -454,7 +473,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.completeTestReportMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
+			if noAppRestart {
+				if appErr, ok := readSharedAppError(sharedAppErrCh); ok {
+					stopReason = fmt.Sprintf("application stopped before test set %s: %s", testSet, appErr.Error())
+					utils.LogError(r.logger, appErr, stopReason)
+					return fmt.Errorf("%s", stopReason)
+				}
+			}
+
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, noAppRestart)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -462,6 +489,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
+			}
+			if noAppRestart {
+				if appErr, ok := readSharedAppError(sharedAppErrCh); ok {
+					stopReason = fmt.Sprintf("application stopped during test set %s: %s", testSet, appErr.Error())
+					utils.LogError(r.logger, appErr, stopReason)
+					return fmt.Errorf("%s", stopReason)
+				}
 			}
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
@@ -669,6 +703,83 @@ func (r *Replayer) Start(ctx context.Context) error {
 	return nil
 }
 
+func readSharedAppError(appErrCh <-chan models.AppError) (models.AppError, bool) {
+	if appErrCh == nil {
+		return models.AppError{}, false
+	}
+	select {
+	case appErr := <-appErrCh:
+		return appErr, true
+	default:
+		return models.AppError{}, false
+	}
+}
+
+func (r *Replayer) startSharedApplication(ctx context.Context, g *errgroup.Group, testSets []string) (context.CancelFunc, <-chan models.AppError, error) {
+	appCommand, err := r.resolveSharedAppCommand(ctx, testSets)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	appCtx, appCancel := context.WithCancel(ctx)
+	appErrCh := make(chan models.AppError, 1)
+	r.logger.Info("running selected test sets without restarting the application", zap.Strings("testSets", testSets))
+
+	g.Go(func() error {
+		defer utils.Recover(r.logger)
+		appErr := r.RunApplication(appCtx, models.RunOptions{AppCommand: appCommand})
+		if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
+			return nil
+		}
+		select {
+		case appErrCh <- appErr:
+		default:
+		}
+		return nil
+	})
+
+	return appCancel, appErrCh, nil
+}
+
+func (r *Replayer) resolveSharedAppCommand(ctx context.Context, testSets []string) (string, error) {
+	if r.testSetConf == nil {
+		return "", nil
+	}
+
+	var appCommand string
+	for _, testSetID := range testSets {
+		conf, err := r.testSetConf.Read(ctx, testSetID)
+		if err != nil {
+			if isMissingTestSetConfigError(err) {
+				continue
+			}
+			return "", fmt.Errorf("read test-set config for %s: %w", testSetID, err)
+		}
+		if conf == nil || strings.TrimSpace(conf.AppCommand) == "" {
+			continue
+		}
+
+		candidate := strings.TrimSpace(conf.AppCommand)
+		if appCommand == "" {
+			appCommand = candidate
+			continue
+		}
+		if candidate != appCommand {
+			return "", fmt.Errorf("--no-app-restart requires selected test sets to use the same appCommand; %s differs", testSetID)
+		}
+	}
+
+	return appCommand, nil
+}
+
+func isMissingTestSetConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "no such file or directory") ||
+		strings.Contains(err.Error(), "The system cannot find the file specified")
+}
+
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
@@ -809,7 +920,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.testSetConf != nil {
 		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 		if err != nil {
-			if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "The system cannot find the file specified") {
+			if isMissingTestSetConfigError(err) {
 				r.logger.Info("test-set config file not found, continuing execution...", zap.String("test-set", testSetID))
 			} else {
 				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)

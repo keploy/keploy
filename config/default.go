@@ -41,6 +41,7 @@ test:
   delay: 5
   healthUrl: ""
   healthPollTimeout: 60s
+  noAppRestart: false
   host: "localhost"
   port: 0
   grpcPort: 0
