@@ -195,8 +195,28 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		return nil, err
 	}
 	// Accept both .yaml and .json so a directory containing a mix of
-	// formats (e.g. mid-migration) is fully visible to replay. Each file
-	// is decoded using its own extension-derived format.
+	// formats (e.g. mid-migration, or a yaml-default `keploy normalize`
+	// run that wrote .yaml siblings next to existing .json testcases) is
+	// fully visible to replay. Each file is decoded using its own
+	// extension-derived format.
+	//
+	// When both test-N.yaml and test-N.json exist for the same basename,
+	// prefer the one matching the configured StorageFormat. Pre-sort the
+	// directory listing so format-matching files come first; the
+	// "first-wins" dedup below then picks the preferred file every time.
+	// Without this sort, the dedup keeps whichever extension the
+	// filesystem returned first (creation order on ext4), which silently
+	// loaded stale pre-normalize testcases on the JSON-recorded /
+	// YAML-normalized path.
+	preferredExt := "." + ts.Format.FileExtension()
+	sort.SliceStable(files, func(i, j int) bool {
+		iMatch := filepath.Ext(files[i].Name()) == preferredExt
+		jMatch := filepath.Ext(files[j].Name()) == preferredExt
+		// Stable sort: format-matching files come before others; ties
+		// retain their original (filesystem) order.
+		return iMatch && !jMatch
+	})
+
 	seen := make(map[string]yaml.Format) // base-name -> format already loaded
 	for _, j := range files {
 		fileExt := filepath.Ext(j.Name())
@@ -214,19 +234,10 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		name := strings.TrimSuffix(j.Name(), fileExt)
-		// If both test-N.yaml and test-N.json exist, prefer the one
-		// matching the configured StorageFormat; skip the other.
-		if prev, ok := seen[name]; ok {
-			if prev == ts.Format {
-				continue
-			}
-			if fileFormat != ts.Format {
-				continue
-			}
-			// The current file matches StorageFormat and the previous
-			// didn't — re-read with the preferred format by falling
-			// through, but also remove the already-added tc. Simpler:
-			// skip re-reads and keep the first one.
+		// First-wins: pre-sort guarantees the format-matching file is
+		// processed before its sibling, so any later occurrence of the
+		// same basename is by definition the non-preferred format.
+		if _, ok := seen[name]; ok {
 			continue
 		}
 		seen[name] = fileFormat
