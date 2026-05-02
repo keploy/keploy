@@ -38,12 +38,15 @@ echo "=== generate keploy config ==="
 $RECORD_BIN config --generate
 rm -rf keploy/
 
-echo "=== start keploy record + gunicorn (sync worker, --keep-alive 2) ==="
-# Sync worker (default) so gunicorn's own keep-alive timer is
-# authoritative; UvicornWorker would override it. --keep-alive 2 is
-# the load-bearing setting.
+echo "=== start keploy record + gunicorn (gthread worker, --keep-alive 2) ==="
+# gthread is the load-bearing worker class here — gunicorn's default
+# (sync) silently DISABLES HTTP keep-alive regardless of --keep-alive,
+# so connections never persist across the burst gap and the bug
+# cannot manifest. gthread honors --keep-alive (closes idle conns
+# after 2s), which is exactly the asymmetric timeout that exposes
+# keploy's upstream-pool half-close race.
 $RECORD_BIN record \
-    -c "gunicorn --bind 0.0.0.0:8080 --workers 2 --keep-alive 2 main:app" \
+    -c "gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --worker-class gthread --keep-alive 2 main:app" \
     > record_logs.txt 2>&1 &
 record_pid=$!
 
