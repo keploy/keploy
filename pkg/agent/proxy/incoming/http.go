@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -531,9 +532,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	forceCloseMode := pm.synchronous
 
 	if !forceCloseMode {
-		// Sampling bypass: no lock, no capture — raw TCP passthrough.
+		// Sampling bypass: no capture, but route through the same
+		// request-framed path so we still get MSG_PEEK pool-liveness
+		// protection. Passing nil for the testcase channel suppresses
+		// capture inside handleHttp1ZeroCopy.
 		if pm.sampling && !acquiredLock {
-			forwardRawTCP(ctx, clientConn, upConn)
+			pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, nil, actualPort)
 			return
 		}
 		// Normal mode OR sampling-tracked: zero-copy TCP passthrough with
@@ -914,84 +918,326 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}
 }
 
-// handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
-// non-sampling) mode. It forwards raw TCP bytes bidirectionally between client
-// and upstream with zero HTTP parsing overhead on the critical path.
+// peekUpstreamLive returns false if the upstream socket has been closed by
+// the peer (FIN/RST already delivered to our kernel) or has unexpected data
+// queued. Implemented as one non-blocking recvfrom(MSG_PEEK|MSG_DONTWAIT) —
+// same liveness probe nginx uses in ngx_http_upstream_keepalive_close_handler.
 //
-// Capture is fully decoupled from forwarding: byte streams are piped through
-// non-blocking asyncPipeFeeders to a streaming parser (parseStreamingHTTP)
-// that emits test cases as soon as each HTTP exchange completes — without
-// waiting for the connection to close. When memory pressure is detected or
-// the capture size limit is reached, the feeders silently stop capturing
-// while forwarding continues unimpacted.
-func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16) {
-	logger.Debug("Using zero-copy TCP passthrough with streaming capture")
-
-	captureEnabled := !isIngressRecordingPaused()
-	var reqFeeder, respFeeder *asyncPipeFeeder
-	if captureEnabled {
-		// maxSize=0 disables the per-feeder total-bytes limit. With
-		// streaming capture the parser consumes data incrementally, so
-		// in-flight memory is bounded by the channel buffer plus one
-		// request/response body in the parser. The per-test-case size
-		// limit is enforced downstream in CaptureHook.
-		reqFeeder = newAsyncPipeFeeder(0, logger)
-		respFeeder = newAsyncPipeFeeder(0, logger)
-		go pm.parseStreamingHTTP(ctx, logger, reqFeeder, respFeeder, t, appPort)
+// This catches the "stale pool entry" race where the backend's short
+// keep-alive (gunicorn 2s) fires during an idle gap, our kernel receives
+// the FIN, but no goroutine has read the upstream socket since the last
+// response so we never noticed. Without this probe, the next request's
+// bytes get written into a half-dead pipe and vanish — surfacing
+// downstream as the customer's 503 + outlier ejection.
+func peekUpstreamLive(conn net.Conn) bool {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
+		return true
 	}
+	sc, err := tc.SyscallConn()
+	if err != nil {
+		return true
+	}
+	alive := true
+	rcErr := sc.Read(func(fd uintptr) bool {
+		var buf [1]byte
+		n, _, perr := syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
+		switch {
+		case perr == syscall.EAGAIN || perr == syscall.EWOULDBLOCK:
+			alive = true // empty queue, socket healthy
+		case perr != nil:
+			alive = false // ECONNRESET, EPIPE, etc.
+		case n == 0:
+			alive = false // FIN already in our buffer
+		default:
+			alive = false // unexpected data on idle socket — evict
+		}
+		return true // tell SyscallConn we're done; don't block
+	})
+	if rcErr != nil {
+		return true // can't probe — let the actual write decide
+	}
+	return alive
+}
 
-	// Close connections on context cancellation (shutdown) to unblock
-	// the io.Copy goroutines. Without this, the function hangs until
-	// the remote side (e.g., upstream app's keep-alive) closes naturally.
-	// Same pattern used by the gRPC handler.
+func isHTTPUpgrade(req *http.Request) bool {
+	if req.Method == http.MethodConnect {
+		return true
+	}
+	if req.Header.Get("Upgrade") != "" {
+		return true
+	}
+	for _, v := range strings.Split(req.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(v), "upgrade") {
+			return true
+		}
+	}
+	return false
+}
+
+// isIdempotentMethod returns whether RFC 9110 §9.2.2 permits automatic
+// retry of the request after a stale-connection failure.
+func isIdempotentMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPut,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	return false
+}
+
+func writeBadGateway(c net.Conn) {
+	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+}
+
+// handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
+// non-sampling) mode.
+//
+// Architecture (Option 3 + MSG_PEEK + replay-on-stale): the function frames
+// HTTP/1.1 requests on the downstream so it can manage upstream connection
+// lifetime per request. Before reusing a pooled upstream conn it does one
+// non-blocking MSG_PEEK to detect already-delivered FIN/RST; on stale
+// detection it dials a fresh upstream. If the actual write to upstream
+// fails (residual race between peek and write), idempotent requests are
+// transparently replayed on a fresh conn — the canonical pattern used by
+// envoy (retry_on: reset-before-request), nginx (proxy_next_upstream), and
+// Go's net/http Transport (errServerClosedIdle).
+//
+// Downstream (envoy↔keploy) keep-alive is preserved across the entire
+// connection lifetime; only upstream conns get redialed on stale detect.
+func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16) {
+	logger.Debug("Using request-framed HTTP/1.1 proxy with MSG_PEEK pool liveness")
+
+	upstreamAddr := upConn.RemoteAddr().String()
+
+	// Tear down both conns on agent shutdown.
 	go func() {
 		<-ctx.Done()
-		clientConn.Close()
-		upConn.Close()
+		_ = clientConn.Close()
+		if upConn != nil {
+			_ = upConn.Close()
+		}
 	}()
 
-	done := make(chan struct{}, 2)
+	wireConn := &wireTimeConn{Conn: clientConn}
+	clientReader := bufio.NewReader(wireConn)
+	upstreamReader := bufio.NewReader(upConn)
+	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
+	// without capture. Suppress capture for this connection's lifetime.
+	captureEnabled := t != nil && !isIngressRecordingPaused()
 
-	// client → upstream (with optional non-blocking side-copy for capture)
-	go func() {
-		var dst io.Writer = upConn
-		if reqFeeder != nil {
-			// Order matters: reqFeeder first samples time.Now() inside its
-			// Write before upConn forwards bytes to the app. This guarantees
-			// HTTP req timestamp ≤ forward instant ≤ any SQL the app fires
-			// in response — preserves causality between HTTP and DB stamps.
-			dst = io.MultiWriter(reqFeeder, upConn)
-		}
-		_, _ = io.Copy(dst, clientConn)
-		if reqFeeder != nil {
-			reqFeeder.Close()
-		}
-		if tc, ok := upConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
+	// First request rides the pre-dialed upConn — we trust it because
+	// handleHttp1Connection just opened it. Subsequent iterations peek.
+	upConnFresh := true
 
-	// upstream → client (with optional non-blocking side-copy for capture)
-	go func() {
-		var dst io.Writer = clientConn
-		if respFeeder != nil {
-			dst = io.MultiWriter(clientConn, respFeeder)
+	redial := func() error {
+		if upConn != nil {
+			_ = upConn.Close()
 		}
-		_, _ = io.Copy(dst, upConn)
-		if respFeeder != nil {
-			respFeeder.Close()
+		newConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+		if err != nil {
+			return err
 		}
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
+		upConn = newConn
+		upstreamReader = bufio.NewReader(upConn)
+		return nil
+	}
 
-	<-done
-	<-done
-	// No post-hoc parsing needed — test cases were emitted incrementally
-	// by parseStreamingHTTP as each HTTP exchange completed.
+	for {
+		if isIngressRecordingPaused() {
+			captureEnabled = false
+		}
+
+		iterStart := time.Now()
+		req, err := http.ReadRequest(clientReader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				logger.Debug("Client request read ended", zap.Error(err))
+			}
+			return
+		}
+		reqTimestamp := wireConn.LastReadTime()
+		if !reqTimestamp.After(iterStart) {
+			reqTimestamp = iterStart
+		}
+
+		// HTTP Upgrade / CONNECT — bail out to raw byte pump after
+		// forwarding the parsed handshake. Subsequent frames are not
+		// HTTP/1.1, so per-request framing breaks down.
+		if isHTTPUpgrade(req) {
+			if err := req.Write(upConn); err != nil {
+				logger.Debug("Failed to forward upgrade request", zap.Error(err))
+				return
+			}
+			forwardRawTCP(ctx, clientConn, upConn)
+			return
+		}
+
+		// MSG_PEEK before reusing a pooled upstream conn.
+		if !upConnFresh && !peekUpstreamLive(upConn) {
+			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
+				zap.String("upstream", upstreamAddr))
+			if err := redial(); err != nil {
+				logger.Error("Upstream redial after stale-detect failed",
+					zap.String("upstream", upstreamAddr), zap.Error(err))
+				writeBadGateway(clientConn)
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+				return
+			}
+		}
+		upConnFresh = false
+
+		// Tee body for capture. Forwarding still works if the buffer
+		// truncates (captureBuffer.Write always reports len(p) bytes
+		// consumed regardless of internal limit).
+		captureEligible := captureEnabled
+		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if captureEligible && req.Body != nil && req.Body != http.NoBody {
+			req.Body = newTeeReadCloser(req.Body, reqCapture)
+		}
+
+		// Forward request. On write failure, replay on a fresh upstream
+		// for idempotent methods only. The peek narrows the race; the
+		// replay catches the residual (FIN arrived between peek and
+		// write).
+		if err := req.Write(upConn); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			if isIdempotentMethod(req.Method) && !reqCapture.Truncated() {
+				logger.Debug("Idempotent request write failed; redial+replay",
+					zap.String("method", req.Method), zap.Error(err))
+				if rerr := redial(); rerr != nil {
+					writeBadGateway(clientConn)
+					return
+				}
+				// Replay from buffered body.
+				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
+				if rerr := req.Write(upConn); rerr != nil {
+					logger.Error("Replay of idempotent request failed", zap.Error(rerr))
+					writeBadGateway(clientConn)
+					return
+				}
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+			} else {
+				logger.Error("Forward of request to upstream failed",
+					zap.String("method", req.Method), zap.Error(err))
+				writeBadGateway(clientConn)
+				return
+			}
+		} else if req.Body != nil {
+			_ = req.Body.Close()
+		}
+
+		// Read response. Empty-response on idempotent methods is also
+		// classified as stale-conn; replay once.
+		resp, err := http.ReadResponse(upstreamReader, req)
+		if err != nil {
+			if isIdempotentMethod(req.Method) && !reqCapture.Truncated() {
+				logger.Debug("Empty response from upstream; redial+replay",
+					zap.String("method", req.Method), zap.Error(err))
+				if rerr := redial(); rerr != nil {
+					writeBadGateway(clientConn)
+					return
+				}
+				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
+				if rerr := req.Write(upConn); rerr != nil {
+					writeBadGateway(clientConn)
+					return
+				}
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+				resp, err = http.ReadResponse(upstreamReader, req)
+				if err != nil {
+					logger.Error("Replay response read failed", zap.Error(err))
+					writeBadGateway(clientConn)
+					return
+				}
+			} else {
+				logger.Error("Failed to read upstream response",
+					zap.Duration("time_since_request", time.Since(reqTimestamp)),
+					zap.Error(err))
+				return
+			}
+		}
+
+		captureEligible = captureEnabled
+		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
+			resp.Body = newTeeReadCloser(resp.Body, respCapture)
+		}
+
+		respTimestamp := time.Now()
+
+		if err := resp.Write(clientConn); err != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			logger.Debug("Failed to forward response to client", zap.Error(err))
+			return
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+
+		// Async capture (matches synchronous-mode pattern at the call
+		// site below — keeps the proxy hot-loop free of dump+parse
+		// allocations under load).
+		if captureEnabled && !reqCapture.Truncated() && !respCapture.Truncated() {
+			select {
+			case captureHookSem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+
+			reqBodyBytes := reqCapture.Bytes()
+			respBodyBytes := respCapture.Bytes()
+			capturedReq := req
+			capturedResp := resp
+			capturedReqTS := reqTimestamp
+			capturedRespTS := respTimestamp
+			actualPort := appPort
+
+			go func() {
+				defer func() { <-captureHookSem }()
+
+				exchSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
+				if err != nil || exchSize > maxHTTPCombinedCaptureBytes {
+					return
+				}
+
+				reqData, err := dumpCapturedRequest(capturedReq, reqBodyBytes)
+				if err != nil {
+					return
+				}
+				parsedReq, err := pkg.ParseHTTPRequest(reqData)
+				if err != nil {
+					return
+				}
+				respData, err := dumpCapturedResponse(capturedResp, parsedReq, respBodyBytes)
+				if err != nil {
+					return
+				}
+				parsedResp, err := pkg.ParseHTTPResponse(respData, parsedReq)
+				if err != nil {
+					return
+				}
+				defer parsedReq.Body.Close()
+				defer parsedResp.Body.Close()
+				hooksUtils.CaptureHook(ctx, logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.incomingOpts, pm.synchronous, pm.mapping, actualPort)
+			}()
+		}
+
+		// Honor close signals from either side.
+		if req.Close || resp.Close {
+			return
+		}
+	}
 }
 
 // parseStreamingHTTP reads from request and response feeders concurrently with
