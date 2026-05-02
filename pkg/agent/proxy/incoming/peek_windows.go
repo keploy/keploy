@@ -20,12 +20,12 @@ import "net"
 //
 // The alternatives all conflict with Go's IOCP ownership of the socket:
 //
-//  - Overlapped WSARecv + CancelIoEx: the completion still posts to Go's
-//    IOCP, racing with Go's own reads on the same fd.
-//  - ioctlsocket(FIONBIO, 1) + peek + restore: MSDN explicitly warns
-//    against FIONBIO on sockets opened with WSA_FLAG_OVERLAPPED.
-//  - WSAEventSelect: overrides the socket's notification mode that Go
-//    relies on.
+//   - Overlapped WSARecv + CancelIoEx: the completion still posts to Go's
+//     IOCP, racing with Go's own reads on the same fd.
+//   - ioctlsocket(FIONBIO, 1) + peek + restore: MSDN explicitly warns
+//     against FIONBIO on sockets opened with WSA_FLAG_OVERLAPPED.
+//   - WSAEventSelect: overrides the socket's notification mode that Go
+//     relies on.
 //
 // Since the keploy ingress forwarder is driven by the eBPF bind redirector
 // (Linux-only), Windows is not a real deployment target for this codepath.
