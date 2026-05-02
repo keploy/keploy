@@ -2,54 +2,34 @@
 
 package proxy
 
-import (
-	"net"
+import "net"
 
-	"golang.org/x/sys/windows"
-)
-
-// peekUpstreamLive returns false if the upstream socket has been closed by
-// the peer (FIN/RST already delivered to our kernel) or has unexpected data
-// queued. The unix sibling uses recvfrom(MSG_PEEK|MSG_DONTWAIT); on Windows
-// the equivalent is WSARecv with MSG_PEEK on a socket Go has already put in
-// non-blocking (IOCP) mode, so MSG_DONTWAIT has no analogue and isn't needed
-// — recv on an empty queue returns WSAEWOULDBLOCK immediately.
+// peekUpstreamLive on Windows is a stub that always reports the socket as
+// alive; the caller falls back to write-based stale detection (the
+// idempotent-replay branch in handleHttp1ZeroCopy still catches the race on
+// the next req.Write).
 //
-// See peek_unix.go for why this probe exists (stale upstream pool entries
-// after the backend's short keep-alive fires during an idle gap).
-func peekUpstreamLive(conn net.Conn) bool {
-	tc, ok := conn.(*net.TCPConn)
-	if !ok {
-		return true
-	}
-	sc, err := tc.SyscallConn()
-	if err != nil {
-		return true
-	}
-	alive := true
-	rcErr := sc.Read(func(fd uintptr) bool {
-		var buf [1]byte
-		wsabuf := windows.WSABuf{Len: 1, Buf: &buf[0]}
-		var n uint32
-		flags := uint32(windows.MSG_PEEK)
-		// Synchronous WSARecv (overlapped=nil) on the IOCP-managed socket.
-		// On a non-blocking socket with no queued data this returns
-		// WSAEWOULDBLOCK without blocking the runtime.
-		perr := windows.WSARecv(windows.Handle(fd), &wsabuf, 1, &n, &flags, nil, nil)
-		switch {
-		case perr == windows.WSAEWOULDBLOCK:
-			alive = true // empty queue, socket healthy
-		case perr != nil:
-			alive = false // WSAECONNRESET, WSAECONNABORTED, etc.
-		case n == 0:
-			alive = false // FIN already in our buffer
-		default:
-			alive = false // unexpected data on idle socket — evict
-		}
-		return true // tell SyscallConn we're done; don't block
-	})
-	if rcErr != nil {
-		return true // can't probe — let the actual write decide
-	}
-	return alive
+// Why a stub and not a real probe:
+//
+// The unix sibling uses recvfrom(MSG_PEEK|MSG_DONTWAIT). On Windows the
+// equivalent flags exist in golang.org/x/sys/windows (WSARecv + MSG_PEEK),
+// but Go puts Windows sockets in BLOCKING mode and gets its async behavior
+// from overlapped I/O bound to the runtime's IOCP. A synchronous WSARecv
+// (lpOverlapped == NULL) on such a socket blocks until data arrives, which
+// defeats the purpose of the probe and can stall the goroutine.
+//
+// The alternatives all conflict with Go's IOCP ownership of the socket:
+//
+//  - Overlapped WSARecv + CancelIoEx: the completion still posts to Go's
+//    IOCP, racing with Go's own reads on the same fd.
+//  - ioctlsocket(FIONBIO, 1) + peek + restore: MSDN explicitly warns
+//    against FIONBIO on sockets opened with WSA_FLAG_OVERLAPPED.
+//  - WSAEventSelect: overrides the socket's notification mode that Go
+//    relies on.
+//
+// Since the keploy ingress forwarder is driven by the eBPF bind redirector
+// (Linux-only), Windows is not a real deployment target for this codepath.
+// Keep the stub until/unless that changes.
+func peekUpstreamLive(_ net.Conn) bool {
+	return true
 }
