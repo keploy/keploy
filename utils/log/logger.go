@@ -4,7 +4,6 @@ package log
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"sync/atomic"
 	"time"
@@ -46,9 +45,13 @@ type redactorHolder struct{ r Redactor }
 
 var globalRedactor atomic.Value
 
-// SetRedactor registers r as the active redactor for all loggers built by
-// this package. Pass nil to disable. Safe to call at any time; only log
-// lines emitted after the call are affected.
+// SetRedactor registers r as the active redactor for every logger built
+// by this package. Pass nil to disable. Safe to call at any time; only
+// log lines emitted after the call are affected. Registration is
+// process-global by design — keploy daemonizes one logger and there is
+// no per-logger or per-test scoping. If you need that later, the right
+// move is to attach the redactor to the core/writer wrappers at
+// construction time rather than reading it from a package var.
 func SetRedactor(r Redactor) {
 	globalRedactor.Store(redactorHolder{r: r})
 }
@@ -127,27 +130,17 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 	if r == nil {
 		return w.inner.Write(p)
 	}
-	redacted := []byte(r.RedactEncoded(string(p)))
-	// RedactEncoded is designed to be byte-length-preserving — Redact
-	// itself substitutes characters within their class without adding
-	// or dropping bytes. In the ordinary case len(redacted) == len(p)
-	// and the io.Writer contract resolves cleanly: return whatever the
-	// inner writer reported. If a future scanner changes that, surface
-	// the mismatch as io.ErrShortWrite rather than silently lying about
-	// bytes-written — zap's accounting downstream compares n against
-	// len(p), and masking a short write there would be worse than a
-	// visible error.
-	n, err := w.inner.Write(redacted)
-	if err != nil {
-		return n, err
+	// RedactEncoded is byte-length-preserving (Redact substitutes within
+	// the same character class), so the redacted slice has len(p). We
+	// transform p, hand the result to the sink, and report success in
+	// terms of p — the io.Writer contract is "wrote n bytes from p"; the
+	// transformation is invisible to the caller. On error, return 0 so
+	// the caller can retry the original p without trying to reason about
+	// partial writes of redacted text.
+	if _, err := w.inner.Write([]byte(r.RedactEncoded(string(p)))); err != nil {
+		return 0, err
 	}
-	if len(redacted) != len(p) {
-		if n >= len(p) {
-			n = len(p)
-		}
-		return n, io.ErrShortWrite
-	}
-	return n, nil
+	return len(p), nil
 }
 
 func (w *redactingWriter) Sync() error {
