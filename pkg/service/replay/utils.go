@@ -562,9 +562,27 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 			// test (or to session-level traffic that should not be
 			// per-test). DNS mocks have no stable timestamps and are
 			// intentionally never filtered out here.
-			if strings.EqualFold(string(m.Kind), string(models.DNS)) {
+			//
+			// Lifetime carve-out: session- and connection-tier mocks
+			// are recorded during app boot or pool warm-up — strictly
+			// before the first HTTP test fires. Their ReqTimestampMock
+			// is therefore *always* outside every test window, even
+			// though the test legitimately consumes them at replay
+			// time (handshake, SET TIME ZONE, prepared-Parse, JDBC
+			// keepalive). The window filter must NOT discard them or
+			// mappings.yaml comes back empty for any test whose mock
+			// budget is dominated by session/connection traffic
+			// (postgres v3 wire-features, listmonk's HikariCP-style
+			// warm-up, mongo's handshake/heartbeat). DNS uses the same
+			// always-keep semantics for an analogous reason: its
+			// timestamps aren't anchored to a test window.
+			switch {
+			case strings.EqualFold(string(m.Kind), string(models.DNS)):
 				// DNS: always keep.
-			} else {
+			case m.Lifetime == models.LifetimeSession || m.Lifetime == models.LifetimeConnection:
+				// Session/connection-tier: always keep — the recorder
+				// stamped them outside every test window by design.
+			default:
 				reqInWindow := !parsedReqTime.IsZero() && !parsedReqTime.Before(tcReq) && !parsedReqTime.After(tcResp)
 				resInWindow := !parsedResTime.IsZero() && !parsedResTime.Before(tcReq) && !parsedResTime.After(tcResp)
 				hasAnyTimestamp := !parsedReqTime.IsZero() || !parsedResTime.IsZero()

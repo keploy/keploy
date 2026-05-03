@@ -108,12 +108,6 @@ This helps expand API Schema, Statement, and Branch Coverage.
 ```bash
 curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
-> **Note:** By default, this installs **Keploy** ***with paid features*** so you can explore the full feature set. To install the OSS edition instead, append the `--oss` flag:
->
-> ```bash
-> curl --silent -O -L https://keploy.io/install.sh && source install.sh --oss
-> ```
-
 
 ### 2. Record Test Cases
 
