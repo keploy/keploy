@@ -106,7 +106,7 @@ function Test-RecordingComplete {
   $p2 = ".\keploy\test-set-$idx\tests"
   foreach ($p in @($p1,$p2)) {
     if (-not (Test-Path $p)) { continue }
-    $files = Get-ChildItem -Path $p -Filter "test-*.yaml" -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -Path $p -Filter "*.yaml" -ErrorAction SilentlyContinue
     if (-not $files) { continue }
     $valid = ($files | Where-Object { $_.Length -ge $minBytes }).Count
     if ($valid -ge $minFiles) { return $true }
@@ -287,7 +287,7 @@ if ($REC_PID -and $REC_PID -ne 0) {
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
 if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; Get-Content .\keploy_agent.log; exit 1 }
-$testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
+$testCount = (Get-ChildItem -Path $testSetPath -Filter "*.yaml").Count
 if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"

@@ -196,25 +196,40 @@ func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName 
 	}
 
 	if _, err := os.Stat(filePath); err != nil {
-		if ctx.Err() == nil || ctx.Err() == context.Canceled {
-			err = os.MkdirAll(filepath.Join(path), 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to create a directory for the file", zap.String("path directory", path), zap.String("file", fileName))
-				return false, err
-			}
-			file, err := os.OpenFile(filePath, os.O_CREATE, 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
-				return false, err
-			}
-			err = file.Close()
-			if err != nil {
-				utils.LogError(Logger, err, "failed to close file", zap.String("path directory", path), zap.String("file", fileName))
-				return false, err
-			}
-			return true, nil
+		if !os.IsNotExist(err) {
+			utils.LogError(Logger, err,
+				"failed to stat file — check filesystem permissions and that the configured keploy path is readable/writable by this process",
+				zap.String("path directory", path),
+				zap.String("file", fileName))
+			return false, err
 		}
-		return false, err
+		// Honour context cancellation/deadline before doing any
+		// filesystem mutations. Previously the check was
+		// `ctx.Err() == nil || ctx.Err() == context.Canceled`,
+		// which both let cancelled contexts proceed (defeating the
+		// cancellation contract) and masked DeadlineExceeded by
+		// returning the surrounding os.Stat error instead of
+		// ctx.Err().
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		// 0o755/0o644 rather than the historical 0o777 — nothing
+		// in the keploy tree needs world-writable perms and the
+		// stricter modes match the rest of the new testdb code.
+		if err := os.MkdirAll(filepath.Join(path), 0o755); err != nil {
+			utils.LogError(Logger, err, "failed to create a directory for the file", zap.String("path directory", path), zap.String("file", fileName))
+			return false, err
+		}
+		file, err := os.OpenFile(filePath, os.O_CREATE, 0o644)
+		if err != nil {
+			utils.LogError(Logger, err, "failed to create the file", zap.String("path directory", path), zap.String("file", fileName))
+			return false, err
+		}
+		if err := file.Close(); err != nil {
+			utils.LogError(Logger, err, "failed to close the file", zap.String("path directory", path), zap.String("file", fileName))
+			return false, err
+		}
+		return true, nil
 	}
 	return false, nil
 }

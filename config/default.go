@@ -92,6 +92,7 @@ record:
   filters: []
   sync: false
   memoryLimit: 0
+  testCaseNaming: descriptive
 configPath: ""
 bypassRules: []
 disableMapping: true

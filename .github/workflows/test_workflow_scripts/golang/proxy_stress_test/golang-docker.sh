@@ -73,7 +73,9 @@ if json_pass_supported; then
     done
 fi
 
-test_count=$(find ./keploy -name 'test-*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
+# Match any *.yaml under a tests/ dir so we are agnostic to the testcase
+# naming scheme (legacy "test-N.yaml" vs descriptive slugs).
+test_count=$(find ./keploy -name '*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
 echo "Total recorded test cases: $test_count"
 if [ "$test_count" -eq 0 ]; then echo "FAIL: No test cases recorded"; exit 1; fi
 

@@ -110,7 +110,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	mockdb.SetConfiguredMockFormat(c.Record.MockFormat)
 
 	format := yaml.ParseFormat(c.StorageFormat)
-	testDB := testdb.NewWithFormat(logger, c.Path, format)
+	namingStrategy, err := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
+	if err != nil {
+		return nil, fmt.Errorf("invalid record.testCaseNaming in keploy.yml: %w (set it to %q or %q)",
+			err, testdb.NamingDescriptive, testdb.NamingSequential)
+	}
+	testDB := testdb.NewWithFormatAndNaming(logger, c.Path, format, namingStrategy)
 	mockDB := mockdb.NewWithFormat(logger, c.Path, "", format)
 	mapDB := mapdb.NewWithFormat(logger, c.Path, "", format)
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
