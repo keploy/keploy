@@ -93,7 +93,16 @@ func (c *ColumnEntry) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("ColumnEntry value: %w", err)
 	}
-	c.Value = v
+	// Coerce based on the column's FieldType so the integrations-side
+	// wire encoder's strict `.(int) / .(float32) / .(float64)` type
+	// assertions in binaryProtocolRowPacket.go can succeed. Without
+	// this, a JSON-recorded float64(42.0) round-trips as `42` (Go's
+	// json.Marshal strips trailing zeros), then UnmarshalJSON
+	// recovers int(42), then the encoder's `.(float64)` assertion
+	// for FieldTypeDouble panics. The coercer doesn't help if the
+	// recorder put a non-numeric value in a numeric-typed column —
+	// that's a real bug in the recorder, not a JSON-roundtrip issue.
+	c.Value = coerceValueForFieldType(v, c.Type)
 	return nil
 }
 
@@ -276,6 +285,70 @@ func decodeBinaryValue(v any) ([]byte, error) {
 		return nil, fmt.Errorf("$type=bin: base64: %w", err)
 	}
 	return b, nil
+}
+
+// coerceValueForFieldType narrows a recovered any-typed value into the
+// concrete Go type the integrations-side wire encoder type-asserts on.
+// The mapping is taken straight from
+// pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols/binaryProtocolRowPacket.go:
+//
+//	FieldTypeTiny / Short / Year / Long / LongLong / Int24
+//	    encoder uses ce.Value.(int)
+//	FieldTypeFloat
+//	    encoder uses ce.Value.(float32)
+//	FieldTypeDouble
+//	    encoder uses ce.Value.(float64)
+//
+// Unsigned columns share the same Go type — the encoder casts after
+// asserting (`uint32(ce.Value.(int))`), so the unsigned bit doesn't
+// change the expected primitive type.
+//
+// String / BLOB / Date-Time columns are left as-is: the encoder for
+// those types accepts a wider type set (string for string-likes,
+// []byte or string for blobs, time.Time / string for date-times) and
+// my MarshalJSON already preserves the Go type through the
+// round-trip ([]byte / time.Time go through the $type envelope).
+func coerceValueForFieldType(v any, ftype FieldType) any {
+	if v == nil {
+		return nil
+	}
+	switch ftype {
+	case FieldTypeTiny, FieldTypeShort, FieldTypeYear,
+		FieldTypeLong, FieldTypeLongLong, FieldTypeInt24:
+		switch x := v.(type) {
+		case int:
+			return x
+		case int64:
+			return int(x)
+		case float64:
+			return int(x)
+		case float32:
+			return int(x)
+		}
+	case FieldTypeFloat:
+		switch x := v.(type) {
+		case float32:
+			return x
+		case float64:
+			return float32(x)
+		case int:
+			return float32(x)
+		case int64:
+			return float32(x)
+		}
+	case FieldTypeDouble:
+		switch x := v.(type) {
+		case float64:
+			return x
+		case float32:
+			return float64(x)
+		case int:
+			return float64(x)
+		case int64:
+			return float64(x)
+		}
+	}
+	return v
 }
 
 func decodeTimestampValue(v any) (time.Time, error) {

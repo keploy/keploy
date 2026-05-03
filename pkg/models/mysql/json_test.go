@@ -165,6 +165,52 @@ func TestColumnEntryJSONBinaryEnvelope(t *testing.T) {
 	}
 }
 
+// TestColumnEntryJSONFloatColumnPreservesType pins the float-typed
+// column round-trip even when the recorded value is a whole number.
+// Go's json.Marshal strips trailing zeros from floats — float64(42.0)
+// emits as `42`, indistinguishable from int(42) on the wire. If the
+// decoder doesn't coerce based on FieldType, the recovered Value is
+// int(42); the integrations-side wire encoder then panics in
+// EncodeBinaryRow at `ce.Value.(float64)` for FieldTypeDouble or
+// `ce.Value.(float32)` for FieldTypeFloat, dropping the MySQL
+// connection and breaking every subsequent op on it. This stays as a
+// dedicated regression alongside TestColumnEntryJSONIntStaysInt.
+func TestColumnEntryJSONFloatColumnPreservesType(t *testing.T) {
+	cases := []struct {
+		name  string
+		ftype FieldType
+		in    any
+		want  any
+	}{
+		{"double_whole", FieldTypeDouble, float64(42.0), float64(42.0)},
+		{"double_frac", FieldTypeDouble, float64(3.14), float64(3.14)},
+		{"float_whole", FieldTypeFloat, float32(42.0), float32(42.0)},
+		{"float_frac", FieldTypeFloat, float32(3.5), float32(3.5)},
+		{"longlong_int", FieldTypeLongLong, 42, 42},
+		{"longlong_int_via_float", FieldTypeLongLong, float64(42.0), 42},
+		{"long_int", FieldTypeLong, 7, 7},
+		{"tiny_int", FieldTypeTiny, 1, 1},
+		{"short_int", FieldTypeShort, 1234, 1234},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := ColumnEntry{Type: tc.ftype, Name: "c", Value: tc.in}
+			body, err := json.Marshal(orig)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got ColumnEntry
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n--JSON--\n%s", err, body)
+			}
+			if !reflect.DeepEqual(got.Value, tc.want) {
+				t.Errorf("FieldType %v coercion drift:\n got  %#v (%T)\n want %#v (%T)\n--JSON--\n%s",
+					tc.ftype, got.Value, got.Value, tc.want, tc.want, body)
+			}
+		})
+	}
+}
+
 // valuesEqual is a small DeepEqual wrapper that handles the
 // time.Time-vs-time.Time monotonic-clock asymmetry: time.Time values
 // that round-trip through RFC3339Nano lose the monotonic clock
