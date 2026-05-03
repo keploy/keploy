@@ -254,6 +254,53 @@ func TestPgtypeJSONNoStructWrapper(t *testing.T) {
 	}
 }
 
+// TestPgtypeJSONJSONBNumberRecovery pins the recursive number-recovery
+// inside generic jsonb-shaped maps. Without the recursive walk in
+// recoverPgMappingFromJSON's fall-through branch, json.Number leaks
+// through map[string]any cells; PostgresV3Cell.GobEncode then errors
+// out with `unsupported Value type json.Number` when the cell flows
+// through the agent's gob transport (sidecar → agent), surfacing in
+// the postgres-fuzzer sample as `failed to gob-encode request body
+// for storemocks` and aborting the test set.
+func TestPgtypeJSONJSONBNumberRecovery(t *testing.T) {
+	// Hand-craft a jsonb-like cell value: a generic map whose key set
+	// doesn't match any pgtype canonical shape.
+	body := []byte(`{"n":42, "f":3.14, "nested":{"k":7}, "arr":[1, 2, 3]}`)
+	var cell PostgresV3Cell
+	if err := cell.UnmarshalJSON(body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m, ok := cell.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", cell.Value)
+	}
+	if v, ok := m["n"].(int64); !ok || v != 42 {
+		t.Errorf("jsonb integer leaf: got %#v (%T) want int64(42) — json.Number must not leak through generic map fall-through", m["n"], m["n"])
+	}
+	if v, ok := m["f"].(float64); !ok || v != 3.14 {
+		t.Errorf("jsonb float leaf: got %#v (%T) want float64(3.14)", m["f"], m["f"])
+	}
+	nested, ok := m["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("jsonb nested object: got %T want map[string]any", m["nested"])
+	}
+	if v, ok := nested["k"].(int64); !ok || v != 7 {
+		t.Errorf("jsonb nested integer: got %#v (%T) want int64(7)", nested["k"], nested["k"])
+	}
+	arr, ok := m["arr"].([]any)
+	if !ok {
+		t.Fatalf("jsonb array: got %T want []any", m["arr"])
+	}
+	if len(arr) != 3 {
+		t.Fatalf("jsonb array len: got %d want 3", len(arr))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if v, ok := arr[i].(int64); !ok || v != want {
+			t.Errorf("jsonb array[%d]: got %#v (%T) want int64(%d)", i, arr[i], arr[i], want)
+		}
+	}
+}
+
 // TestPgtypeJSONRowsRoundTrip mirrors the on-disk shape that was
 // actually failing in the petclinic mocks: a row of mixed int+string
 // cells inside a sequence. Pre-fix the wire form was

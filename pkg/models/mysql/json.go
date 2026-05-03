@@ -202,12 +202,21 @@ func recoverJSONValue(raw any) (any, error) {
 	case bool:
 		return x, nil
 	case json.Number:
-		// int64 first — matches yaml.v3 widening every !!int to
-		// int64 through the untyped decode path. Without this,
-		// every integer column value would come back as float64
-		// and the integrations-side encoder would write float
-		// wire bytes for an INT column.
+		// Match yaml.v3's reflective default for !!int into
+		// interface{}: it returns Go `int`, NOT int64. The
+		// integrations-side wire encoder (binaryProtocolRowPacket.go
+		// line ~297) does `ce.Value.(int)` for FieldTypeLongLong
+		// and friends — an int64 there panics the encoder, the
+		// MySQL parser recovers but the connection is dropped, and
+		// the fuzzer reports `query execution failed: invalid
+		// connection` on every subsequent op. Return int when the
+		// integer literal fits, fall back to int64 only for values
+		// outside int's range (32-bit hosts; modern keploy runs on
+		// 64-bit so this branch is empty in practice).
 		if i, err := x.Int64(); err == nil {
+			if int64(int(i)) == i {
+				return int(i), nil
+			}
 			return i, nil
 		}
 		f, err := x.Float64()

@@ -379,7 +379,21 @@ func recoverPgMappingFromJSON(m map[string]any) (any, error) {
 		return rawCellFromJSON(m)
 	}
 	// Fall through: generic JSON object (jsonb top-level, ad-hoc map).
-	return m, nil
+	// Walk the values recursively so nested numbers convert from
+	// json.Number to int64/float64 — without this, downstream gob
+	// transport (PostgresV3Cell.GobEncode) errors out on the
+	// json.Number type with `unsupported Value type json.Number` for
+	// any jsonb cell that contains an integer leaf. Mirrors the array
+	// recursion in recoverCellFromJSON.
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		r, err := recoverCellFromJSON(v)
+		if err != nil {
+			return nil, fmt.Errorf("jsonb[%q]: %w", k, err)
+		}
+		out[k] = r
+	}
+	return out, nil
 }
 
 func decodeJSONByDiscriminator(disc string, m map[string]any) (any, error) {

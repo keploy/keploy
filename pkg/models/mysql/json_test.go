@@ -25,9 +25,13 @@ func TestColumnEntryJSONRoundTrip(t *testing.T) {
 		{"null", nil},
 		{"bool_true", true},
 		{"bool_false", false},
-		{"int_positive", int64(42)},
-		{"int_negative", int64(-12345)},
-		{"int_max", int64(9223372036854775807)},
+		{"int_positive", 42},
+		{"int_negative", -12345},
+		// MaxInt64 still fits in Go `int` on 64-bit hosts (which is
+		// the only platform keploy ships on), so the recovered type
+		// is still `int`. The literal exists in this test to pin
+		// that we don't lose precision on the boundary value.
+		{"int_max", 9223372036854775807},
 		{"float", 3.14},
 		{"string", "Lizard"},
 		{"empty_string", ""},
@@ -71,7 +75,7 @@ func TestParameterJSONRoundTrip(t *testing.T) {
 	}{
 		{"null", nil},
 		{"bool", true},
-		{"int", int64(42)},
+		{"int", 42},
 		{"float", 1.5},
 		{"string", "hello"},
 		{"binary", []byte{0xDE, 0xAD, 0xBE, 0xEF}},
@@ -104,17 +108,18 @@ func TestParameterJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestColumnEntryJSONIntStaysInt64 is the focused regression test for
+// TestColumnEntryJSONIntStaysInt is the focused regression test for
 // the production bug. encoding/json's default decoder maps every JSON
 // number to float64 — for an INT column, the integrations-side
-// encoder type-switches on Value and treats float64 as the wrong code
-// path, producing malformed wire bytes that disconnect the driver.
-// The custom UnmarshalJSON uses json.Decoder.UseNumber so integer
-// literals come back as int64, matching what yaml.v3's resolver
-// produces on the YAML path. This stays even if every other test in
+// encoder type-switches on Value via `ce.Value.(int)` (not int64) and
+// panics on a float64 input. yaml.v3's reflective default on the
+// existing YAML path returns Go `int` for !!int into interface{}, so
+// the JSON decoder must match that exact type to keep the wire
+// encoder consistent — int64 from json.Number.Int64() also panics
+// the same .(int) assertion. This stays even if every other test in
 // this file is deleted.
-func TestColumnEntryJSONIntStaysInt64(t *testing.T) {
-	orig := ColumnEntry{Type: FieldTypeLong, Name: "id", Value: int64(42)}
+func TestColumnEntryJSONIntStaysInt(t *testing.T) {
+	orig := ColumnEntry{Type: FieldTypeLong, Name: "id", Value: 42}
 	body, err := json.Marshal(orig)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -123,12 +128,12 @@ func TestColumnEntryJSONIntStaysInt64(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, ok := got.Value.(int64); !ok {
-		t.Fatalf("ColumnEntry.Value: expected int64 (got %T = %v) — the float64-drift bug broke the MySQL binary protocol encoder",
+	if _, ok := got.Value.(int); !ok {
+		t.Fatalf("ColumnEntry.Value: expected int (got %T = %v) — yaml.v3 default returns int for !!int → interface{}, and the integrations-side wire encoder type-asserts .(int); int64 panics it",
 			got.Value, got.Value)
 	}
-	if got.Value.(int64) != 42 {
-		t.Errorf("Value mismatch: got %d want 42", got.Value.(int64))
+	if got.Value.(int) != 42 {
+		t.Errorf("Value mismatch: got %d want 42", got.Value.(int))
 	}
 }
 
