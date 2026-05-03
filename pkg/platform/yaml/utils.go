@@ -196,10 +196,19 @@ func ValidatePath(path string) (string, error) {
 	return path, nil
 }
 
-// NextIndexForPrefix scans path for yaml files named "{prefix}-{N}.yaml"
-// and returns the next sequential index (max+1, starting at 1). It is
-// used to disambiguate descriptive test case slugs when multiple
-// recordings share the same endpoint.
+// NextIndexForPrefix scans path for testcase files named
+// "{prefix}-{N}.{ext}" (where {ext} is either yaml or json) and returns
+// the next sequential index (max+1, starting at 1). It is used to
+// disambiguate descriptive test case slugs when multiple recordings
+// share the same endpoint.
+//
+// Both .yaml and .json files are counted into the same index space so
+// a tests/ directory containing a mix of formats (e.g. a yaml-record +
+// json-record dual pass) does not hand out colliding indices to a
+// JSON recorder. Without this, claimName loops 256× on every second
+// JSON-format capture for any repeating slug because the existing
+// .json sibling is invisible to the index scan and generateName keeps
+// re-suggesting the same N.
 //
 // A missing directory is treated as "no existing files" and returns 1
 // (first recording in a new test set). Any other IO error is returned
@@ -243,10 +252,11 @@ func NextIndexForPrefix(path, prefix string) (int, error) {
 	lastIndex := 0
 	for _, v := range files {
 		name := filepath.Base(v.Name())
-		if filepath.Ext(name) != ".yaml" {
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".json" {
 			continue
 		}
-		stem := name[:len(name)-len(".yaml")]
+		stem := name[:len(name)-len(ext)]
 		if !strings.HasPrefix(stem, prefix+"-") {
 			continue
 		}
