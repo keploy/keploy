@@ -699,6 +699,23 @@ done
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
+  # State-bleed guard. The yaml record pass populated postgres with rows
+  # whose IDs/timestamps/sequences depend on the empty-DB starting state.
+  # Recording the same client traffic again with a non-empty DB would
+  # capture a different set of "expected" responses (409 conflicts on
+  # re-creates, advanced sequence values, etc.) — which then fail at
+  # replay time when the DB starts fresh again. Reset postgres to the
+  # same starting state the yaml pass had so the json testset captures
+  # the same testcases, just in a different on-disk encoding.
+  section "Reset Postgres before json record pass"
+  docker rm -f mypostgres
+  docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
+    -e POSTGRES_DB=petclinic -p 5432:5432 postgres:latest
+  wait_for_postgres
+  docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
+  docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
+  endsec
+
   for i in 1; do
     do_record_iteration "$i" "--storage-format json"
   done

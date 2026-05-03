@@ -68,6 +68,16 @@ done
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
+    # State-bleed guard. The yaml iterations populated postgres (via
+    # docker-compose volume) with rows whose IDs were assigned starting
+    # from an empty DB. Recording the same traffic again with the
+    # accumulated state captures bind values that reference rows only
+    # the polluted DB had — postgres-v3's transactional matcher then
+    # fails at replay-time with "no recorded invocation shares this SQL
+    # hash". `docker compose down -v` clears the named volumes so the
+    # json record pass starts from the same blank state.
+    docker compose down -v || true
+    sleep 2
     for i in {1..2}; do
         do_record_iteration "$i" "--storage-format json"
     done

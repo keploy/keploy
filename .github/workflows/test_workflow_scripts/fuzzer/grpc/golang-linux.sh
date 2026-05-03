@@ -240,6 +240,14 @@ if [ "$MODE" = "incoming" ]; then
 
  if json_pass_supported; then
    echo "🧪 Re-running incoming with --storage-format json"
+   # The yaml replay above started the fuzzer server with `keploy -c`.
+   # Keploy stops itself, but the server child it spawned can keep
+   # owning :50051, so the json record's app-launch fails with
+   # "listen tcp :50051: bind: address already in use" and keploy
+   # bails before capturing any test case. Force-kill anything still
+   # holding :50051 before the json record's app starts.
+   sudo pkill -f "$FUZZER_SERVER_BIN" || true
+   sleep 2
    if [[ "$RECORD_SRC" == "latest" ]]; then
      "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming_json.txt &
    else

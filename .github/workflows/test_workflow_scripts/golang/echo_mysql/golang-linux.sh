@@ -184,6 +184,24 @@ done
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
 if json_pass_supported; then
+  # State-bleed guard before json record pass. The yaml iterations left
+  # rows in mysql-container; capturing the same traffic again over a
+  # non-empty DB records different responses (auto-increment past N,
+  # duplicate-key errors, etc.) which then fail when replayed against a
+  # fresh DB. Recreate the container so json record sees the same empty
+  # starting state the yaml pass had.
+  section "Reset MySQL before json record pass"
+  docker rm -f mysql-container || true
+  if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
+    docker compose up -d
+    wait_for_mysql
+  else
+    docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
+      -p 3306:3306 --rm -d mysql:latest
+    wait_for_mysql
+  fi
+  endsec
+
   for i in 1 2; do
     run_record_iteration "$i" "--storage-format json"
     echo "Recorded json test case and mocks for iteration $i"

@@ -225,6 +225,21 @@ else
 fi
 
 if json_pass_supported; then
+    # State-bleed guard. The yaml record pass left tables/rows in
+    # mysql-container with auto-increment IDs and side-effect counters
+    # past their fresh-DB starting values. Recording the same fuzzer
+    # traffic against that polluted state captures different "expected"
+    # responses than the yaml pass did, and replay against a fresh DB
+    # then fails to match. Recreate the container so the json pass sees
+    # the same blank starting state.
+    section "Reset MySQL before json record pass"
+    docker rm -f mysql-container || true
+    docker run --name mysql-container \
+      -e MYSQL_ROOT_PASSWORD=password \
+      -p 3306:3306 --rm -d mysql:8.0
+    wait_for_mysql
+    endsec
+
     section "Start Recording (json)"
     "$RECORD_KEPLOY_BIN" record --storage-format json -c "$MYSQL_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
