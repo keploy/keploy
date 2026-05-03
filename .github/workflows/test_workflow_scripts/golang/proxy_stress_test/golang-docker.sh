@@ -55,7 +55,7 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-test_count=$(find ./keploy -name 'test-*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
+test_count=$(find ./keploy -name '*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
 echo "Total recorded test cases: $test_count"
 if [ "$test_count" -eq 0 ]; then echo "FAIL: No test cases recorded"; exit 1; fi
 

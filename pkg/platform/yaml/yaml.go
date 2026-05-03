@@ -153,25 +153,40 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	}
 
 	if _, err := os.Stat(yamlPath); err != nil {
-		if ctx.Err() == nil || ctx.Err() == context.Canceled {
-			err = os.MkdirAll(filepath.Join(path), 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-				return false, err
-			}
-			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
-			if err != nil {
-				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-				return false, err
-			}
-			err = file.Close()
-			if err != nil {
-				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-				return false, err
-			}
-			return true, nil
+		if !os.IsNotExist(err) {
+			utils.LogError(Logger, err,
+				"failed to stat yaml file — check filesystem permissions and that the configured keploy path is readable/writable by this process",
+				zap.String("path directory", path),
+				zap.String("yaml", fileName))
+			return false, err
 		}
-		return false, err
+		// Honour context cancellation/deadline before doing any
+		// filesystem mutations. Previously the check was
+		// `ctx.Err() == nil || ctx.Err() == context.Canceled`,
+		// which both let cancelled contexts proceed (defeating the
+		// cancellation contract) and masked DeadlineExceeded by
+		// returning the surrounding os.Stat error instead of
+		// ctx.Err().
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		// 0o755/0o644 rather than the historical 0o777 — nothing
+		// in the keploy tree needs world-writable perms and the
+		// stricter modes match the rest of the new testdb code.
+		if err := os.MkdirAll(filepath.Join(path), 0o755); err != nil {
+			utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			return false, err
+		}
+		file, err := os.OpenFile(yamlPath, os.O_CREATE, 0o644)
+		if err != nil {
+			utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			return false, err
+		}
+		if err := file.Close(); err != nil {
+			utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+			return false, err
+		}
+		return true, nil
 	}
 	return false, nil
 }
