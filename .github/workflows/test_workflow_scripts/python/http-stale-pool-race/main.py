@@ -1,9 +1,12 @@
 """Minimal Flask app for the http-stale-pool-race regression test.
 
-Run via gunicorn with the sync worker (default) and `--keep-alive 2`. The
-short keep-alive is the load-bearing config: it lets gunicorn close idle
-connections faster than the bursty client's idle gap, which exercises the
-upstream-pool half-close race in keploy's HTTP/1.1 ingress proxy.
+Run via gunicorn with `--worker-class gthread --threads 4 --keep-alive 2`.
+gthread is required: gunicorn's default `sync` worker silently disables
+HTTP keep-alive regardless of the `--keep-alive` flag, which means
+connections never persist across the bursty client's idle gap and the
+race we're trying to reproduce can't fire. gthread honors `--keep-alive`
+and closes idle pooled connections after 2s — exactly the asymmetric
+timeout that exposes keploy's upstream-pool half-close race.
 """
 from flask import Flask, jsonify
 

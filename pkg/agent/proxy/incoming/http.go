@@ -983,6 +983,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// without capture. Suppress capture for this connection's lifetime.
 	captureEnabled := t != nil && !isIngressRecordingPaused()
 
+	// Close the most recent upstream conn on function return. The caller
+	// (handleHttp1Connection) defers Close on its own copy of the original
+	// upConn, but redial() replaces this function's local upConn — so
+	// without this defer, every successful redial leaks the freshly dialed
+	// socket until ctx is cancelled. The closure captures upConn by
+	// reference, so it always closes the latest one.
+	defer func() {
+		if upConn != nil {
+			_ = upConn.Close()
+		}
+	}()
+
 	// First request rides the pre-dialed upConn — we trust it because
 	// handleHttp1Connection just opened it. Subsequent iterations peek.
 	upConnFresh := true
@@ -1035,7 +1047,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
 				zap.String("upstream", upstreamAddr))
 			if err := redial(); err != nil {
-				logger.Error("Upstream redial after stale-detect failed",
+				logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
 					zap.String("upstream", upstreamAddr), zap.Error(err))
 				writeBadGateway(clientConn)
 				if req.Body != nil {
@@ -1067,13 +1079,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Idempotent request write failed; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
+					logger.Error("Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
+						zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					writeBadGateway(clientConn)
 					return
 				}
 				// Replay from buffered body.
 				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
 				if rerr := req.Write(upConn); rerr != nil {
-					logger.Error("Replay of idempotent request failed", zap.Error(rerr))
+					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
+						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					writeBadGateway(clientConn)
 					return
 				}
@@ -1081,8 +1096,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					_ = req.Body.Close()
 				}
 			} else {
-				logger.Error("Forward of request to upstream failed",
-					zap.String("method", req.Method), zap.Error(err))
+				// Non-idempotent or oversized body: cannot safely replay
+				// per RFC 9110 §9.2.2 / capture budget. Surface a 502
+				// to the client and tear down so envoy doesn't reuse
+				// this conn.
+				logger.Error("Forward of request to upstream failed and request is not safely replayable (non-idempotent method or body exceeded capture budget). Verify upstream health on the resolved address.",
+					zap.String("method", req.Method),
+					zap.String("upstream", upstreamAddr),
+					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
+					zap.Bool("body_truncated", reqCapture.Truncated()),
+					zap.Error(err))
 				writeBadGateway(clientConn)
 				return
 			}
@@ -1098,11 +1121,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Empty response from upstream; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
+					logger.Error("Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
+						zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					writeBadGateway(clientConn)
 					return
 				}
 				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
 				if rerr := req.Write(upConn); rerr != nil {
+					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
+						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					writeBadGateway(clientConn)
 					return
 				}
@@ -1111,14 +1138,24 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				resp, err = http.ReadResponse(upstreamReader, req)
 				if err != nil {
-					logger.Error("Replay response read failed", zap.Error(err))
+					logger.Error("Replay response read failed; upstream returned no response on the redialed connection either. Check application logs for crashes/restarts.",
+						zap.String("upstream", upstreamAddr), zap.Error(err))
 					writeBadGateway(clientConn)
 					return
 				}
 			} else {
-				logger.Error("Failed to read upstream response",
+				// Non-idempotent or oversized body: surface 502 so the
+				// downstream client doesn't see a silent connection
+				// close (which presents as a confusing reset/hang
+				// rather than a structured 502).
+				logger.Error("Failed to read upstream response and request is not safely replayable. Verify upstream application health on the resolved address.",
+					zap.String("method", req.Method),
+					zap.String("upstream", upstreamAddr),
+					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
+					zap.Bool("body_truncated", reqCapture.Truncated()),
 					zap.Duration("time_since_request", time.Since(reqTimestamp)),
 					zap.Error(err))
+				writeBadGateway(clientConn)
 				return
 			}
 		}
@@ -1128,8 +1165,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
-
-		respTimestamp := time.Now()
 
 		if err := resp.Write(clientConn); err != nil {
 			if resp.Body != nil {
@@ -1141,6 +1176,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if resp.Body != nil {
 			_ = resp.Body.Close()
 		}
+
+		// Last-byte semantics for respTimestamp: capture AFTER resp.Write
+		// has drained the upstream body and forwarded it to the client.
+		// This matches the parseStreamingHTTP doc invariant
+		// (reqTimestamp ≤ outbound-mock-timestamp ≤ respTimestamp): any
+		// DB-side mocks the app fired while streaming the response body
+		// stamp before time.Now() here, so they fall inside the per-test
+		// window and match correctly at replay.
+		respTimestamp := time.Now()
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse
