@@ -71,8 +71,13 @@ jobs:
       - name: Run regression test
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
+        # Run via `bash <script>` rather than `source` so the
+        # script's intentional avoidance of `set -e` is not overridden
+        # by the workflow step's default `-eo pipefail`. The script's
+        # `client_status=$?` capture and cleanup-then-fail sequencing
+        # depend on commands not short-circuiting the parent shell.
         run: |
-          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/http-stale-pool-race/python-linux.sh"
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/http-stale-pool-race/python-linux.sh"
 
       - name: Upload logs
         if: always()

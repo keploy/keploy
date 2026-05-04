@@ -17,6 +17,13 @@
 # is ~25-50%; with the fix it is 0%.
 
 set -uo pipefail
+# Explicit set +e: even when this script is sourced from a bash step
+# that has -e enabled by default (GitHub Actions does this for `run:`
+# blocks), we want the burst-client invocation to NOT short-circuit
+# the script — `python burst_client.py` is followed by an explicit
+# `client_status=$?` capture and a cleanup-then-fail sequence that
+# only works without -e.
+set +e
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 

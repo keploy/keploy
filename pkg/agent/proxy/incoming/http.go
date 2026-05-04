@@ -967,13 +967,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 	upstreamAddr := upConn.RemoteAddr().String()
 
-	// Tear down both conns on agent shutdown.
+	// On agent shutdown, close ONLY the downstream conn. That unblocks
+	// the http.ReadRequest call in the loop below, which causes the
+	// loop to return, which triggers the function-exit defer (declared
+	// further down) that closes the current upstream conn. Closing
+	// upConn here too would race with redial()'s reassignment — the
+	// race detector flags it on overlapping shutdown+redial.
 	go func() {
 		<-ctx.Done()
 		_ = clientConn.Close()
-		if upConn != nil {
-			_ = upConn.Close()
-		}
 	}()
 
 	wireConn := &wireTimeConn{Conn: clientConn}
