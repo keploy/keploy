@@ -1058,13 +1058,28 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	upConnFresh := true
 
 	redial := func() error {
+		// Honor parent ctx — once cancellation has fired, the shutdown
+		// goroutine has closed the conns and any in-flight req.Write /
+		// ReadResponse failed with net.ErrClosed (which isStaleConnError
+		// classifies as stale). Without this short-circuit we'd then
+		// dial a fresh upstream during shutdown, generate one more
+		// pointless round-trip, and delay the connection teardown.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Close the previous conn via the holder so a concurrent
 		// shutdown sees a consistent view (either the old conn or the
 		// new one — never a torn pointer).
 		if h := upConnHolder.Load(); h != nil {
 			_ = h.c.Close()
 		}
-		newConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+		// DialContext (instead of DialTimeout) so an in-flight dial
+		// also gets cancelled when the parent ctx fires. The derived
+		// 3s deadline preserves the original per-dial timeout.
+		dialCtx, cancelDial := context.WithTimeout(ctx, 3*time.Second)
+		defer cancelDial()
+		var d net.Dialer
+		newConn, err := d.DialContext(dialCtx, "tcp4", upstreamAddr)
 		if err != nil {
 			return err
 		}
