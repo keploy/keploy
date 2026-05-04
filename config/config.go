@@ -64,15 +64,19 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
-	MemoryLimit       uint64          `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
-	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	Filters     []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// TestCaseNaming controls how default test case filenames are generated.
+	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
+	// "sequential" preserves the legacy `test-N.yaml` numbering.
+	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
+	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
