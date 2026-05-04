@@ -1009,6 +1009,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	logger.Debug("Using request-framed HTTP/1.1 proxy with MSG_PEEK pool liveness")
 
 	upstreamAddr := upConn.RemoteAddr().String()
+	// Capture the network family of the original conn so redial uses
+	// the same one — hard-coding "tcp4" would break against an IPv6
+	// upstream and could mismatch a "tcp" dual-stack listener.
+	upstreamNetwork := upConn.RemoteAddr().Network()
 
 	// upConnHolder lets the ctx-cancel + function-exit goroutines safely
 	// close whatever the CURRENT upstream conn is, without racing with
@@ -1079,7 +1083,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		dialCtx, cancelDial := context.WithTimeout(ctx, 3*time.Second)
 		defer cancelDial()
 		var d net.Dialer
-		newConn, err := d.DialContext(dialCtx, "tcp4", upstreamAddr)
+		newConn, err := d.DialContext(dialCtx, upstreamNetwork, upstreamAddr)
 		if err != nil {
 			return err
 		}
@@ -1257,10 +1261,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// we did, the buffer IS the captured body bytes). Forwarding
 		// still works if the buffer truncates (captureBuffer.Write
 		// always reports len(p) bytes consumed regardless of internal
-		// limit).
+		// limit). Allocate the buffer lazily — if capture is disabled
+		// or the body is already pre-buffered or absent, we never
+		// touch reqCapture, so don't pay the per-request alloc.
 		captureEligible := captureEnabled
-		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		var reqCapture *captureBuffer
 		if captureEligible && preBufferedReqBody == nil && req.Body != nil && req.Body != http.NoBody {
+			reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
@@ -1380,8 +1387,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 
 		captureEligible = captureEnabled
-		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		var respCapture *captureBuffer
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
+			respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
@@ -1410,9 +1418,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// allocations under load). Body source preference:
 		// preBufferedReqBody (eager-buffered for replay safety; always
 		// the exact bytes the upstream saw) → reqCapture (tee on the
-		// streaming path).
-		reqTeeTruncated := preBufferedReqBody == nil && reqCapture.Truncated()
-		if captureEnabled && !reqTeeTruncated && !respCapture.Truncated() {
+		// streaming path) → nil (no body / capture disabled).
+		// reqCapture / respCapture may be nil when we skipped the
+		// per-request alloc (capture disabled, body absent, or body
+		// pre-buffered).
+		reqTeeTruncated := reqCapture != nil && reqCapture.Truncated()
+		respTeeTruncated := respCapture != nil && respCapture.Truncated()
+		if captureEnabled && !reqTeeTruncated && !respTeeTruncated {
 			select {
 			case captureHookSem <- struct{}{}:
 			case <-ctx.Done():
@@ -1420,12 +1432,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 
 			var reqBodyBytes []byte
-			if preBufferedReqBody != nil {
+			switch {
+			case preBufferedReqBody != nil:
 				reqBodyBytes = preBufferedReqBody
-			} else {
+			case reqCapture != nil:
 				reqBodyBytes = reqCapture.Bytes()
 			}
-			respBodyBytes := respCapture.Bytes()
+			var respBodyBytes []byte
+			if respCapture != nil {
+				respBodyBytes = respCapture.Bytes()
+			}
 			capturedReq := req
 			capturedResp := resp
 			capturedReqTS := reqTimestamp

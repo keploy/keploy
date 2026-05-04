@@ -37,18 +37,29 @@ func peekUpstreamLive(conn net.Conn) bool {
 	alive := true
 	rcErr := sc.Read(func(fd uintptr) bool {
 		var buf [1]byte
-		n, _, perr := syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
-		switch {
-		case perr == syscall.EAGAIN || perr == syscall.EWOULDBLOCK:
-			alive = true // empty queue, socket healthy
-		case perr != nil:
-			alive = false // ECONNRESET, EPIPE, etc.
-		case n == 0:
-			alive = false // FIN already in our buffer
-		default:
-			alive = false // unexpected data on idle socket — evict
+		// Loop on EINTR — a signal-interrupted recvfrom doesn't say
+		// anything about the socket's health; treating it as dead
+		// would spuriously evict pooled conns. Returning `false` from
+		// this callback would make SyscallConn block waiting for the
+		// fd to become readable (the wrong semantic for a non-blocking
+		// peek), so we just retry the syscall in place.
+		for {
+			n, _, perr := syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
+			if perr == syscall.EINTR {
+				continue
+			}
+			switch {
+			case perr == syscall.EAGAIN || perr == syscall.EWOULDBLOCK:
+				alive = true // empty queue, socket healthy
+			case perr != nil:
+				alive = false // ECONNRESET, EPIPE, etc.
+			case n == 0:
+				alive = false // FIN already in our buffer
+			default:
+				alive = false // unexpected data on idle socket — evict
+			}
+			return true // tell SyscallConn we're done; don't block
 		}
-		return true // tell SyscallConn we're done; don't block
 	})
 	if rcErr != nil {
 		return true // can't probe — let the actual write decide
