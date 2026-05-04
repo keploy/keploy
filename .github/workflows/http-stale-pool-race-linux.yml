@@ -1,0 +1,91 @@
+name: HTTP Stale-Pool Race Regression (Linux)
+# Regression test for issue #4165 — the upstream-pool half-close race
+# in keploy's HTTP/1.1 ingress proxy that surfaced as silent request
+# drops + downstream 503/UC under bursty traffic with idle gaps longer
+# than the backend's keep-alive (gunicorn 2s default).
+#
+# The matrix runs the same bursty-load test against two keploy
+# binaries:
+#   - record_with_build  → uses the PR's binary. MUST pass.
+#   - record_with_latest → uses the published `latest`. Demonstrates
+#                          the bug on releases that pre-date the fix
+#                          (~25-50% drop rate). Marked
+#                          continue-on-error so it documents the bug
+#                          without blocking PR merges; flip to a hard
+#                          gate once a release containing the fix is
+#                          published as `latest`.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  http_stale_pool_race_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_with_build
+            record_src: build
+            # The PR's binary MUST keep the test green. If this
+            # leg fails, either the fix regressed or the burst
+            # parameters drift from what reproduces the race.
+            continue_on_error: false
+          - job: record_with_latest
+            record_src: latest
+            # The published `latest` is expected to fail this test
+            # until a release containing the fix ships. Marked
+            # continue-on-error so the failure is visible but does
+            # not block the PR.
+            continue_on_error: true
+    name: stale-pool-race (${{ matrix.config.job }})
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.config.continue_on_error }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Run regression test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        # Run via `bash <script>` rather than `source` so the
+        # script's intentional avoidance of `set -e` is not overridden
+        # by the workflow step's default `-eo pipefail`. The script's
+        # `client_status=$?` capture and cleanup-then-fail sequencing
+        # depend on commands not short-circuiting the parent shell.
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/http-stale-pool-race/python-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-stale-pool-race-${{ matrix.config.job }}-logs
+          path: |
+            .github/workflows/test_workflow_scripts/python/http-stale-pool-race/record_logs.txt
+            .github/workflows/test_workflow_scripts/python/http-stale-pool-race/keploy/
+          if-no-files-found: warn
+          retention-days: 7
