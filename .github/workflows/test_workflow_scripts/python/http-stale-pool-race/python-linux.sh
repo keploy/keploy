@@ -59,7 +59,6 @@ echo "=== start keploy record + gunicorn (gthread worker, --keep-alive 2) ==="
 $RECORD_BIN record \
     -c "gunicorn --bind 0.0.0.0:8080 --workers 2 --threads 4 --worker-class gthread --keep-alive 2 main:app" \
     > record_logs.txt 2>&1 &
-record_pid=$!
 
 echo "=== wait for app readiness ==="
 ready=0

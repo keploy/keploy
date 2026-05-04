@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -943,6 +944,36 @@ func isIdempotentMethod(m string) bool {
 	return false
 }
 
+// isStaleConnError reports whether err looks like an upstream
+// connection-drop (the case replay-on-stale was designed for) as
+// opposed to a deterministic protocol/parse failure (where replay
+// would just re-trigger the same bad response). EOF / unexpected EOF
+// / connection reset / broken pipe / "use of closed network
+// connection" all map to "the conn died, try a fresh one"; everything
+// else (e.g., http.ReadResponse rejecting a malformed status line) is
+// not retried.
+func isStaleConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	// net.OpError without a recognized syscall cause: treat as
+	// transport-layer failure (e.g., kernel-side connection abort).
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	return false
+}
+
 func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 }
@@ -976,15 +1007,27 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 	upstreamAddr := upConn.RemoteAddr().String()
 
-	// On agent shutdown, close ONLY the downstream conn. That unblocks
-	// the http.ReadRequest call in the loop below, which causes the
-	// loop to return, which triggers the function-exit defer (declared
-	// further down) that closes the current upstream conn. Closing
-	// upConn here too would race with redial()'s reassignment — the
-	// race detector flags it on overlapping shutdown+redial.
+	// upConnHolder lets the ctx-cancel + function-exit goroutines safely
+	// close whatever the CURRENT upstream conn is, without racing with
+	// redial()'s reassignment. The main loop still uses the local upConn
+	// variable for fast access (no atomic load on the hot path); redial
+	// is responsible for keeping the holder in sync.
+	type connHolder struct{ c net.Conn }
+	var upConnHolder atomic.Pointer[connHolder]
+	upConnHolder.Store(&connHolder{c: upConn})
+
+	// On agent shutdown, close BOTH conns: closing the downstream
+	// unblocks http.ReadRequest in the loop's read phase; closing the
+	// upstream unblocks http.ReadResponse / req.Write if the loop is
+	// stuck in upstream I/O on a hung backend. Race-safe via the
+	// atomic — we always close whatever connHolder pointer is current,
+	// even if redial swapped it concurrently.
 	go func() {
 		<-ctx.Done()
 		_ = clientConn.Close()
+		if h := upConnHolder.Load(); h != nil {
+			_ = h.c.Close()
+		}
 	}()
 
 	wireConn := &wireTimeConn{Conn: clientConn}
@@ -998,11 +1041,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// (handleHttp1Connection) defers Close on its own copy of the original
 	// upConn, but redial() replaces this function's local upConn — so
 	// without this defer, every successful redial leaks the freshly dialed
-	// socket until ctx is cancelled. The closure captures upConn by
-	// reference, so it always closes the latest one.
+	// socket until ctx is cancelled. Reads from the holder so it always
+	// targets the latest conn (the local upConn could be stale if redial
+	// happened mid-iteration).
 	defer func() {
-		if upConn != nil {
-			_ = upConn.Close()
+		if h := upConnHolder.Load(); h != nil {
+			_ = h.c.Close()
 		}
 	}()
 
@@ -1011,8 +1055,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	upConnFresh := true
 
 	redial := func() error {
-		if upConn != nil {
-			_ = upConn.Close()
+		// Close the previous conn via the holder so a concurrent
+		// shutdown sees a consistent view (either the old conn or the
+		// new one — never a torn pointer).
+		if h := upConnHolder.Load(); h != nil {
+			_ = h.c.Close()
 		}
 		newConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
 		if err != nil {
@@ -1020,6 +1067,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		upConn = newConn
 		upstreamReader = bufio.NewReader(upConn)
+		upConnHolder.Store(&connHolder{c: newConn})
 		return nil
 	}
 
@@ -1256,9 +1304,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// don't fall back to reqCapture.Truncated() here because it
 		// can be empty even in safe-to-replay cases (capture disabled
 		// on the sampling-bypass path).
+		//
+		// Replay only when the error LOOKS like a connection drop
+		// (isStaleConnError). A protocol/parse error from
+		// http.ReadResponse (malformed status line, bad headers) is
+		// deterministic — replaying just produces the same bad
+		// response and double-charges the upstream for an idempotent
+		// request that's not even getting through.
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			if canReplay {
+			if canReplay && isStaleConnError(err) {
 				logger.Debug("Empty response from upstream; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
