@@ -33,8 +33,18 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 cleanup() {
     echo "cleanup..."
-    sudo pkill -9 -f keploy 2>/dev/null || true
-    sudo pkill -9 -f gunicorn 2>/dev/null || true
+    # Match by process NAME (default pkill mode), NOT by full command
+    # line (-f). With -f, pkill's regex matches against the full
+    # argv of every process — including its own sudo parent (whose
+    # argv literally contains the pattern arg) and even this script's
+    # bash (whose argv path /home/runner/work/keploy/keploy/... +
+    # something downstream that matches). That self-match was killing
+    # the wrapping bash with SIGKILL after the test PASS, surfacing
+    # as exit 137 even on a successful run. Matching by `comm` (the
+    # bare executable name) hits keploy/gunicorn but never bash/sudo/
+    # pkill themselves.
+    sudo pkill -9 keploy 2>/dev/null || true
+    sudo pkill -9 gunicorn 2>/dev/null || true
     sleep 1
 }
 trap cleanup EXIT
@@ -83,9 +93,18 @@ python burst_client.py
 client_status=$?
 
 echo "=== stop keploy record cleanly ==="
-sudo pkill -INT -f 'keploy.*record' 2>/dev/null || true
+# Match by process NAME (no -f). Same reason as the trap cleanup:
+# `pkill -f 'keploy.*record'` self-matches its own sudo parent
+# because the regex pattern lives in sudo's argv, and Linux pkill -f
+# greedy-matches the regex against the joined cmdline of every
+# process in /proc — which on this CI runner happens to also kill
+# the wrapping bash with SIGKILL after the script's exit, surfacing
+# as a 137 even on a passing test run. `pkill keploy` matches by
+# `comm` (the bare executable name); only the actual keploy process
+# is hit.
+sudo pkill -INT keploy 2>/dev/null || true
 sleep 5
-sudo pkill -9 -f 'keploy.*record' 2>/dev/null || true
+sudo pkill -9 keploy 2>/dev/null || true
 sleep 2
 
 if grep -q 'WARNING: DATA RACE' record_logs.txt; then
