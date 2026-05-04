@@ -1131,22 +1131,23 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// too. forwardRawTCP reads directly from the underlying
 			// net.Conn and would silently drop anything sitting in the
 			// bufio buffers, corrupting upgraded connections.
+			//
+			// Use io.CopyN — it advances the bufio cursor as it reads
+			// (no separate Discard), and guarantees ALL N bytes are
+			// transferred before returning (handles short writes
+			// internally, unlike a single net.Conn.Write).
 			if n := clientReader.Buffered(); n > 0 {
-				chunk, _ := clientReader.Peek(n)
-				if _, werr := upConn.Write(chunk); werr != nil {
+				if _, werr := io.CopyN(upConn, clientReader, int64(n)); werr != nil {
 					logger.Debug("Failed to flush bufio-buffered upgrade bytes upstream",
 						zap.String("upstream", upstreamAddr), zap.Error(werr))
 					return
 				}
-				_, _ = clientReader.Discard(n)
 			}
 			if n := upstreamReader.Buffered(); n > 0 {
-				chunk, _ := upstreamReader.Peek(n)
-				if _, werr := clientConn.Write(chunk); werr != nil {
+				if _, werr := io.CopyN(clientConn, upstreamReader, int64(n)); werr != nil {
 					logger.Debug("Failed to flush bufio-buffered upgrade bytes downstream", zap.Error(werr))
 					return
 				}
-				_, _ = upstreamReader.Discard(n)
 			}
 			forwardRawTCP(ctx, clientConn, upConn)
 			return
