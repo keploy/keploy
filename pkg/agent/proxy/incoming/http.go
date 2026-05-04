@@ -1032,7 +1032,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				logger.Debug("Client request read ended", zap.Error(err))
+				// Malformed / truncated downstream request — surface a
+				// structured 400 so clients/proxies don't see a bare
+				// reset and misattribute it to upstream. EOF is the
+				// normal end-of-keep-alive close path; no response
+				// needed there.
+				logger.Debug("Failed to parse downstream HTTP request", zap.Error(err))
+				writeBadRequest(clientConn)
 			}
 			return
 		}
@@ -1117,11 +1123,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				b, rerr := io.ReadAll(io.LimitReader(req.Body, req.ContentLength+1))
 				_ = req.Body.Close()
 				if rerr != nil {
+					// Failure reading the DOWNSTREAM client body —
+					// usually a client disconnect mid-body or a
+					// truncated request. This is not an upstream
+					// problem, so 400 (writeBadRequest) is the right
+					// status; 502 would misattribute it to the app.
 					logger.Error("Failed to read request body for replay-safe buffering. Possible client disconnect mid-body.",
 						zap.String("method", req.Method),
 						zap.Int64("content_length", req.ContentLength),
 						zap.Error(rerr))
-					writeBadGateway(clientConn)
+					writeBadRequest(clientConn)
 					return
 				}
 				if int64(len(b)) != req.ContentLength {
