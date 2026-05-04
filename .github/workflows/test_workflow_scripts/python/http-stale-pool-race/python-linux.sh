@@ -3,14 +3,18 @@
 # HTTP/1.1 ingress proxy (issue #4165, fix in handleHttp1ZeroCopy via
 # MSG_PEEK + replay-on-stale).
 #
-# Setup: gunicorn (sync worker, --keep-alive 2) sits behind keploy in
-# record mode. A bursty client (burst_client.py) opens N persistent
-# HTTP/1.1 connections to localhost:8080 and fires bursts with idle
-# gaps longer than gunicorn's keep-alive. Without the fix, keploy
-# silently drops the first request on each post-idle-gap burst because
-# its two-goroutine io.Copy byte-pump never notices the upstream FIN
-# during the gap. With the fix, MSG_PEEK detects the stale conn and
-# redials before forwarding the next request.
+# Setup: gunicorn (gthread worker, 4 threads, --keep-alive 2) sits
+# behind keploy in record mode. gthread is required because gunicorn's
+# default sync worker silently disables HTTP keep-alive regardless of
+# --keep-alive, so connections never persist across the bursty client's
+# idle gap and the bug can't be reproduced. A bursty client
+# (burst_client.py) opens N persistent HTTP/1.1 connections to
+# localhost:8080 and fires bursts with idle gaps longer than gunicorn's
+# keep-alive. Without the fix, keploy silently drops the first request
+# on each post-idle-gap burst because its two-goroutine io.Copy
+# byte-pump never notices the upstream FIN during the gap. With the
+# fix, MSG_PEEK detects the stale conn and redials before forwarding
+# the next request.
 #
 # Pass/fail is driven by burst_client.py's drop-rate gate
 # (MAX_DROP_PCT, default 5%). Without the fix the observed drop rate

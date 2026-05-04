@@ -947,6 +947,15 @@ func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 }
 
+// writeBadRequest is the client-side counterpart to writeBadGateway:
+// 400-class so the failure isn't misattributed to the upstream by
+// downstream proxies / monitoring. Used when we detect a malformed
+// or truncated request from the downstream client (e.g.,
+// Content-Length mismatch during replay-safety pre-buffering).
+func writeBadRequest(c net.Conn) {
+	_, _ = c.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+}
+
 // handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
 // non-sampling) mode.
 //
@@ -1116,13 +1125,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					return
 				}
 				if int64(len(b)) != req.ContentLength {
-					// Client lied about Content-Length or hung up
-					// early — surface a 400-class error to be safe;
-					// 502 is the closest existing helper.
-					logger.Error("Request body length did not match Content-Length; not safe to replay.",
+					// Client lied about Content-Length or disconnected
+					// mid-body. This is a downstream-client protocol
+					// issue, not an upstream failure — return 400 Bad
+					// Request rather than 502 so downstream
+					// proxies/monitoring don't misattribute the failure
+					// to the app.
+					logger.Error("Request body length did not match Content-Length; treating as malformed client request.",
 						zap.Int64("content_length", req.ContentLength),
 						zap.Int("bytes_read", len(b)))
-					writeBadGateway(clientConn)
+					writeBadRequest(clientConn)
 					return
 				}
 				preBufferedReqBody = b
