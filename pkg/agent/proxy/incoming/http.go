@@ -1034,8 +1034,27 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// forwarding the parsed handshake. Subsequent frames are not
 		// HTTP/1.1, so per-request framing breaks down.
 		if isHTTPUpgrade(req) {
+			// Pool-liveness probe applies here too: an Upgrade on a
+			// reused-but-stale conn would silently swallow the
+			// handshake and leave the client hanging.
+			if !upConnFresh && !peekUpstreamLive(upConn) {
+				logger.Debug("Stale upstream pool entry detected before upgrade; redialing",
+					zap.String("upstream", upstreamAddr))
+				if rerr := redial(); rerr != nil {
+					logger.Error("Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
+						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					writeBadGateway(clientConn)
+					return
+				}
+			}
+			upConnFresh = false
 			if err := req.Write(upConn); err != nil {
-				logger.Debug("Failed to forward upgrade request", zap.Error(err))
+				logger.Error("Failed to forward upgrade request to upstream. Verify upstream supports the requested upgrade and is listening on the resolved address.",
+					zap.String("method", req.Method),
+					zap.String("upgrade", req.Header.Get("Upgrade")),
+					zap.String("upstream", upstreamAddr),
+					zap.Error(err))
+				writeBadGateway(clientConn)
 				return
 			}
 			forwardRawTCP(ctx, clientConn, upConn)
@@ -1058,12 +1077,71 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		upConnFresh = false
 
-		// Tee body for capture. Forwarding still works if the buffer
-		// truncates (captureBuffer.Write always reports len(p) bytes
-		// consumed regardless of internal limit).
+		// Replay-safety pre-buffering. Replaying an idempotent request
+		// is only safe when we can resend the EXACT bytes that were
+		// (or would have been) on the wire — gating on
+		// reqCapture.Truncated() is insufficient because (a) the tee
+		// is not attached on the sampling-bypass path (t == nil), so
+		// reqCapture would be empty and we'd resend an empty body; and
+		// (b) a mid-body write failure would leave reqCapture holding
+		// only a prefix, so replay would resend a partial body.
+		//
+		// For idempotent methods with a known-bounded body, eagerly
+		// drain it into a buffer up-front. The buffer becomes the
+		// single source of truth for both the initial write and any
+		// replay. For unknown-length (chunked) or oversized bodies we
+		// can't safely buffer, so replay is disabled and forwarding
+		// stays streaming.
+		var preBufferedReqBody []byte
+		canReplay := false
+		if isIdempotentMethod(req.Method) {
+			switch {
+			case req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0:
+				// No body — replay is trivially safe.
+				canReplay = true
+			case req.ContentLength > 0 && req.ContentLength <= int64(maxHTTPBodyCaptureBytes):
+				// Known-small body — buffer fully. Use ContentLength+1
+				// as the read cap so an upstream lying about
+				// Content-Length doesn't OOM us.
+				b, rerr := io.ReadAll(io.LimitReader(req.Body, req.ContentLength+1))
+				_ = req.Body.Close()
+				if rerr != nil {
+					logger.Error("Failed to read request body for replay-safe buffering. Possible client disconnect mid-body.",
+						zap.String("method", req.Method),
+						zap.Int64("content_length", req.ContentLength),
+						zap.Error(rerr))
+					writeBadGateway(clientConn)
+					return
+				}
+				if int64(len(b)) != req.ContentLength {
+					// Client lied about Content-Length or hung up
+					// early — surface a 400-class error to be safe;
+					// 502 is the closest existing helper.
+					logger.Error("Request body length did not match Content-Length; not safe to replay.",
+						zap.Int64("content_length", req.ContentLength),
+						zap.Int("bytes_read", len(b)))
+					writeBadGateway(clientConn)
+					return
+				}
+				preBufferedReqBody = b
+				req.Body = io.NopCloser(bytes.NewReader(b))
+				canReplay = true
+			default:
+				// Unknown-length (chunked) or known-too-large body.
+				// Stream-forward but disable replay — partial-body
+				// replay would be worse than a clean 502.
+				canReplay = false
+			}
+		}
+
+		// Tee body for capture (only when we did NOT pre-buffer; if
+		// we did, the buffer IS the captured body bytes). Forwarding
+		// still works if the buffer truncates (captureBuffer.Write
+		// always reports len(p) bytes consumed regardless of internal
+		// limit).
 		captureEligible := captureEnabled
 		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
-		if captureEligible && req.Body != nil && req.Body != http.NoBody {
+		if captureEligible && preBufferedReqBody == nil && req.Body != nil && req.Body != http.NoBody {
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
@@ -1075,7 +1153,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if req.Body != nil {
 				_ = req.Body.Close()
 			}
-			if isIdempotentMethod(req.Method) && !reqCapture.Truncated() {
+			if canReplay {
 				logger.Debug("Idempotent request write failed; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
@@ -1084,8 +1162,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					writeBadGateway(clientConn)
 					return
 				}
-				// Replay from buffered body.
-				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
+				// Replay from the pre-buffered body (or no body if
+				// none was sent). Using preBufferedReqBody is what
+				// makes this safe — reqCapture may be partial or
+				// empty depending on capture state and write timing.
+				if preBufferedReqBody != nil {
+					req.Body = io.NopCloser(bytes.NewReader(preBufferedReqBody))
+				} else {
+					req.Body = http.NoBody
+				}
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
@@ -1096,15 +1181,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					_ = req.Body.Close()
 				}
 			} else {
-				// Non-idempotent or oversized body: cannot safely replay
-				// per RFC 9110 §9.2.2 / capture budget. Surface a 502
-				// to the client and tear down so envoy doesn't reuse
-				// this conn.
-				logger.Error("Forward of request to upstream failed and request is not safely replayable (non-idempotent method or body exceeded capture budget). Verify upstream health on the resolved address.",
+				// Non-idempotent, unknown-length body, or oversized
+				// body: cannot safely replay per RFC 9110 §9.2.2.
+				// Surface a 502 to the client and tear down so envoy
+				// doesn't reuse this conn.
+				logger.Error("Forward of request to upstream failed and request is not safely replayable (non-idempotent method or body cannot be re-sent). Verify upstream health on the resolved address.",
 					zap.String("method", req.Method),
 					zap.String("upstream", upstreamAddr),
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
-					zap.Bool("body_truncated", reqCapture.Truncated()),
+					zap.Int64("content_length", req.ContentLength),
 					zap.Error(err))
 				writeBadGateway(clientConn)
 				return
@@ -1114,10 +1199,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 
 		// Read response. Empty-response on idempotent methods is also
-		// classified as stale-conn; replay once.
+		// classified as stale-conn; replay once. canReplay is the
+		// authoritative gate (see preBufferedReqBody comment above) —
+		// don't fall back to reqCapture.Truncated() here because it
+		// can be empty even in safe-to-replay cases (capture disabled
+		// on the sampling-bypass path).
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			if isIdempotentMethod(req.Method) && !reqCapture.Truncated() {
+			if canReplay {
 				logger.Debug("Empty response from upstream; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
@@ -1126,7 +1215,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					writeBadGateway(clientConn)
 					return
 				}
-				req.Body = io.NopCloser(bytes.NewReader(reqCapture.Bytes()))
+				if preBufferedReqBody != nil {
+					req.Body = io.NopCloser(bytes.NewReader(preBufferedReqBody))
+				} else {
+					req.Body = http.NoBody
+				}
 				if rerr := req.Write(upConn); rerr != nil {
 					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
@@ -1144,15 +1237,15 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					return
 				}
 			} else {
-				// Non-idempotent or oversized body: surface 502 so the
-				// downstream client doesn't see a silent connection
-				// close (which presents as a confusing reset/hang
-				// rather than a structured 502).
+				// Non-idempotent, unknown-length, or oversized body:
+				// surface 502 so the downstream client doesn't see a
+				// silent connection close (which presents as a
+				// confusing reset/hang rather than a structured 502).
 				logger.Error("Failed to read upstream response and request is not safely replayable. Verify upstream application health on the resolved address.",
 					zap.String("method", req.Method),
 					zap.String("upstream", upstreamAddr),
 					zap.Bool("idempotent", isIdempotentMethod(req.Method)),
-					zap.Bool("body_truncated", reqCapture.Truncated()),
+					zap.Int64("content_length", req.ContentLength),
 					zap.Duration("time_since_request", time.Since(reqTimestamp)),
 					zap.Error(err))
 				writeBadGateway(clientConn)
@@ -1188,15 +1281,24 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse
-		// allocations under load).
-		if captureEnabled && !reqCapture.Truncated() && !respCapture.Truncated() {
+		// allocations under load). Body source preference:
+		// preBufferedReqBody (eager-buffered for replay safety; always
+		// the exact bytes the upstream saw) → reqCapture (tee on the
+		// streaming path).
+		reqTeeTruncated := preBufferedReqBody == nil && reqCapture.Truncated()
+		if captureEnabled && !reqTeeTruncated && !respCapture.Truncated() {
 			select {
 			case captureHookSem <- struct{}{}:
 			case <-ctx.Done():
 				return
 			}
 
-			reqBodyBytes := reqCapture.Bytes()
+			var reqBodyBytes []byte
+			if preBufferedReqBody != nil {
+				reqBodyBytes = preBufferedReqBody
+			} else {
+				reqBodyBytes = reqCapture.Bytes()
+			}
 			respBodyBytes := respCapture.Bytes()
 			capturedReq := req
 			capturedResp := resp

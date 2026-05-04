@@ -1126,6 +1126,7 @@ jobs:
       - run_node_docker
       - run_python_docker
       - run_python_linux
+      - run_http_stale_pool_race_linux
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
@@ -1145,6 +1146,7 @@ jobs:
             "${{ needs.run_node_docker.result }}" \
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
+            "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
