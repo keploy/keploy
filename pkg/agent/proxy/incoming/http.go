@@ -1074,6 +1074,32 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				writeBadGateway(clientConn)
 				return
 			}
+			// Drain bytes already buffered in our bufio readers before
+			// switching to the raw byte pump. http.ReadRequest may
+			// have buffered post-headers bytes from the same TCP
+			// segment (e.g., a pipelined first WebSocket frame); on
+			// the upstream side, partial response bytes from a
+			// previous keep-alive iteration are theoretically possible
+			// too. forwardRawTCP reads directly from the underlying
+			// net.Conn and would silently drop anything sitting in the
+			// bufio buffers, corrupting upgraded connections.
+			if n := clientReader.Buffered(); n > 0 {
+				chunk, _ := clientReader.Peek(n)
+				if _, werr := upConn.Write(chunk); werr != nil {
+					logger.Debug("Failed to flush bufio-buffered upgrade bytes upstream",
+						zap.String("upstream", upstreamAddr), zap.Error(werr))
+					return
+				}
+				_, _ = clientReader.Discard(n)
+			}
+			if n := upstreamReader.Buffered(); n > 0 {
+				chunk, _ := upstreamReader.Peek(n)
+				if _, werr := clientConn.Write(chunk); werr != nil {
+					logger.Debug("Failed to flush bufio-buffered upgrade bytes downstream", zap.Error(werr))
+					return
+				}
+				_, _ = upstreamReader.Discard(n)
+			}
 			forwardRawTCP(ctx, clientConn, upConn)
 			return
 		}
@@ -1142,7 +1168,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					// Request rather than 502 so downstream
 					// proxies/monitoring don't misattribute the failure
 					// to the app.
-					logger.Error("Request body length did not match Content-Length; treating as malformed client request.",
+					logger.Error("Request body length did not match declared Content-Length; treating as malformed client request. If this fires in production, check the downstream client/proxy for truncated uploads, mid-body disconnects, or an incorrectly computed Content-Length header on the request side.",
+						zap.String("method", req.Method),
 						zap.Int64("content_length", req.ContentLength),
 						zap.Int("bytes_read", len(b)))
 					writeBadRequest(clientConn)
