@@ -949,9 +949,11 @@ func isIdempotentMethod(m string) bool {
 // opposed to a deterministic protocol/parse failure (where replay
 // would just re-trigger the same bad response). EOF / unexpected EOF
 // / connection reset / broken pipe / "use of closed network
-// connection" all map to "the conn died, try a fresh one"; everything
-// else (e.g., http.ReadResponse rejecting a malformed status line) is
-// not retried.
+// connection" / connection aborted all map to "the conn died, try a
+// fresh one"; everything else — including timeouts (Timeout()=true on
+// the wrapping net.OpError) and protocol-parse errors — is not
+// retried, since those typically indicate a deterministic upstream
+// failure that replay would just re-trigger and double-charge.
 func isStaleConnError(err error) bool {
 	if err == nil {
 		return false
@@ -959,16 +961,17 @@ func isStaleConnError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+	// Specific syscall errors that propagate via net.OpError's Unwrap
+	// chain (errors.Is recurses through it). Timeouts deliberately
+	// not included — a slow upstream isn't a stale-pool case and
+	// replay would just re-pay the timeout while double-charging the
+	// upstream for the original.
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNABORTED) {
 		return true
 	}
 	if errors.Is(err, net.ErrClosed) {
-		return true
-	}
-	// net.OpError without a recognized syscall cause: treat as
-	// transport-layer failure (e.g., kernel-side connection abort).
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
 		return true
 	}
 	return false

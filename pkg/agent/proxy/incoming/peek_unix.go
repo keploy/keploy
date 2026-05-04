@@ -12,6 +12,13 @@ import (
 // queued. Implemented as one non-blocking recvfrom(MSG_PEEK|MSG_DONTWAIT) —
 // same liveness probe nginx uses in ngx_http_upstream_keepalive_close_handler.
 //
+// Build tag is //go:build !windows because MSG_PEEK + MSG_DONTWAIT and the
+// EAGAIN/EWOULDBLOCK/ECONNRESET error codes are POSIX, so this single
+// implementation is correct on every Unix-like target keploy ships to
+// (linux/amd64, linux/arm64, darwin/arm64, *bsd). A separate Windows stub
+// in peek_windows.go returns true unconditionally so non-Unix builds
+// compile cleanly.
+//
 // This catches the "stale pool entry" race where the backend's short
 // keep-alive (gunicorn 2s) fires during an idle gap, our kernel receives
 // the FIN, but no goroutine has read the upstream socket since the last
