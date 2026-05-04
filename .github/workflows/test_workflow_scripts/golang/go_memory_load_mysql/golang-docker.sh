@@ -9,21 +9,17 @@ APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
 MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
-# 1 VU throughout all stages: enforces strictly sequential execution so every
-# SQL UPDATE+SELECT on a product row is unique in the recording window. With >1
-# concurrent VUs, two VUs can pick the same product+quantity, producing identical
-# SQL requests with different responses; Keploy stores these in the same mock
-# bucket and serves them FIFO, so during sequential replay the wrong mock gets
-# matched, embedding wrong customer/product data in responses and failing assertions.
-# 1 VU = zero concurrency = zero identical-SQL collisions = guaranteed replay accuracy.
-MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-1,1,1,1}"
+# Hill-shaped VU ramp: 4→8→12→4. Saturates the system by a small fraction so
+# Keploy's recording captures real concurrent load while staying within CI memory
+# limits. globalNoise in keploy.yml covers variable response fields (id, timestamps,
+# etc.) so concurrent-VU FIFO mock collisions don't fail assertions.
+MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
-# 0 = disable large-payload cycle. MySQL LONGTEXT large-payload responses can
-# exceed Keploy's in-memory mock buffer, causing reconstruction failures during
-# replay. Disable until Keploy supports full large-document mock replay.
-LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-0}"
+# Enable 1 MB large-payload cycle so the pipeline exercises >1 MB requests.
+# fallBackOnMiss: true in keploy.yml handles BodySkipped mocks during replay.
+LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
