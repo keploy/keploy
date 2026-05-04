@@ -110,7 +110,12 @@ for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
 done
 
 if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "${test_container}_json" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
+    # Reuse the compose service name (`proxyStressApp`) — there is no
+    # `${container}_json` service in docker-compose. Format dispatch is
+    # auto-detected per file by NewMockReaderAny / GetTestCases on the
+    # replay side, so the --storage-format flag here only affects what
+    # extension the json *report* gets written under.
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
     if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
     if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
     if ! json_scan_reports; then
