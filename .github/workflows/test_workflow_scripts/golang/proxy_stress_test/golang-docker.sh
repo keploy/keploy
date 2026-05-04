@@ -105,9 +105,28 @@ if [ "$report_count" -eq 0 ]; then echo "FAIL: No reports — replay hung"; cat 
 if grep -q "Error channel is full" "${test_container}.txt"; then echo "FAIL: Error channel overflow"; cat "${test_container}.txt"; exit 1; fi
 if grep -q "incomplete or invalid response packet" "${test_container}.txt"; then echo "FAIL: PG decode failure"; cat "${test_container}.txt"; exit 1; fi
 
+# Enforce status=PASSED on every yaml replay test-set. The previous
+# loop only echoed the status, so a FAILED test-set silently exited 0
+# and the job was marked green. Surfaced by keploy/integrations#188:
+# postgres-v3 recorder under-captures concurrent simple-Query mocks,
+# causing /api/batch-transfer to fail at replay — every config
+# (record_build_replay_build, record_build_replay_latest,
+# record_latest_replay_build) was failing the same 3/5 cases per
+# test-set, only nobody noticed because nothing exited non-zero.
+yaml_status_rc=0
 for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
-    [ -f "$report_file" ] && echo "$(basename "$report_file"): $(grep 'status:' "$report_file" | head -1 | awk '{print $2}')"
+    [ -f "$report_file" ] || continue
+    status=$(grep 'status:' "$report_file" | head -1 | awk '{print $2}')
+    echo "$(basename "$report_file"): ${status:-<missing>}"
+    if [ "$status" != "PASSED" ]; then
+        echo "::error::$(basename "$report_file") status=${status:-<missing>}"
+        yaml_status_rc=1
+    fi
 done
+if [ "$yaml_status_rc" -ne 0 ]; then
+    echo "FAIL: yaml replay had at least one non-PASSED test-set (see keploy/integrations#188)"
+    exit 1
+fi
 
 if json_pass_supported; then
     # Reuse the compose service name (`proxyStressApp`) — there is no
