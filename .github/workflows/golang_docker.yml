@@ -1,11 +1,6 @@
 name: Golang On Docker
 on:
   workflow_call:
-    inputs:
-      image_tag:            
-        description: "Docker image tag or digest to pull"
-        required: false
-        type: string
 jobs:
   golang_docker:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -20,6 +15,12 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: go-memory-load
+            path: go-memory-load
+            script_dir: go_memory_load
+          - name: proxy-stress-test
+            path: proxy-stress-test
+            script_dir: proxy_stress_test
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -38,7 +39,7 @@ jobs:
       - id: image
         uses: ./.github/actions/download-image
         with:
-          image_tag: ${{ inputs.image_tag }}
+          artifact_name: docker-image-linux-amd64
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -54,11 +55,31 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
+          ref: main
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          # RCA instrumentation for postgres-v3 per-test window misalignment
+          # (see PR #4126). Only echo-sql is postgres-touching in this matrix;
+          # the env var is a no-op for the non-PG apps so we set it
+          # unconditionally and gate the artifact upload below.
+          KEPLOY_PG_V3_LOG_BIND_VALUES: "1"
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker.sh
+
+      - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
+        # Only upload for the postgres-touching variant to keep artifact
+        # storage tight. TODO(postgres-v3 RCA): broaden if other matrix
+        # apps regress on PG.
+        if: ${{ always() && matrix.app.name == 'echo-sql' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
+          path: |
+            samples-go/${{ matrix.app.path }}/keploy/
+            samples-go/${{ matrix.app.path }}/echoApp.txt
+          if-no-files-found: warn
+          retention-days: 7

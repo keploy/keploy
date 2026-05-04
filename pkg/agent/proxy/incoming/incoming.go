@@ -42,8 +42,15 @@ type IngressProxyManager struct {
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 	synchronous  bool
-	sampling     bool
-	samplingSem  chan struct{}
+	// mapping mirrors !cfg.DisableMapping at construction time. Forwarded
+	// to CaptureHook so the synchronous-record path can decide whether
+	// SyncMockManager.ResolveRange should emit a TestMockMapping entry
+	// onto the agent's mappingChan. Without this plumbing the mapping
+	// arg was hardcoded false at the OSS Capture call site, which
+	// silently disabled mappings.yaml production during record (#3905).
+	mapping     bool
+	sampling    bool
+	samplingSem chan struct{}
 
 	ingressHook IngressHook
 }
@@ -55,6 +62,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		mapping:     !cfg.DisableMapping,
 		sampling:    false,
 		samplingSem: make(chan struct{}, func() int {
 			if cfg.Agent.EnableSampling > 0 {
@@ -181,6 +189,11 @@ type tcpForwarderState struct {
 	done     chan struct{} // closed when the accept loop exits
 }
 
+const (
+	ingressTargetListenTimeout = 3 * time.Second
+	ingressTargetPollInterval  = 25 * time.Millisecond
+)
+
 func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
 	return &goTCPIngressHook{
 		pm:         pm,
@@ -193,6 +206,21 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
+
+	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+		if err != nil {
+			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
+				zap.String("target", newAppAddr),
+				zap.Duration("timeout", ingressTargetListenTimeout),
+				zap.Error(err))
+		} else {
+			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
+				zap.String("target", newAppAddr))
+		}
+	} else {
+		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
+			zap.Uint16("orig_port", origPort))
+	}
 
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
@@ -248,6 +276,39 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	return nil
 }
 
+func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
+	if newPort == 0 {
+		return false, nil
+	}
+	return true, waitForIngressTarget(ctx, addr, timeout)
+}
+
+func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(ingressTargetPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp4", addr, ingressTargetPollInterval)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s to listen: %w", addr, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	h.mu.Lock()
 	st, ok := h.forwarders[origPort]
@@ -268,19 +329,16 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
-	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
-	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
-	if err != nil {
-		//if not EOF then log
-		if err != io.EOF {
-			utils.LogError(logger, err, "error reading initial bytes from client connection")
-		}
+	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
+	if err == io.EOF && len(preface) == 0 {
+		return
+	}
+	if err != nil && err != io.EOF {
+		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		logger.Debug("Detected HTTP/2 connection")
-
 		// Get the actual destination for gRPC on Windows
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
@@ -298,36 +356,37 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
-			logger.Error("Failed to connect to upstream gRPC server",
-				zap.String("Final_App_Address", finalAppAddr),
+			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
+
+		// Pass replayConn so RecordIncoming sees the full byte stream including
+		// the preface. RecordIncoming's forwardAndTee will forward everything
+		// (including the preface) to the upstream app, which is what cmux needs
+		// to see the original handshake.
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
-		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
 }
 
 type replayConn struct {
 	net.Conn
-	buf *bytes.Reader
+	reader io.Reader
 }
 
 func newReplayConn(initial []byte, c net.Conn) net.Conn {
 	return &replayConn{
-		Conn: c,
-		buf:  bytes.NewReader(initial),
+		Conn:   c,
+		reader: util.NewPrefixReader(initial, c),
 	}
 }
 
 func (r *replayConn) Read(p []byte) (int, error) {
-	if r.buf.Len() > 0 {
-		return r.buf.Read(p)
-	}
-	return r.Conn.Read(p)
+	return r.reader.Read(p)
 }
 
 // extractPortFromAddr extracts the port from an address string (host:port).

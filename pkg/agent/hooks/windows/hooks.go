@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -83,7 +84,7 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 		<-ctx.Done()
 		h.unLoad(ctx)
 
-		//deleting in order to free the memory in case of rerecord.
+		// deleting in order to free the memory on shutdown.
 		h.sess.Delete(uint64(0))
 		return nil
 	})
@@ -163,9 +164,30 @@ func (h *Hooks) ensureWinDivertAssets() (string, error) {
 }
 
 func (h *Hooks) unLoad(_ context.Context) {
-	err := StopRedirector()
-	if err != nil {
-		h.logger.Error("failed to stop redirector", zap.Error(err))
+	// Call StopRedirector under a timeout. The Rust side of the
+	// redirector owns a WinDivert recv/send loop that prints
+	// "Packet sent successfully!" per iteration; if it hangs during
+	// shutdown (the Rust stop path deadlocks or is slow to wake the
+	// recv thread), the old unconditional wait let the keploy
+	// process linger until the CI job timeout fired at 6h. The Go
+	// process needs to exit promptly even if the Rust side is
+	// misbehaving so the next run gets a clean slate — a stuck
+	// driver unload is a worse failure mode than a 10 s hard cap
+	// followed by process exit.
+	const stopTimeout = 10 * time.Second
+	done := make(chan error, 1)
+	go func() {
+		defer utils.Recover(h.logger)
+		done <- StopRedirector()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			h.logger.Error("failed to stop redirector", zap.Error(err))
+		}
+	case <-time.After(stopTimeout):
+		h.logger.Error("stop_redirector did not return within the shutdown deadline; the Rust capture thread may be stuck in its WinDivert loop. Proceeding with Go-side shutdown anyway — the OS will tear down the remaining native resources on process exit. If this recurs, capture a 'Packet sent successfully' dump from the Rust log and check the stop path in src/ffi.rs",
+			zap.Duration("deadline", stopTimeout))
 	}
 
 	h.logger.Info("Successfully unloaded Windows hooks")

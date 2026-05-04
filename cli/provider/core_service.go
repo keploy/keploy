@@ -19,10 +19,8 @@ import (
 	openapidb "go.keploy.io/server/v3/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v3/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v3/pkg/platform/yaml/testdb"
-	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/contract"
 	"go.keploy.io/server/v3/pkg/service/diff"
-	"go.keploy.io/server/v3/pkg/service/orchestrator"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/pkg/service/report"
@@ -36,25 +34,23 @@ type CommonInternalService struct {
 	Instrumentation *http.AgentClient
 }
 
-func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
 	commonServices, err := GetCommonServices(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, nil, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
-	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Storage, cfg)
+	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
-	case "rerecord":
-		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
 	case "record":
 		return recordSvc, nil
-	case "test", "mock":
+	case "test":
 		return replaySvc, nil
-	case "templatize", "config", "update", "login", "export", "import", "sanitize", "normalize":
+	case "templatize", "config", "update", "export", "import", "sanitize", "normalize":
 		return toolsSvc, nil
 	case "contract":
 		return contractSvc, nil
@@ -91,12 +87,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 				utils.LogError(logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
 			}
 			if c.ContainerName != "" && c.ContainerName != cont {
-				logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
+				logger.Debug(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
 			}
 			c.ContainerName = cont
 
 			if c.NetworkName != "" && c.NetworkName != net {
-				logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
+				logger.Debug(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
 			}
 			c.NetworkName = net
 
@@ -106,7 +102,17 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	testDB := testdb.New(logger, c.Path)
+	// Propagate the config-file mock-format selection into mockdb. The
+	// env var KEPLOY_MOCK_FORMAT still wins if set, so ad-hoc runs can
+	// override without editing keploy.yml.
+	mockdb.SetConfiguredMockFormat(c.Record.MockFormat)
+
+	namingStrategy, err := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
+	if err != nil {
+		return nil, fmt.Errorf("invalid record.testCaseNaming in keploy.yml: %w (set it to %q or %q)",
+			err, testdb.NamingDescriptive, testdb.NamingSequential)
+	}
+	testDB := testdb.NewWithNaming(logger, c.Path, namingStrategy)
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))

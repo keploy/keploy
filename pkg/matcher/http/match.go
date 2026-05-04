@@ -158,7 +158,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if res.BodyResult[0].Normal {
 			for i := range res.HeadersResult {
 				if strings.ToLower(res.HeadersResult[i].Expected.Key) == "content-length" && !res.HeadersResult[i].Normal {
-					logger.Warn("Ignoring Content-Length mismatch since body content is identical",
+					logger.Debug("Ignoring Content-Length mismatch since body content is identical",
 						zap.String("expected", strings.Join(res.HeadersResult[i].Expected.Value, ",")),
 						zap.String("actual", strings.Join(res.HeadersResult[i].Actual.Value, ",")))
 					res.HeadersResult[i].Normal = true
@@ -278,7 +278,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			case models.JSON:
 				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					logger.Warn("failed to compute json diff", zap.Error(err))
+					logger.Debug("failed to compute json diff", zap.Error(err))
 				}
 
 				// Checking for templatized values.
@@ -336,7 +336,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				// Comparing the body again after updating the expected
 				patch, err = jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
-					logger.Warn("failed to compute json diff", zap.Error(err))
+					logger.Debug("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					if jsonComparisonResult.Matches() {
@@ -449,7 +449,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 	}
 
-	if !skipSuccessMsg {
+	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
+	// so we skip the success message as well
+	if !skipSuccessMsg && emitFailureLogs {
 		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
@@ -659,7 +661,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		default:
 			if assertionName != models.NoiseAssertion {
-				logger.Warn("unhandled assertion type", zap.String("name", string(assertionName)))
+				logger.Debug("unhandled assertion type", zap.String("name", string(assertionName)))
 			}
 		}
 	}

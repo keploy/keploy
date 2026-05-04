@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,11 @@ const (
 	KeployTLSVolumeName = "keploy-tls-certs"
 	// The path inside the container where certs are mounted
 	KeployTLSMountPath = "/tmp/keploy-tls"
+
+	// AgentReadyFile is the readiness marker file written by the agent once
+	// setup is complete. Used by the Docker Compose healthcheck and cleared
+	// on agent startup to prevent stale state from passing the healthcheck.
+	AgentReadyFile = "/tmp/agent.ready"
 
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
@@ -120,6 +126,31 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 		return err
 	}
 	return nil
+}
+
+// MarshalCompose serialises the Compose struct to YAML bytes without writing to disk.
+func (idc *Impl) MarshalCompose(compose *Compose) ([]byte, error) {
+	data, err := yaml.Marshal(compose)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal compose to YAML: %w", err)
+	}
+	return data, nil
+}
+
+// FindContainerInCompose searches for a container within an already-parsed Compose
+// structure. This is the in-memory equivalent of FindContainerInComposeFiles.
+func (idc *Impl) FindContainerInCompose(compose *Compose, containerName string) (*ComposeServiceInfo, error) {
+	networks, ports, service, found := idc.findContainerInServices(compose, containerName)
+	if !found {
+		return nil, fmt.Errorf("container '%s' not found in compose", containerName)
+	}
+	return &ComposeServiceInfo{
+		// ComposePath is intentionally empty — content lives in memory.
+		Networks:       networks,
+		Ports:          ports,
+		Compose:        compose,
+		AppServiceName: service,
+	}, nil
 }
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.
@@ -545,6 +576,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
+	// Forward the operator's --disable-mapping (root-level config) into
+	// the agent container. The keploy.yml directory isn't bind-mounted
+	// into the agent's filesystem, so viper inside the container would
+	// otherwise default to true and disable record-side mapping
+	// production regardless of the host config.
+	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}
@@ -564,6 +601,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+	if opts.MemoryLimit > 0 {
+		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
 	}
 	if models.IsAnsiDisabled {
 		command = append(command, "--disable-ansi")
@@ -714,7 +754,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "test"},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
-				{Kind: yaml.ScalarNode, Value: "cat /tmp/agent.ready"},
+				{Kind: yaml.ScalarNode, Value: "cat " + AgentReadyFile},
 			}},
 
 			// interval
@@ -805,7 +845,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				})
 			}
 		} else {
-			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
+			idc.logger.Debug("Failed to get current working directory for pprof mount", zap.Error(err))
 		}
 	}
 
@@ -911,6 +951,11 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		return fmt.Errorf("no services found in compose file")
 	}
 
+	keployServiceNode, _, err := idc.findServiceNodeAndName(compose, "keploy-agent")
+	if err != nil {
+		return fmt.Errorf("keploy-agent service not found: %w", err)
+	}
+
 	// Find the app service by container name or service name
 	for i := 0; i < len(compose.Services.Content); i += 2 {
 		if i+1 >= len(compose.Services.Content) {
@@ -939,6 +984,17 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		}
 
 		if isTargetService {
+			// The app will share the keploy-agent network namespace, so resolver
+			// settings must move to keploy-agent. Leaving them on the app either
+			// makes Compose reject the config (dns + network_mode conflict) or
+			// causes the namespace owner to use the wrong /etc/resolv.conf.
+			for _, key := range []string{"dns", "dns_search", "dns_opt"} {
+				if valueNode := idc.getServiceProperty(serviceContentNode, key); valueNode != nil {
+					idc.setServicePropertyNode(keployServiceNode, key, cloneYAMLNode(valueNode))
+					idc.removeServiceProperty(serviceContentNode, key)
+				}
+			}
+
 			// Remove networks and ports from the app service
 			idc.removeServiceProperty(serviceContentNode, "networks")
 			idc.removeServiceProperty(serviceContentNode, "ports")
@@ -993,36 +1049,55 @@ func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value strin
 	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 }
 
-// Helper to add/update an environment variable
-func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
-	var envNode *yaml.Node
-
-	// Find 'environment' key
+// getOrCreateEnvNode finds the 'environment' node inside a service, creating
+// a SequenceNode if none exists. It centralizes the lookup/create logic for
+// environment mutations performed by helper methods.
+func (idc *Impl) getOrCreateEnvNode(serviceNode *yaml.Node) *yaml.Node {
 	for i := 0; i < len(serviceNode.Content); i += 2 {
 		if serviceNode.Content[i].Value == "environment" {
-			envNode = serviceNode.Content[i+1]
-			break
+			return serviceNode.Content[i+1]
 		}
 	}
 
-	// Create 'environment' if missing
-	if envNode == nil {
-		envNode = &yaml.Node{Kind: yaml.SequenceNode}
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
-			envNode,
-		)
-	}
+	// Not found — create it.
+	envNode := &yaml.Node{Kind: yaml.SequenceNode}
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+		envNode,
+	)
+	return envNode
+}
+
+// Helper to add/update an environment variable.
+// If the key already exists, its value is replaced (upsert semantics).
+func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
+	envNode := idc.getOrCreateEnvNode(serviceNode)
 
 	// Handle Sequence (array) style environment: ["KEY=VAL"]
 	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				// Key already exists — update in place.
+				node.Value = fmt.Sprintf("%s=%s", envKey, envValue)
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content, &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Value: fmt.Sprintf("%s=%s", envKey, envValue),
 		})
+		return
 	}
 	// Handle Mapping (dict) style environment: { KEY: VAL }
 	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				// Key already exists — update in place.
+				envNode.Content[i+1].Value = envValue
+				return
+			}
+		}
 		envNode.Content = append(envNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envKey},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: envValue},
@@ -1030,13 +1105,64 @@ func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue strin
 	}
 }
 
-// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS)
+// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS).
+// If the key already exists, the new value is appended (space-separated).
+// If it does not exist, a new entry is created.
 func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
-	// Logic: Find existing key. If found, append string " " + value. If not, create it.
-	// (Simplified implementation reuse addServiceEnvVar for now, assuming override is fine or strictly adding)
-	// For Java Tool Options, users rarely hardcode it in compose, but if they do, we ideally append.
-	// For simplicity in this iteration:
-	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+	envNode := idc.getOrCreateEnvNode(serviceNode)
+
+	// Handle Sequence (array) style: ["KEY=VAL", ...]
+	if envNode.Kind == yaml.SequenceNode {
+		prefix := envKey + "="
+		for _, node := range envNode.Content {
+			if strings.HasPrefix(node.Value, prefix) {
+				existingVal := strings.TrimPrefix(node.Value, prefix)
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				node.Value = node.Value + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
+
+	// Handle Mapping (dict) style: { KEY: VAL }
+	if envNode.Kind == yaml.MappingNode {
+		for i := 0; i < len(envNode.Content)-1; i += 2 {
+			if envNode.Content[i].Value == envKey {
+				existingVal := envNode.Content[i+1].Value
+				existingTokens := strings.Fields(existingVal)
+				newTokens := strings.Fields(appendValue)
+				var missing []string
+				for _, t := range newTokens {
+					if !slices.Contains(existingTokens, t) {
+						missing = append(missing, t)
+					}
+				}
+				if len(missing) == 0 {
+					// All tokens already present — skip to avoid double-injection.
+					return
+				}
+				envNode.Content[i+1].Value = existingVal + " " + strings.Join(missing, " ")
+				return
+			}
+		}
+		// Key not found — add new entry.
+		idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+		return
+	}
 }
 
 // Helper to ensure top-level volumes exists
@@ -1057,6 +1183,54 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 	compose.Volumes.Content = append(compose.Volumes.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
+	)
+}
+
+func cloneYAMLNode(node *yaml.Node) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+
+	cloned := *node
+	if node.Content != nil {
+		cloned.Content = make([]*yaml.Node, len(node.Content))
+		for i, child := range node.Content {
+			cloned.Content[i] = cloneYAMLNode(child)
+		}
+	}
+
+	return &cloned
+}
+
+func (idc *Impl) getServiceProperty(serviceNode *yaml.Node, propertyName string) *yaml.Node {
+	if serviceNode == nil || serviceNode.Content == nil {
+		return nil
+	}
+
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == propertyName {
+			return serviceNode.Content[i+1]
+		}
+	}
+
+	return nil
+}
+
+func (idc *Impl) setServicePropertyNode(serviceNode *yaml.Node, key string, valueNode *yaml.Node) {
+	if serviceNode.Content == nil {
+		serviceNode.Content = make([]*yaml.Node, 0)
+	}
+
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == key {
+			serviceNode.Content[i+1] = valueNode
+			return
+		}
+	}
+
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		valueNode,
 	)
 }
 

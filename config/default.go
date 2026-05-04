@@ -39,9 +39,19 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  healthUrl: ""
+  healthPollTimeout: 60s
   host: "localhost"
   port: 0
   grpcPort: 0
+  ssePort: 0
+  protocol:
+    http:
+      port: 0
+    sse:
+      port: 0
+    grpc:
+      port: 0
   apiTimeout: 5
   skipCoverage: false
   coverageReportPath: ""
@@ -54,8 +64,6 @@ test:
   basePath: ""
   mocking: true
   disableLineCoverage: false
-  disableMockUpload: true
-  useLocalMock: false
   updateTemplate: false
   mustPass: false
   maxFailAttempts: 5
@@ -66,11 +74,24 @@ test:
   compareAll: false
   updateTestMapping: false
   disableAutoHeaderNoise: false
+  # strictMockWindow enforces cross-test bleed prevention. Per-test
+  # (LifetimePerTest) mocks whose request timestamp falls outside the
+  # outer test window are dropped rather than promoted across tests.
+  #
+  # Default TRUE now that every stateful-protocol recorder classifies
+  # mocks finely enough (per-connection data mocks, session vs per-test
+  # distinction for connection-alive commands) that legitimate cross-
+  # test sharing is encoded as session/connection lifetime rather than
+  # implicit out-of-window reuse. If an older recording relies on the
+  # legacy lax behaviour, opt out with strictMockWindow: false here or
+  # export KEPLOY_STRICT_MOCK_WINDOW=0 — the env var wins.
+  strictMockWindow: true
 record:
   recordTimer: 0s
   filters: []
   sync: false
-  maxBufferMemoryMB: 0
+  memoryLimit: 0
+  testCaseNaming: descriptive
 configPath: ""
 bypassRules: []
 disableMapping: true
@@ -114,6 +135,11 @@ func New() *Config {
 	if err != nil {
 		panic(err)
 	}
+	// Defaults for fields whose Go zero value is not the desired default.
+	// EnableIPv6Redirect defaults to true so ::1 traffic is redirected to
+	// the proxy on modern Linux distros where glibc resolves localhost to
+	// ::1 first. Setting it false in config is the opt-in rollback knob.
+	config.Agent.EnableIPv6Redirect = true
 	return config
 }
 

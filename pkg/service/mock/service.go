@@ -71,10 +71,6 @@ type OutgoingConfig struct {
 	// SQLDelay mimics the application startup delay used during test runs.
 	SQLDelay time.Duration
 
-	// FallBackOnMiss, when true, forwards unmatched outgoing calls to the
-	// real upstream instead of returning an error.
-	FallBackOnMiss bool
-
 	// Mocking enables or disables mock interception entirely.
 	Mocking bool
 }

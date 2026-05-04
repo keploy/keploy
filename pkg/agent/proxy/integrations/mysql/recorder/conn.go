@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -63,9 +62,6 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		return res, err
 	}
 
-	// Set the timestamp of the initial request
-	res.reqTimestamp = time.Now()
-
 	// Decode server handshake packet
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
@@ -106,6 +102,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 		return res, err
 	}
+
+	// Stamp reqTimestamp from the actual handshake-response arrival.
+	// CapturedReqTime tracks the most recent request chunk on this
+	// connection, so reading it here pins the timestamp to the wire
+	// arrival of the client's first packet rather than to whatever
+	// stale value was carried forward from a prior request.
+	res.reqTimestamp = models.CapturedReqTime(ctx)
 
 	_, err = destConn.Write(handshakeResponse)
 	if err != nil {
@@ -411,7 +414,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		}
 	}
 
-	res.resTimestamp = time.Now()
+	res.resTimestamp = models.CapturedRespTime(ctx)
 
 	setHandshakeResult(&res, authRes)
 
@@ -837,6 +840,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
 	decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
 
+	// Seed server capabilities from the restored greeting. Without this,
+	// decodeCtx.ServerCaps stays 0 and DeprecateEOF() returns false,
+	// which makes the TextResultSet handler look for an EOF packet
+	// between column definitions and row data. Modern clients
+	// (mysql-connector-python, mysql-connector-j, Go's go-sql-driver
+	// with DEPRECATE_EOF) send the row bytes immediately, and the
+	// recorder aborts with "expected EOF packet for column definition".
+	// Mirror what handleInitialHandshake does on its path.
+	decodeCtx.ServerCaps = sg.CapabilityFlags
+
 	logger.Debug("Post-TLS MySQL: restored server greeting",
 		zap.String("key", storeKey),
 		zap.String("pluginName", pluginName))
@@ -865,6 +878,16 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// and go directly to command phase recording.
 		logger.Debug("Post-TLS MySQL: existing connection detected (seq=0), skipping auth — entering command phase directly")
 
+		// We didn't decode a HandshakeResponse41 on this path, so
+		// ClientCaps is still 0. Assume the client is modern and
+		// advertises CLIENT_DEPRECATE_EOF — this matches every
+		// supported driver (mysql-connector-python/j, Go's
+		// go-sql-driver, Node mysql2). If the server ALSO advertised
+		// it (check on line above), DeprecateEOF() will return true
+		// and the EOF-less result set decode path will be used.
+		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
+		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
@@ -876,7 +899,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Feed the first packet back to the parser by wrapping clientConn.
 		wrappedClient := &pUtils.Conn{
 			Conn:   clientConn,
-			Reader: io.MultiReader(bytes.NewReader(firstPkt), clientConn),
+			Reader: pUtils.NewPrefixReader(firstPkt, clientConn),
 			Logger: logger,
 		}
 
@@ -911,6 +934,13 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if err != nil {
 		return fmt.Errorf("failed to decode post-TLS HandshakeResponse41: %w", err)
 	}
+
+	// Mirror handleInitialHandshake: after decoding the client response,
+	// populate ClientCaps so DeprecateEOF() short-circuits the EOF read
+	// in the TextResultSet/BinaryProtocol handlers. Without this the
+	// recorder aborts on the first SELECT response for modern clients
+	// that negotiate CLIENT_DEPRECATE_EOF.
+	decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
 
 	requests = append(requests, mysql.Request{PacketBundle: *handshakeResponsePkt})
 
@@ -975,7 +1005,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	}
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
-		mocks, entry.ReqTimestamp, time.Now(), opts)
+		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: auth exchange recorded, proceeding to command phase")
 
@@ -1080,7 +1110,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 
 	recordMock(ctx, requests, responses, "config",
 		sslReqPkt.Header.Type, mysql.StatusToString(mysql.OK),
-		mocks, entry.ReqTimestamp, time.Now(), opts)
+		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: recorded synthetic config mock for seq=0 path")
 	return nil

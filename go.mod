@@ -6,7 +6,7 @@ toolchain go1.26.1
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/cilium/ebpf v0.19.0
+	github.com/cilium/ebpf v0.21.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
@@ -54,10 +54,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-require (
-	gopkg.in/yaml.v3 v3.0.1
-	gotest.tools/v3 v3.5.0 // indirect
-)
+require gopkg.in/yaml.v3 v3.0.1
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -78,7 +75,7 @@ require (
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.50.0
 	golang.org/x/text v0.34.0
-	golang.org/x/tools v0.41.0 // indirect
+	golang.org/x/tools v0.41.0
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
 
@@ -95,7 +92,6 @@ require (
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/render v1.0.3
-	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/keploy/jsonDiff v1.0.8
@@ -152,6 +148,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
 	github.com/minio/minlz v1.0.0 // indirect

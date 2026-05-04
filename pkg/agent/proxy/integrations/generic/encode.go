@@ -2,230 +2,263 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
-	"fmt"
 	"io"
 	"net"
-	"strconv"
+	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
-	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml *pUtil.MemoryLimiter) error {
+// captureTeeWriter forwards data to dest (critical path) and non-blocking
+// tees a copy to a capture channel. If the channel is full or recording is
+// paused, capture is silently dropped — forwarding is never affected.
+type captureTeeWriter struct {
+	dest      io.Writer
+	ch        chan []byte
+	stopped   bool
+	closeOnce *sync.Once // shared with the forwarding goroutine's defer close
+}
 
-	var genericRequests []models.Payload
+func (w *captureTeeWriter) stop() {
+	w.stopped = true
+	// Close the channel so the consumer goroutine can exit promptly
+	// instead of blocking until the connection ends.
+	w.closeOnce.Do(func() { close(w.ch) })
+}
 
-	bufStr := string(reqBuf)
-	dataType := models.String
-	if !util.IsASCII(string(reqBuf)) {
-		bufStr = util.EncodeBase64(reqBuf)
-		dataType = "binary"
+func (w *captureTeeWriter) Write(p []byte) (int, error) {
+	// Forward to destination first — this is the critical path.
+	n, err := w.dest.Write(p)
+	if err != nil {
+		return n, err
 	}
-
-	if bufStr != "" {
-		genericRequests = append(genericRequests, models.Payload{
-			Origin: models.FromClient,
-			Message: []models.OutputBinary{
-				{
-					Type: dataType,
-					Data: bufStr,
-				},
-			},
-		})
+	// Non-blocking tee to capture channel.
+	if !w.stopped {
+		if memoryguard.IsRecordingPaused() {
+			w.stop()
+			return n, nil
+		}
+		buf := make([]byte, len(p))
+		copy(buf, p)
+		select {
+		case w.ch <- buf:
+		default:
+			w.stop()
+		}
 	}
+	return n, nil
+}
+
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+
+	// Forward initial request buffer to destination immediately.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
+
+	// If recording is already paused, pure passthrough.
+	if memoryguard.IsRecordingPaused() {
+		return forwardBidirectional(clientConn, destConn)
+	}
+
+	// Capture channels — background goroutine reads these to create mocks.
+	// Buffered to absorb brief processing delays without blocking forwarding.
+	clientCapChan := make(chan []byte, 256)
+	destCapChan := make(chan []byte, 256)
+
+	// Seed initial request buffer into capture.
+	initialBuf := make([]byte, len(reqBuf))
+	copy(initialBuf, reqBuf)
+	clientCapChan <- initialBuf
+
+	// Start background mock creator.
+	go createGenericMocksAsync(ctx, logger, clientCapChan, destCapChan)
+
+	// Forward bidirectionally at wire speed with non-blocking capture tee.
+	// Each tee writer shares a closeOnce with the deferred close so the
+	// channel is closed exactly once (by whichever fires first: capture
+	// stop or connection end).
+	clientCloseOnce := &sync.Once{}
+	destCloseOnce := &sync.Once{}
+
+	done := make(chan struct{}, 2)
+	go func() {
+		defer clientCloseOnce.Do(func() { close(clientCapChan) })
+		tee := &captureTeeWriter{dest: destConn, ch: clientCapChan, closeOnce: clientCloseOnce}
+		_, _ = io.Copy(tee, clientConn)
+		done <- struct{}{}
+	}()
+	go func() {
+		defer destCloseOnce.Do(func() { close(destCapChan) })
+		tee := &captureTeeWriter{dest: clientConn, ch: destCapChan, closeOnce: destCloseOnce}
+		_, _ = io.Copy(tee, destConn)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	return nil
+}
+
+// forwardBidirectional does raw TCP passthrough without any capture.
+func forwardBidirectional(clientConn, destConn net.Conn) error {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		done <- struct{}{}
+	}
+	go cp(destConn, clientConn)
+	go cp(clientConn, destConn)
+	<-done
+	<-done
+	return nil
+}
+
+// createGenericMocksAsync reads captured data from both channels and creates
+// mock entries based on request-response alternation. Runs in a background
+// goroutine — never blocks the forwarding path.
+//
+// Exchange-boundary detection: a request-response pair is flushed to the
+// syncMock buffer the instant the first response chunk arrives, not when
+// the next request starts. Flushing on "next request" is too late for
+// pooled connections — the next request can be seconds away (mongo driver
+// checkout/heartbeat pools), by which point the enterprise capture has
+// already run ResolveRange for the test and the 7-second buffer cutoff in
+// syncMock.ResolveRange discards the pending mock. The consequence was
+// that in static-dedup mode every test after the first recorded zero
+// mocks.
+//
+// The tradeoff: a server reply split into multiple TCP read chunks lands
+// as a single mock here (only the first chunk), with trailing chunks
+// dropped. For the protocols generic is a fallback for (mongo wire,
+// various binary RPC), responses are almost always a single write and
+// therefore one io.Copy chunk. A future protocol-aware parser should
+// supersede generic where framing matters.
+func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, destCh <-chan []byte) {
+	var genericRequests []models.Payload
 	var genericResponses []models.Payload
-
-	clientBuffChan := make(chan []byte)
-	destBuffChan := make(chan []byte)
-	errChan := make(chan error)
-	//TODO: where to close the error channel since it is used in both the go routines
-	//close(errChan)
-
-	// read requests from client
-	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, ml)
-	if err != nil {
-		return fmt.Errorf("error reading from client:%v", err)
-	}
-
-	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, ml)
-	if err != nil {
-		return fmt.Errorf("error reading from destination:%v", err)
-	}
-
-	prevChunkWasReq := false
-	var reqTimestampMock = time.Now()
+	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
+	reqTimestampMock := models.CapturedReqTime(ctx)
 	var resTimestampMock time.Time
 
-	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Int("genericReqs", len(genericRequests)), zap.Int("genericResps", len(genericResponses)))
-	for {
+	flushMock := func() {
+		if len(genericRequests) == 0 || len(genericResponses) == 0 {
+			return
+		}
+		metadata := make(map[string]string)
+		metadata["type"] = "config"
+		if connID, ok := ctx.Value(models.ClientConnectionIDKey).(string); ok {
+			metadata["connID"] = connID
+		}
+		mock := &models.Mock{
+			Version: models.GetVersion(),
+			Name:    "mocks",
+			Kind:    models.GENERIC,
+			Spec: models.MockSpec{
+				GenericRequests:  genericRequests,
+				GenericResponses: genericResponses,
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampMock,
+				Metadata:         metadata,
+			},
+			// Generic TCP has no well-defined protocol for the recorder to
+			// classify commands against; the legacy recorder tags every
+			// exchange Metadata["type"]="config" which DeriveLifetime
+			// previously resolved to LifetimeSession. Stamp that explicitly
+			// so the filter layer's authoritative routing (Lifetime-first,
+			// metadata.type fallback) short-circuits on a single enum
+			// compare — no map probe, no kind fallback.
+			TestModeInfo: models.TestModeInfo{
+				Lifetime:        models.LifetimeSession,
+				LifetimeDerived: true,
+			},
+		}
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.AddMock(mock)
+		}
+		genericRequests = nil
+		genericResponses = nil
+	}
+
+	for clientCh != nil || destCh != nil {
 		select {
 		case <-ctx.Done():
+			flushMock()
+			return
+		case buf, ok := <-clientCh:
+			if !ok {
+				clientCh = nil
+				continue
+			}
+			// Back-stop for the rare case where the previous completed
+			// request/response exchange was not flushed when its first
+			// response chunk arrived. When the next client chunk shows
+			// up, flush that already-paired exchange before starting a
+			// new one. The common case is flushed below on the first
+			// response chunk, so this branch is normally a no-op.
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponsesCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponsesCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-
-				metadata := make(map[string]string)
-				metadata["type"] = "config"
-				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-				// Save the mock
-				mock := &models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequestsCopy,
-						GenericResponses: genericResponsesCopy,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-						Metadata:         metadata,
-					},
-				}
-				if mgr := syncMock.Get(); mgr != nil {
-					mgr.AddMock(mock)
-					return ctx.Err()
-				}
-				return ctx.Err()
+				flushMock()
 			}
-		case buffer := <-clientBuffChan:
-			// Write the request message to the destination
-			_, err := destConn.Write(buffer)
-			if ml != nil {
-				ml.Release(int64(len(buffer)))
+			// Starting a brand-new exchange: drop any orphaned response
+			// chunks from a previous multi-chunk server reply whose
+			// head chunk was already flushed, and reset the request
+			// timestamp to this request's arrival time.
+			if len(genericRequests) == 0 {
+				genericResponses = nil
+				reqTimestampMock = models.CapturedReqTime(ctx)
 			}
-			if err != nil {
-				utils.LogError(logger, err, "failed to write request message to the destination server")
-				return err
-			}
-
-			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponseCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponseCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-				reqTS := reqTimestampMock
-				resTS := resTimestampMock
-				go func(reqs []models.Payload, resps []models.Payload, reqTimestamp, resTimestamp time.Time) {
-					metadata := make(map[string]string)
-					metadata["type"] = "config"
-					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-					// create the mock
-					mock := &models.Mock{
-						Version: models.GetVersion(),
-						Name:    "mocks",
-						Kind:    models.GENERIC,
-						Spec: models.MockSpec{
-							GenericRequests:  reqs,
-							GenericResponses: resps,
-							ReqTimestampMock: reqTimestamp,
-							ResTimestampMock: resTimestamp,
-							Metadata:         metadata,
-						},
-					}
-					if mgr := syncMock.Get(); mgr != nil {
-						mgr.AddMock(mock)
-					}
-
-				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
-				genericRequests = []models.Payload{}
-				genericResponses = []models.Payload{}
-			}
-
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = util.EncodeBase64(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				genericRequests = append(genericRequests, models.Payload{
-					Origin: models.FromClient,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
+			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
 			prevChunkWasReq = true
-		case buffer := <-destBuffChan:
-			if prevChunkWasReq {
-				// store the request timestamp
-				reqTimestampMock = time.Now()
-			}
-			// Write the response message to the client
-			_, err := clientConn.Write(buffer)
-			if ml != nil {
-				ml.Release(int64(len(buffer)))
-			}
-			if err != nil {
-				utils.LogError(logger, err, "failed to write response message to the client")
-				return err
-			}
 
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffDataType = "binary"
+		case buf, ok := <-destCh:
+			if !ok {
+				destCh = nil
+				continue
 			}
+			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
+			resTimestampMock = models.CapturedRespTime(ctx)
 
-			if bufStr != "" {
-				genericResponses = append(genericResponses, models.Payload{
-					Origin: models.FromServer,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
+			// Flush the moment the first response chunk for an
+			// outstanding request arrives. This makes the mock visible
+			// to the syncMock buffer BEFORE the enterprise capture's
+			// ResolveRange call fires for the current test, which in
+			// static-dedup mode is what associates the mock with the
+			// right test window. Waiting any longer (for the next
+			// client chunk or an idle timer) misses the window on
+			// pooled connections where the next request is seconds
+			// away.
+			if prevChunkWasReq && len(genericRequests) > 0 {
+				flushMock()
 			}
-
-			resTimestampMock = time.Now()
-
-			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			prevChunkWasReq = false
-		case err := <-errChan:
-			if err == io.EOF {
-				return nil
-			}
-			if errors.Is(err, pUtil.ErrMemoryLimitExceeded) {
-				logger.Debug("memory limit exceeded, falling back to passthrough for this connection")
-				// Use bidirectional io.Copy on the existing connections
-				// instead of pUtil.PassThrough which dials a new connection.
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
-				return nil
-			}
-			return err
 		}
+	}
+	flushMock()
+}
+
+func encodePayload(buf []byte, origin models.OriginType) models.Payload {
+	bufStr := string(buf)
+	dataType := models.String
+	if !util.IsASCII(string(buf)) {
+		bufStr = util.EncodeBase64(buf)
+		dataType = "binary"
+	}
+	return models.Payload{
+		Origin: origin,
+		Message: []models.OutputBinary{
+			{
+				Type: dataType,
+				Data: bufStr,
+			},
+		},
 	}
 }

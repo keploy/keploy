@@ -4,19 +4,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/platform/auth"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 
+	_ "net/http/pprof"
 	"runtime/pprof"
 )
 
@@ -50,6 +54,56 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+
+	// Start pprof HTTP server for live profiling if PPROF_PORT is set
+	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
+		go func() {
+			addr := "localhost:" + pprofPort
+			logger.Info("pprof server starting", zap.String("addr", addr))
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				logger.Error("pprof server failed; check that PPROF_PORT is a valid port and not already in use, or unset the env var to disable",
+					zap.String("port", pprofPort), zap.Error(err))
+			}
+		}()
+	}
+
+	// Set soft memory limit for GC if GOMEMLIMIT_MB is set.
+	// This makes Go's GC more aggressive when approaching the limit,
+	// reducing peak memory during load without affecting normal operation.
+	if memLimitMB := os.Getenv("GOMEMLIMIT_MB"); memLimitMB != "" {
+		mb, err := strconv.ParseInt(memLimitMB, 10, 64)
+		if err != nil || mb <= 0 {
+			logger.Info("invalid GOMEMLIMIT_MB value, ignoring; expected a positive integer (e.g. GOMEMLIMIT_MB=150)",
+				zap.String("value", memLimitMB))
+		} else {
+			debug.SetMemoryLimit(mb * 1024 * 1024)
+			logger.Info("GOMEMLIMIT set", zap.Int64("MB", mb))
+		}
+	}
+
+	// Start background memory monitor only when GOMEMLIMIT_MB is set.
+	// Calls FreeOSMemory on sharp heap drops to force fast OS page release.
+	// Gated to avoid periodic ReadMemStats overhead for commands that don't need it.
+	if os.Getenv("GOMEMLIMIT_MB") != "" {
+		go func() {
+			var prevInUse uint64
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					var m runtime.MemStats
+					runtime.ReadMemStats(&m)
+					if prevInUse > 0 && m.HeapInuse < prevInUse/2 {
+						debug.FreeOSMemory()
+					}
+					prevInUse = m.HeapInuse
+				}
+			}
+		}()
+	}
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
@@ -143,9 +197,8 @@ func start(ctx context.Context) {
 		utils.LogError(logger, err, errMsg)
 		os.Exit(1)
 	}
-	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, conf, auth)
+	svcProvider := provider.NewServiceProvider(logger, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {

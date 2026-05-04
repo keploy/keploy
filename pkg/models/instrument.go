@@ -100,9 +100,36 @@ type SetupOptions struct {
 	NetworkAliases    map[string][]string
 	BuildDelay        uint64
 	PassThroughPorts  []uint
+	MemoryLimit       uint64
 	ConfigPath        string
 	ExtraArgs         []string
 	EnableSampling    int
+	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
+	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
+	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
+	// program can rewrite ::1 destinations to the v4-mapped proxy address.
+	// When false, the v6 proxy address is left as all-zero and v6 traffic
+	// falls through unredirected — this preserves the legacy zero-address
+	// behaviour as an opt-in rollback knob.
+	EnableIPv6Redirect bool
+	// CAJavaHome, when non-empty, forces the Keploy MITM CA truststore
+	// install (installJavaCAForHome) to target $CAJavaHome/lib/security/
+	// cacerts using $CAJavaHome/bin/keytool, instead of the PATH-resolved
+	// keytool. This is the manual-override knob for the app-aware
+	// java.home detector in pkg/agent/proxy/tls/java_detect.go:
+	// auto-detection from /proc/<ClientNSPID>/environ +
+	// /proc/<ClientNSPID>/exe covers the common SDKMAN / Maven-wrapper /
+	// fat-jar cases, but operators can force a specific JDK with
+	// --ca-java-home when the app is launched via an exotic launcher
+	// that masks both JAVA_HOME and the exe symlink (e.g. containerised
+	// runners that re-exec through a wrapper).
+	//
+	// Empty string = auto-detect (preferred); non-empty = override.
+	CAJavaHome string
+	// InMemoryCompose holds docker-compose YAML content to avoid writing sensitive
+	// environment variables to disk. When non-nil, SetupCompose uses this content
+	// directly instead of reading from a file path extracted from the command.
+	InMemoryCompose []byte
 }
 
 type RunOptions struct {

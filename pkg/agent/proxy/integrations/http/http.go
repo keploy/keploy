@@ -20,6 +20,23 @@ import (
 	"go.uber.org/zap"
 )
 
+// httpMethodPrefixes are pre-computed to avoid per-call []byte allocations.
+var (
+	httpResponsePrefix = []byte("HTTP/")
+	httpMethodGET      = []byte("GET ")
+	httpMethodPOST     = []byte("POST ")
+	httpMethodPUT      = []byte("PUT ")
+	httpMethodPATCH    = []byte("PATCH ")
+	httpMethodDELETE   = []byte("DELETE ")
+	httpMethodOPTIONS  = []byte("OPTIONS ")
+	httpMethodHEAD     = []byte("HEAD ")
+	httpMethodCONNECT  = []byte("CONNECT ")
+	httpVersionMarker  = []byte(" HTTP/")
+)
+
+// maxRequestLineScan caps how far into the first line we scan for " HTTP/".
+const maxRequestLineScan = 8192
+
 func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
 		Initializer: New, Priority: 100,
@@ -44,23 +61,78 @@ type FinalHTTP struct {
 	ResTimestampMock time.Time
 }
 
-// MatchType function determines if the outgoing network call is HTTP by comparing the
-// message format with that of an HTTP text message.
+// MatchType determines if the outgoing network call is HTTP by checking for
+// a well-formed HTTP request line (METHOD path HTTP/version) or a response
+// status prefix (HTTP/version). For requests, it verifies " HTTP/" appears in
+// the first line to prevent false positives from binary protocols that start
+// with method-like ASCII bytes. Response detection only checks the prefix.
 func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
-	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
-		bytes.HasPrefix(buf[:], []byte("GET ")) ||
-		bytes.HasPrefix(buf[:], []byte("POST ")) ||
-		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
-		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
-		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
-		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
-		bytes.HasPrefix(buf[:], []byte("CONNECT "))
-	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", isHTTP))
-	return isHTTP
+	isResponse := bytes.HasPrefix(buf, httpResponsePrefix)
+	isRequest := bytes.HasPrefix(buf, httpMethodGET) ||
+		bytes.HasPrefix(buf, httpMethodPOST) ||
+		bytes.HasPrefix(buf, httpMethodPUT) ||
+		bytes.HasPrefix(buf, httpMethodPATCH) ||
+		bytes.HasPrefix(buf, httpMethodDELETE) ||
+		bytes.HasPrefix(buf, httpMethodOPTIONS) ||
+		bytes.HasPrefix(buf, httpMethodHEAD) ||
+		bytes.HasPrefix(buf, httpMethodCONNECT)
+
+	if !isRequest && !isResponse {
+		h.Logger.Debug("determined the protocol is not HTTP", zap.Bool("isHTTP", false))
+		return false
+	}
+
+	// For requests, verify the first line contains " HTTP/" to confirm it's a
+	// valid HTTP request line and not a binary protocol that coincidentally
+	// starts with method-like ASCII bytes.
+	if isRequest {
+		// Cap the search range first to bound the scan cost on large non-HTTP payloads.
+		scanBuf := buf
+		maxScan := maxRequestLineScan + len(httpVersionMarker)
+		if len(scanBuf) > maxScan {
+			scanBuf = scanBuf[:maxScan]
+		}
+		end := bytes.IndexByte(scanBuf, '\n')
+		if end == -1 {
+			end = len(scanBuf)
+		}
+		if !bytes.Contains(scanBuf[:end], httpVersionMarker) {
+			h.Logger.Debug("HTTP method prefix found but no HTTP version in request line", zap.Bool("isHTTP", false))
+			return false
+		}
+	}
+
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", true))
+	return true
 }
 
+// IsV2 declares that the HTTP parser is migrated to the supervisor + relay
+// + FakeConn architecture (pkg/agent/proxy/proxy_v2.go). The dispatcher
+// type-asserts the matchedParser against integrations.IntegrationsV2 and
+// routes to recordViaSupervisor only when IsV2() returns true.
+//
+// Returning true is unconditional — the HTTP parser has no per-instance
+// configuration that could force it back to the legacy path. The rollback
+// knob is the env KEPLOY_NEW_RELAY=off handled in proxy_v2.go.
+func (h *HTTP) IsV2() bool { return true }
+
+// RecordOutgoing dispatches to the V2 path when the supervisor has
+// attached a session via RecordSession.V2, and to the legacy path
+// otherwise. Keeping both paths live lets the dispatcher / rollback
+// knob (KEPLOY_NEW_RELAY) swap between them without code changes.
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	if session != nil && session.V2 != nil {
+		return h.recordV2(ctx, session.V2)
+	}
+	return h.recordLegacy(ctx, session)
+}
+
+// recordLegacy is the original RecordOutgoing body preserved unchanged.
+// It consumes the legacy RecordSession fields (Ingress / Egress / Mocks)
+// and forwards bytes between the real sockets itself. The V2 path in
+// recordV2 relies on the supervisor's relay to do the forwarding and
+// only observes teed chunks via FakeConn streams.
+func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
@@ -70,7 +142,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MemLimiter)
+	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -101,7 +173,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions, onMockRecorded integrations.PostRecordHook) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
@@ -212,21 +284,40 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
+		// HTTP is a request-response protocol — every exchange is per-test
+		// by construction. No handshake/session tier exists at the HTTP
+		// layer; outbound calls from an application under test are always
+		// bound to the current test window. Stamp LifetimePerTest + mark
+		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
+		// no-op (the recorder is authoritative at emit time). Leaves
+		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
 	}
 
-	if opts.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			// In synchronous mode, always route HTTP mocks through the sync manager.
-			// The manager uses its internal first-request state to decide whether to
-			// buffer or forward mocks for correct time-window based association.
-			mgr.AddMock(newMock)
-			return nil
-		}
+	if onMockRecorded != nil {
+		onMockRecorded(newMock)
 	}
-	// In non-synchronous mode (k8s-proxy), or if no manager is available,
-	// send directly to the mocks channel so the mock is persisted.
-	if mocks != nil {
-		mocks <- newMock
+
+	if mgr := syncMock.Get(); mgr != nil {
+		// Route HTTP mocks through the sync manager. The manager uses its
+		// internal first-request state to decide whether to buffer or forward
+		// mocks for correct time-window based association.
+		mgr.AddMock(newMock)
+		return nil
+	}
+
+	// Fallback: syncMock manager unavailable, send to mocks channel directly.
+	// Use select with ctx so we don't block forever during shutdown.
+	select {
+	case <-ctx.Done():
+		select {
+		case mocks <- newMock:
+		default:
+		}
+	case mocks <- newMock:
 	}
 	return nil
 }

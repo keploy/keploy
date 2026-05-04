@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,6 +226,611 @@ func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:100\nevent:ticker\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:101\nevent:ticker\ndata:{\"value\":2}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:102\nevent:ticker\ndata:{\"value\":3}\n\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedSSEBody := strings.Join([]string{
+		"id:100",
+		"event:ticker",
+		"data:{\"value\":1}",
+		"",
+		"id:101",
+		"event:ticker",
+		"data:{\"value\":2}",
+		"",
+	}, "\n")
+
+	tc := &models.TestCase{
+		Name: "sse-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream; charset=utf-8",
+			},
+			Body: expectedSSEBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "100"},
+						{Key: "event", Value: "ticker"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "101"},
+						{Key: "event", Value: "ticker"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, capturedBody, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := tc.HTTPResp.Body
+	if !matched {
+		respBody = capturedBody
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedSSEBody, respBody)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected server stream to be closed by client after matching SSE queue")
+	}
+}
+
+func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:1\nevent:update\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:2\nevent:update\ndata:{\"value\":999}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "sse-mismatch",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			Body: strings.Join([]string{
+				"id:1",
+				"event:update",
+				"data:{\"value\":1}",
+				"",
+				"id:2",
+				"event:update",
+				"data:{\"value\":2}",
+				"",
+			}, "\n"),
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "1"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "2"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream - should NOT match due to value mismatch
+	noiseKeys := map[string]struct{}{}
+	matched, capturedBody, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+
+	respBody := capturedBody
+	if matched {
+		respBody = tc.HTTPResp.Body
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.NotEqual(t, tc.HTTPResp.Body, respBody)
+	assert.Contains(t, respBody, "999")
+}
+
+func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:1\nevent:update\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:2\nevent:update\ndata:{\"value\":2}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "sse-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			// This intentionally does not match the streamed frames. The stream
+			// comparator must use HTTPResp.StreamBody when present.
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "1"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "2"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	// When matched, use tc.HTTPResp.Body (legacy body)
+	respBody := tc.HTTPResp.Body
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, respBody)
+}
+
+func TestCanonicalizeSSEFrame_318(t *testing.T) {
+	input := "id: 100\nevent: system-alert\ndata: {\"active\": true, \"user\" : \"alice\"}\n"
+	got := canonicalizeSSEFrame(input)
+
+	assert.Equal(t, "id:100\nevent:system-alert\ndata:{\"active\":true,\"user\":\"alice\"}", got)
+}
+
+func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("{\"id\":1,\"ok\":true}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":2,\"ok\":false}\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "ndjson-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1,"ok":true}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2,"ok":false}`},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	// When matched, use tc.HTTPResp.Body (legacy body)
+	respBody := tc.HTTPResp.Body
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, respBody)
+}
+
+func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("{\"id\":1,\"ok\":true}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":2,\"ok\":false}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":3,\"ok\":true}\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := "{\"id\":1,\"ok\":true}\n{\"id\":2,\"ok\":false}\n"
+
+	tc := &models.TestCase{
+		Name: "ndjson-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1,"ok":true}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2,"ok":false}`},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected NDJSON stream to be closed by client after matching queue")
+	}
+}
+
+func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+	const boundary = "myCustomBoundary"
+
+	writePart := func(w http.ResponseWriter, contentType string, body string) {
+		_, _ = w.Write([]byte("--" + boundary + "\r\n"))
+		_, _ = w.Write([]byte("Content-Type: " + contentType + "\r\n\r\n"))
+		_, _ = w.Write([]byte(body))
+		_, _ = w.Write([]byte("\r\n"))
+	}
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		writePart(w, "application/json", `{"frame":1}`)
+		flusher.Flush()
+		writePart(w, "text/plain", "frame-2")
+		flusher.Flush()
+		writePart(w, "text/plain", "frame-3")
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := strings.Join([]string{
+		"--" + boundary,
+		"Content-Type: application/json",
+		"",
+		`{"frame":1}`,
+		"--" + boundary,
+		"Content-Type: text/plain",
+		"",
+		"frame-2",
+		"",
+	}, "\r\n")
+
+	tc := &models.TestCase{
+		Name: "multipart-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "multipart/x-mixed-replace; boundary=" + boundary,
+			},
+			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: expectedBody},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected multipart stream to be closed by client after matching queue")
+	}
+}
+
+func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("[INFO] booting\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("[INFO] ready\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("[INFO] keep-running\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := "[INFO] booting\n[INFO] ready\n"
+
+	tc := &models.TestCase{
+		Name: "plain-stream-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/plain",
+			},
+			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: "[INFO] booting"},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: "[INFO] ready"},
+					},
+				},
+			},
+		},
+	}
+
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected plain text stream to be closed by client after matching queue")
+	}
+}
+
+func TestCompareSSEFrame_DataJSONTypeMismatch_322(t *testing.T) {
+	logger := zap.NewNop()
+	match, reason := compareSSEFrame(
+		"data:{\"value\":1}",
+		"data:not-json",
+		nil,
+		logger,
+	)
+
+	assert.False(t, match)
+	assert.Equal(t, "data-json-type mismatch", reason)
+}
+
+func TestCompareSSEFields_MultilineDataNormalization_322A(t *testing.T) {
+	logger := zap.NewNop()
+
+	expected := []sseField{
+		{key: "id", value: "1", hasValue: true},
+		{key: "data", value: "line-1\nline-2", hasValue: true},
+	}
+	actual := parseSSEFrame("id:1\ndata:line-1\ndata:line-2")
+
+	match, reason := compareSSEFields(expected, actual, nil, logger)
+	assert.True(t, match, "multiline SSE data should compare equal after normalization")
+	assert.Equal(t, "", reason)
+}
+
+func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
+	now := time.Now().UTC()
+	tc := &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Timestamp: now,
+		},
+		HTTPResp: models.HTTPResp{
+			Timestamp: now.Add(1500 * time.Millisecond),
+		},
+	}
+
+	timeout := ComputeStreamingTimeoutSeconds(tc, 2)
+	assert.Equal(t, uint64(12), timeout)
+
+	preferConfigured := ComputeStreamingTimeoutSeconds(tc, 30)
+	assert.Equal(t, uint64(30), preferConfigured)
+
+	fallback := ComputeStreamingTimeoutSeconds(&models.TestCase{}, 7)
+	assert.Equal(t, uint64(7), fallback)
+
+	defaultMin := ComputeStreamingTimeoutSeconds(&models.TestCase{}, 0)
+	assert.Equal(t, uint64(10), defaultMin)
+}
+
 // TestIsTime_VariousFormats_808 covers multiple scenarios for the IsTime function,
 // including standard date formats (RFC3339, UnixDate), numeric timestamps as strings,
 // and invalid inputs to ensure it correctly identifies time-like strings.
@@ -413,6 +1019,18 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 
 // TestFilterMocks_678 validates the filtering and sorting of mocks in Test and Config modes.
 func TestFilterMocks_678(t *testing.T) {
+	// All subtests in TestFilterMocks_678 assert LAX-mode behaviour
+	// (out-of-window non-config mocks promoted to the unfiltered pool
+	// rather than dropped). The env var KEPLOY_STRICT_MOCK_WINDOW is
+	// parsed once at init and cached in strictWindowEnvOverride; an
+	// enabling value makes filterByTimeStamp behave strict regardless
+	// of the perCall flag, so our strict=false arguments no longer
+	// produce the expected lax output. Skip the whole test — every
+	// subtest is affected. Strict-mode behaviour is covered by
+	// TestFilterByTimeStamp_StrictMode below (which runs unconditionally).
+	if strictWindowEnvOverride {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW set to enabling value — lax assertions unreachable; strict coverage runs elsewhere")
+	}
 	logger := zap.NewNop()
 	ctx := context.Background()
 
@@ -426,7 +1044,9 @@ func TestFilterMocks_678(t *testing.T) {
 	allMocks := []*models.Mock{mock3, mock1, mock2, mockNoTime, mockNonKeploy}
 
 	t.Run("filterByTimeStamp_NoFilters", func(t *testing.T) {
-		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, time.Time{}, time.Time{})
+		// strict=false (default lax) — subject under test here is the
+		// no-window shortcut, not the containment rule.
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, time.Time{}, time.Time{}, false)
 		assert.Len(t, filtered, 5)
 		assert.Len(t, unfiltered, 0)
 	})
@@ -434,7 +1054,11 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("filterByTimeStamp_ValidRange", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before)
+		// Existing assertions were written under lax Option-2 semantics
+		// (req-only inside window, out-of-window mocks kept as unfiltered).
+		// Pass strict=false to preserve that contract; strict mode is
+		// exercised separately by TestFilterByTimeStamp_StrictMode.
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, allMocks, after, before, false)
 
 		// Check filtered mocks
 		require.Len(t, filtered, 3)
@@ -458,7 +1082,9 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("FilterTcsMocks", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		result := FilterTcsMocks(ctx, logger, allMocks, after, before)
+		// strict=false preserves the original lax expectations of this test
+		// (written before Option-1 strict containment existed).
+		result := FilterTcsMocks(ctx, logger, allMocks, after, before, false)
 		require.Len(t, result, 3)
 		assert.Equal(t, "mockNoTime", result[0].Name) // Zero time comes first
 		assert.Equal(t, "mock2", result[1].Name)
@@ -468,7 +1094,8 @@ func TestFilterMocks_678(t *testing.T) {
 	t.Run("FilterConfigMocks", func(t *testing.T) {
 		after := now.Add(-1 * time.Hour)
 		before := now.Add(1 * time.Hour)
-		result := FilterConfigMocks(ctx, logger, allMocks, after, before)
+		// strict=false — see FilterTcsMocks note above.
+		result := FilterConfigMocks(ctx, logger, allMocks, after, before, false)
 		require.Len(t, result, 5)
 		// Sorted filtered part
 		assert.Equal(t, "mockNoTime", result[0].Name)
@@ -481,6 +1108,12 @@ func TestFilterMocks_678(t *testing.T) {
 }
 
 func TestFilterConfigMocks_PrioritizesLateMockByRequestTime_3738(t *testing.T) {
+	// Reproducer asserts lax-mode behaviour for out-of-window mocks;
+	// skip when KEPLOY_STRICT_MOCK_WINDOW forces strict on. See
+	// TestFilterMocks_678's guard for the same reason.
+	if strictWindowEnvOverride {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW is set — unset it to run lax-mode assertions")
+	}
 	logger := zap.NewNop()
 	ctx := context.Background()
 
@@ -512,17 +1145,417 @@ func TestFilterConfigMocks_PrioritizesLateMockByRequestTime_3738(t *testing.T) {
 		},
 	}
 
-	filtered, unfiltered := filterByTimeStamp(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	// strict=false — reproducer test validates legacy Option-2 behaviour
+	// (trailing response kept in filtered even though it landed a
+	// microsecond past beforeTime).
+	filtered, unfiltered := filterByTimeStamp(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime, false)
 	require.Len(t, filtered, 2)
 	assert.ElementsMatch(t, []string{"mock-137", "mock-138"}, []string{filtered[0].Name, filtered[1].Name})
 	require.Len(t, unfiltered, 1)
 	assert.Equal(t, "mock-62", unfiltered[0].Name)
 
-	result := FilterConfigMocks(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime)
+	result := FilterConfigMocks(ctx, logger, []*models.Mock{trailingData, staleData, countQuery}, testReqTime, testRespTime, false)
 	require.Len(t, result, 3)
 	assert.Equal(t, "mock-137", result[0].Name)
 	assert.Equal(t, "mock-138", result[1].Name)
 	assert.Equal(t, "mock-62", result[2].Name)
+}
+
+// TestFilterByTimeStamp_StrictMode validates the strict-window opt-in.
+// The in-window predicate is REQUEST-timestamp only (responses may
+// legitimately straggle past beforeTime), so strict and lax both keep
+// mocks whose req is inside [after,before]. The behavioural difference
+// is SOLELY out-of-window handling: strict DROPS non-config mocks that
+// would leak into the unfiltered pool, while lax preserves the legacy
+// cross-test config pool promotion. Config-tagged mocks survive in
+// both modes.
+func TestFilterByTimeStamp_StrictMode(t *testing.T) {
+	// The process-wide env value (strictWindowEnvOverride /
+	// strictWindowEnvExplicitOff) is parsed once at init and then
+	// cached — we can't os.Setenv() it mid-test. Per-subtest skips
+	// below keep each assertion running when its mode is reachable
+	// and skip only the ones that can't.
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	inWindow := &models.Mock{
+		Name: "in-window-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now, ResTimestampMock: now.Add(time.Second)},
+	}
+	straggler := &models.Mock{
+		// Req inside window but Res past beforeTime — under the req-only
+		// containment rule, BOTH lax and strict keep it in the filtered
+		// set (response straggle is normal async completion, not bleed).
+		Name: "straggler-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now, ResTimestampMock: now.Add(2 * time.Hour)},
+	}
+	stale := &models.Mock{
+		// Both endpoints before window — both modes drop from filteredMocks
+		// (lax pushes to unfiltered, strict drops entirely).
+		Name: "stale-data", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{ReqTimestampMock: now.Add(-3 * time.Hour), ResTimestampMock: now.Add(-3 * time.Hour)},
+	}
+	staleConfig := &models.Mock{
+		// Stale but type=config — strict keeps in unfiltered pool, lax also keeps.
+		Name: "stale-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now.Add(-3 * time.Hour),
+			ResTimestampMock: now.Add(-3 * time.Hour),
+			Metadata:         map[string]string{"type": "config"},
+		},
+	}
+	all := []*models.Mock{inWindow, straggler, stale, staleConfig}
+
+	t.Run("default lax promotes stale-data to unfiltered (legacy leak)", func(t *testing.T) {
+		// strict=false (default). Req-in-window rule for the filtered
+		// partition; out-of-window non-config mocks get promoted to the
+		// unfiltered pool (the legacy bleed). Env forcing strict on
+		// defeats the lax path — skip this subtest only.
+		if strictWindowEnvOverride {
+			t.Skip("KEPLOY_STRICT_MOCK_WINDOW forces strict on — lax semantics not reachable")
+		}
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, false)
+		filteredNames := mockNames(filtered)
+		unfilteredNames := mockNames(unfiltered)
+		assert.ElementsMatch(t, []string{"in-window-data", "straggler-data"}, filteredNames)
+		assert.ElementsMatch(t, []string{"stale-data", "stale-config"}, unfilteredNames)
+	})
+
+	t.Run("opt-in strict keeps straggler (req in window); drops stale-data; keeps stale-config", func(t *testing.T) {
+		// strict=true — opt into Option-1 containment. Env forcing
+		// strict OFF defeats the strict path — skip this subtest only.
+		if strictWindowEnvExplicitOff {
+			t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict semantics not reachable")
+		}
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, true)
+		filteredNames := mockNames(filtered)
+		unfilteredNames := mockNames(unfiltered)
+		assert.ElementsMatch(t, []string{"in-window-data", "straggler-data"}, filteredNames)
+		assert.ElementsMatch(t, []string{"stale-config"}, unfilteredNames)
+	})
+}
+
+// Locks in the contract that a mock whose response timestamp precedes
+// its request timestamp is DROPPED from both filtered and unfiltered
+// partitions, in BOTH strict and lax modes — the response-before-
+// request state is always an inconsistent recording (clock skew,
+// serialisation bug, or file corruption) and keeping it in either pool
+// risks confusing the matcher's scoring. See filterByTimeStamp's
+// "defensive sanity check" in pkg/util.go.
+func TestFilterByTimeStamp_DropsInvalidTimestampOrder(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	// Req inside window, but Res BEFORE Req by 1s — invalid order.
+	invalid := &models.Mock{
+		Name: "invalid-order", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(-time.Second),
+		},
+	}
+	// Same shape but type=config — still dropped; invalid-order check
+	// fires before the config-vs-data partition.
+	invalidConfig := &models.Mock{
+		Name: "invalid-order-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(-time.Second),
+			Metadata:         map[string]string{"type": "config"},
+		},
+	}
+	// Sanity: a well-ordered in-window mock survives alongside drops.
+	valid := &models.Mock{
+		Name: "valid-in-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(time.Second),
+		},
+	}
+	all := []*models.Mock{invalid, invalidConfig, valid}
+
+	t.Run("lax mode drops invalid-order from BOTH partitions", func(t *testing.T) {
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, false)
+		assert.ElementsMatch(t, []string{"valid-in-window"}, mockNames(filtered))
+		assert.Empty(t, mockNames(unfiltered))
+	})
+
+	t.Run("strict mode drops invalid-order from BOTH partitions", func(t *testing.T) {
+		filtered, unfiltered := filterByTimeStamp(ctx, logger, all, after, before, true)
+		assert.ElementsMatch(t, []string{"valid-in-window"}, mockNames(filtered))
+		assert.Empty(t, mockNames(unfiltered))
+	})
+}
+
+func mockNames(ms []*models.Mock) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
+// TestFilterByTimeStampTierAware_StartupPreservation pins the
+// tier-aware strictMockWindow contract. Given the five cases from the
+// contract (startup, in-window, stale prev-test, session, connection)
+// plus the stale-past-window case, the filter KEEPs startup + session +
+// connection + in-window and DROPs only genuinely stale cross-test
+// per-test mocks. See pkg/util.go's filterByTimeStampTierAware doc.
+func TestFilterByTimeStampTierAware_StartupPreservation(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// firstWindowStart < previousTestEnd < currentStart < currentEnd
+	//         |             |                 |              |
+	//      2:00 UTC      2:30 UTC          3:00 UTC       3:10 UTC
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	previousTestEnd := time.Date(2026, 4, 22, 2, 30, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// startup: per-test mock recorded BEFORE any test fired (req <
+	// firstWindowStart). Legacy blanket-drop killed this; tier-aware
+	// must preserve.
+	startup := &models.Mock{
+		Name: "startup-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// inWindow: per-test mock whose req is inside [currentStart, currentEnd].
+	inWindow := &models.Mock{
+		Name: "in-window-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// stalePrev: per-test mock from a previous test window
+	// (firstWindowStart <= req < currentStart). REAL bleed — must drop.
+	stalePrev := &models.Mock{
+		Name: "stale-prev-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-5 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// session: LifetimeSession is always preserved (spans tests).
+	session := &models.Mock{
+		Name: "session-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-10 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// connection: LifetimeConnection is always preserved (conn-bounded).
+	connection := &models.Mock{
+		Name: "connection-scoped", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: previousTestEnd.Add(-15 * time.Minute),
+			ResTimestampMock: previousTestEnd.Add(-15*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// stalePast: per-test mock whose req is PAST currentEnd (future-test
+	// bleed). Also genuine stale and must be dropped.
+	stalePast := &models.Mock{
+		Name: "stale-past-test", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentEnd.Add(10 * time.Minute),
+			ResTimestampMock: currentEnd.Add(10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{startup, inWindow, stalePrev, session, connection, stalePast}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// The startup per-test mock survives in `filtered` so MockManager's
+	// SetMocksWithWindow partition-by-firstWindowStart routes it into
+	// the startup tree. The in-window per-test mock also lives in
+	// `filtered` — that's its current tier.
+	assert.ElementsMatch(t, []string{"startup-pertest", "in-window-pertest"}, mockNames(filtered),
+		"startup + in-window per-test mocks must survive in filtered slice")
+
+	// Session and connection mocks go to unfiltered (reusable-across-
+	// tests pool). Stale previous-test and stale future-test per-test
+	// mocks are DROPPED — genuine cross-test bleed.
+	assert.ElementsMatch(t, []string{"session-scoped", "connection-scoped"}, mockNames(unfiltered),
+		"session + connection must survive in unfiltered slice; stale per-test must drop")
+}
+
+// TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback pins the
+// fallback contract: when firstWindowStart is zero (no test has fired
+// yet on the underlying MockManager, or the caller couldn't thread
+// it), the tier-aware filter reverts to the legacy blanket-drop
+// semantics so behaviour is strictly no worse than before the fix.
+func TestFilterByTimeStampTierAware_ZeroFirstStart_Fallback(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict fallback not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	now := time.Now()
+	after := now.Add(-1 * time.Hour)
+	before := now.Add(1 * time.Hour)
+
+	// Per-test mock predating the current window. Under tier-aware with
+	// a known firstWindowStart this would be preserved as startup; under
+	// zero-firstWindowStart fallback it behaves like the legacy blanket
+	// drop (dropped under strict).
+	preWindow := &models.Mock{
+		Name: "pre-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now.Add(-3 * time.Hour),
+			ResTimestampMock: now.Add(-3*time.Hour + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	inWindow := &models.Mock{
+		Name: "in-window", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: now,
+			ResTimestampMock: now.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{preWindow, inWindow}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, after, before, true, time.Time{})
+
+	// Zero firstWindowStart → legacy blanket-drop — pre-window dropped,
+	// in-window kept.
+	assert.ElementsMatch(t, []string{"in-window"}, mockNames(filtered),
+		"zero firstWindowStart must fall back to legacy blanket drop for per-test mocks")
+	assert.Empty(t, mockNames(unfiltered),
+		"zero firstWindowStart strict mode must leave per-test unfiltered empty")
+}
+
+// TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative
+// pins the mockdb/filter-layer authoritative per-test router contract:
+// pool routing uses ONLY Lifetime + ReqTimestampMock. The recorder-
+// stamped metadata["scope"] string is informational on the wire and
+// MUST NOT influence routing. This regression-guards the debug-bundle
+// symptom where perTest-lifetime mocks with a recorder-stamped
+// scope=session (context-probe captured between test-window
+// transitions) were incorrectly dropped into the session pool.
+//
+// Contract:
+//
+//  1. mock{Lifetime=perTest, metadata.scope=session, req ∈ window} →
+//     per-test pool (filtered). The timestamp attribution wins; scope
+//     is ignored.
+//  2. mock{Lifetime=session, metadata.scope=test:N, req ∈ window} →
+//     session pool (unfiltered). Lifetime-first short-circuit wins;
+//     neither scope nor the fact that req happens to land inside the
+//     current test's window matters for the session-lifetime class.
+//  3. mock{Lifetime=connection, metadata.scope=session, req ∈ window} →
+//     session pool (unfiltered). Same lifetime-first semantics as (2).
+func TestFilterByTimeStamp_ScopeMetadataIgnored_LifetimeAndTimestampAuthoritative(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — lifetime-first routing only exercised under strict")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	start := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
+	end := start.Add(10 * time.Second)
+	reqInWindow := start.Add(time.Second)
+	resInWindow := reqInWindow.Add(time.Millisecond)
+
+	// Case 1: the user's exact anomaly shape — a perTest-lifetime mock
+	// with recorder-stamped scope=session, timestamp inside the window.
+	// Must land in the per-test (filtered) pool via timestamp
+	// attribution; the scope tag is noise.
+	perTestWithSessionScope := &models.Mock{
+		Name:    "pertest-scope-session-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			// The recorder stamped scope=session (context-probe
+			// thought it was between tests) AND type=mocks (semantic
+			// class classified the query as per-test). Exactly the
+			// debug-bundle's "lifetime: perTest, scope: session" shape.
+			Metadata: map[string]string{"type": "mocks", "scope": "session"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+	// Case 2: a session-lifetime mock stamped scope=test:N, req in
+	// window. Lifetime-first short-circuit wins — session pool.
+	sessionWithTestScope := &models.Mock{
+		Name:    "session-scope-test-anomaly",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "config", "scope": "test:sap-customer360"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	// Case 3: a connection-lifetime mock stamped scope=session, req in
+	// window. Lifetime-first short-circuit wins — session/unfiltered
+	// pool (MockManager seeds the per-connID pool from unfiltered).
+	connWithSessionScope := &models.Mock{
+		Name:    "connection-scope-session",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "connection", "scope": "session", "connID": "pg-conn-1"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeConnection},
+	}
+	// Case 4 (baseline sanity): an ordinary perTest-lifetime mock with
+	// no scope tag at all, req in window. Must still land in per-test.
+	// Guards against a regression where the lifetime-first branch
+	// accidentally swallows perTest traffic.
+	perTestNoScope := &models.Mock{
+		Name:    "pertest-no-scope",
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqInWindow,
+			ResTimestampMock: resInWindow,
+			Metadata:         map[string]string{"type": "mocks"},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+
+	all := []*models.Mock{perTestWithSessionScope, sessionWithTestScope, connWithSessionScope, perTestNoScope}
+
+	filtered, unfiltered := filterByTimeStampTierAware(ctx, logger, all, start, end, true, start)
+
+	assert.ElementsMatch(t,
+		[]string{"pertest-scope-session-anomaly", "pertest-no-scope"},
+		mockNames(filtered),
+		"perTest-lifetime mocks in window must land in the per-test pool irrespective of metadata[\"scope\"]")
+	assert.ElementsMatch(t,
+		[]string{"session-scope-test-anomaly", "connection-scope-session"},
+		mockNames(unfiltered),
+		"Session/Connection-lifetime mocks must land in the session pool irrespective of metadata[\"scope\"] or whether req sits inside the current window")
 }
 
 // TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
@@ -560,6 +1593,7 @@ func TestResolveTestTarget(t *testing.T) {
 		name            string
 		originalTarget  string
 		urlReplacements map[string]string
+		portMappings    map[uint32]uint32
 		configHost      string
 		appPort         uint16
 		configPort      uint32
@@ -611,6 +1645,24 @@ func TestResolveTestTarget(t *testing.T) {
 			configPort:      9090,
 			isHTTP:          true,
 			expectedTarget:  "http://new-host:9090/api",
+		},
+		{
+			name:            "HTTP_PortMappingOverridesReplacementPort",
+			originalTarget:  "http://example.com/api",
+			urlReplacements: map[string]string{"example.com": "localhost:3000"},
+			portMappings:    map[uint32]uint32{3000: 4000},
+			configPort:      9090, // Still ignored by replacement-with-port before mapping.
+			isHTTP:          true,
+			expectedTarget:  "http://localhost:4000/api",
+		},
+		{
+			name:           "HTTP_PortMappingOverridesConfigAndAppPort",
+			originalTarget: "http://example.com/api",
+			appPort:        8080,
+			configPort:     9090,
+			portMappings:   map[uint32]uint32{9090: 7070},
+			isHTTP:         true,
+			expectedTarget: "http://example.com:7070/api",
 		},
 		{
 			name:           "HTTPS_DefaultPort",
@@ -676,11 +1728,19 @@ func TestResolveTestTarget(t *testing.T) {
 			isHTTP:         false,
 			expectedTarget: "[::1]:9090",
 		},
+		{
+			name:           "GRPC_PortMappingOverridesConfigPort",
+			originalTarget: "example.com:50051",
+			configPort:     50052,
+			portMappings:   map[uint32]uint32{50052: 50053},
+			isHTTP:         false,
+			expectedTarget: "example.com:50053",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
+			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.portMappings, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -695,11 +1755,240 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	logger := zap.NewNop()
 
 	t.Run("HTTP_InvalidURL", func(t *testing.T) {
-		_, err := ResolveTestTarget("http://[::1]:namedport", nil, "", 0, 0, true, logger)
+		_, err := ResolveTestTarget("http://[::1]:namedport", nil, nil, "", 0, 0, true, logger)
 		assert.Error(t, err)
 	})
 
 	t.Run("GRPC_ConfigHost_ReplaceError", func(t *testing.T) {
 		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
 	})
+}
+
+// --- updateTemplateValuesFromHTTPResp: response-header walk tests ---
+//
+// These cover the gap noted against listmonk's session-cookie round-trip: at replay
+// time the live Set-Cookie/Authorization/etc. values must be pulled out of
+// resp.Header and written into utils.TemplatizedValues so that subsequent tests
+// that render {{.session}}/{{.token}}/... see the fresh value rather than the
+// stale record-time one.
+
+func runHeaderUpdateTest(
+	t *testing.T,
+	recordedHeader, liveHeader map[string]string,
+	initialTemplatedValues map[string]interface{},
+) (changed bool, final map[string]interface{}) {
+	t.Helper()
+	logger := zap.NewNop()
+
+	templated := models.HTTPResp{
+		StatusCode: 302,
+		Header:     recordedHeader,
+		Body:       "",
+	}
+	live := models.HTTPResp{
+		StatusCode: 302,
+		Header:     liveHeader,
+		Body:       "",
+	}
+
+	current := make(map[string]interface{}, len(initialTemplatedValues))
+	prev := make(map[string]interface{}, len(initialTemplatedValues))
+	for k, v := range initialTemplatedValues {
+		current[k] = v
+		prev[k] = v
+	}
+
+	changed = updateTemplateValuesFromHTTPResp(logger, templated, live, current, prev)
+	return changed, current
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_SetCookie(t *testing.T) {
+	recorded := map[string]string{
+		"Set-Cookie": "session={{.session}}; Path=/; HttpOnly",
+	}
+	live := map[string]string{
+		"Set-Cookie": "session=LIVE123; Path=/; HttpOnly",
+	}
+	initial := map[string]interface{}{"session": "RECORDED_VAL"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed, "expected Set-Cookie placeholder update to report changed=true")
+	assert.Equal(t, "LIVE123", final["session"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_BearerAuthorizationHeader(t *testing.T) {
+	recorded := map[string]string{
+		"Authorization": "Bearer {{.token}}",
+	}
+	live := map[string]string{
+		"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+	}
+	initial := map[string]interface{}{"token": "OLD_TOKEN"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "eyJhbGciOiJIUzI1NiJ9.payload.sig", final["token"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_GenericHeader(t *testing.T) {
+	recorded := map[string]string{
+		"X-Request-Id": "{{.reqId}}",
+	}
+	live := map[string]string{
+		"X-Request-Id": "abc-123-def-456",
+	}
+	initial := map[string]interface{}{"reqId": "old-id"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "abc-123-def-456", final["reqId"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_HeaderWithLiteralPrefix(t *testing.T) {
+	recorded := map[string]string{
+		"X-Correlation": "trace-{{.id}}",
+	}
+	live := map[string]string{
+		"X-Correlation": "trace-DEF456",
+	}
+	initial := map[string]interface{}{"id": "OLDID"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.True(t, changed)
+	assert.Equal(t, "DEF456", final["id"])
+}
+
+func TestUpdateTemplateValuesFromHTTPResp_NoPlaceholder_NoOp(t *testing.T) {
+	recorded := map[string]string{
+		"X-Foo": "bar",
+	}
+	live := map[string]string{
+		"X-Foo": "bar",
+	}
+	// There's a templated value, but it's unrelated to this header -- must not
+	// leak into the map under a new key, and the existing key must stay untouched.
+	initial := map[string]interface{}{"unrelated": "keepme"}
+
+	changed, final := runHeaderUpdateTest(t, recorded, live, initial)
+	assert.False(t, changed, "no placeholder in recorded header should mean no template change")
+	assert.Equal(t, "keepme", final["unrelated"])
+	_, foundFoo := final["X-Foo"]
+	assert.False(t, foundFoo, "must not invent a new template key from a literal header")
+}
+
+// TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-
+// pool partition. Contract:
+//   - LifetimeConnection           → startupMocks (connection-scoped reuse)
+//   - LifetimeSession              → unfilteredMocks (session-scoped reuse)
+//   - LifetimePerTest in-window    → filteredMocks
+//   - legacy metadata.type=config  → unfilteredMocks (fallback)
+//   - legacy metadata.type=connection → startupMocks (fallback)
+//   - legacy no-type per-test      → filteredMocks (legacy fallback path)
+//   - startup-init (req < firstWindowStart) under strict → startupMocks
+func TestFilterByTimeStampThreeTier(t *testing.T) {
+	if strictWindowEnvExplicitOff {
+		t.Skip("KEPLOY_STRICT_MOCK_WINDOW=0 forces strict off — strict-tier semantics not reachable")
+	}
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	firstWindowStart := time.Date(2026, 4, 22, 2, 0, 0, 0, time.UTC)
+	currentStart := time.Date(2026, 4, 22, 3, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 4, 22, 3, 10, 0, 0, time.UTC)
+
+	// In-window PerTest → filtered.
+	inWindow := &models.Mock{
+		Name: "perTest-in", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: currentStart.Add(time.Minute),
+			ResTimestampMock: currentStart.Add(time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Session → unfiltered.
+	session := &models.Mock{
+		Name: "session", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-10 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-10*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeSession,
+			LifetimeDerived: true,
+		},
+	}
+	// Connection → startup.
+	conn := &models.Mock{
+		Name: "conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-5 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-5*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimeConnection,
+			LifetimeDerived: true,
+		},
+	}
+	// Startup-init PerTest (req < firstWindowStart) → startup.
+	startupInit := &models.Mock{
+		Name: "startup-init", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			ReqTimestampMock: firstWindowStart.Add(-2 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-2*time.Minute + time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+	// Legacy config (no Lifetime, just metadata.type=config) → unfiltered.
+	legacyConfig := &models.Mock{
+		Name: "legacy-config", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config"},
+			ReqTimestampMock: firstWindowStart.Add(-20 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-20*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy connection (no Lifetime, just metadata.type=connection) → startup.
+	legacyConn := &models.Mock{
+		Name: "legacy-conn", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "connection"},
+			ReqTimestampMock: firstWindowStart.Add(-25 * time.Minute),
+			ResTimestampMock: firstWindowStart.Add(-25*time.Minute + time.Millisecond),
+		},
+	}
+	// Legacy per-test (no Lifetime, metadata.type="mocks") — treated as PerTest.
+	legacyPerTest := &models.Mock{
+		Name: "legacy-pertest", Version: "api.keploy.io/v1beta1",
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks"},
+			ReqTimestampMock: currentStart.Add(2 * time.Minute),
+			ResTimestampMock: currentStart.Add(2*time.Minute + time.Millisecond),
+		},
+	}
+
+	all := []*models.Mock{inWindow, session, conn, startupInit, legacyConfig, legacyConn, legacyPerTest}
+
+	filtered, unfiltered, startup := FilterByTimeStampThreeTier(ctx, logger, all, currentStart, currentEnd, true, firstWindowStart)
+
+	// Helper to collect names.
+	names := func(ms []*models.Mock) []string {
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return out
+	}
+
+	assert.ElementsMatch(t, []string{"perTest-in", "legacy-pertest"}, names(filtered),
+		"perTest in-window mocks land in filtered; legacy-untyped perTest falls through")
+	assert.ElementsMatch(t, []string{"session", "legacy-config"}, names(unfiltered),
+		"session-lifetime + legacy config-tagged land in unfiltered")
+	assert.ElementsMatch(t, []string{"conn", "startup-init", "legacy-conn"}, names(startup),
+		"connection-lifetime + startup-init PerTest + legacy connection-tagged land in startup")
 }

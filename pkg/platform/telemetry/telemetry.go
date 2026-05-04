@@ -29,6 +29,15 @@ type Telemetry struct {
 	inflight       sync.WaitGroup
 	inflightN      atomic.Int64
 	closed         atomic.Bool
+
+	// Batched counters for high-frequency recording events.
+	// Instead of spawning a goroutine per event, these are incremented atomically
+	// and flushed periodically by a single background goroutine.
+	recordedTests atomic.Int64
+	recordedMocks atomic.Int64
+	flushOnce     sync.Once
+	flushDone     chan struct{} // closed when flush loop exits; initialized in NewTelemetry
+	closeCh       chan struct{} // signals the flush loop to stop
 }
 
 type Options struct {
@@ -50,6 +59,8 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 		GlobalMap:      gm,
 		InstallationID: opt.InstallationID,
 		client:         &http.Client{Timeout: 2 * time.Second}, // matches Shutdown drain timeout
+		flushDone:      make(chan struct{}),
+		closeCh:        make(chan struct{}),
 	}
 }
 
@@ -130,14 +141,11 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 }
 
 func (tel *Telemetry) RecordedTestAndMocks() {
-	dataMap := map[string]interface{}{
-		"mocks": make(map[string]int),
+	if !tel.Enabled {
+		return
 	}
-	tel.SendTelemetry("RecordedTestAndMocks", dataMap)
-}
-
-func (tel *Telemetry) GenerateUT() {
-	tel.SendTelemetry("GenerateUT")
+	tel.recordedTests.Add(1)
+	tel.ensureFlushLoop()
 }
 
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
@@ -152,10 +160,49 @@ func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 }
 
 func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
-	dataMap := map[string]interface{}{
-		"mock": mockType,
+	if !tel.Enabled {
+		return
 	}
-	tel.SendTelemetry("RecordedTestCaseMock", dataMap)
+	tel.recordedMocks.Add(1)
+	tel.ensureFlushLoop()
+}
+
+// ensureFlushLoop starts a single background goroutine that periodically
+// flushes batched recording counters. This replaces the per-event goroutine
+// pattern that previously spawned thousands of goroutines under load.
+func (tel *Telemetry) ensureFlushLoop() {
+	tel.flushOnce.Do(func() {
+		go func() {
+			defer close(tel.flushDone)
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					tel.flushRecordingCounters()
+				case <-tel.closeCh:
+					tel.flushRecordingCounters() // final flush
+					return
+				}
+			}
+		}()
+	})
+}
+
+// flushRecordingCounters sends a single batched telemetry event with
+// accumulated test and mock counts, then resets the counters.
+// Uses sendTracked so Shutdown() waits for the HTTP request to complete.
+func (tel *Telemetry) flushRecordingCounters() {
+	tests := tel.recordedTests.Swap(0)
+	mocks := tel.recordedMocks.Swap(0)
+	if tests == 0 && mocks == 0 {
+		return
+	}
+	dataMap := map[string]interface{}{
+		"recorded_tests": tests,
+		"recorded_mocks": mocks,
+	}
+	tel.sendTracked("RecordedBatch", dataMap)
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
@@ -244,12 +291,28 @@ func (tel *Telemetry) Shutdown() {
 	if !tel.Enabled {
 		return
 	}
+
+	// Flush remaining recording counters BEFORE setting closed,
+	// since sendTracked rejects events when closed is true.
+	tel.flushRecordingCounters()
+
 	tel.mu.Lock()
 	if !tel.closed.CompareAndSwap(false, true) {
 		tel.mu.Unlock()
 		return
 	}
 	tel.mu.Unlock()
+
+	// Signal the flush loop goroutine to exit.
+	close(tel.closeCh)
+
+	// Wait for the flush loop goroutine to finish so it doesn't leak.
+	// Uses a short timeout to avoid blocking shutdown if the loop never started.
+	select {
+	case <-tel.flushDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	if tel.inflightN.Load() == 0 {
 		return
 	}

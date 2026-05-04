@@ -2,16 +2,20 @@
 package testdb
 
 import (
-	"bytes"
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -22,16 +26,112 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// NamingStrategy selects how default test case filenames are generated
+// during recording.
+type NamingStrategy string
+
+const (
+	// NamingDescriptive derives slugs from the HTTP method+path or
+	// gRPC service/method of the recorded request.
+	NamingDescriptive NamingStrategy = "descriptive"
+	// NamingSequential preserves the legacy test-N.yaml numbering.
+	NamingSequential NamingStrategy = "sequential"
+)
+
 type TestYaml struct {
-	TcsPath string
-	logger  *zap.Logger
+	TcsPath        string
+	logger         *zap.Logger
+	namingStrategy NamingStrategy
+
+	// lastIndex caches the max test-index per test-set path so upsert
+	// can mint "test-N" names without re-reading tests/ on every
+	// insert. pprof measured 16% of the record client's CPU in
+	// FindLastIndex at ~3000 accumulated tests; at steady state every
+	// new test caused a getdents64 of the full directory.
+	// Only used by the sequential naming path; descriptive mode keys
+	// per-slug indices off NextIndexForPrefix instead.
+	lastIndex sync.Map // map[string]*atomic.Int64
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
-	return &TestYaml{
-		TcsPath: tcsPath,
-		logger:  logger,
+	return NewWithNaming(logger, tcsPath, NamingDescriptive)
+}
+
+// NewWithNaming constructs a TestYaml that uses the given naming
+// strategy for test cases without an explicit name.
+func NewWithNaming(logger *zap.Logger, tcsPath string, strategy NamingStrategy) *TestYaml {
+	if strategy == "" {
+		strategy = NamingDescriptive
 	}
+	return &TestYaml{
+		TcsPath:        tcsPath,
+		logger:         logger,
+		namingStrategy: strategy,
+	}
+}
+
+// ParseNamingStrategy converts a user-supplied config string into a
+// NamingStrategy, tolerating leading/trailing whitespace and case
+// differences. It returns an error for unrecognised values so that
+// callers can surface config typos instead of silently falling back.
+// The returned strategy is always usable — unknown inputs default to
+// NamingDescriptive so the caller may choose to log-and-continue.
+func ParseNamingStrategy(s string) (NamingStrategy, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", string(NamingDescriptive):
+		return NamingDescriptive, nil
+	case string(NamingSequential):
+		return NamingSequential, nil
+	default:
+		return NamingDescriptive, fmt.Errorf(
+			"unknown testCaseNaming %q: supported values are %q and %q",
+			s, NamingDescriptive, NamingSequential,
+		)
+	}
+}
+
+// validateNameComponent rejects raw path components that would let a
+// caller escape the keploy directory once they reach filepath.Join.
+// We must reject path separators and ".." on the *unjoined* string
+// because filepath.Join calls filepath.Clean, which collapses ".."
+// segments before any downstream ValidatePath ever sees them — so
+// inputs like testSetID="../etc" turn into "etc/tests" and pass the
+// post-Join check even though they escape the configured root.
+func validateNameComponent(label, s string) error {
+	if s == "" {
+		return nil
+	}
+	if strings.ContainsAny(s, `/\`) || strings.Contains(s, "..") || s == "." {
+		return fmt.Errorf("invalid %s %q: must not contain path separators or parent references", label, s)
+	}
+	return nil
+}
+
+// nextTestIndex returns the next available test-N index for tcsPath.
+// yaml.FindLastIndex already returns "max existing + 1" (i.e. the
+// next available index on disk), so the first call seeds the counter
+// with that value and returns it directly. Subsequent calls on the
+// same tcsPath take the atomic Add(1) path. Safe for concurrent
+// upserts on the same test-set.
+func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
+	if v, ok := ts.lastIndex.Load(tcsPath); ok {
+		return int(v.(*atomic.Int64).Add(1)), nil
+	}
+	seed, err := yaml.FindLastIndex(tcsPath, ts.logger)
+	if err != nil {
+		return 0, err
+	}
+	// Store seed so the next caller sees Add(1)=seed+1, preserving
+	// the "one monotonically-increasing counter per tcsPath" contract.
+	var counter atomic.Int64
+	counter.Store(int64(seed))
+	actual, loaded := ts.lastIndex.LoadOrStore(tcsPath, &counter)
+	if loaded {
+		// Another goroutine raced us and won the LoadOrStore; advance
+		// on the winning counter instead of overwriting it.
+		return int(actual.(*atomic.Int64).Add(1)), nil
+	}
+	return seed, nil
 }
 
 type tcsInfo struct {
@@ -62,7 +162,7 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 
 func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
 	if latestRunID == "" {
-		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
+		ts.logger.Debug("No latest run ID provided, returning empty test set IDs")
 		return []string{}, nil
 	}
 
@@ -80,6 +180,36 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	}
 
 	return testSetReports, nil
+}
+
+func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseName string) (*models.TestCase, error) {
+	// Validate inputs to prevent directory traversal.
+	if filepath.Base(testSetID) != testSetID || strings.Contains(testSetID, "..") {
+		return nil, fmt.Errorf("invalid test set ID %q: must not contain path separators or '..'", testSetID)
+	}
+	if filepath.Base(testCaseName) != testCaseName || strings.Contains(testCaseName, "..") {
+		return nil, fmt.Errorf("invalid test case name %q: must not contain path separators or '..'", testCaseName)
+	}
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+	testPath, err := yaml.ValidatePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := yaml.ReadFile(ctx, ts.logger, testPath, testCaseName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("test case %q is empty", testCaseName)
+	}
+	var doc *yaml.NetworkTrafficDoc
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("test case %q is nil after unmarshal", testCaseName)
+	}
+	return Decode(doc, ts.logger)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
@@ -118,7 +248,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		if len(data) == 0 {
-			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			ts.logger.Debug("skipping empty testcase", zap.String("testcase name", name))
 			continue
 		}
 
@@ -130,7 +260,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 
 		if testCase == nil {
-			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", name))
 			continue
 		}
 
@@ -198,19 +328,63 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	// Reject path-separator/".." injection on the raw components
+	// before filepath.Join cleans them away. yaml.ValidatePath only
+	// runs after Join, by which point the input has already been
+	// normalised through filepath.Clean — so a hostile testSetID
+	// like "../etc" would be silently rewritten into a path that
+	// passes the no-".." check while still escaping ts.TcsPath.
+	if err := validateNameComponent("testSetID", testSetID); err != nil {
+		return tcsInfo{name: "", path: ""}, err
+	}
+	if err := validateNameComponent("test case name", tc.Name); err != nil {
+		return tcsInfo{name: "", path: ""}, err
+	}
+	// Validate the joined testcase directory at the top of upsert so
+	// the deferred placeholder cleanup, saveAssets and the temp-file
+	// rename all operate on the same (potentially Clean'd) value
+	// rather than on the raw input. Helpers such as claimName
+	// validate the path again on their own; this is just the local
+	// invariant for upsert's bookkeeping.
+	tcsPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests"))
+	if err != nil {
+		return tcsInfo{name: "", path: ""}, fmt.Errorf("validate testcase directory: %w", err)
+	}
 	var tcsName string
+	var reservedPlaceholder bool
 	if tc.Name == "" {
-		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+		claimed, err := ts.claimName(tcsPath, tc)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
-		tcsName = fmt.Sprintf("test-%v", lastIndx)
+		tcsName = claimed
+		reservedPlaceholder = true
 	} else {
 		tcsName = tc.Name
 	}
 
-	err := ts.saveAssets(testSetID, tc, tcsName)
+	// If anything after the atomic filename reservation fails before
+	// we successfully write the final yaml, remove the empty
+	// placeholder we left behind in claimName so the testset
+	// directory doesn't accumulate stale 0-byte files that would
+	// also skew subsequent NextIndexForPrefix scans.
+	writeSucceeded := false
+	defer func() {
+		if reservedPlaceholder && !writeSucceeded {
+			placeholder := filepath.Join(tcsPath, tcsName+".yaml")
+			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
+				// This is a secondary failure during error handling —
+				// the primary upsert error is already returned to the
+				// caller. Surface the cleanup miss at Debug so it
+				// stays discoverable without polluting normal logs.
+				ts.logger.Debug("failed to remove placeholder after upsert error",
+					zap.String("path", placeholder),
+					zap.Error(rmErr))
+			}
+		}
+	}()
+
+	err = ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
@@ -221,30 +395,179 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 	yamlTc.Name = tcsName
 
-	var buf bytes.Buffer
-	encoder := yamlLib.NewEncoder(&buf)
-	encoder.SetIndent(2) // Set indent to 2 spaces to match the original style
-	err = encoder.Encode(&yamlTc)
-	if err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, err
-	}
-	data := buf.Bytes()
+	// Stream YAML directly to disk instead of buffering in memory.
+	// This avoids allocating a large bytes.Buffer per test case.
 
-	_, err = yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
+	// Validate the output path to prevent directory traversal
+	yamlPath, err := yaml.ValidatePath(filepath.Join(tcsPath, tcsName+".yaml"))
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
 	}
 
-	data = append([]byte(utils.GetVersionAsComment()), data...)
-
-	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
+	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*.yaml.tmp")
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	writer := bufio.NewWriter(tmpFile)
+	if version := utils.GetVersionAsComment(); version != "" {
+		if _, err := writer.WriteString(version); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
+		}
+	}
+
+	encoder := yamlLib.NewEncoder(writer)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&yamlTc); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+	if err := writer.Flush(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
+	}
+	// Match the 0o644 file mode used by the hardened CreateYamlFile —
+	// os.CreateTemp creates with 0o600 by default, so explicitly chmod
+	// to the read-everyone, write-owner mode the rest of the testdb
+	// tree now uses.
+	if err := tmpFile.Chmod(0o644); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close temp file: %w", err)
+	}
+	cleanup = false
+
+	// Replace the destination with the freshly-written temp file.
+	//
+	// On POSIX, os.Rename atomically replaces an existing target —
+	// which is what we want, because claimName has already created
+	// a zero-byte placeholder at yamlPath that holds the name
+	// reservation. Skipping the explicit pre-rename Remove on POSIX
+	// keeps that reservation alive throughout the swap, so a
+	// concurrent recorder running claimName can't O_EXCL-claim the
+	// same filename in the gap (and the deferred placeholder
+	// cleanup can't accidentally delete a rival's reservation if
+	// the rename later fails).
+	//
+	// Windows' Rename can't replace an existing file (it errors
+	// EEXIST), so the Stat+Remove dance is still required there.
+	// That platform retains a narrow race between Remove and
+	// Rename which we accept as a stdlib limitation; the
+	// concurrent-recorder scenario this addresses is rare on
+	// Windows in practice.
+	if runtime.GOOS == "windows" {
+		if _, statErr := os.Stat(yamlPath); statErr == nil {
+			if err := os.Remove(yamlPath); err != nil {
+				os.Remove(tmpPath)
+				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase yaml: %w", err)
+			}
+		} else if !os.IsNotExist(statErr) {
+			os.Remove(tmpPath)
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase yaml: %w", statErr)
+		}
+	}
+	if err := os.Rename(tmpPath, yamlPath); err != nil {
+		os.Remove(tmpPath)
+		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	writeSucceeded = true
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
+}
+
+// generateName produces a default filename for a recorded test case
+// based on the active naming strategy. Descriptive mode derives a slug
+// from the request and appends a collision-resolving suffix; sequential
+// mode preserves the legacy test-N numbering.
+func (ts *TestYaml) generateName(tcsPath string, tc *models.TestCase) (string, error) {
+	if ts.namingStrategy == NamingSequential {
+		idx, err := ts.nextTestIndex(tcsPath)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("test-%d", idx), nil
+	}
+
+	slug := BuildTestCaseSlug(tc)
+	idx, err := yaml.NextIndexForPrefix(tcsPath, slug)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%d", slug, idx), nil
+}
+
+// maxNameClaimAttempts bounds the retry loop in claimName so a
+// persistent filesystem error can't spin forever. It must comfortably
+// exceed the number of recorders a user could realistically run
+// against the same testset directory in parallel. The per-attempt
+// cost is a single directory scan plus one failed OpenFile, so
+// raising the bound is cheap; the value is sized well above any
+// plausible concurrent-recorder count.
+const maxNameClaimAttempts = 256
+
+// claimName atomically reserves a unique filename for an auto-named
+// test case. It calls generateName, then attempts to create the target
+// file with O_CREATE|O_EXCL so two concurrent recorders writing to the
+// same testset directory cannot end up writing to the same path. On a
+// collision (another process wrote that name between our directory
+// scan and the create), it rescans the directory for a new index and
+// retries. The zero-length file created here is only a name
+// reservation: upsert later writes the encoded testcase body into a
+// sibling temp file and replaces the reservation in place via
+// os.Rename (POSIX atomically replaces; Windows requires the explicit
+// remove-then-rename guarded in upsert).
+func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, error) {
+	// Modes match yaml.CreateYamlFile (0o755 directories, 0o644
+	// files). The effective file mode is further masked by the
+	// process umask.
+	validatedPath, err := yaml.ValidatePath(tcsPath)
+	if err != nil {
+		return "", fmt.Errorf("validate testcase directory: %w", err)
+	}
+	tcsPath = validatedPath
+	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+		return "", fmt.Errorf("create testcase directory: %w", err)
+	}
+	var lastName string
+	for attempt := 0; attempt < maxNameClaimAttempts; attempt++ {
+		name, err := ts.generateName(tcsPath, tc)
+		if err != nil {
+			return "", err
+		}
+		lastName = name
+		target := filepath.Join(tcsPath, name+".yaml")
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			// Surface any Close error to the caller — on networked
+			// filesystems (NFS, SMB) Close is when some writes are
+			// actually flushed, so a broken reservation must not
+			// proceed. Remove the half-reserved file first so a
+			// retry picks a fresh name rather than EEXIST-looping.
+			if closeErr := f.Close(); closeErr != nil {
+				_ = os.Remove(target)
+				return "", fmt.Errorf("close reserved testcase file %q: %w", name, closeErr)
+			}
+			return name, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("reserve testcase file %q: %w", name, err)
+		}
+	}
+	return "", fmt.Errorf("failed to allocate a unique testcase name after %d attempts (last candidate %q)", maxNameClaimAttempts, lastName)
 }
 
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
@@ -282,7 +605,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return err
 	}
 	if len(data) == 0 {
-		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
+		ts.logger.Debug("skipping empty testcase", zap.String("testcase name", testCaseID))
 		return nil
 	}
 	var testCase *yaml.NetworkTrafficDoc
@@ -294,7 +617,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 	}
 
 	if testCase == nil {
-		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
 		return nil
 	}
 

@@ -9,10 +9,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-type MockDownload struct {
-	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
-}
-
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -27,6 +23,7 @@ type Config struct {
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	JSONOutput            bool                `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
 	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
@@ -34,9 +31,7 @@ type Config struct {
 	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
-	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
@@ -54,28 +49,14 @@ type Config struct {
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
-	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
+	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
+	// sensitive environment variables (secrets, tokens) to disk. When set, the
+	// compose command uses "-f -" and pipes this content via stdin.
+	InMemoryCompose []byte `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Agent struct {
 	models.SetupOptions
-}
-
-type UtGen struct {
-	SourceFilePath     string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
-	TestFilePath       string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
-	CoverageReportPath string  `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"`
-	TestCommand        string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
-	CoverageFormat     string  `json:"coverageFormat" yaml:"coverageFormat" mapstructure:"coverageFormat"`
-	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
-	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
-	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
-	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
-	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
-	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
-	AdditionalPrompt   string  `json:"additionalPrompt" yaml:"additionalPrompt" mapstructure:"additionalPrompt"`
-	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
-	Flakiness          bool    `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
 }
 
 type Templatize struct {
@@ -83,31 +64,27 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
-	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
-	// MaxBufferMemoryMB sets the maximum memory (in MB) for proxy record
-	// buffers. The zero value (default) means unlimited — no memory limit
-	// is enforced and all traffic is recorded.
-	MaxBufferMemoryMB uint64 `json:"maxBufferMemoryMB" yaml:"maxBufferMemoryMB" mapstructure:"maxBufferMemoryMB"`
-}
-
-type ReRecord struct {
-	SelectedTests []string        `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters       []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	Host          string          `json:"host" yaml:"host" mapstructure:"host"`
-	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
-	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
-	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
-	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
-	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
+	Filters     []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// TestCaseNaming controls how default test case filenames are generated.
+	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
+	// "sequential" preserves the legacy `test-N.yaml` numbering.
+	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
+	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// MockFormat selects the on-disk format for recorded mocks.
+	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
+	// format all tooling expects. "gob" writes a binary mocks.gob — a
+	// ~28% CPU reduction on the record client at high throughput, at
+	// the cost of not being grep/diff-friendly and having no cross-
+	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
+	// takes precedence over this field for ad-hoc experimentation.
+	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
 }
 
 type Contract struct {
@@ -133,41 +110,45 @@ type Normalize struct {
 }
 
 type Test struct {
-	SelectedTests          map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	GlobalNoise            Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	ReplaceWith            ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
-	Delay                  uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	Host                   string              `json:"host" yaml:"host" mapstructure:"host"`
-	Port                   uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	GRPCPort               uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout             uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	SkipCoverage           bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
-	CoverageReportPath     string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	IgnoreOrdering         bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
-	MongoPassword          string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Language               models.Language     `json:"language" yaml:"language" mapstructure:"language"`
-	RemoveUnusedMocks      bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
-	PreserveFailedMocks    bool                `json:"preserveFailedMocks" yaml:"preserveFailedMocks" mapstructure:"preserveFailedMocks"` // skip mock pruning when tests fail (set by k8s-proxy autoreplay)
-	FallBackOnMiss         bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`                // Deprecated: this flag is ignored. Replay is now always deterministic.
-	JacocoAgentPath        string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
-	BasePath               string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	Mocking                bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
-	IgnoredTests           map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
-	DisableLineCoverage    bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	DisableMockUpload      bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
-	UseLocalMock           bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
-	UpdateTemplate         bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
-	MustPass               bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
-	MaxFailAttempts        uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
-	MaxFlakyChecks         uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
-	ProtoFile              string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
-	ProtoDir               string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
-	ProtoInclude           []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
-	CompareAll             bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
-	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
-	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
-	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
-	CmdUsed                string              `json:"-" yaml:"-" mapstructure:"-"`                                                                // Full command used for the test run (set at runtime)
+	SelectedTests               map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
+	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
+	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	SSEPort                     uint32              `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
+	Protocol                    ProtocolConfig      `json:"protocol" yaml:"protocol" mapstructure:"protocol"`
+	APITimeout                  uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	SkipCoverage                bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
+	CoverageReportPath          string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
+	IgnoreOrdering              bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
+	MongoPassword               string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
+	Language                    models.Language     `json:"language" yaml:"language" mapstructure:"language"`
+	RemoveUnusedMocks           bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
+	PreserveFailedMocks         bool                `json:"preserveFailedMocks" yaml:"preserveFailedMocks" mapstructure:"preserveFailedMocks"` // skip mock pruning when tests fail (set by k8s-proxy autoreplay)
+	FallBackOnMiss              bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`                // Deprecated: this flag is ignored. Replay is now always deterministic.
+	JacocoAgentPath             string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
+	BasePath                    string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	Mocking                     bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	IgnoredTests                map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+	DisableLineCoverage         bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
+	UpdateTemplate              bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
+	MustPass                    bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
+	MaxFailAttempts             uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
+	MaxFlakyChecks              uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
+	ProtoFile                   string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir                    string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude                []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CompareAll                  bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
+	SchemaMatch                 bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
+	UpdateTestMapping           bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
+	DisableAutoHeaderNoise      bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"`                                    // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
+	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
+	CmdUsed                     string              `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 }
 
 type Report struct {
@@ -190,8 +171,21 @@ type ReplaceWith struct {
 }
 
 type ReplaceWithMap struct {
-	URL map[string]string `json:"url" yaml:"url" mapstructure:"url"`
+	URL  map[string]string `json:"url" yaml:"url" mapstructure:"url"`
+	Port map[uint32]uint32 `json:"port" yaml:"port" mapstructure:"port"`
 }
+
+// ProtocolSettings holds per-protocol configuration. Add new fields here
+// to extend all protocols without changing the map structure.
+type ProtocolSettings struct {
+	Port uint32 `json:"port" yaml:"port" mapstructure:"port"`
+}
+
+// ProtocolConfig maps protocol names (e.g. "http", "sse", "grpc") to their
+// settings. The map schema allows additional protocol names in the config
+// without schema changes, but only protocols recognized by the application
+// are currently used by the replay and protocol-handling logic.
+type ProtocolConfig map[string]ProtocolSettings
 
 type SelectedTests struct {
 	TestSet string   `json:"testSet" yaml:"testSet" mapstructure:"testSet"`
