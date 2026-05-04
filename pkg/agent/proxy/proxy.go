@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"sort"
@@ -202,11 +203,90 @@ type Proxy struct {
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
 	skipListener bool
+
+	// recordBufferCap and recordBufferQueueSize mirror
+	// config.Record.RecordBuffer at proxy-construction time. Snapshotted
+	// here (instead of plumbing the full *config.Config through every
+	// per-connection helper) because these are read once per relay
+	// construction in recordViaSupervisor and never mutated after the
+	// proxy is built. Zero values fall through to the relay package's
+	// own defaults via withDefaults().
+	recordBufferCap       int64
+	recordBufferQueueSize int
 }
 
 // SetSkipListener disables the TCP accept loop.
 func (p *Proxy) SetSkipListener(skip bool) {
 	p.skipListener = skip
+}
+
+// Safe ranges for the user-tunable record buffer. Below the min the
+// recorder drops on the first chunk for any non-trivial response;
+// above the max the per-connection memory footprint becomes a footgun
+// (with thousands of concurrent recorded connections, total RAM
+// = max_conns × cap). Zero means "fall through to relay defaults"
+// and is NOT clamped — that's the signal-to-defer path.
+const (
+	minRecordBufferCap   int64 = 1 << 20  // 1 MiB
+	maxRecordBufferCap   int64 = 2 << 30  // 2 GiB
+	minRecordBufferQueue       = 64
+	maxRecordBufferQueue       = 1 << 16 // 65536
+)
+
+// clampRecordBuffer validates user-supplied record-buffer values
+// and clamps them to safe ranges, logging warnings for adjustments.
+// Returns values suitable for relay.Config.PerConnCap and TeeChanBuf.
+//
+// Zero inputs pass through as zero (relay.withDefaults applies
+// built-in defaults). Out-of-range values are clamped + warned, NOT
+// rejected — record-path failure must never crash the agent.
+func clampRecordBuffer(logger *zap.Logger, capBytes uint64, queue int) (int64, int) {
+	var outCap int64
+	switch {
+	case capBytes == 0:
+		outCap = 0
+	case capBytes > math.MaxInt64 || int64(capBytes) > maxRecordBufferCap:
+		// uint64 overflow into int64-negative is also caught here.
+		logger.Warn("record-buffer maxMemoryPerConnection above safe maximum; clamping",
+			zap.Uint64("requested", capBytes),
+			zap.Int64("clamped", maxRecordBufferCap),
+			zap.Int64("max", maxRecordBufferCap),
+		)
+		outCap = maxRecordBufferCap
+	case int64(capBytes) < minRecordBufferCap:
+		logger.Warn("record-buffer maxMemoryPerConnection below safe minimum; clamping",
+			zap.Uint64("requested", capBytes),
+			zap.Int64("clamped", minRecordBufferCap),
+			zap.Int64("min", minRecordBufferCap),
+		)
+		outCap = minRecordBufferCap
+	default:
+		outCap = int64(capBytes)
+	}
+
+	var outQueue int
+	switch {
+	case queue == 0:
+		outQueue = 0
+	case queue > maxRecordBufferQueue:
+		logger.Warn("record-buffer queueSize above safe maximum; clamping",
+			zap.Int("requested", queue),
+			zap.Int("clamped", maxRecordBufferQueue),
+			zap.Int("max", maxRecordBufferQueue),
+		)
+		outQueue = maxRecordBufferQueue
+	case queue < minRecordBufferQueue:
+		logger.Warn("record-buffer queueSize below safe minimum; clamping",
+			zap.Int("requested", queue),
+			zap.Int("clamped", minRecordBufferQueue),
+			zap.Int("min", minRecordBufferQueue),
+		)
+		outQueue = minRecordBufferQueue
+	default:
+		outQueue = queue
+	}
+
+	return outCap, outQueue
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -491,7 +571,20 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		// legitimate direct access and we intentionally do not expose a
 		// setter helper for a one-line test-only override.
 		dnsForwardTimeout: 2 * time.Second,
+
+		// Snapshot record-buffer tuning. Cast through int64 for the
+		// byte-budget field; uint64 → int64 saturating cast guards
+		// against operator misconfiguration like 18 EiB. The relay's
+		// withDefaults() applies built-in defaults when these are
+		// zero or negative, so the zero-config path keeps working.
+		recordBufferCap:       int64(opts.Record.RecordBuffer.MaxMemoryPerConnection),
+		recordBufferQueueSize: opts.Record.RecordBuffer.QueueSize,
 	}
+	proxy.recordBufferCap, proxy.recordBufferQueueSize = clampRecordBuffer(
+		logger,
+		opts.Record.RecordBuffer.MaxMemoryPerConnection,
+		opts.Record.RecordBuffer.QueueSize,
+	)
 
 	// Plumb the proxy logger into the package-singleton SyncMockManager
 	// so its drop-path Error emissions actually reach the host logger.

@@ -189,7 +189,7 @@ func (s *Session) MarkMockIncomplete(reason string) {
 		return
 	}
 	if !s.mockIncomplete.Swap(true) && s.Logger != nil {
-		s.Logger.Debug("mock marked incomplete", zap.String("reason", reason))
+		s.Logger.Warn("mock marked incomplete", zap.String("reason", reason), zap.String("connID", s.ClientConnID))
 	}
 }
 
@@ -298,6 +298,12 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// connection goes idle, producing spurious aborts after a
 		// benign drop (memory pressure, chunk gate, short write).
 		s.mockIncomplete.Store(false)
+		if s.Logger != nil {
+			s.Logger.Warn("emitMockCore: dropped mock due to mockIncomplete flag",
+				zap.String("connID", s.ClientConnID),
+				zap.String("mockName", m.Name),
+			)
+		}
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}

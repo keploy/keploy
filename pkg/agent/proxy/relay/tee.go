@@ -185,9 +185,10 @@ func (t *tee) drop(reason string) {
 		t.onDrop(reason)
 	}
 	if t.logger != nil {
-		t.logger.Debug("relay: tee drop",
+		t.logger.Warn("relay: tee drop",
 			zap.String("dir", t.dir.String()),
 			zap.String("reason", reason),
+			zap.Uint64("drops_total", t.drops.Load()),
 		)
 	}
 }
