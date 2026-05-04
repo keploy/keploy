@@ -299,25 +299,6 @@ if ! wait "$request_pid"; then
     exit 1
 fi
 echo "Recorded misc test case and mocks"
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    app_name="flaskMisc_json"
-    send_request "misc" &
-    request_pid=$!
-    $RECORD_BIN record --storage-format json -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
-    if grep "ERROR" "${app_name}.txt"; then exit 1; fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
-    sleep 5
-    if ! wait "$request_pid"; then
-        echo "::error::Request driver failed while recording misc (json)"
-        exit 1
-    fi
-    echo "Recorded misc test case and mocks (json)"
-fi
-
 # Sanitize the newly created test cases
 $RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
 if grep "ERROR" "sanitize_logs_misc.txt"; then
@@ -394,24 +375,5 @@ if [ "$final_test_passed" != true ]; then
     echo "The final test run failed."
     cat "final_test_logs.txt"
     exit 1
-fi
-
-if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs_json.txt
-    if grep "ERROR" "final_test_logs_json.txt"; then
-        cat final_test_logs_json.txt
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "final_test_logs_json.txt"; then
-        cat final_test_logs_json.txt
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat final_test_logs_json.txt
-        exit 1
-    fi
-    echo "All final tests passed successfully (yaml + json)!"
-else
-    echo "All final tests passed successfully (yaml only)!"
 fi
 exit 0

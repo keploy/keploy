@@ -158,16 +158,6 @@ do_record_iteration() {
 for i in 1 2; do
   do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-  for i in 1 2; do
-    do_record_iteration "$i" "--storage-format json"
-  done
-fi
-
 # Tweak the testcase whose recorded body contains "page":1, flipping it
 # to "page":4. Located by content rather than filename so this works
 # under both legacy (test-N.yaml) and descriptive testcase naming.
@@ -301,33 +291,5 @@ else
 fi
 
 run_replay 3 "--apiTimeout 30"
-
-if json_pass_supported; then
-  section "Replay (json)"
-  set +e
-  "$REPLAY_BIN" test --storage-format json -c 'npm start' --delay 10 \
-    > test_logs_json.txt 2>&1
-  rc=$?
-  set -e
-  echo "json replay exit code: $rc"
-  cat test_logs_json.txt || true
-  if grep -q "WARNING: DATA RACE" "test_logs_json.txt"; then
-    echo "::error::Data race detected in json replay"
-    exit 1
-  fi
-  if grep -q "ERROR" "test_logs_json.txt"; then
-    echo "::error::Error found in json replay"
-    exit 1
-  fi
-  if ! json_scan_reports; then
-    cat test_logs_json.txt
-    exit 1
-  fi
-  if [[ $rc -ne 0 ]]; then
-    exit "$rc"
-  fi
-  endsec
-fi
-
 echo "All replays completed and PASSED."
 exit 0

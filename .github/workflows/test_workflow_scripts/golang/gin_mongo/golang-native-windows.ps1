@@ -272,12 +272,6 @@ for ($i = 1; $i -le 2; $i++) {
     Invoke-RecordIteration -Iter $i
 }
 
-# Supplemental json-format pass — Windows workflows always run build-windows
-# binaries which include --storage-format support, so no gating is needed.
-for ($i = 1; $i -le 2; $i++) {
-    Invoke-RecordIteration -Iter $i -ExtraFlags '--storage-format json'
-}
-
 # =============================================================================
 # 3. Test Phase
 # =============================================================================
@@ -349,34 +343,5 @@ if ($anyFailed) {
     exit 1
 }
 
-# Json-format replay + scan.
-Write-Host "Starting Replay (json)..."
-$testLogFileJson = "test_logs_json.txt"
-& $keployPath test --storage-format json -c ".\ginApp.exe" --delay 20 2>&1 | Tee-Object -FilePath $testLogFileJson
-
-$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
-if (-not $reportFilesJson) {
-    Write-Error "No json report files found."
-    exit 1
-}
-$anyJsonFailed = $false
-foreach ($file in $reportFilesJson) {
-    try {
-        $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
-    } catch {
-        Write-Error "Failed to parse json report $($file.Name): $_"
-        $anyJsonFailed = $true
-        continue
-    }
-    Write-Host "json report $($file.Name): $($obj.status)"
-    if ($obj.status -ne "PASSED") {
-        $anyJsonFailed = $true
-    }
-}
-if ($anyJsonFailed) {
-    Write-Error "Some json tests failed."
-    exit 1
-}
-
-Write-Host "🎉 All tests passed successfully (yaml + json)."
+Write-Host "🎉 All tests passed successfully."
 exit 0

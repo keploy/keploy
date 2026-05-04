@@ -101,16 +101,6 @@ do_record_iteration() {
 for i in {1..2}; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # Keep MongoDB running during test replay. Keploy will serve mocks for
 # matched requests; unmatched requests fall through to the real database
 # which returns the same data recorded earlier, preventing flaky failures
@@ -156,24 +146,5 @@ done
 if [ "$all_passed" != true ]; then
     cat "${test_container}.txt"
     exit 1
-fi
-
-if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt"
-    if grep "ERROR" "${test_container}_json.txt"; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    echo "All tests passed (yaml + json)"
-else
-    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

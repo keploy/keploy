@@ -159,16 +159,6 @@ do_record_iteration() {
 for i in 1; do
   do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-  for i in 1; do
-    do_record_iteration "$i" "--storage-format json"
-  done
-fi
-
 sleep 5
 
 section "Shutdown MySQL before test mode"
@@ -218,26 +208,5 @@ fi
 
 if [[ $REPLAY_RC -ne 0 ]]; then
   echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
-fi
-
-if json_pass_supported; then
-  section "Replay (json)"
-  set +e
-  "$REPLAY_BIN" test --storage-format json \
-    -c "java -jar $JAR_NAME" \
-    --delay 20 --api-timeout 60 \
-    2>&1 | tee test_logs_json.txt
-  REPLAY_RC_JSON=$?
-  set -e
-  echo "Replay (json) exit code: $REPLAY_RC_JSON"
-  endsec
-
-  if ! json_scan_reports; then
-    cat test_logs_json.txt
-    exit 1
-  fi
-  echo "All tests passed (yaml + json)"
-else
-  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

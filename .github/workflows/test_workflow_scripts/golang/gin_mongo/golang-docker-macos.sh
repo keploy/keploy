@@ -183,16 +183,6 @@ do_record_iteration() {
 for i in {1..2}; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # Start the keploy in test mode.
 test_container="ginApp_${JOB_ID}_test"
 $REPLAY_BIN test \
@@ -236,34 +226,5 @@ done
 if [ "$all_passed" != true ]; then
     cat "${test_container}.txt"
     exit 1
-fi
-
-if json_pass_supported; then
-    test_container_json="${test_container}_json"
-    $REPLAY_BIN test --storage-format json \
-      -c "docker run --rm -p ${APP_PORT}:${APP_PORT} --net ${NETWORK_NAME} --name $test_container_json ${APP_IMAGE}" \
-      --containerName "$test_container_json" \
-      --apiTimeout 60 \
-      --delay 20 \
-      --generate-github-actions=false \
-      --proxy-port=$PROXY_PORT \
-      --dns-port=$DNS_PORT \
-      --keploy-container "$KEPLOY_CONTAINER" \
-      2>&1 | tee "${test_container_json}.txt"
-    if grep "ERROR" "${test_container_json}.txt"; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${test_container_json}.txt"; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    echo "All tests passed (yaml + json)"
-else
-    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

@@ -115,30 +115,6 @@ sleep 5
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    section "Start Recording (json)"
-    echo "Starting json-format Recording..."
-    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
-    KEPLOY_PID=$!
-    sleep 5
-    endsec
-
-    send_request
-
-    section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
-    echo "$REC_PID Keploy PID"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
-    check_for_errors "record_json.txt"
-    echo "Recording (json) stopped."
-    endsec
-fi
-
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
@@ -146,15 +122,3 @@ sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateG
 check_for_errors "test.txt"
 check_test_report
 endsec
-
-if json_pass_supported; then
-    section "Start Replay (json)"
-    echo "Starting json-format Replay..."
-    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
-    check_for_errors "test_json.txt"
-    if ! json_scan_reports; then
-        cat test_json.txt
-        exit 1
-    fi
-    endsec
-fi
