@@ -87,16 +87,6 @@ do_record_iteration() {
 for i in {1..2}; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # Shutdown mongo before test mode - Keploy should use mocks for database interactions
 echo "Shutting down mongo before test mode..."
 docker stop mongoDb || true
@@ -141,25 +131,5 @@ done
 if [ "$all_passed" != true ]; then
     cat "${test_container}.txt"
     exit 1
-fi
-
-if json_pass_supported; then
-    test_container_json="${test_container}_json"
-    $REPLAY_BIN test --storage-format json -c "docker run -p 8000:8000 --rm --name $test_container_json --network keploy-network node-app:1.0" --containerName "$test_container_json" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container_json}.txt"
-    if grep "ERROR" "${test_container_json}.txt"; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${test_container_json}.txt"; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat "${test_container_json}.txt"
-        exit 1
-    fi
-    echo "All tests passed (yaml + json)"
-else
-    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

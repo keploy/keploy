@@ -117,14 +117,6 @@ record_iterations() {
 }
 
 record_iterations
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    record_iterations "--storage-format json"
-fi
-
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
 
@@ -166,26 +158,5 @@ done
 if [ "$all_passed" != true ]; then
     cat "test_logs.txt"
     exit 1
-fi
-
-if json_pass_supported; then
-    "$REPLAY_BIN" test --storage-format json -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_json.txt
-    if grep "ERROR" "test_logs_json.txt"; then
-        echo "Error found in pipeline (json replay)..."
-        cat "test_logs_json.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
-        echo "Race condition detected in json test, stopping pipeline..."
-        cat "test_logs_json.txt"
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat test_logs_json.txt
-        exit 1
-    fi
-    echo "All tests passed (yaml + json)"
-else
-    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

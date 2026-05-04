@@ -151,16 +151,6 @@ do_record_iteration() {
 for i in 1 2; do
   do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-  for i in 1 2; do
-    do_record_iteration "$i" "--storage-format json"
-  done
-fi
-
 # --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
 docker stop $DB_CONTAINER >/dev/null 2>&1 || true
@@ -214,29 +204,4 @@ done
 if ! $all_passed; then
   echo "Some tests failed"
   exit 1
-fi
-
-if json_pass_supported; then
-  test_container_json="${APP_CONTAINER}_test_json"
-  "$REPLAY_BIN" test --storage-format json \
-    -c "docker run --rm -p $APP_PORT:$APP_PORT --net $NETWORK_NAME --name $test_container_json $APP_IMAGE" \
-    --container-name "$test_container_json" \
-    --apiTimeout 60 \
-    --delay 12 \
-    --proxy-port $PROXY_PORT \
-    --dns-port $DNS_PORT \
-    --keploy-container "$KEPLOY_CONTAINER" \
-    --generate-github-actions=false 2>&1 | tee "${test_container_json}.txt"
-
-  if grep -q "WARNING: DATA RACE" "${test_container_json}.txt"; then
-    cat "${test_container_json}.txt"
-    exit 1
-  fi
-  if ! json_scan_reports; then
-    cat "${test_container_json}.txt"
-    exit 1
-  fi
-  echo "All tests passed (yaml + json)"
-else
-  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi

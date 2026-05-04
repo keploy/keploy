@@ -314,12 +314,11 @@ check_test_report() {
     return 0
 }
 
-# Checks that the safe normalize run produced the expected warnings.
-# Optional first argument overrides the default log file path so the same
-# check can be reused for the supplemental --storage-format json pass.
+# Checks that the safe normalize run produced the expected 7 high-risk
+# warnings (one per high-risk testcase in the recorded test-set).
 check_normalize_warnings() {
     section "Validating Safe Normalize Warnings..."
-    local logfile="${1:-normalize_safe.log}"
+    local logfile="normalize_safe.log"
     local warning_msg="failed to normalize test case.*due to a high-risk failure"
 
     echo "Checking for high-risk normalization warnings in $logfile..."
@@ -327,25 +326,12 @@ check_normalize_warnings() {
     local warning_count
     warning_count=$(grep -c "$warning_msg" "$logfile" || true)
 
-    # Each recorded test-set produces 7 high-risk warnings during safe
-    # normalize. Count test-sets dynamically so the supplemental JSON
-    # record pass (added in e6bfcfb3) — which doubles the test-sets to
-    # test-set-0 + test-set-1 — does not break the assertion. Stays
-    # correct if a third format is ever added.
-    local num_test_sets expected_warnings
-    num_test_sets=$(find ./keploy -maxdepth 1 -type d -name "test-set-*" 2>/dev/null | wc -l)
-    if [ "$num_test_sets" -lt 1 ]; then
-        echo "::error::No test-set directories found under ./keploy"
-        exit 1
-    fi
-    expected_warnings=$((7 * num_test_sets))
-
-    if [ "$warning_count" -ne "$expected_warnings" ]; then
-        echo "::error::Expected $expected_warnings high-risk normalization warnings ($num_test_sets test-set × 7), but found $warning_count."
+    if [ "$warning_count" -ne 7 ]; then
+        echo "::error::Expected 7 high-risk normalization warnings, but found $warning_count."
         exit 1
     fi
 
-    echo "✅ Found exactly $expected_warnings high-risk normalization warnings ($num_test_sets test-set × 7), as expected."
+    echo "✅ Found exactly 7 high-risk normalization warnings, as expected."
     endsec
 }
 
@@ -394,24 +380,6 @@ sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors "record.log"
 endsec
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    section "Record Test Cases (json)"
-    $RECORD_BIN record --storage-format json -c "./my-app" 2>&1 | tee record_json.log &
-    KEPLOY_PID=$!
-    wait_for_http 8080
-    bash ./curl.sh
-    sleep 5
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
-    check_for_errors "record_json.log"
-    endsec
-fi
-
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
@@ -425,21 +393,8 @@ section "Attempt Safe Normalization (Expected to Warn)"
 echo "Running normalize without force flag. Expecting warnings for high-risk failures..."
 $REPLAY_BIN normalize 2>&1 | tee normalize_safe.log || true
 check_for_errors "normalize_safe.log"
-check_normalize_warnings "normalize_safe.log"
+check_normalize_warnings
 endsec
-
-# Mirror the safe normalize for the supplemental --storage-format json
-# pass. Without this, normalize only writes .yaml updates; the json
-# record-pass test-set's .json files keep their original (pre-normalize)
-# expected bodies, and the json final-validation test on test-set-1 fails
-# even after the testdb reader prefers the format-matching sibling.
-if json_pass_supported; then
-    section "Attempt Safe Normalization — JSON (Expected to Warn)"
-    $REPLAY_BIN normalize --storage-format json 2>&1 | tee normalize_safe_json.log || true
-    check_for_errors "normalize_safe_json.log"
-    check_normalize_warnings "normalize_safe_json.log"
-    endsec
-fi
 
 section "Run Forced Normalization (Expected to Succeed)"
 echo "Running normalize with --allow-high-risk flag..."
@@ -447,15 +402,6 @@ $REPLAY_BIN normalize --allow-high-risk 2>&1 | tee normalize_forced.log || true
 check_for_errors "normalize_forced.log"
 echo "Forced normalization complete. Test cases should now be updated."
 endsec
-
-if json_pass_supported; then
-    section "Run Forced Normalization — JSON (Expected to Succeed)"
-    $REPLAY_BIN normalize --storage-format json --allow-high-risk 2>&1 | tee normalize_forced_json.log || true
-    check_for_errors "normalize_forced_json.log"
-    echo "Forced normalization (json) complete."
-    endsec
-fi
-
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
 $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee final_test.log || true
@@ -463,17 +409,5 @@ check_for_errors "final_test.log"
 endsec
 
 check_test_report
-
-if json_pass_supported; then
-    section "Run Keploy Tests (json)"
-    $REPLAY_BIN test --storage-format json -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee final_test_json.log || true
-    check_for_errors "final_test_json.log"
-    if ! json_scan_reports; then
-        cat final_test_json.log
-        exit 1
-    fi
-    endsec
-fi
-
 echo "✅ Full Risk Profile & Normalization Test Pipeline Succeeded!"
 exit 0

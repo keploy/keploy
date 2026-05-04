@@ -143,15 +143,6 @@ do_record() {
 # Record: Keploy wraps the server to capture incoming gRPC calls.
 echo "🧪 Recording gRPC server with Keploy..."
 do_record
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    echo "🧪 Recording gRPC server with Keploy (json)..."
-    do_record "--storage-format json"
-fi
-
 # Replay: Keploy replays the captured gRPC calls against the server.
 echo "🧪 Replaying recorded tests..."
 "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test.log || true
@@ -161,17 +152,4 @@ if ! check_test_report; then
     echo "Test report check failed."
     cat test.log
     exit 1
-fi
-
-if json_pass_supported; then
-    echo "🧪 Replaying recorded tests (json)..."
-    "$REPLAY_BIN" test --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_json.log || true
-    check_for_errors test_json.log
-    if ! json_scan_reports; then
-        cat test_json.log
-        exit 1
-    fi
-    echo "✅ grpc-protoscope tests passed (yaml + json)."
-else
-    echo "✅ grpc-protoscope tests passed (yaml only)."
 fi

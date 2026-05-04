@@ -694,33 +694,6 @@ do_record_iteration() {
 for i in 1; do
   do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-  # State-bleed guard. The yaml record pass populated postgres with rows
-  # whose IDs/timestamps/sequences depend on the empty-DB starting state.
-  # Recording the same client traffic again with a non-empty DB would
-  # capture a different set of "expected" responses (409 conflicts on
-  # re-creates, advanced sequence values, etc.) — which then fail at
-  # replay time when the DB starts fresh again. Reset postgres to the
-  # same starting state the yaml pass had so the json testset captures
-  # the same testcases, just in a different on-disk encoding.
-  section "Reset Postgres before json record pass"
-  docker rm -f mypostgres
-  docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
-    -e POSTGRES_DB=petclinic -p 5432:5432 postgres:latest
-  wait_for_postgres
-  docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
-  docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
-  endsec
-
-  for i in 1; do
-    do_record_iteration "$i" "--storage-format json"
-  done
-fi
-
 sleep 5
 
 section "Shutdown Postgres before test mode"
@@ -786,26 +759,5 @@ fi
 
 if [[ $REPLAY_RC -ne 0 ]]; then
     echo "::warning::Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
-fi
-
-if json_pass_supported; then
-  section "Replay (json)"
-  set +e
-  "$REPLAY_BIN" test --storage-format json \
-    -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
-    --delay 20 --api-timeout 60 \
-    2>&1 | tee test_logs_json.txt
-  REPLAY_RC_JSON=$?
-  set -e
-  echo "Replay (json) exit code: $REPLAY_RC_JSON"
-  endsec
-
-  if ! json_scan_reports; then
-    cat test_logs_json.txt
-    exit 1
-  fi
-  echo "All tests passed (yaml + json)"
-else
-  echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
 exit 0

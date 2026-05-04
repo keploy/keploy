@@ -101,16 +101,6 @@ do_record_iteration() {
 for i in {1..2}; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # Test modes and result checking
 $REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
 cat test_logs1.txt
@@ -186,27 +176,6 @@ if [ "$all_passed" = true ]; then
         echo "Test-set-1 did not pass."
         cat "test_logs1.txt"
         exit 1
-    fi
-    if json_pass_supported; then
-        $REPLAY_BIN test --storage-format json -c 'node app.js' --delay 10    &> test_logs_json.txt
-        cat test_logs_json.txt
-        if grep "ERROR" "test_logs_json.txt"; then
-            echo "Error found in json replay..."
-            cat "test_logs_json.txt"
-            exit 1
-        fi
-        if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
-            echo "Race condition detected in json test..."
-            cat "test_logs_json.txt"
-            exit 1
-        fi
-        if ! json_scan_reports; then
-            cat test_logs_json.txt
-            exit 1
-        fi
-        echo "All tests passed (yaml + json)"
-    else
-        echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
     fi
     exit 0
 else

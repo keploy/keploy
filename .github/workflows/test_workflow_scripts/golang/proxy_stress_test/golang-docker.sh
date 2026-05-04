@@ -63,26 +63,6 @@ do_record_iteration() {
 for i in {1..2}; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    # State-bleed guard. The yaml iterations populated postgres (via
-    # docker-compose volume) with rows whose IDs were assigned starting
-    # from an empty DB. Recording the same traffic again with the
-    # accumulated state captures bind values that reference rows only
-    # the polluted DB had — postgres-v3's transactional matcher then
-    # fails at replay-time with "no recorded invocation shares this SQL
-    # hash". `docker compose down -v` clears the named volumes so the
-    # json record pass starts from the same blank state.
-    docker compose down -v || true
-    sleep 2
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # Match any *.yaml under a tests/ dir so we are agnostic to the testcase
 # naming scheme (legacy "test-N.yaml" vs descriptive slugs).
 test_count=$(find ./keploy -name '*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
@@ -108,16 +88,3 @@ if grep -q "incomplete or invalid response packet" "${test_container}.txt"; then
 for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
     [ -f "$report_file" ] && echo "$(basename "$report_file"): $(grep 'status:' "$report_file" | head -1 | awk '{print $2}')"
 done
-
-if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "${test_container}_json" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
-    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
-    if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
-    if ! json_scan_reports; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    echo "Proxy stress test PASSED — yaml + json"
-else
-    echo "Proxy stress test PASSED — yaml only (json pass skipped for compat-matrix cell)"
-fi

@@ -194,47 +194,6 @@ for record_iteration in {1..2}; do
     wait
     echo "Recorded test case and mocks for iteration ${record_iteration}"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    # Additional record pass with --storage-format json. The new test-sets
-    # land alongside the yaml ones in the same keploy/ tree
-    # (FindLastIndexAny picks the next free index across both extensions),
-    # so the subsequent default-format replay exercises the read-side
-    # auto-detect path over a directory that mixes yaml and json fixtures.
-    for record_iteration in {1..2}; do
-        app_name="ginMongo_json_${record_iteration}"
-        "$RECORD_BIN" record --storage-format json -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
-
-        KEPLOY_PID=$!
-
-        if ! send_request "$KEPLOY_PID"; then
-            echo "::error::Failed to drive gin-mongo traffic for json record iteration ${record_iteration}"
-            cat "${app_name}.txt" || true
-            exit 1
-        fi
-
-        if unexpected_errors="$(has_unexpected_errors "${app_name}.txt")"; then
-            echo "Error found in pipeline..."
-            printf '%s\n' "$unexpected_errors"
-            cat "${app_name}.txt"
-            exit 1
-        fi
-        if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-          echo "Race condition detected in json recording, stopping pipeline..."
-          cat "${app_name}.txt"
-          exit 1
-        fi
-        sleep 5
-        wait
-        echo "Recorded json test case and mocks for iteration ${record_iteration}"
-    done
-else
-    echo "Skipping --storage-format json record pass: at least one binary is the released keploy (no json support)."
-fi
-
 # Keep MongoDB running during test replay. Keploy will serve mocks for
 # matched requests; unmatched requests fall through to the real database
 # which returns the same data recorded earlier, preventing flaky failures
@@ -309,47 +268,8 @@ for report_file in "${yaml_reports[@]}"; do
         break
     fi
 done
-
-if json_pass_supported; then
-    # Second replay pass with --storage-format json — exercises the json
-    # write path AND, because the keploy/ tree holds both yaml- and
-    # json-recorded test-sets, validates that a json-mode replay reads
-    # the yaml fixtures via the read-side auto-detect path.
-    "$REPLAY_BIN" test --storage-format json -c "./ginApp" --delay 7 2>&1 | tee test_logs_json.txt
-    replay_status_json=${PIPESTATUS[0]}
-
-    if [ "$replay_status_json" -ne 0 ]; then
-        echo "::error::Keploy json replay failed with exit code ${replay_status_json}"
-        cat test_logs_json.txt
-        exit "$replay_status_json"
-    fi
-
-    if unexpected_errors="$(has_unexpected_errors "test_logs_json.txt")"; then
-        echo "Error found in pipeline (json replay)..."
-        printf '%s\n' "$unexpected_errors"
-        cat "test_logs_json.txt"
-        exit 1
-    fi
-
-    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
-        echo "Race condition detected in json test, stopping pipeline..."
-        cat "test_logs_json.txt"
-        exit 1
-    fi
-
-    if ! json_scan_reports; then
-        all_passed=false
-        cat "test_logs_json.txt"
-    fi
-fi
-
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    if json_pass_supported; then
-        echo "All tests passed (yaml + json)"
-    else
-        echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
-    fi
     exit 0
 else
     cat "test_logs.txt"

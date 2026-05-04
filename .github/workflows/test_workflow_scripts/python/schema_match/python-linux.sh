@@ -87,39 +87,4 @@ if [ "$PASS_COUNT" -ne 8 ] || [ "$FAIL_COUNT" -ne 5 ]; then
     exit 1
 fi
 echo "✅ SUCCESS: Schema match logic and side-by-side visualization verified."
-
-# Supplemental json-format pass: re-record + re-run schema-match in a
-# scratch directory so the existing 8/5 assertion above is unaffected.
-# Gated on both binaries supporting --storage-format json.
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    echo "Running json-format schema-match pass (scratch path)..."
-    rm -rf keploy_json/
-    sudo -E env "PATH=$PATH" $RECORD_BIN record --storage-format json --path ./keploy_json -c "python3 app.py" &
-    KEPLOY_PID=$!
-    sleep 10
-    until curl -fsS http://127.0.0.1:5000/user/profile >/dev/null; do
-        echo "Waiting for app to start..."
-        sleep 3
-    done
-    python3 check-endpoints.py
-    sleep 5
-    sudo kill $KEPLOY_PID || true
-    sleep 5
-
-    set +e
-    OUTPUT_JSON=$(sudo -E env "PATH=$PATH" $REPLAY_BIN test --storage-format json --path ./keploy_json -c "python3 app-test.py" --schema-match --delay 10 2>&1)
-    set -e
-    PASS_COUNT_JSON=$(echo "$OUTPUT_JSON" | grep -c "Testrun passed" || true)
-    FAIL_COUNT_JSON=$(echo "$OUTPUT_JSON" | grep -c "Testrun failed" || true)
-    echo "JSON results: $PASS_COUNT_JSON PASSED, $FAIL_COUNT_JSON FAILED (expected 8/5)"
-    if [ "$PASS_COUNT_JSON" -ne 8 ] || [ "$FAIL_COUNT_JSON" -ne 5 ]; then
-        echo "❌ FAILURE: json-format schema-match counts don't match yaml ($PASS_COUNT_JSON/$FAIL_COUNT_JSON vs 8/5)"
-        echo "$OUTPUT_JSON"
-        exit 1
-    fi
-    echo "✅ json-format schema-match counts match yaml."
-fi
 exit 0

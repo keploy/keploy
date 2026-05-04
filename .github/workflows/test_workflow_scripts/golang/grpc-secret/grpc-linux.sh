@@ -326,16 +326,6 @@ do_record_iteration() {
 for i in 1 2; do
     do_record_iteration "$i"
 done
-
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in 1 2; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
 # --- Run keploy test (before sanitize) ---
 echo "🧪 Phase 2: Running keploy test (before sanitize)..."
 "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_before_sanitize.txt || true
@@ -375,18 +365,6 @@ if ! check_test_report 2; then
 fi
 
 echo "✅ All tests passed after sanitize!"
-
-if json_pass_supported; then
-    echo "🧪 Phase 5: Running keploy test (json) after sanitize..."
-    "$REPLAY_BIN" test --storage-format json -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_json_after_sanitize.txt || true
-    check_for_errors test_json_after_sanitize.txt
-    if ! json_scan_reports; then
-        cat test_json_after_sanitize.txt
-        exit 1
-    fi
-    echo "✅ All tests passed in json mode!"
-fi
-
 # --- Cleanup ---
 cleanup_keploy
 

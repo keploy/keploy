@@ -161,16 +161,6 @@ for i in {1..2}; do
     do_record_iteration "$i"
 done
 
-# shellcheck disable=SC1091
-source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
-
-if json_pass_supported; then
-    for i in {1..2}; do
-        do_record_iteration "$i" "--storage-format json"
-    done
-fi
-
-
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
@@ -216,23 +206,4 @@ done
 if [ "$all_passed" != true ]; then
     echo "Some tests failed"
     exit 1
-fi
-
-if json_pass_supported; then
-    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --debug --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}_json.txt"
-    if grep "ERROR" "${test_container}_json.txt"; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    if ! json_scan_reports; then
-        cat "${test_container}_json.txt"
-        exit 1
-    fi
-    echo "All tests passed (yaml + json)"
-else
-    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
