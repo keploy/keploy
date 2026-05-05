@@ -37,6 +37,25 @@ var caCrt []byte //certificate
 //go:embed asset/ca.key
 var caPKey []byte //private key
 
+// embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
+// https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
+// certdata.txt). Compiled into the binary via go:embed so the agent always
+// has a valid trust store regardless of the runtime image's filesystem
+// state. See pkg/agent/proxy/tls/data/REFRESH.md for the refresh procedure.
+//
+// This bundle is the safety net that prevents the failure mode in
+// keploy/k8s-proxy#375: even if /etc/ssl/certs/ca-certificates.crt is
+// missing or shadowed at runtime (broken image, weird volume mount,
+// SELinux policy, distroless), apps mutated by keploy still see real
+// public roots in their trust store and can validate AWS / Google /
+// Snowflake / etc. The merged bundle written to /tmp/keploy-tls/ca.crt
+// becomes (system_or_embedded_roots ∪ keploy_mitm_ca) instead of
+// (keploy_mitm_ca alone), which is what made the customer's pods fail
+// CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call.
+//
+//go:embed data/mozilla_roots.pem
+var embeddedFallbackRoots []byte
+
 //go:embed asset
 var _ embed.FS
 
@@ -280,26 +299,104 @@ var systemCABundleSearchPaths = []string{
 // stub that reads from a tempdir-backed search list.
 var loadSystemCABundleFn = loadSystemCABundle
 
-// loadSystemCABundle returns the contents of the first readable, non-empty OS
-// CA bundle file from systemCABundleSearchPaths (plus the path used). On
-// failure (no readable non-empty file found) it logs at Info level and
-// returns (nil, "") — the caller should proceed with the Keploy CA alone
-// rather than erroring.
+// distroIndicatorPaths are filesystem signals that the container has a
+// "normal" Linux trust-store layout that the postinst trigger of the
+// `ca-certificates` package would have populated. If at least one of these
+// is present (as a directory or file), the absence of the expected bundle
+// file is a build/runtime regression — the image *should* have it. If none
+// of these is present, the image is almost certainly a deliberately
+// stripped distroless / scratch base, where the missing bundle is
+// expected. We use this signal to choose between WARN (regression) and
+// INFO (intentional minimal image).
 //
-// We intentionally DO NOT return an error: the shared-volume CA file is a
-// best-effort merge. In the worst case (minimal distroless/scratch image with
-// no OS bundle) the application falls back to the prior behaviour of trusting
-// only the Keploy MITM CA — not worse than the status quo. The absence of a
-// system bundle is expected in distroless/scratch deployments, so we log at
-// Info rather than Warn to avoid alarming operators whose images intentionally
-// ship without a trust store.
-func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
-	return loadSystemCABundleFromPaths(logger, systemCABundleSearchPaths)
+// Keep this list narrow: every entry needs to be something a distroless
+// image would lack. /etc/ssl/certs/ is the canonical Debian/Ubuntu/Alpine
+// directory; /etc/pki/tls/certs/ is the RHEL/Fedora analogue. Both are
+// created by the ca-certificates package at install time.
+var distroIndicatorPaths = []string{
+	"/etc/ssl/certs",
+	"/etc/pki/tls/certs",
 }
 
-// loadSystemCABundleFromPaths is the testable core of loadSystemCABundle —
-// it scans the given ranked list instead of the production constant.
+// hasDistroTrustLayout reports whether the runtime image *appears* to have
+// the kind of base layout where the OS CA bundle would normally be
+// installed by `ca-certificates`. This is a heuristic — it can produce a
+// false-positive WARN if an operator is intentionally running on a
+// non-distroless image without `ca-certificates` installed, and a
+// false-negative (silent INFO) if a distroless image happens to have an
+// empty /etc/ssl/certs directory. Both edge cases are rare and the
+// remediation message in both log paths is identical, so the cost of a
+// misclassification is low.
+//
+// Indirected via an fn-var so tests can stub the result without mocking
+// the filesystem.
+var hasDistroTrustLayoutFn = hasDistroTrustLayout
+
+func hasDistroTrustLayout() bool {
+	for _, p := range distroIndicatorPaths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// systemCABundleSourceEmbedded is the sentinel returned in the source-path
+// position of loadSystemCABundle when the disk search produced no readable
+// bundle and we fell back to the embeddedFallbackRoots blob. Operators see
+// this string in startup logs and in the merged-bundle source field.
+const systemCABundleSourceEmbedded = "<embedded:mozilla-roots.pem>"
+
+// loadSystemCABundle returns trust-anchor PEM bytes for merging with the
+// Keploy MITM CA into the shared-volume bundle, plus a source identifier
+// for logging. Lookup order:
+//
+//  1. Disk paths in systemCABundleSearchPaths — the well-known Linux
+//     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
+//     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
+//     store. First readable, non-empty file wins.
+//  2. embeddedFallbackRoots — Mozilla NSS roots vendored from curl.se,
+//     compiled into the agent binary via go:embed. Used when every disk
+//     path was missing/empty.
+//
+// This function used to return (nil, "") on miss, leaving the merged
+// bundle to contain only the Keploy MITM CA. That state was the tail
+// half of the failure mode in keploy/k8s-proxy#375: an orphan-mutated
+// pod whose agent had no system trust store served apps a trust bundle
+// that contained only Keploy's MITM root. Combined with an inactive
+// eBPF redirect (the head half of that incident), every public-endpoint
+// HTTPS call fell back to direct-to-internet routing and validated the
+// real cert chain against keploy-only roots, producing
+// CERTIFICATE_VERIFY_FAILED. The embedded fallback closes that failure
+// class regardless of disk state, distroless vs not, weird volume
+// mounts, SELinux denials, or future regressions in image builds.
+//
+// We still log when disk search comes up empty — that's a useful signal
+// for operators to investigate WHY the disk bundle is missing — but the
+// log severity differs:
+//
+//   - Distro-shaped image (presence of /etc/ssl/certs or similar)
+//     missing its bundle is a build/runtime regression. ERROR.
+//   - Distroless / scratch image with no trust-store layout is an
+//     intentional operator choice. INFO.
+//
+// In either case the embedded fallback is now used so the app's trust
+// store still works.
+func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
+	return loadSystemCABundleFromPathsAndFallback(logger, systemCABundleSearchPaths, embeddedFallbackRoots)
+}
+
+// loadSystemCABundleFromPaths is retained as the disk-only path used by
+// existing tests. It does NOT consult the embedded fallback — those tests
+// assert disk-search behavior in isolation. Production code goes through
+// loadSystemCABundleFromPathsAndFallback.
 func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, string) {
+	return loadSystemCABundleFromPathsAndFallback(logger, paths, nil)
+}
+
+// loadSystemCABundleFromPathsAndFallback is the testable core. fallback
+// may be nil to disable the embedded path (used by disk-only tests).
+func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, fallback []byte) ([]byte, string) {
 	tried := make([]string, 0, len(paths))
 	for _, p := range paths {
 		tried = append(tried, p)
@@ -316,24 +413,63 @@ func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, st
 		}
 		return data, p
 	}
-	logger.Info(
-		"No system CA bundle found on any known path — the shared "+
-			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
-			"Non-proxied HTTPS calls from the application (internal services, "+
-			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
-			"CERTIFICATE_VERIFY_FAILED. To fix, ensure the Keploy AGENT "+
-			"container (the writer of this shared volume — not the app "+
-			"container) has access to an OS trust bundle at one of the "+
-			"searched paths: install `ca-certificates` in the agent image "+
-			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, "+
-			"`apk add ca-certificates` on Alpine), mount the host's bundle "+
-			"into the agent pod, or rebuild from a base image that ships "+
-			"trust roots. Fixing this in the app image does NOT help: "+
-			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this "+
-			"shared file, so they replace whatever the app image already "+
-			"trusts.",
-		zap.Strings("searched_paths", tried),
+
+	// Disk search exhausted. Decide log severity based on whether the
+	// image *should* have had a disk bundle (distro-shaped) vs whether
+	// the absence was expected (distroless / scratch). Both code paths
+	// then return the embedded fallback so apps still get real public
+	// roots.
+	const (
+		// Same message body in both severities — only the level differs.
+		// Keeping the wording identical means the remediation guidance
+		// stays consistent across log levels and operators don't have to
+		// learn two variants.
+		msg = "No system CA bundle found on any known disk path — falling " +
+			"back to the agent's embedded Mozilla NSS roots. The merged " +
+			"/tmp/keploy-tls/ca.crt will contain (embedded_roots ∪ " +
+			"Keploy MITM CA), so the app's trust store is still valid for " +
+			"public endpoints. To restore the disk path, ensure the Keploy " +
+			"AGENT container (the writer of this shared volume — not the " +
+			"app container) has access to an OS trust bundle at one of the " +
+			"searched paths: install `ca-certificates` in the agent image " +
+			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, " +
+			"`apk add ca-certificates` on Alpine), mount the host's bundle " +
+			"into the agent pod, or rebuild from a base image that ships " +
+			"trust roots. Fixing this in the app image does NOT help: " +
+			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this " +
+			"shared file, so they replace whatever the app image already " +
+			"trusts."
 	)
+
+	fields := []zap.Field{
+		zap.Strings("searched_paths", tried),
+		zap.Strings("distro_indicator_paths", distroIndicatorPaths),
+		zap.Int("embedded_fallback_bytes", len(fallback)),
+	}
+
+	if hasDistroTrustLayoutFn() {
+		// Image looks distro-shaped (Debian/Ubuntu/Alpine/RHEL family) —
+		// missing disk bundle is a real misconfiguration. ERROR so
+		// alerting catches it. We still produce a working trust store
+		// via the embedded fallback; ERROR is the operator-facing signal
+		// to investigate the agent image / volume mounts / SELinux.
+		logger.Error(msg, append(fields,
+			zap.String("severity_reason", "image looks distro-shaped (one of the distro_indicator_paths exists) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
+		)...)
+	} else {
+		// Truly distroless — the operator deliberately stripped the trust
+		// store; raising the level here would create alert fatigue.
+		logger.Info(msg, append(fields,
+			zap.String("severity_reason", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected — using embedded fallback"),
+		)...)
+	}
+
+	if len(fallback) > 0 {
+		return fallback, systemCABundleSourceEmbedded
+	}
+	// fallback==nil only happens via the disk-only test entry point.
+	// Production callers always pass embeddedFallbackRoots which is
+	// non-empty by build-time go:embed.
 	return nil, ""
 }
 
