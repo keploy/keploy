@@ -172,23 +172,20 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 		timer.Stop()
 	case <-timer.C:
 		n := m.dropCount.Add(1)
-		// Loud-on-first-drop: production bundles surfaced the cliff
-		// only via the n%1024 sampled line, which meant operators
-		// missed the first 1023 drops entirely. Fire the prominent
-		// "capture is now lossy" warning the moment the first drop
-		// happens — that's the actionable signal — and keep the
-		// every-1024 sampled line for sustained-drop telemetry so a
-		// long-running stuck consumer doesn't flood the log.
-		if n == 1 {
-			m.dropLogger().Warn(
-				"syncMock outChan overflow; mock recording is now LOSSY — every subsequent overflow drop is silent unless the per-1024 sampler fires; raise outgoingMockChanCap (pkg/service/agent/agent.go) or speed up the gob/HTTP/disk consumer pipeline",
-				zap.Int("outChanCap", cap(m.outChan)),
-				zap.Duration("budget", sendBudget),
-			)
-		}
+		// The existing per-1024 sampled Error fires at n==1 AND every
+		// subsequent 1024th drop. Per-Copilot review on #4176, the
+		// "your recording is now lossy" wording lives on the same n==1
+		// branch rather than as a separate Warn so operators see one
+		// clear signal at the moment capture goes lossy, instead of
+		// two separate lines that may interleave with other logs.
+		// Subsequent sampled emissions stay terse to avoid drowning a
+		// stuck consumer's goroutine in its own logging.
 		if n == 1 || n%sendDropSampleRate == 0 {
-			m.dropLogger().Error(
-				"syncMock outChan overflow; mock dropped — raise consumer throughput or increase outChan capacity",
+			msg := "syncMock outChan overflow; mock dropped — consumer can't keep up with mock production"
+			if n == 1 {
+				msg = "syncMock outChan overflow on FIRST drop — mock recording is now LOSSY for this session; subsequent overflow drops are silent except for the per-1024 sampled line. Reduce concurrent test load, upgrade to a release with a larger outChan capacity, or investigate consumer-side stalls (slow disk / network to k8s-proxy) before re-running for a clean recording."
+			}
+			m.dropLogger().Error(msg,
 				zap.Uint64("dropsSoFar", n),
 				zap.Int("outChanCap", cap(m.outChan)),
 				zap.Duration("budget", sendBudget),

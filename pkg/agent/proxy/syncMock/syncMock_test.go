@@ -839,13 +839,13 @@ func TestSendToOutChanDropsAfterBudget(t *testing.T) {
 	}
 }
 
-// TestSendToOutChanLoudOnFirstDrop validates that the
-// promoted-to-Warn line fires on the first drop AND the existing
-// Error line continues to fire on the same first drop. The Warn
-// is the actionable "your recording is now lossy" signal that
-// production bundles needed and the rate-sampled Error line did
-// not surface (the n%1024 sampler hid the first 1023 drops on a
-// stuck consumer).
+// TestSendToOutChanLoudOnFirstDrop validates that the very first
+// drop's Error message carries the expanded "recording is now
+// LOSSY" wording AND that subsequent sampled emissions get the
+// terse default. Per Copilot review on PR #4176, the loud signal
+// rides on the existing Error log on the n==1 branch rather than
+// as a separate Warn — one clear actionable line at the moment
+// capture goes lossy, no log-level duplication.
 func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	t.Parallel()
 
@@ -855,9 +855,7 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	}
 	mgr.SetOutputChannel(ch)
 
-	// Capture both Warn and Error so we can assert the Warn fires
-	// loud-on-first AND the Error keeps the per-1024 cadence.
-	core, logs := observer.New(zap.WarnLevel)
+	core, logs := observer.New(zap.ErrorLevel)
 	mgr.SetLogger(zap.New(core))
 
 	// Fill the slot so the next send hits the drop branch.
@@ -868,27 +866,20 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected dropCount=1, got %d", got)
 	}
-
-	warnCount := 0
-	errorCount := 0
-	for _, e := range logs.All() {
-		switch e.Level {
-		case zap.WarnLevel:
-			warnCount++
-			if !strings.Contains(e.Message, "LOSSY") {
-				t.Errorf("Warn log message missing LOSSY signal: %q", e.Message)
-			}
-		case zap.ErrorLevel:
-			errorCount++
-		}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
 	}
-	if warnCount != 1 {
-		t.Fatalf("expected exactly one Warn-on-first-drop, got %d (logs=%v)",
-			warnCount, logs.All())
+	entry := logs.All()[0]
+	if entry.Level != zap.ErrorLevel {
+		t.Fatalf("expected Error level, got %v", entry.Level)
 	}
-	if errorCount != 1 {
-		t.Fatalf("expected exactly one Error log on first drop (sampler n==1 branch), got %d",
-			errorCount)
+	// The first-drop message must carry the operator-actionable
+	// "LOSSY" wording — the whole point of the expanded n==1
+	// message is to surface the actionable cliff signal *the moment*
+	// capture stops being whole, so the operator can react before
+	// the per-1024 sampler hides hundreds of subsequent drops.
+	if !strings.Contains(entry.Message, "LOSSY") {
+		t.Errorf("first-drop Error missing LOSSY wording: %q", entry.Message)
 	}
 }
 
