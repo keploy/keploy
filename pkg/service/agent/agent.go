@@ -158,22 +158,35 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 // cgroup limit.
 //
 // Implementation detail: a Go channel is slot-counted, so the
-// runtime cap is derived as outgoingMockBufferBytes / avgMockSizeBytes.
-// avgMockSizeBytes is the median+headroom from the per-mock size
-// distribution observed in production bundles (provider-engagement
-// test EKS, 2026-05-04: median ~1 KiB, p95 ~10 KiB, max ~27 KiB —
-// 4 KiB sits just above median while keeping the worst-case
-// OOM-equivalent under the cgroup budget). A workload with
-// consistently-larger mocks will see proportionally fewer slots
-// before backpressure kicks in, which is the intended safety
-// behavior of any byte-bounded buffer.
+// runtime cap is derived as outgoingMockBufferBytes / nominalMockSizeBytes.
+// nominalMockSizeBytes is an *estimate* of "what one mock typically
+// costs in memory" — it is NOT a measured average, and the runtime
+// neither tracks per-mock byte size nor enforces this value as a
+// per-mock ceiling. It exists solely to translate the design-unit
+// byte budget into the slot count Go channels actually need.
+//
+// 4 KiB was picked from the per-mock size distribution observed in
+// production bundles (provider-engagement test EKS, 2026-05-04:
+// median ~1 KiB, mean ~2.3 KiB, p95 ~10 KiB, max ~27 KiB). 4 KiB
+// sits between mean and p95 — high enough that workloads with
+// mostly-typical mocks fit comfortably under the byte budget, low
+// enough that workloads skewed toward p95 still get a useful number
+// of slots. A workload with consistently-larger mocks (e.g. mostly
+// p95+ Postgres rows) will pin proportionally more memory at slot
+// cap than the nominal 64 MiB; this is the same expected-vs-worst
+// tradeoff every slot-counted Go channel makes.
 //
 // Bumped (effectively) from 100-slot to 64 MiB-equivalent after
 // the same production bundles showed the old 100-slot cap silently
-// dropping ≥2048 mocks per pod within minutes of recording start
-// (the bundles' median mock was ~1 KiB, so 100 slots held ~250 KiB
-// — less than the 1.0 MiB the *successful* part of those sessions
-// ended up writing to disk).
+// dropping ≥2048 mocks per pod within minutes of recording start.
+// At the bundles' MEAN per-mock size of ~2.3 KiB (computed as
+// 1.0 MiB total / 450 mocks for the 8eafdd8e bundle, ~2.2 KiB
+// for 452c57e7, ~2.5 KiB for c48b2e08), 100 slots held only
+// ~230 KiB worst-case — less than 1/4 of the 1.0 MiB the
+// *successful* part of those sessions ended up writing to disk.
+// The mean is what matters here, not the median (~1 KiB), because
+// the producer fills slots with whatever it produces — bigger
+// individual mocks weigh more on the channel even at slot cap.
 //
 // Why "byte budget then derive" instead of "two independent caps
 // (slots AND bytes) like PR #4172"? PR #4172 needs the two-cap shape
@@ -193,8 +206,8 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 // the cliff at trivial loads.
 const (
 	outgoingMockBufferBytes int64 = 64 * 1024 * 1024 // 64 MiB
-	avgMockSizeBytes        int64 = 4 * 1024         // 4 KiB
-	outgoingMockChanCap           = int(outgoingMockBufferBytes / avgMockSizeBytes)
+	nominalMockSizeBytes        int64 = 4 * 1024         // 4 KiB
+	outgoingMockChanCap           = int(outgoingMockBufferBytes / nominalMockSizeBytes)
 )
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
