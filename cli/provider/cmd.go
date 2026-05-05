@@ -1102,7 +1102,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if c.cfg.Record.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
 				memBytes := c.cfg.Record.MemoryLimit * 1024 * 1024
 				if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
-					return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
+					return fmt.Errorf("memory limit conflict: Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB)",
 						bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
 						c.cfg.Record.MemoryLimit)
 				}
@@ -1413,7 +1413,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Agent.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
 			memBytes := c.cfg.Agent.MemoryLimit * 1024 * 1024
 			if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
-				return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
+				return fmt.Errorf("memory limit conflict: Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB)",
 					bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
 					c.cfg.Agent.MemoryLimit)
 			}
