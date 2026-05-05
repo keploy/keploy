@@ -148,14 +148,16 @@ func TestLoadSystemCABundle_NoSources_DistroImageErrors(t *testing.T) {
 	if !strings.Contains(entry.Message, "No system CA bundle found") {
 		t.Fatalf("unexpected log message: %q", entry.Message)
 	}
-	// The structured field is what alert rules will key off; verify it's set
-	// and points at the right reason.
+	// severity_reason is a stable enum string (alert rules key off it).
+	// Assert exact equality so an accidental wording change in production
+	// fails this test instead of slipping past — that's the whole reason
+	// the field exists separately from the human-readable explanation.
 	var sawReason bool
 	for _, f := range entry.Context {
 		if f.Key == "severity_reason" {
 			sawReason = true
-			if !strings.Contains(f.String, "image looks distro-shaped") {
-				t.Fatalf("severity_reason has wrong text: %q", f.String)
+			if f.String != severityReasonDistroLayoutPresent {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonDistroLayoutPresent, f.String)
 			}
 		}
 	}
@@ -273,12 +275,15 @@ func TestLoadSystemCABundle_NoSources_DistrolessImageStaysInfo(t *testing.T) {
 	if !strings.Contains(entry.Message, "No system CA bundle found") {
 		t.Fatalf("unexpected log message: %q", entry.Message)
 	}
+	// Exact-equality assertion on the stable enum value — see the
+	// matching block in TestLoadSystemCABundle_NoSources_DistroImageErrors
+	// for the rationale.
 	var sawReason bool
 	for _, f := range entry.Context {
 		if f.Key == "severity_reason" {
 			sawReason = true
-			if !strings.Contains(f.String, "no distro trust-store layout") {
-				t.Fatalf("severity_reason has wrong text: %q", f.String)
+			if f.String != severityReasonNoDistroLayout {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonNoDistroLayout, f.String)
 			}
 		}
 	}

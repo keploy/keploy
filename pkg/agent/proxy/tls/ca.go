@@ -332,9 +332,17 @@ var distroIndicatorPaths = []string{
 // the filesystem.
 var hasDistroTrustLayoutFn = hasDistroTrustLayout
 
+// Treat anything OTHER than "file not present" (ENOENT) as "indicator
+// present". A permission-denied / IO-error Stat result on /etc/ssl/certs
+// is overwhelmingly more likely on a distro-shaped image where the
+// bundle directory exists but the agent process can't traverse it
+// (SELinux, container-user-namespace remap, weird overlay) than on a
+// distroless image. Treating those errors as "absent" would silently
+// downgrade ERROR → INFO and let the misconfiguration that #375 was
+// raised against slip past alert pipelines.
 func hasDistroTrustLayout() bool {
 	for _, p := range distroIndicatorPaths {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
 			return true
 		}
 	}
@@ -346,6 +354,15 @@ func hasDistroTrustLayout() bool {
 // bundle and we fell back to the embeddedFallbackRoots blob. Operators see
 // this string in startup logs and in the merged-bundle source field.
 const systemCABundleSourceEmbedded = "<embedded:mozilla-roots.pem>"
+
+// severity_reason values. These are stable, enum-like strings so alert
+// rules and downstream log parsers can key off them without breaking when
+// the human-readable wording in severity_explanation is tightened. Add a
+// new constant rather than reusing one with a different meaning.
+const (
+	severityReasonDistroLayoutPresent = "distro_layout_present"
+	severityReasonNoDistroLayout      = "no_distro_layout"
+)
 
 // loadSystemCABundle returns trust-anchor PEM bytes for merging with the
 // Keploy MITM CA into the shared-volume bundle, plus a source identifier
@@ -454,13 +471,15 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 		// via the embedded fallback; ERROR is the operator-facing signal
 		// to investigate the agent image / volume mounts / SELinux.
 		logger.Error(msg, append(fields,
-			zap.String("severity_reason", "image looks distro-shaped (one of the distro_indicator_paths exists) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
+			zap.String("severity_reason", severityReasonDistroLayoutPresent),
+			zap.String("severity_explanation", "image looks distro-shaped (one of the distro_indicator_paths exists) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
 		)...)
 	} else {
 		// Truly distroless — the operator deliberately stripped the trust
 		// store; raising the level here would create alert fatigue.
 		logger.Info(msg, append(fields,
-			zap.String("severity_reason", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected — using embedded fallback"),
+			zap.String("severity_reason", severityReasonNoDistroLayout),
+			zap.String("severity_explanation", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected — using embedded fallback"),
 		)...)
 	}
 
