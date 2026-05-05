@@ -206,7 +206,7 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 // the cliff at trivial loads.
 const (
 	outgoingMockBufferBytes int64 = 64 * 1024 * 1024 // 64 MiB
-	nominalMockSizeBytes        int64 = 4 * 1024         // 4 KiB
+	nominalMockSizeBytes    int64 = 4 * 1024         // 4 KiB
 	outgoingMockChanCap           = int(outgoingMockBufferBytes / nominalMockSizeBytes)
 )
 
