@@ -113,8 +113,8 @@ type SetupOptions struct {
 	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
 	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferQueueSize int
-	ExtraArgs         []string
-	EnableSampling    int
+	ExtraArgs             []string
+	EnableSampling        int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF

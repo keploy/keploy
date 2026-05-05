@@ -227,8 +227,8 @@ func (p *Proxy) SetSkipListener(skip bool) {
 // = max_conns × cap). Zero means "fall through to relay defaults"
 // and is NOT clamped — that's the signal-to-defer path.
 const (
-	minRecordBufferCap   int64 = 1 << 20  // 1 MiB
-	maxRecordBufferCap   int64 = 2 << 30  // 2 GiB
+	minRecordBufferCap   int64 = 1 << 20 // 1 MiB
+	maxRecordBufferCap   int64 = 2 << 30 // 2 GiB
 	minRecordBufferQueue       = 64
 	maxRecordBufferQueue       = 1 << 16 // 65536
 )
