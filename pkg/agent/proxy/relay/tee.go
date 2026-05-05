@@ -180,12 +180,15 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 
 // drop bumps counters and notifies. Kept small so push stays inlineable.
 //
-// Logging cadence is exponential (drops_total ∈ {1, 2, 4, 8, ...}) at Warn
-// so the first drop on a connection always surfaces (the signal an
-// operator wants when investigating "incomplete mock") while sustained
-// backpressure produces O(log N) warnings instead of O(N). Subsequent
-// drops still increment drops_total and fire onDrop unchanged — only the
-// log emission is rate-limited.
+// Logging cadence is exponential (drops_total ∈ {1, 2, 4, 8, ...}) at
+// Debug so the first drop on a connection surfaces when --debug is on
+// while sustained backpressure produces O(log N) emissions instead of
+// O(N). Drops are an internal-pipeline signal, not a user-facing
+// problem (the forward path is unaffected; only mock recording is
+// impacted), so the level is Debug — operators investigating
+// "incomplete mock" enable --debug to see them, normal runs stay
+// quiet. Subsequent drops still increment drops_total and fire onDrop
+// unchanged — only the log emission is rate-limited.
 func (t *tee) drop(reason string) {
 	n := t.drops.Add(1)
 	if t.onDrop != nil {
@@ -193,7 +196,7 @@ func (t *tee) drop(reason string) {
 	}
 	if t.logger != nil && n&(n-1) == 0 {
 		// n is a power of two (1, 2, 4, 8, ...) — log this drop.
-		t.logger.Warn("relay: tee drop",
+		t.logger.Debug("relay: tee drop",
 			zap.String("dir", t.dir.String()),
 			zap.String("reason", reason),
 			zap.Uint64("drops_total", n),

@@ -234,12 +234,16 @@ const (
 )
 
 // clampRecordBuffer validates user-supplied record-buffer values
-// and clamps them to safe ranges, logging warnings for adjustments.
+// and clamps them to safe ranges, logging adjustments at Debug.
 // Returns values suitable for relay.Config.PerConnCap and TeeChanBuf.
 //
 // Zero inputs pass through as zero (relay.withDefaults applies
-// built-in defaults). Out-of-range values are clamped + warned, NOT
-// rejected — record-path failure must never crash the agent.
+// built-in defaults). Out-of-range values are clamped + logged at
+// Debug, NOT rejected — record-path failure must never crash the
+// agent. Debug-level here matches the rest of the record-buffer
+// pipeline observability (see tee.drop, MarkMockIncomplete) so
+// --debug surfaces the whole story end-to-end on a single switch
+// without polluting normal-run logs with config-time noise.
 func clampRecordBuffer(logger *zap.Logger, capBytes uint64, queue int) (int64, int) {
 	var outCap int64
 	switch {
@@ -247,14 +251,14 @@ func clampRecordBuffer(logger *zap.Logger, capBytes uint64, queue int) (int64, i
 		outCap = 0
 	case capBytes > math.MaxInt64 || int64(capBytes) > maxRecordBufferCap:
 		// uint64 overflow into int64-negative is also caught here.
-		logger.Warn("record-buffer maxMemoryPerConnection above safe maximum; clamping",
+		logger.Debug("record-buffer maxMemoryPerConnection above safe maximum; clamping",
 			zap.Uint64("requested", capBytes),
 			zap.Int64("clamped", maxRecordBufferCap),
 			zap.Int64("max", maxRecordBufferCap),
 		)
 		outCap = maxRecordBufferCap
 	case int64(capBytes) < minRecordBufferCap:
-		logger.Warn("record-buffer maxMemoryPerConnection below safe minimum; clamping",
+		logger.Debug("record-buffer maxMemoryPerConnection below safe minimum; clamping",
 			zap.Uint64("requested", capBytes),
 			zap.Int64("clamped", minRecordBufferCap),
 			zap.Int64("min", minRecordBufferCap),
@@ -269,14 +273,14 @@ func clampRecordBuffer(logger *zap.Logger, capBytes uint64, queue int) (int64, i
 	case queue == 0:
 		outQueue = 0
 	case queue > maxRecordBufferQueue:
-		logger.Warn("record-buffer queueSize above safe maximum; clamping",
+		logger.Debug("record-buffer queueSize above safe maximum; clamping",
 			zap.Int("requested", queue),
 			zap.Int("clamped", maxRecordBufferQueue),
 			zap.Int("max", maxRecordBufferQueue),
 		)
 		outQueue = maxRecordBufferQueue
 	case queue < minRecordBufferQueue:
-		logger.Warn("record-buffer queueSize below safe minimum; clamping",
+		logger.Debug("record-buffer queueSize below safe minimum; clamping",
 			zap.Int("requested", queue),
 			zap.Int("clamped", minRecordBufferQueue),
 			zap.Int("min", minRecordBufferQueue),

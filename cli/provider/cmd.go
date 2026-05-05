@@ -1454,7 +1454,7 @@ func (c *CmdConfigurator) resolveRecordBufferUint64(cmd *cobra.Command, flagName
 	if envVal := os.Getenv(envName); envVal != "" {
 		v, err := strconv.ParseUint(envVal, 10, 64)
 		if err != nil {
-			c.logger.Warn("ignoring malformed env var; expected unsigned integer",
+			c.logger.Debug("ignoring malformed env var; expected unsigned integer",
 				zap.String("envVar", envName),
 				zap.String("value", envVal),
 				zap.Error(err))
@@ -1480,7 +1480,7 @@ func (c *CmdConfigurator) resolveRecordBufferInt(cmd *cobra.Command, flagName, e
 	if envVal := os.Getenv(envName); envVal != "" {
 		v, err := strconv.Atoi(envVal)
 		if err != nil {
-			c.logger.Warn("ignoring malformed env var; expected integer",
+			c.logger.Debug("ignoring malformed env var; expected integer",
 				zap.String("envVar", envName),
 				zap.String("value", envVal),
 				zap.Error(err))
