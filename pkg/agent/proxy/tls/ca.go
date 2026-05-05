@@ -496,7 +496,7 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 		// to investigate the agent image / volume mounts / SELinux.
 		logger.Error(msg, append(fields,
 			zap.String("severity_reason", severityReasonDistroLayoutPresent),
-			zap.String("severity_explanation", "image looks distro-shaped (one of the distro_indicator_paths exists) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
+			zap.String("severity_explanation", "image looks distro-shaped (stat did not return ENOENT for at least one of the distro_indicator_paths — the entry exists, or stat hit a non-not-found error such as EACCES, which still implies a distro-shaped layer) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
 		)...)
 	} else {
 		// Truly distroless — the operator deliberately stripped the trust
