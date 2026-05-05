@@ -148,44 +148,54 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
-// outgoingMockChanCap is the buffer depth of the agent → CLI mock
-// stream. The channel pipes typed mocks captured by the recorder
-// goroutines into the gob-encoded HTTP stream the CLI consumes; a
-// deeper buffer absorbs producer bursts at the cost of holding that
-// many in-flight Mocks in memory inside the agent.
+// outgoingMockBufferBytes is the byte budget for the agent → CLI mock
+// channel. This is the *design* unit — operators (and the comment
+// block in pkg/agent/proxy/syncMock/syncMock.go's drop log) reason
+// about memory, not slot count, and PR #4172's relay-layer cap
+// (DefaultPerConnCap, also bytes) uses the same convention. At
+// 64 MiB this matches PR #4172's per-connection budget, which keeps
+// the two layers symmetric and easy to audit against the agent's
+// cgroup limit.
 //
-// Bumped from 100 → 16384 after production bundles
-// (provider-engagement test EKS cluster, 2026-05-04) showed the old
-// 100-slot cap silently dropping ≥2048 mocks per pod within minutes
-// of recording start. Per-mock YAML sizes in those bundles were
-// median ~1 KiB, p95 ~10 KiB, max ~27 KiB — so the historic 100
-// slots held ~250 KiB of mocks at typical sizes (much less than the
-// 1.0 MiB a single full session in those bundles ended up writing
-// to disk). 16384 slots ≈ 50 MiB at the same per-mock distribution,
-// which is ~5% of the 1.2 GiB cgroup limit on the affected pods —
-// safe to default-on, well clear of OOM, and four orders of magnitude
-// more headroom than today's effective budget.
+// Implementation detail: a Go channel is slot-counted, so the
+// runtime cap is derived as outgoingMockBufferBytes / avgMockSizeBytes.
+// avgMockSizeBytes is the median+headroom from the per-mock size
+// distribution observed in production bundles (provider-engagement
+// test EKS, 2026-05-04: median ~1 KiB, p95 ~10 KiB, max ~27 KiB —
+// 4 KiB sits just above median while keeping the worst-case
+// OOM-equivalent under the cgroup budget). A workload with
+// consistently-larger mocks will see proportionally fewer slots
+// before backpressure kicks in, which is the intended safety
+// behavior of any byte-bounded buffer.
+//
+// Bumped (effectively) from 100-slot to 64 MiB-equivalent after
+// the same production bundles showed the old 100-slot cap silently
+// dropping ≥2048 mocks per pod within minutes of recording start
+// (the bundles' median mock was ~1 KiB, so 100 slots held ~250 KiB
+// — less than the 1.0 MiB the *successful* part of those sessions
+// ended up writing to disk).
+//
+// Why "byte budget then derive" instead of "two independent caps
+// (slots AND bytes) like PR #4172"? PR #4172 needs the two-cap shape
+// because individual chunks at the relay layer can be up to 32 KiB
+// each (forward buffer size) and a single connection might emit
+// thousands of them — the slot cap protects against pathological
+// chunk-count explosions even when bytes are fine. At the
+// outChan layer downstream of the relay, mocks are already
+// per-protocol-message granularity (one HTTP req/resp pair, one
+// PG query, etc.) — count and bytes track each other much more
+// tightly, so a single byte budget is sufficient and avoids the
+// "two knobs, both must be set, can drift" maintenance burden.
 //
 // The drop path itself is unchanged and still intentional: it is
 // far better to lose a mock and keep recording than to OOM-kill the
 // agent and lose every mock captured in the run. We just stop hitting
 // the cliff at trivial loads.
-//
-// Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
-// request/response body strings, postgres v3 bind values whose raw
-// bytes are now capped per-value via the integrations recorder fix
-// in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
-// mock — multiple Bind parameters, plus DataRow cells on the
-// response side). The worst-case OOM pattern PR #4135's
-// go-memory-load CI run 24990909605 / job 73176710440 hit was a
-// 60-VU × 1 MiB inserts shape; with 16384 slots that worst-case
-// would peak at ~16 GiB which would still tip the agent over. That
-// case is *separately* protected by memoryguard's 500 ms tick and
-// by the relay-layer per-conn caps PR #4172 introduced
-// (DefaultPerConnCap = 64 MiB, DefaultTeeChanBuf = 1024) — the
-// outChan downstream of the relay never sees individual mocks
-// fatter than what the relay tee passed through.
-const outgoingMockChanCap = 16384
+const (
+	outgoingMockBufferBytes int64 = 64 * 1024 * 1024 // 64 MiB
+	avgMockSizeBytes        int64 = 4 * 1024         // 4 KiB
+	outgoingMockChanCap           = int(outgoingMockBufferBytes / avgMockSizeBytes)
+)
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)
