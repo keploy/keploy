@@ -154,29 +154,38 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 // deeper buffer absorbs producer bursts at the cost of holding that
 // many in-flight Mocks in memory inside the agent.
 //
+// Bumped from 100 → 16384 after production bundles
+// (provider-engagement test EKS cluster, 2026-05-04) showed the old
+// 100-slot cap silently dropping ≥2048 mocks per pod within minutes
+// of recording start. Per-mock YAML sizes in those bundles were
+// median ~1 KiB, p95 ~10 KiB, max ~27 KiB — so the historic 100
+// slots held ~250 KiB of mocks at typical sizes (much less than the
+// 1.0 MiB a single full session in those bundles ended up writing
+// to disk). 16384 slots ≈ 50 MiB at the same per-mock distribution,
+// which is ~5% of the 1.2 GiB cgroup limit on the affected pods —
+// safe to default-on, well clear of OOM, and four orders of magnitude
+// more headroom than today's effective budget.
+//
+// The drop path itself is unchanged and still intentional: it is
+// far better to lose a mock and keep recording than to OOM-kill the
+// agent and lose every mock captured in the run. We just stop hitting
+// the cliff at trivial loads.
+//
 // Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
 // request/response body strings, postgres v3 bind values whose raw
 // bytes are now capped per-value via the integrations recorder fix
 // in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
 // mock — multiple Bind parameters, plus DataRow cells on the
-// response side). At 100 entries the worst-case pinned memory for
-// a "fat" mock workload (e.g. the 60-VU × 1 MiB inserts shape that
-// triggered the OOM observed on PR #4135's go-memory-load CI run
-// 24990909605, job 73176710440) is bounded; 1000 was unsafe because
-// the slow CLI consumer (gob-encoded over HTTP, then disk-write per
-// mock) reliably underran the producer and let the channel fill,
-// pinning ~1 GiB of bodies before memoryguard's 500 ms tick could
-// react.
-//
-// 100 was chosen so that it stays well above any normal-traffic
-// micro-burst (typical postgres recordings emit ~10–30 mocks/s) yet
-// the ceiling is reached fast enough that syncMock's existing
-// outChan-overflow drop-with-Error path becomes the dominant
-// backpressure signal long before the cgroup limit is hit. The
-// drop path is intentional: it is far better to lose a mock and
-// keep recording than to OOM-kill the agent and lose every mock
-// captured in the run.
-const outgoingMockChanCap = 100
+// response side). The worst-case OOM pattern PR #4135's
+// go-memory-load CI run 24990909605 / job 73176710440 hit was a
+// 60-VU × 1 MiB inserts shape; with 16384 slots that worst-case
+// would peak at ~16 GiB which would still tip the agent over. That
+// case is *separately* protected by memoryguard's 500 ms tick and
+// by the relay-layer per-conn caps PR #4172 introduced
+// (DefaultPerConnCap = 64 MiB, DefaultTeeChanBuf = 1024) — the
+// outChan downstream of the relay never sees individual mocks
+// fatter than what the relay tee passed through.
+const outgoingMockChanCap = 16384
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)

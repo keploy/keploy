@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -835,6 +836,59 @@ func TestSendToOutChanDropsAfterBudget(t *testing.T) {
 	entry := logs.All()[0]
 	if entry.Level != zap.ErrorLevel {
 		t.Fatalf("expected Error level on drop log, got %v", entry.Level)
+	}
+}
+
+// TestSendToOutChanLoudOnFirstDrop validates that the
+// promoted-to-Warn line fires on the first drop AND the existing
+// Error line continues to fire on the same first drop. The Warn
+// is the actionable "your recording is now lossy" signal that
+// production bundles needed and the rate-sampled Error line did
+// not surface (the n%1024 sampler hid the first 1023 drops on a
+// stuck consumer).
+func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	// Capture both Warn and Error so we can assert the Warn fires
+	// loud-on-first AND the Error keeps the per-1024 cadence.
+	core, logs := observer.New(zap.WarnLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Fill the slot so the next send hits the drop branch.
+	ch <- &models.Mock{}
+
+	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+
+	if got := mgr.DropCount(); got != 1 {
+		t.Fatalf("expected dropCount=1, got %d", got)
+	}
+
+	warnCount := 0
+	errorCount := 0
+	for _, e := range logs.All() {
+		switch e.Level {
+		case zap.WarnLevel:
+			warnCount++
+			if !strings.Contains(e.Message, "LOSSY") {
+				t.Errorf("Warn log message missing LOSSY signal: %q", e.Message)
+			}
+		case zap.ErrorLevel:
+			errorCount++
+		}
+	}
+	if warnCount != 1 {
+		t.Fatalf("expected exactly one Warn-on-first-drop, got %d (logs=%v)",
+			warnCount, logs.All())
+	}
+	if errorCount != 1 {
+		t.Fatalf("expected exactly one Error log on first drop (sampler n==1 branch), got %d",
+			errorCount)
 	}
 }
 

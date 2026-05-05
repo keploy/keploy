@@ -172,6 +172,20 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 		timer.Stop()
 	case <-timer.C:
 		n := m.dropCount.Add(1)
+		// Loud-on-first-drop: production bundles surfaced the cliff
+		// only via the n%1024 sampled line, which meant operators
+		// missed the first 1023 drops entirely. Fire the prominent
+		// "capture is now lossy" warning the moment the first drop
+		// happens — that's the actionable signal — and keep the
+		// every-1024 sampled line for sustained-drop telemetry so a
+		// long-running stuck consumer doesn't flood the log.
+		if n == 1 {
+			m.dropLogger().Warn(
+				"syncMock outChan overflow; mock recording is now LOSSY — every subsequent overflow drop is silent unless the per-1024 sampler fires; raise outgoingMockChanCap (pkg/service/agent/agent.go) or speed up the gob/HTTP/disk consumer pipeline",
+				zap.Int("outChanCap", cap(m.outChan)),
+				zap.Duration("budget", sendBudget),
+			)
+		}
 		if n == 1 || n%sendDropSampleRate == 0 {
 			m.dropLogger().Error(
 				"syncMock outChan overflow; mock dropped — raise consumer throughput or increase outChan capacity",
