@@ -1078,58 +1078,32 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.EnableSampling = enableSampling
 
-			// Resolve record-buffer values: flag overrides yaml,
-			// env var overrides flag, validation/clamp lives in
-			// pkg/agent/proxy/relay (defaults applied there too).
-			if cmd.Flags().Changed("max-memory-per-conn") {
-				v, err := cmd.Flags().GetUint64("max-memory-per-conn")
-				if err != nil {
-					utils.LogError(c.logger, err, "failed to get the max-memory-per-conn flag")
-					return fmt.Errorf("failed to get max-memory-per-conn flag: %w", err)
-				}
-				c.cfg.Record.RecordBuffer.MaxMemoryPerConnection = v
+			// Resolve record-buffer values: flag overrides yaml, env
+			// overrides flag. Range validation and clamping live in
+			// clampRecordBuffer (pkg/agent/proxy/proxy.go); only the
+			// cross-check against MemoryLimit happens here so the user
+			// gets fast feedback at the CLI surface.
+			if err := c.resolveRecordBufferUint64(cmd, "max-memory-per-conn", "KEPLOY_RECORD_MAX_MEMORY_PER_CONN", &c.cfg.Record.RecordBuffer.MaxMemoryPerConnection); err != nil {
+				return err
 			}
-			if cmd.Flags().Changed("queue-size") {
-				v, err := cmd.Flags().GetInt("queue-size")
-				if err != nil {
-					utils.LogError(c.logger, err, "failed to get the queue-size flag")
-					return fmt.Errorf("failed to get queue-size flag: %w", err)
-				}
-				c.cfg.Record.RecordBuffer.QueueSize = v
-			}
-			if envVal := os.Getenv("KEPLOY_RECORD_MAX_MEMORY_PER_CONN"); envVal != "" {
-				v, err := strconv.ParseUint(envVal, 10, 64)
-				if err != nil {
-					c.logger.Warn("ignoring malformed KEPLOY_RECORD_MAX_MEMORY_PER_CONN; expected unsigned integer (bytes)",
-						zap.String("value", envVal), zap.Error(err))
-				} else {
-					c.cfg.Record.RecordBuffer.MaxMemoryPerConnection = v
-				}
-			}
-			if envVal := os.Getenv("KEPLOY_RECORD_QUEUE_SIZE"); envVal != "" {
-				v, err := strconv.Atoi(envVal)
-				if err != nil {
-					c.logger.Warn("ignoring malformed KEPLOY_RECORD_QUEUE_SIZE; expected integer",
-						zap.String("value", envVal), zap.Error(err))
-				} else {
-					c.cfg.Record.RecordBuffer.QueueSize = v
-				}
+			if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
+				return err
 			}
 
-			// Cross-check: a single connection's recording buffer must not
-			// exceed the docker container's memory limit. Otherwise even
-			// one large response can OOM-kill the agent before any
-			// concurrency. Mirrors the equivalent guard in k8s-proxy's
-			// ApplyRecordConfig — both produce the same UX (fail at
-			// config time, not at runtime). Record.MemoryLimit is in MB
-			// and is only meaningful for docker run / docker compose
-			// (zeroed earlier for native runs at line ~1045), so we gate
-			// on >0 to skip native runs where this comparison is moot.
+			// Cross-check: a single connection's recording buffer must
+			// not exceed the docker container's memory limit. Otherwise
+			// even one large response can OOM-kill the agent before any
+			// concurrency. Mirrors k8s-proxy's ApplyRecordConfig — both
+			// produce the same UX (fail at config time, not at runtime)
+			// with a UI-aligned error string. Record.MemoryLimit is in
+			// MB and is only meaningful for docker run / docker compose
+			// (zeroed earlier for native runs), so we gate on >0 to
+			// skip native runs where this comparison is moot.
 			if c.cfg.Record.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
 				memBytes := c.cfg.Record.MemoryLimit * 1024 * 1024
 				if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
 					return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
-						c.cfg.Record.RecordBuffer.MaxMemoryPerConnection/(1024*1024),
+						bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
 						c.cfg.Record.MemoryLimit)
 				}
 			}
@@ -1422,39 +1396,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// set these; argv wins if explicitly passed. Env vars on the
 		// agent process win over argv (lets operators tune a running
 		// container without rebuilding the orchestrator command).
-		if cmd.Flags().Changed("max-memory-per-conn") {
-			v, err := cmd.Flags().GetUint64("max-memory-per-conn")
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get max-memory-per-conn flag")
-				return fmt.Errorf("failed to get max-memory-per-conn flag: %w", err)
-			}
-			c.cfg.Record.RecordBuffer.MaxMemoryPerConnection = v
+		if err := c.resolveRecordBufferUint64(cmd, "max-memory-per-conn", "KEPLOY_RECORD_MAX_MEMORY_PER_CONN", &c.cfg.Record.RecordBuffer.MaxMemoryPerConnection); err != nil {
+			return err
 		}
-		if cmd.Flags().Changed("queue-size") {
-			v, err := cmd.Flags().GetInt("queue-size")
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get queue-size flag")
-				return fmt.Errorf("failed to get queue-size flag: %w", err)
-			}
-			c.cfg.Record.RecordBuffer.QueueSize = v
-		}
-		if envVal := os.Getenv("KEPLOY_RECORD_MAX_MEMORY_PER_CONN"); envVal != "" {
-			v, err := strconv.ParseUint(envVal, 10, 64)
-			if err != nil {
-				c.logger.Warn("ignoring malformed KEPLOY_RECORD_MAX_MEMORY_PER_CONN; expected unsigned integer (bytes)",
-					zap.String("value", envVal), zap.Error(err))
-			} else {
-				c.cfg.Record.RecordBuffer.MaxMemoryPerConnection = v
-			}
-		}
-		if envVal := os.Getenv("KEPLOY_RECORD_QUEUE_SIZE"); envVal != "" {
-			v, err := strconv.Atoi(envVal)
-			if err != nil {
-				c.logger.Warn("ignoring malformed KEPLOY_RECORD_QUEUE_SIZE; expected integer",
-					zap.String("value", envVal), zap.Error(err))
-			} else {
-				c.cfg.Record.RecordBuffer.QueueSize = v
-			}
+		if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
+			return err
 		}
 
 		// Cross-check: max-memory-per-conn must not exceed the agent's
@@ -1468,7 +1414,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			memBytes := c.cfg.Agent.MemoryLimit * 1024 * 1024
 			if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
 				return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
-					c.cfg.Record.RecordBuffer.MaxMemoryPerConnection/(1024*1024),
+					bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
 					c.cfg.Agent.MemoryLimit)
 			}
 		}
@@ -1486,6 +1432,74 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	return nil
+}
+
+// resolveRecordBufferUint64 applies flag→env override semantics for one
+// record-buffer uint64 field. Used by ValidateFlags' record and agent
+// branches which would otherwise duplicate this dance verbatim.
+//
+// Semantics: a Changed flag wins over the existing config value; an
+// env var wins over both. Malformed env values are warned and ignored
+// (the config keeps whatever the flag/yaml resolved to) — record-path
+// configuration mistakes must never tear down the daemon.
+func (c *CmdConfigurator) resolveRecordBufferUint64(cmd *cobra.Command, flagName, envName string, target *uint64) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetUint64(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := strconv.ParseUint(envVal, 10, 64)
+		if err != nil {
+			c.logger.Warn("ignoring malformed env var; expected unsigned integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// resolveRecordBufferInt is the int sibling of resolveRecordBufferUint64.
+// Kept as a separate helper rather than a generic because cobra's flag
+// accessors are typed and the env-parse uses strconv.Atoi here.
+func (c *CmdConfigurator) resolveRecordBufferInt(cmd *cobra.Command, flagName, envName string, target *int) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetInt(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := strconv.Atoi(envVal)
+		if err != nil {
+			c.logger.Warn("ignoring malformed env var; expected integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// bytesToMBCeil converts bytes to MiB with ceiling rounding so the
+// formatted error never under-reports the configured value (e.g.,
+// 1.5 MiB worth of bytes prints as "2 MB", not "1 MB"). Float
+// formatting was tempting but a trailing ".00" looks awkward in the
+// majority case where users enter whole-MB values; ceil-int strikes
+// the right balance.
+func bytesToMBCeil(b uint64) uint64 {
+	const mib = uint64(1024 * 1024)
+	return (b + mib - 1) / mib
 }
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {

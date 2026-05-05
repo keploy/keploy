@@ -571,14 +571,13 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		// legitimate direct access and we intentionally do not expose a
 		// setter helper for a one-line test-only override.
 		dnsForwardTimeout: 2 * time.Second,
-
-		// Snapshot record-buffer tuning. Cast through int64 for the
-		// byte-budget field; uint64 → int64 saturating cast guards
-		// against operator misconfiguration like 18 EiB. The relay's
-		// withDefaults() applies built-in defaults when these are
-		// zero or negative, so the zero-config path keeps working.
-		recordBufferCap:       int64(opts.Record.RecordBuffer.MaxMemoryPerConnection),
-		recordBufferQueueSize: opts.Record.RecordBuffer.QueueSize,
+		// Record-buffer tuning is set by clampRecordBuffer below — it
+		// validates the operator-supplied uint64/int values against
+		// safe ranges (1 MiB-2 GiB / 64-65536 slots), warns + clamps
+		// rather than crashing, and detects uint64 → int64 wrap from
+		// values > math.MaxInt64 explicitly. Setting these here would
+		// be redundant and would risk a transient negative cap from a
+		// bare uint64 → int64 reinterpretation cast.
 	}
 	proxy.recordBufferCap, proxy.recordBufferQueueSize = clampRecordBuffer(
 		logger,

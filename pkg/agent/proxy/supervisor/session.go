@@ -177,9 +177,11 @@ func (s *Session) AddPostRecordHook(h PostRecordHook) {
 }
 
 // MarkMockIncomplete sets the session's incomplete-mock flag. EmitMock
-// drops silently while the flag is set. Reason is logged at Debug so
-// operators can trace why a mock was withheld (memory pressure, channel
-// full, dropped chunk, parser-internal inconsistency).
+// drops silently while the flag is set. Reason is logged at Warn the
+// first time the flag flips per session so operators can trace why a
+// mock was withheld (memory pressure, channel full, dropped chunk,
+// parser-internal inconsistency) without grepping debug logs;
+// subsequent calls within the same session are no-ops and emit nothing.
 //
 // The relay calls this when it gates a chunk at the tee; parsers call
 // it when they cannot continue decoding a mock cleanly. Safe to call
