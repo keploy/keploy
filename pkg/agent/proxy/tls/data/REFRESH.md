@@ -54,7 +54,9 @@ have been in NSS for years — but quarterly refresh is the right cadence
 to keep the lag bounded.
 
 A `chore(agent): refresh embedded Mozilla CA roots` PR every quarter is
-the lightweight maintenance path. The diff is just this one file.
+the lightweight maintenance path. In the typical case the diff is just
+`mozilla_roots.pem` — this `REFRESH.md` itself only changes when the
+refresh procedure (commands, source URL, or test names) changes.
 
 ## Why we vendor the bytes instead of importing `golang.org/x/crypto/x509roots/fallback`
 

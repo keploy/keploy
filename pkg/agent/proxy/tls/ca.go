@@ -306,7 +306,7 @@ var loadSystemCABundleFn = loadSystemCABundle
 // file is a build/runtime regression — the image *should* have it. If none
 // of these is present, the image is almost certainly a deliberately
 // stripped distroless / scratch base, where the missing bundle is
-// expected. We use this signal to choose between WARN (regression) and
+// expected. We use this signal to choose between ERROR (regression) and
 // INFO (intentional minimal image).
 //
 // Keep this list narrow: every entry needs to be something a distroless
@@ -321,7 +321,7 @@ var distroIndicatorPaths = []string{
 // hasDistroTrustLayout reports whether the runtime image *appears* to have
 // the kind of base layout where the OS CA bundle would normally be
 // installed by `ca-certificates`. This is a heuristic — it can produce a
-// false-positive WARN if an operator is intentionally running on a
+// false-positive ERROR if an operator is intentionally running on a
 // non-distroless image without `ca-certificates` installed, and a
 // false-negative (silent INFO) if a distroless image happens to have an
 // empty /etc/ssl/certs directory. Both edge cases are rare and the
@@ -433,30 +433,48 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 
 	// Disk search exhausted. Decide log severity based on whether the
 	// image *should* have had a disk bundle (distro-shaped) vs whether
-	// the absence was expected (distroless / scratch). Both code paths
-	// then return the embedded fallback so apps still get real public
-	// roots.
-	const (
-		// Same message body in both severities — only the level differs.
-		// Keeping the wording identical means the remediation guidance
-		// stays consistent across log levels and operators don't have to
-		// learn two variants.
+	// the absence was expected (distroless / scratch). When fallback is
+	// non-nil (production code path) both severities continue with the
+	// embedded Mozilla NSS roots so apps still get real public roots.
+	// When fallback is nil (the disk-only test entry point and any
+	// future caller that explicitly opts out of the embedded blob) the
+	// log message must NOT claim a fallback happened — there isn't one
+	// — so we vary the body on len(fallback) > 0.
+	//
+	// Keeping the actionable remediation guidance identical across the
+	// two severities means operators don't have to learn two variants;
+	// only the level and the leading sentence differ.
+	const remediation = " To restore the disk path, ensure the Keploy " +
+		"AGENT container (the writer of this shared volume — not the " +
+		"app container) has access to an OS trust bundle at one of the " +
+		"searched paths: install `ca-certificates` in the agent image " +
+		"(`apt-get install -y ca-certificates` on Debian/Ubuntu, " +
+		"`apk add ca-certificates` on Alpine), mount the host's bundle " +
+		"into the agent pod, or rebuild from a base image that ships " +
+		"trust roots. Fixing this in the app image does NOT help: " +
+		"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this " +
+		"shared file, so they replace whatever the app image already " +
+		"trusts."
+
+	var msg string
+	if len(fallback) > 0 {
 		msg = "No system CA bundle found on any known disk path — falling " +
 			"back to the agent's embedded Mozilla NSS roots. The merged " +
 			"/tmp/keploy-tls/ca.crt will contain (embedded_roots ∪ " +
 			"Keploy MITM CA), so the app's trust store is still valid for " +
-			"public endpoints. To restore the disk path, ensure the Keploy " +
-			"AGENT container (the writer of this shared volume — not the " +
-			"app container) has access to an OS trust bundle at one of the " +
-			"searched paths: install `ca-certificates` in the agent image " +
-			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, " +
-			"`apk add ca-certificates` on Alpine), mount the host's bundle " +
-			"into the agent pod, or rebuild from a base image that ships " +
-			"trust roots. Fixing this in the app image does NOT help: " +
-			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this " +
-			"shared file, so they replace whatever the app image already " +
-			"trusts."
-	)
+			"public endpoints." + remediation
+	} else {
+		// fallback==nil: no embedded blob is being used (the disk-only
+		// test entry point loadSystemCABundleFromPaths takes this
+		// branch). Saying we "fell back to the embedded Mozilla NSS
+		// roots" here would be misleading — the merged bundle in this
+		// shape contains only the Keploy MITM CA.
+		msg = "No system CA bundle found on any known disk path and no " +
+			"embedded fallback configured — the merged " +
+			"/tmp/keploy-tls/ca.crt will contain only the Keploy MITM " +
+			"CA, which is NOT a valid trust store for public endpoints." +
+			remediation
+	}
 
 	fields := []zap.Field{
 		zap.Strings("searched_paths", tried),
