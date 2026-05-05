@@ -285,16 +285,41 @@ func (r *Relay) run(ctx context.Context) error {
 
 	// Forwarder src → dst (Dir=FromClient).
 	wgForward.Add(1)
+	fwdC2DDone := make(chan struct{})
 	go func() {
 		defer wgForward.Done()
+		defer close(fwdC2DDone)
 		recordErr(r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D))
 	}()
 
 	// Forwarder dst → src (Dir=FromDest).
 	wgForward.Add(1)
+	fwdD2CDone := make(chan struct{})
 	go func() {
 		defer wgForward.Done()
+		defer close(fwdD2CDone)
 		recordErr(r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C))
+	}()
+
+	// FIX: when ONE forwarder exits (e.g. upstream sent FIN → FromDest
+	// got EOF), close the OTHER forwarder's source so its blocked Read
+	// returns immediately. Without this, the relay waits for the still-
+	// blocked forwarder to exit on its own — for outbound captures with
+	// HTTP/1.1 keepalive, that means waiting for the *app's* read_timeout
+	// (60s for botocore) before everything tears down.
+	go func() {
+		select {
+		case <-fwdC2DDone:
+			if dst := r.dst.Load(); dst != nil {
+				_ = (*dst).Close()
+			}
+		case <-fwdD2CDone:
+			if src := r.src.Load(); src != nil {
+				_ = (*src).Close()
+			}
+		case <-stopping:
+			return
+		}
 	}()
 
 	// Block until both forwarders exit.
