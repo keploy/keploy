@@ -482,6 +482,12 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 		zap.Int("embedded_fallback_bytes", len(fallback)),
 	}
 
+	// severity_explanation describes WHY this severity was chosen — it
+	// must not claim the embedded fallback was used when it wasn't.
+	// Whether the fallback is in effect is already conveyed by the
+	// `embedded_fallback_bytes` structured field and by the leading
+	// sentence of `msg`, so the explanation stays focused on the
+	// distro-shape decision.
 	if hasDistroTrustLayoutFn() {
 		// Image looks distro-shaped (Debian/Ubuntu/Alpine/RHEL family) —
 		// missing disk bundle is a real misconfiguration. ERROR so
@@ -497,7 +503,7 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 		// store; raising the level here would create alert fatigue.
 		logger.Info(msg, append(fields,
 			zap.String("severity_reason", severityReasonNoDistroLayout),
-			zap.String("severity_explanation", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected — using embedded fallback"),
+			zap.String("severity_explanation", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected"),
 		)...)
 	}
 
