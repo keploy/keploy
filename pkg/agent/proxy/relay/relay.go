@@ -283,10 +283,29 @@ func (r *Relay) run(ctx context.Context) error {
 		r.processDirectives(ctx, stopping)
 	}()
 
+	// When one forwarder exits, signal the other to exit too via the
+	// existing stopping/nudgeDeadline machinery. Without this signalling,
+	// if e.g. the upstream sends FIN → FromDest reads EOF and exits, the
+	// FromClient forwarder is still parked in src.Read(client) with no
+	// event to wake it; wgForward.Wait() blocks until the application's
+	// HTTP client times out on its own (~60s for botocore default
+	// read_timeout). The recipe used here mirrors what cancelNudge does
+	// for ctx.Done(): close stopping (idempotent via sync.Once so the
+	// late close below stays safe) AND nudge the peer's read deadline so
+	// its in-flight Read returns Timeout(); the forwarder's existing
+	// timeout-loop branch re-checks the top-of-loop select, observes
+	// stopping closed, and exits cleanly. Crucially, the relay still
+	// does NOT close the real sockets — that ownership stays with
+	// proxy.go::handleConnection per the contract in doc.go.
+	var stopOnce sync.Once
+	closeStopping := func() { stopOnce.Do(func() { close(stopping) }) }
+
 	// Forwarder src → dst (Dir=FromClient).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
+		defer closeStopping()
+		defer r.nudgeDeadline(r.dst.Load())
 		recordErr(r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D))
 	}()
 
@@ -294,6 +313,8 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
+		defer closeStopping()
+		defer r.nudgeDeadline(r.src.Load())
 		recordErr(r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C))
 	}()
 
@@ -312,8 +333,11 @@ func (r *Relay) run(ctx context.Context) error {
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
-	// Signal the directive processor to exit and wait for it.
-	close(stopping)
+	// Signal the directive processor to exit and wait for it. Use the
+	// idempotent closer because either forwarder's defer may have
+	// already closed stopping during its own exit (see closeStopping
+	// above) — closing a closed channel panics.
+	closeStopping()
 	wgDirective.Wait()
 
 	// After the processor has returned, no one else can send on acks:

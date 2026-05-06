@@ -92,6 +92,19 @@ record:
   sync: false
   memoryLimit: 0
   testCaseNaming: descriptive
+  # recordBuffer tunes the per-connection recording queue. Touch only
+  # if you see "mock incomplete" warnings (reason: per_conn_cap or
+  # channel_full) in the agent logs. Env vars
+  # KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+  # override these values.
+  recordBuffer:
+    # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in
+    # default. Bump for workloads with large responses (e.g. >10 MB
+    # query results).
+    maxMemoryPerConnection: 67108864
+    # Number of chunk slots (~32 KiB each). Zero falls through to
+    # the built-in default. Bump for bursty traffic.
+    queueSize: 1024
 configPath: ""
 bypassRules: []
 disableMapping: true
