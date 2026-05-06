@@ -717,6 +717,12 @@ jobs:
   run_schema_match_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/schema_match_linux.yml
+  # End-to-end coverage for --capture-packets: drives a real
+  # outbound-HTTPS workload through the keploy proxy and verifies the
+  # streamed traffic.pcap + sslkeys.log decrypt cleanly with tshark.
+  run_sample_tls_pcap:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/sample_tls_pcap.yml
 
   # -------------------------------------------------------------------
   # macOS test jobs — self-hosted runner loads the linux/arm64 image
@@ -1140,6 +1146,7 @@ jobs:
       - run_fuzzer_linux
       - run_grpc_linux
       - run_schema_match_linux
+      - run_sample_tls_pcap
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1161,6 +1168,7 @@ jobs:
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
+            "${{ needs.run_sample_tls_pcap.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
