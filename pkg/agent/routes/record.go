@@ -376,8 +376,26 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := enc.Encode(m); err != nil {
-				a.logger.Error("gob encode failed", zap.Error(err))
-				return
+				// One un-encodable mock (e.g. a postgres cell whose Go
+				// type isn't yet covered by PostgresV3Cell.GobEncode)
+				// MUST NOT tear down the stream — the producer keeps
+				// pushing onto mockChan, and a hard return here would
+				// silently drop every subsequent mock for the rest of
+				// the recording session. See provider-engagement RCA
+				// May 2026: a single [16]uint8 case in a uuid[] column
+				// truncated 22 tests' worth of mocks because this
+				// handler exited at the first encode error.
+				//
+				// Skip the bad mock, log loudly so operators can
+				// trace which type lacks a case, and stay alive so
+				// the rest of the recording continues to flow.
+				a.logger.Error("gob encode failed; skipping this mock and continuing the stream",
+					zap.Error(err),
+					zap.String("mockKind", string(m.Kind)),
+					zap.String("mockName", m.Name),
+					zap.String("next_step", "the named mock was DROPPED from this recording. Add a tag byte and a case to PostgresV3Cell.GobEncode/GobDecode (and the codec catalogue) for the offending Value type, then re-record. Until that lands, replays of test cases that depend on this mock will see candidates: 0 in the postgres v3 matcher."),
+				)
+				continue
 			}
 			flusher.Flush()
 		}
