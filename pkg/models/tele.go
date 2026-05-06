@@ -1,5 +1,16 @@
 package models
 
+
+// Event-type names emitted by this package. Only the names this file's
+// methods actually emit are listed; existing pre-existing emissions
+// (Ping, RecordedTestSuite, RecordedBatch, TestSetRun, MockTestRun,
+// RecordedMocks) keep their original string literals to avoid churn in
+// callers we did not touch.
+const (
+	TeleEventTestRun                = "TestRun"
+	TeleEventRecordSessionCompleted = "RecordSessionCompleted"
+)
+
 type TeleEvent struct {
 	InstallationID string                 `json:"installationId"`
 	EventType      string                 `json:"eventType"`

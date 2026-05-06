@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -15,7 +16,16 @@ import (
 	"go.uber.org/zap"
 )
 
-var teleURL = "https://telemetry.keploy.io/analytics"
+const defaultTeleURL = "https://telemetry.keploy.io/analytics"
+
+// teleURL resolves the telemetry sink at startup. KEPLOY_TELEMETRY_URL lets
+// local-dev point at a self-hosted receiver (e.g. http://localhost:3030/analytics).
+var teleURL = func() string {
+	if v := os.Getenv("KEPLOY_TELEMETRY_URL"); v != "" {
+		return v
+	}
+	return defaultTeleURL
+}()
 
 type Telemetry struct {
 	Enabled        bool
@@ -104,17 +114,18 @@ func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runSt
 	tel.sendTracked("TestSetRun", dataMap)
 }
 
-func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{}) {
+func (tel *Telemetry) TestRun(success int, failure int, testSets int, mocksConsumed int, runStatus string, metadata map[string]interface{}) {
 	dataMap := map[string]interface{}{
-		"Passed-Tests": success,
-		"Failed-Tests": failure,
-		"Test-Sets":    testSets,
-		"Run-Status":   runStatus,
+		"Passed-Tests":   success,
+		"Failed-Tests":   failure,
+		"Test-Sets":      testSets,
+		"Mocks-Consumed": mocksConsumed,
+		"Run-Status":     runStatus,
 	}
 	for k, v := range metadata {
 		dataMap[k] = v
 	}
-	tel.sendTracked("TestRun", dataMap)
+	tel.sendTracked(models.TeleEventTestRun, dataMap)
 }
 
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
@@ -122,6 +133,18 @@ func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 		"Utilized-Mocks": utilizedMocks,
 	}
 	tel.sendTracked("MockTestRun", dataMap)
+}
+
+// RecordSessionCompleted fires at the end of a successful record session
+// with totals. record always captures one test-set per invocation, so we
+// don't include a test-set count.
+func (tel *Telemetry) RecordSessionCompleted(testCount, mockCount int64, durationMs int64) {
+	dataMap := map[string]interface{}{
+		"test_count":  testCount,
+		"mock_count":  mockCount,
+		"duration_ms": durationMs,
+	}
+	tel.sendTracked(models.TeleEventRecordSessionCompleted, dataMap)
 }
 
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{}) {

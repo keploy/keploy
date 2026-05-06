@@ -172,6 +172,7 @@ type Replayer struct {
 	totalTestFailed       int
 	totalTestObsolete     int
 	totalTestIgnored      int
+	totalMocksConsumed    int // distinct mocks consumed across all test sets in the current run; used for telemetry on TestRun event
 	totalTestTimeTaken    time.Duration
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
@@ -288,6 +289,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.completeTestReportMu.Lock()
 	r.completeTestReport = make(map[string]TestReportVerdict)
 	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
+	r.totalMocksConsumed = 0
 	r.totalTestTimeTaken = 0
 	r.completeTestReportMu.Unlock()
 	r.failedTCsBySetID = make(map[string][]string)
@@ -607,8 +609,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.completeTestReportMu.RLock()
 	passed := r.totalTestPassed
 	failed := r.totalTestFailed
+	mocksConsumed := r.totalMocksConsumed
 	r.completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+	r.telemetry.TestRun(passed, failed, len(testSets), mocksConsumed, testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
 	// Shutdown is optional: the static Telemetry interface does not require it,
@@ -2463,6 +2466,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
+
+	r.completeTestReportMu.Lock()
+	r.totalMocksConsumed += len(totalConsumedMocks)
+	r.completeTestReportMu.Unlock()
 
 	return testSetStatus, nil
 }

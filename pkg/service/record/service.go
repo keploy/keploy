@@ -52,6 +52,7 @@ type Telemetry interface {
 	RecordedTestCaseMock(mockType string)
 	RecordedMocks(mockTotal map[string]int)
 	RecordedTestAndMocks()
+	RecordSessionCompleted(testCount, mockCount int64, durationMs int64)
 }
 
 type FrameChan struct {
