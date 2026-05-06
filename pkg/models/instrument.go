@@ -103,25 +103,25 @@ type SetupOptions struct {
 	DockerDelay     uint64
 	Synchronous     bool
 	// Cmd               string
-	AgentURI          string
-	IsDocker          bool
-	CommandType       string
-	EnableTesting     bool
-	ProxyPort         uint32
-	IncomingProxyPort uint16
-	DnsPort           uint32
-	Mode              Mode
+	AgentURI                  string
+	IsDocker                  bool
+	CommandType               string
+	EnableTesting             bool
+	ProxyPort                 uint32
+	IncomingProxyPort         uint16
+	DnsPort                   uint32
+	Mode                      Mode
 	GlobalPassthrough         bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
-	AgentPort         uint32
-	AppPorts          []string
-	AppNetworks       []string
-	NetworkAliases    map[string][]string
-	BuildDelay        uint64
-	PassThroughPorts  []uint
-	MemoryLimit       uint64
-	ConfigPath        string
+	AgentPort                 uint32
+	AppPorts                  []string
+	AppNetworks               []string
+	NetworkAliases            map[string][]string
+	BuildDelay                uint64
+	PassThroughPorts          []uint
+	MemoryLimit               uint64
+	ConfigPath                string
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have

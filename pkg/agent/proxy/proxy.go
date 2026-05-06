@@ -561,27 +561,27 @@ func nextProtosSubset(want, offered []string) bool {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
-		logger:             logger,
-		Port:               opts.ProxyPort,
-		IncomingProxyPort:  opts.IncomingProxyPort,
-		DNSPort:            opts.DNSPort, // default: 26789
-		synchronous:        opts.Agent.Synchronous,
-		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:            &sync.Mutex{},
-		connMutex:          &sync.Mutex{},
-		DestInfo:           info,
-		clientClose:        make(chan bool, 1),
-		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
+		logger:                    logger,
+		Port:                      opts.ProxyPort,
+		IncomingProxyPort:         opts.IncomingProxyPort,
+		DNSPort:                   opts.DNSPort, // default: 26789
+		synchronous:               opts.Agent.Synchronous,
+		IP4:                       "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                       "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:                   &sync.Mutex{},
+		connMutex:                 &sync.Mutex{},
+		DestInfo:                  info,
+		clientClose:               make(chan bool, 1),
+		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
 		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
-		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:           opts.Agent.IsDocker,
-		EnableIPv6Redirect: opts.Agent.EnableIPv6Redirect,
-		appPID:             opts.Agent.ClientNSPID,
-		caJavaHome:         opts.Agent.CAJavaHome,
-		dnsCache:           newDNSCache(),
-		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:                  opts.Agent.IsDocker,
+		EnableIPv6Redirect:        opts.Agent.EnableIPv6Redirect,
+		appPID:                    opts.Agent.ClientNSPID,
+		caJavaHome:                opts.Agent.CAJavaHome,
+		dnsCache:                  newDNSCache(),
+		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
 		// against CoreDNS (~500 ms default) while keeping app-side lookup
