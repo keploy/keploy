@@ -97,10 +97,11 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
+	IP4               string
+	IP6               string
+	Port              uint32
+	IncomingProxyPort uint16
+	DNSPort           uint32
 
 	DestInfo     agent.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -138,12 +139,13 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsSwitchMutex     sync.Mutex
-	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer      *dns.Server
-	TCPDNSServer      *dns.Server
-	GlobalPassthrough bool
-	IsDocker          bool
+	nsSwitchMutex             sync.Mutex
+	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer              *dns.Server
+	TCPDNSServer              *dns.Server
+	GlobalPassthrough         bool
+	OpportunisticTLSIntercept bool
+	IsDocker                  bool
 
 	// EnableIPv6Redirect mirrors config.Agent.EnableIPv6Redirect. When
 	// true (the default), the synthetic DNS fallback answers AAAA
@@ -203,6 +205,20 @@ type Proxy struct {
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
 	skipListener bool
+
+	// pcapMu guards the pcap-lifecycle fields below. The lifecycle is:
+	// startPacketCapture spins up the afpacket goroutines and
+	// installs a fresh broadcaster; stopPacketCapture cancels, waits
+	// on done, and clears the broadcaster. Subscribers join via
+	// SubscribePcap and receive every captured frame fanned out from
+	// the capture loop — there is NO on-disk pcap file. In the k8s
+	// live-recording use case the session never ends, so "fetch on
+	// stop" is the wrong model; the recorder holds a long-lived
+	// HTTP stream from the moment Record() is called.
+	pcapMu          sync.Mutex
+	pcapCancel      context.CancelFunc
+	pcapDone        chan struct{}
+	pcapBroadcaster *pcapBroadcaster
 
 	// recordBufferCap and recordBufferQueueSize mirror
 	// config.Record.RecordBuffer at proxy-construction time. Snapshotted
@@ -545,25 +561,27 @@ func nextProtosSubset(want, offered []string) bool {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
-		logger:             logger,
-		Port:               opts.ProxyPort,
-		DNSPort:            opts.DNSPort, // default: 26789
-		synchronous:        opts.Agent.Synchronous,
-		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:            &sync.Mutex{},
-		connMutex:          &sync.Mutex{},
-		DestInfo:           info,
-		clientClose:        make(chan bool, 1),
-		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
-		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:           opts.Agent.IsDocker,
-		EnableIPv6Redirect: opts.Agent.EnableIPv6Redirect,
-		appPID:             opts.Agent.ClientNSPID,
-		caJavaHome:         opts.Agent.CAJavaHome,
-		dnsCache:           newDNSCache(),
-		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		logger:                    logger,
+		Port:                      opts.ProxyPort,
+		IncomingProxyPort:         opts.IncomingProxyPort,
+		DNSPort:                   opts.DNSPort, // default: 26789
+		synchronous:               opts.Agent.Synchronous,
+		IP4:                       "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                       "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:                   &sync.Mutex{},
+		connMutex:                 &sync.Mutex{},
+		DestInfo:                  info,
+		clientClose:               make(chan bool, 1),
+		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
+		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
+		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:                  opts.Agent.IsDocker,
+		EnableIPv6Redirect:        opts.Agent.EnableIPv6Redirect,
+		appPID:                    opts.Agent.ClientNSPID,
+		caJavaHome:                opts.Agent.CAJavaHome,
+		dnsCache:                  newDNSCache(),
+		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
 		// against CoreDNS (~500 ms default) while keeping app-side lookup
@@ -671,7 +689,28 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
+	// Flush any in-flight packet capture so the test-set's pcap is
+	// finalised before the agent is allowed to exit.
+	p.stopPacketCapture()
 	return nil
+}
+
+// SubscribePcap registers w to receive every captured packet as a
+// pcap byte stream (file header + one record per frame). The flush
+// callback, if non-nil, is invoked after each record — agent HTTP
+// handlers pass http.Flusher.Flush so packets reach the recorder
+// over chunked transfer-encoding without buffering. Returns the
+// unsubscribe func; safe to call once. Errors when no capture is
+// active for this proxy (i.e., --capture-packets was not set on
+// the recording session).
+func (p *Proxy) SubscribePcap(w io.Writer, flush func()) (func(), error) {
+	p.pcapMu.Lock()
+	b := p.pcapBroadcaster
+	p.pcapMu.Unlock()
+	if b == nil {
+		return nil, errors.New("packet capture is not active")
+	}
+	return b.subscribe(w, flush)
 }
 
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
@@ -1233,6 +1272,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	// Opportunistic TLS intercept: a separate passthrough variant
+	// where we relay bytes verbatim AND peek for a TLS handshake;
+	// when one shows up, we hijack and MITM both halves so the keys
+	// land in the keylog fanout sink. Strictly more capable than
+	// GlobalPassthrough for sessions where MITM is acceptable, but
+	// lives on its own flag so deployments that need true
+	// no-MITM passthrough (cert pinning, channel-binding clients,
+	// other parser-incompatible workloads) keep their existing
+	// semantics. Takes precedence over GlobalPassthrough.
+	if p.OpportunisticTLSIntercept {
+		if err := p.opportunisticTLSIntercept(parserCtx, srcConn, dstAddr, rule.Backdate); err != nil {
+			utils.LogError(p.logger, err, "opportunistic TLS intercept failed",
+				zap.String("server address", dstAddr))
+			return err
+		}
+		return nil
+	}
+
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 		dstConn, err = net.Dial("tcp", dstAddr)
@@ -1541,6 +1598,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					InsecureSkipVerify: true, // nolint:gosec
 					ServerName:         sni,
 					NextProtos:         []string{"h2", "http/1.1"},
+					KeyLogWriter:       pTls.KeyLogWriter(),
 				}
 				speculativeDial = startSpeculativeUpstreamTLS(ctx, addr, specCfg)
 				speculativeDialAddr = addr
@@ -1746,6 +1804,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         serverName,
 			NextProtos:         nextProtos,
+			KeyLogWriter:       pTls.KeyLogWriter(),
 		}
 
 		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
@@ -2134,11 +2193,14 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 	return nil
 }
 
-func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
+	// Lift the per-session opportunistic-TLS toggle onto the proxy
+	// for handleConnection to read. Independent of GlobalPassthrough.
+	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
@@ -2146,12 +2208,34 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 	})
 	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
+	if opts.CapturePackets {
+		// Agent picks its own scratch dir on its OWN filesystem; the
+		// recorder cannot pass a path here because the two processes
+		// usually run in separate filesystems (Docker, k8s, separate
+		// hosts). The recorder pulls the finalised bytes back via the
+		// agent's /agent/pcap/{traffic,keylog} HTTP endpoints.
+		// Use a context detached from the per-call ctx so the capture
+		// outlives this Record() call and runs for the full session;
+		// stopPacketCapture is invoked on the next Record()/Mock() or
+		// when the proxy shuts down.
+		if err := p.startPacketCapture(context.Background(), ""); err != nil {
+			utils.LogError(p.logger, err, "failed to start packet capture; continuing without pcap")
+		}
+	} else {
+		// New session without capture — make sure any previous capture
+		// from a prior test-set is torn down.
+		p.stopPacketCapture()
+	}
+
 	return nil
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	// Mock is replay; no pcap capture during replay. Tear down any
+	// capture left over from a previous record session.
+	p.stopPacketCapture()
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
