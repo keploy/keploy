@@ -18,6 +18,14 @@ type Instrumentation interface {
 	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
 	// When this is called, connection errors will be logged as debug instead of error.
 	NotifyGracefulShutdown(ctx context.Context) error
+	// StreamPcapArtifacts opens long-lived HTTP streams to the
+	// agent's pcap and TLS keylog channels and writes the bytes to
+	// <destDir>/traffic.pcap and <destDir>/sslkeys.log respectively
+	// as packets arrive. Blocks until ctx is cancelled. The
+	// streaming model is required because the cluster live-recording
+	// use case never stops; a fetch-on-stop model would never
+	// deliver bytes.
+	StreamPcapArtifacts(ctx context.Context, destDir string) error
 }
 
 type Service interface {

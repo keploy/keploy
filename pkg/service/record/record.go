@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +182,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		// Pcap + keylog flow over long-lived HTTP streams started in
+		// Start() right after the agent's broadcaster came up. The
+		// streams unwind on their own when the agent closes the
+		// response or the recorder context is cancelled — there is
+		// no on-disk file on the agent and no fetch step here.
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -261,7 +267,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize})
+	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -320,6 +326,31 @@ func (r *Recorder) Start(ctx context.Context) error {
 	recordingStarted = true
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+
+	// Kick off the pcap + keylog streams. GetTestAndMockChans above
+	// has already triggered Proxy.Record() on the agent, which
+	// installs the broadcaster — so the stream subscribes against a
+	// live capture. The goroutine ends when ctx is cancelled
+	// (recording stop) or when the agent's HTTP server closes the
+	// response. Any error is logged but never fails the recording.
+	if r.config.Record.CapturePackets {
+		destDir := filepath.Join(r.config.Path, newTestSetID)
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
+				zap.String("destDir", destDir), zap.Error(err))
+		} else {
+			errGrp, _ := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if errGrp != nil {
+				errGrp.Go(func() error {
+					if err := r.instrumentation.StreamPcapArtifacts(ctx, destDir); err != nil {
+						utils.LogError(r.logger, err, "pcap stream ended with error",
+							zap.String("destDir", destDir))
+					}
+					return nil
+				})
+			}
+		}
 	}
 
 	if r.config.CommandType == string(utils.DockerCompose) {
@@ -587,9 +618,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:         r.config.BypassRules,
-		MongoPassword: r.config.Test.MongoPassword,
-		TLSPrivateKey: tlsPrivateKey,
+		Rules:                     r.config.BypassRules,
+		MongoPassword:             r.config.Test.MongoPassword,
+		TLSPrivateKey:             tlsPrivateKey,
+		CapturePackets:            r.config.Record.CapturePackets,
+		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
 	})
 	if err != nil {
 
