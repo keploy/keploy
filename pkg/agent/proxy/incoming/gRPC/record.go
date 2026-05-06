@@ -53,19 +53,19 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// is never blocked by the parser in practice. If the channel fills up, the
 	// forwarder blocks (preserving stream integrity) rather than dropping bytes
 	// which would corrupt the HTTP/2 frame alignment for the parser.
-	clientFrameCh := make(chan []byte, 512)
-	destFrameCh := make(chan []byte, 512)
+	clientFrameCh := make(chan frameChunk, 512)
+	destFrameCh := make(chan frameChunk, 512)
 
 	// Forward client → dest, tee copies to channel
 	go func() {
 		defer close(clientFrameCh)
-		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app")
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false)
 	}()
 
 	// Forward dest → client, tee copies to channel
 	go func() {
 		defer close(destFrameCh)
-		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client")
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true)
 	}()
 
 	// Single emitter goroutine to avoid duplicate test case emission.
@@ -118,16 +118,26 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 // When memory pressure is detected, the tee stops permanently for this
 // connection (cannot resume without corrupting the parser's frame alignment).
 // Forwarding continues unimpacted.
-func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, direction string) {
+type frameChunk struct {
+	data      []byte
+	timestamp time.Time
+}
+
+func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, stampAfterWrite bool) {
 	buf := make([]byte, 32*1024)
 	teeActive := !memoryguard.IsRecordingPaused()
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
+			readAt := time.Now()
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
 				logger.Debug("forward write error",
 					zap.String("direction", direction), zap.Error(wErr))
 				return
+			}
+			timestamp := readAt
+			if stampAfterWrite {
+				timestamp = time.Now()
 			}
 			if teeActive {
 				if memoryguard.IsRecordingPaused() {
@@ -135,7 +145,10 @@ func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, dire
 				} else {
 					data := make([]byte, n)
 					copy(data, buf[:n])
-					ch <- data // blocking send — preserves stream integrity
+					ch <- frameChunk{
+						data:      data,
+						timestamp: timestamp,
+					} // blocking send — preserves stream integrity
 				}
 			}
 		}
@@ -149,64 +162,83 @@ func forwardAndTee(src, dst net.Conn, ch chan<- []byte, logger *zap.Logger, dire
 	}
 }
 
-// parseFramesFromChan reconstructs HTTP/2 frames from byte chunks received
-// via channel, then feeds them to the DefaultStreamManager.
-func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan []byte, sm *pkg.DefaultStreamManager, isOutgoing bool, triggerEmit func()) {
-	pr, pw := io.Pipe()
-	defer pr.Close()
-
-	go func() {
-		defer pw.Close()
-		var writeErr bool
-		for data := range ch {
-			// Keep draining the channel even after a pipe write error so the
-			// forwarder's blocking ch<-data never hangs. We just stop writing
-			// to the pipe (parser is done), but the channel must be consumed.
-			if !writeErr {
-				if _, err := pw.Write(data); err != nil {
-					writeErr = true
-				}
-			}
-		}
-	}()
-
-	if !isOutgoing {
-		preface := make([]byte, len(http2.ClientPreface))
-		if _, err := io.ReadFull(pr, preface); err != nil {
-			logger.Debug("failed to read HTTP/2 client preface", zap.Error(err))
-			return
-		}
-		if !bytes.Equal(preface, []byte(http2.ClientPreface)) {
-			logger.Debug("unexpected bytes instead of HTTP/2 preface")
-			return
-		}
-	}
-
-	framer := http2.NewFramer(nil, pr)
-	framer.ReadMetaHeaders = nil
-	framer.MaxHeaderListSize = 1 << 20
+// parseFramesFromChan reconstructs HTTP/2 frames from timestamped byte chunks
+// received via channel, then feeds them to the DefaultStreamManager.
+func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, triggerEmit func()) {
+	var buffer []byte
+	prefaceRead := isOutgoing
 
 	for {
+		var chunk frameChunk
 		select {
 		case <-ctx.Done():
+			drainFrameChunks(ch)
 			return
-		default:
-		}
-
-		frame, err := framer.ReadFrame()
-		if err != nil {
-			if err != io.EOF && !strings.Contains(err.Error(), "use of closed") {
-				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
+		case next, ok := <-ch:
+			if !ok {
+				return
 			}
-			return
+			chunk = next
 		}
 
-		now := time.Now()
-		if err := sm.HandleFrame(frame, isOutgoing, now); err != nil {
-			logger.Debug("stream manager error", zap.Error(err))
+		if len(chunk.data) == 0 {
+			continue
+		}
+		buffer = append(buffer, chunk.data...)
+
+		if !prefaceRead {
+			if len(buffer) < len(http2.ClientPreface) {
+				continue
+			}
+			if !bytes.Equal(buffer[:len(http2.ClientPreface)], []byte(http2.ClientPreface)) {
+				logger.Debug("unexpected bytes instead of HTTP/2 preface")
+				drainFrameChunks(ch)
+				return
+			}
+			buffer = buffer[len(http2.ClientPreface):]
+			prefaceRead = true
 		}
 
-		triggerEmit()
+		for {
+			if len(buffer) < 9 {
+				break
+			}
+			frameLength := (uint32(buffer[0]) << 16) | (uint32(buffer[1]) << 8) | uint32(buffer[2])
+			if frameLength > pkg.MaxFrameSize {
+				logger.Debug("frame parser finished",
+					zap.Bool("isOutgoing", isOutgoing),
+					zap.Uint32("frameLength", frameLength),
+					zap.Uint32("maxFrameSize", pkg.MaxFrameSize))
+				drainFrameChunks(ch)
+				return
+			}
+			frameSize := int(frameLength) + 9
+			if len(buffer) < frameSize {
+				break
+			}
+
+			frame, consumed, err := pkg.ExtractHTTP2Frame(buffer[:frameSize])
+			if err != nil {
+				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
+				drainFrameChunks(ch)
+				return
+			}
+			buffer = buffer[consumed:]
+			if len(buffer) == 0 {
+				buffer = nil
+			}
+
+			if err := sm.HandleFrame(frame, isOutgoing, chunk.timestamp); err != nil {
+				logger.Debug("stream manager error", zap.Error(err))
+			}
+
+			triggerEmit()
+		}
+	}
+}
+
+func drainFrameChunks(ch <-chan frameChunk) {
+	for range ch {
 	}
 }
 

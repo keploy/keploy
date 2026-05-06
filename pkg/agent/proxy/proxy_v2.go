@@ -129,6 +129,12 @@ func (p *Proxy) recordViaSupervisor(
 		BumpActivity:         sv.BumpActivity,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
+		// User-tunable record-buffer caps. Snapshotted onto the Proxy
+		// at startup from config.Record.RecordBuffer (yaml/flag/env).
+		// Zero values fall through to relay package defaults via
+		// withDefaults() — preserving the zero-config path.
+		PerConnCap: p.recordBufferCap,
+		TeeChanBuf: p.recordBufferQueueSize,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
@@ -243,6 +249,8 @@ func (p *Proxy) recordViaSupervisor(
 //   - For isClient=true (upgrading the destination side — keploy
 //     acts as TLS client to the real server), dials TLS over the
 //     existing conn using tls.Client and performs the handshake.
+//     Upstream cert verification is ALWAYS skipped here — see the
+//     dest-side InsecureSkipVerify rationale on the cfg clone below.
 //   - For isClient=false (upgrading the client side — keploy acts
 //     as TLS server presenting the MITM cert), hands off to
 //     pTls.HandleTLSConnection which already implements the server-
@@ -258,7 +266,41 @@ func newProxyTLSUpgradeFn(logger *zap.Logger) relay.TLSUpgradeFn {
 			return conn, nil
 		}
 		if isClient {
-			tlsConn := tls.Client(conn, cfg)
+			// Upstream identity verification is keploy's responsibility
+			// to NOT do. Keploy is a transparent MITM record/replay
+			// proxy: the real client (pgx, asyncpg, libpq, JDBC, mongo
+			// driver, etc.) already made its trust decision against
+			// keploy's minted cert when it dialed in, and the upstream
+			// it points at in record mode is whatever the application
+			// would have dialed itself — typically a self-signed dev /
+			// CI / staging Postgres or Mongo, or a Kubernetes service
+			// reachable only by ClusterIP. Either way the upstream
+			// cert's SAN/CN often does not match the IP literal keploy
+			// sees in `Destination Address` (e.g. cert valid for
+			// 127.0.0.1, dial target 10.224.0.152), and Go's default
+			// hostname/IP verification would surface that as
+			// `dest TLS handshake failed: x509: certificate is valid
+			// for X, not Y` and trip the parser supervisor's
+			// passthrough fallback — silently dropping all recording
+			// for that connection.
+			//
+			// Parsers that build their DestTLSConfig already set
+			// InsecureSkipVerify on it (see e.g.
+			// integrations/pkg/postgres/v3/recorder.buildDestTLSConfigV2,
+			// keploy/pkg/agent/proxy/integrations/mysql/recorder.buildDestTLSConfigV2)
+			// — but if a parser ever forgets, or if some future call
+			// site lands here with a strict config, we still need the
+			// MITM-correct posture. So clone the parser's cfg, force
+			// InsecureSkipVerify=true on the clone, and dial against
+			// that. ServerName / RootCAs / NextProtos / ClientCert
+			// material on the parser-supplied cfg is preserved
+			// (shallow clone via tls.Config.Clone), so SNI for
+			// vhosted PG-as-a-service providers (RDS, Cloud SQL, Neon)
+			// and any upstream-mTLS material a parser might wire in
+			// still reaches the wire.
+			dialCfg := cfg.Clone()
+			dialCfg.InsecureSkipVerify = true //#nosec G402 -- MITM record-time proxy: keploy intentionally never validates the upstream cert. See the docstring above.
+			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
 			}

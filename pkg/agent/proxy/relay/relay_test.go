@@ -440,6 +440,13 @@ type countingConn struct {
 func (c *countingConn) Read(p []byte) (int, error)  { c.reads.Add(1); return c.Conn.Read(p) }
 func (c *countingConn) Write(p []byte) (int, error) { c.writes.Add(1); return c.Conn.Write(p) }
 
+type fixedReadAtConn struct {
+	net.Conn
+	readAt time.Time
+}
+
+func (c fixedReadAtConn) LastReadTime() time.Time { return c.readAt }
+
 func TestDirectiveUpgradeTLS_UsesUpgradedConn(t *testing.T) {
 	t.Parallel()
 	var upgraded countingConn
@@ -473,6 +480,112 @@ func TestDirectiveUpgradeTLS_UsesUpgradedConn(t *testing.T) {
 
 	if upgraded.writes.Load() == 0 {
 		t.Fatalf("upgraded conn never Written; pointer swap did not take effect")
+	}
+}
+
+func TestDirectiveUpgradeTLS_PostUpgradeChunkUsesSocketReadTime(t *testing.T) {
+	t.Parallel()
+
+	clientApp, srcPipe := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientApp.Close()
+		_ = srcPipe.Close()
+		_ = dstProxy.Close()
+		_ = destSvc.Close()
+	})
+
+	readAt := time.Unix(1_700_000_000, 987_654_321)
+	srcProxy := fixedReadAtConn{Conn: srcPipe, readAt: readAt}
+	r := New(Config{
+		TLSUpgradeFn: func(_ context.Context, conn net.Conn, _ bool, _ *tls.Config) (net.Conn, error) {
+			return conn, nil
+		},
+	}, srcProxy, dstProxy)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("Run did not return")
+		}
+	})
+
+	r.Directives() <- directive.UpgradeTLS(nil, &tls.Config{}, "client-side upgrade")
+	select {
+	case ack := <-r.Acks():
+		if !ack.OK {
+			t.Fatalf("TLS upgrade failed: %+v", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no ack")
+	}
+
+	go func() {
+		_, _ = clientApp.Write([]byte("post-upgrade"))
+	}()
+	_ = readExact(t, destSvc, len("post-upgrade"))
+
+	chunk, err := r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if got := string(chunk.Bytes); got != "post-upgrade" {
+		t.Fatalf("chunk bytes = %q, want post-upgrade", got)
+	}
+	if !chunk.ReadAt.Equal(readAt) {
+		t.Fatalf("chunk ReadAt = %v, want socket read time %v", chunk.ReadAt, readAt)
+	}
+}
+
+func TestDirectiveUpgradeTLS_PrependsStashedClientBytesThroughPreamble(t *testing.T) {
+	t.Parallel()
+
+	var gotClientHandshake atomic.Value
+	upgraderFn := func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
+		if isClient {
+			return conn, nil
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			return nil, err
+		}
+		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+		buf := make([]byte, len("CLIENTHELLO"))
+		n, err := conn.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		gotClientHandshake.Store(string(buf[:n]))
+		return conn, nil
+	}
+
+	h := newHarness(t, Config{TLSUpgradeFn: upgraderFn})
+	stashAt := time.Unix(1_700_000_001, 123)
+	h.r.stashInflightFromPause(fakeconn.FromDest, []byte("S"), stashAt)
+	h.r.stashInflightFromPause(fakeconn.FromClient, []byte("CLIENTHELLO"), stashAt)
+
+	d := directive.UpgradeTLS(nil, &tls.Config{}, "postgres sslrequest")
+	d.TLS.PreambleReadFromDest = 1
+	d.TLS.ProceedOnPreamble = []byte{'S'}
+	h.r.Directives() <- d
+
+	select {
+	case ack := <-h.r.Acks():
+		if !ack.OK {
+			t.Fatalf("TLS upgrade failed: %+v", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no ack")
+	}
+
+	if got, _ := gotClientHandshake.Load().(string); got != "CLIENTHELLO" {
+		t.Fatalf("client-side upgrader read %q, want stashed ClientHello", got)
 	}
 }
 
@@ -588,6 +701,66 @@ func TestCleanShutdownOnCtxCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Run did not return after ctx cancel")
+	}
+}
+
+// TestRunReturnsPromptlyWhenDestClosesWhileClientIdle is a regression
+// guard for the 60s tail introduced by issue #4173. The relay starts
+// two forwarder goroutines and joins them via wgForward.Wait(). When
+// the upstream side closes (e.g. an AWS ALB sending FIN at idle
+// timeout), the FromDest forwarder reads EOF and exits — but the
+// FromClient forwarder is still parked in a blocking Read on the
+// client conn, with no event to wake it. Without the
+// closeStopping+nudgeDeadline coordinator added to run(), Run() then
+// blocks until the application's HTTP client closes the client side
+// itself (typically 60s for botocore's default read_timeout).
+//
+// The test pipes both sides explicitly, lets the relay reach a
+// steady-state where both forwarders are blocked in Read, then closes
+// the dest peer and asserts that Run returns within a short bound.
+// On the regression, this hangs until t.Fatalf fires.
+func TestRunReturnsPromptlyWhenDestClosesWhileClientIdle(t *testing.T) {
+	t.Parallel()
+	clientApp, srcProxy := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientApp.Close()
+		_ = destSvc.Close()
+		_ = srcProxy.Close()
+		_ = dstProxy.Close()
+	})
+
+	r := New(Config{}, srcProxy, dstProxy)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	// Let both forwarder goroutines reach their respective Read calls.
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate the upstream peer closing the connection (FIN) while the
+	// client side stays idle — the exact production shape from #4173.
+	// The FromDest forwarder will read 0/EOF; the FromClient forwarder
+	// is still parked in Read on srcProxy (clientApp has sent nothing).
+	_ = destSvc.Close()
+
+	// With the fix: FromDest's defer fires closeStopping() and
+	// nudgeDeadline(srcProxy); FromClient's Read returns Timeout(),
+	// loops up, observes stopping closed, exits; wgForward.Wait()
+	// completes; Run returns. All within ~ms.
+	//
+	// Without the fix: Run would block until clientApp.Close() or ctx
+	// cancellation — neither of which we trigger in this test. The
+	// timeout below is the regression guard.
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("Run returned non-nil error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return within 2s after dest close while client idle (regression of #4173 — relay stuck waiting for FromClient forwarder)")
 	}
 }
 

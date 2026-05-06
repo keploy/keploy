@@ -208,7 +208,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			}
 
 			// Capture the request timestamp.
-			reqTimestampMock := time.Now()
+			reqTimestampMock := models.CapturedReqTime(ctx)
 
 			chunkedReqStart := time.Now()
 			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
@@ -236,7 +236,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				if err == io.EOF {
 					h.Logger.Debug("Response complete, exiting the loop.")
 					if len(resp) != 0 {
-						resTimestampMock := time.Now()
+						resTimestampMock := models.CapturedRespTime(ctx)
 						_, err = clientConn.Write(resp)
 						if err != nil {
 							if ctx.Err() != nil {
@@ -281,10 +281,21 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				//     capture, then fall through to synthesize a fresh
 				//     error response — same behaviour as the mid-body
 				//     error branch below (line ~318).
-				resTimestampMock := time.Now()
+				// Pick the response timestamp deliberately:
+				//  - len(resp) == 0: no response bytes ever arrived, so
+				//    CapturedRespTime would be the carry-over value from a
+				//    prior exchange on this keep-alive connection, which can
+				//    place ResTimestampMock BEFORE ReqTimestampMock. Use the
+				//    request timestamp so the synthesized mock stays
+				//    monotonic.
+				//  - len(resp) != 0: partial bytes were observed, so the
+				//    response-side capture has been stamped against this
+				//    exchange — use it normally.
+				var resTimestampMock time.Time
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
 				if len(resp) == 0 {
+					resTimestampMock = reqTimestampMock
 					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
 						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
 						zap.String("error_class", upstreamErrorClass(err)),
@@ -303,6 +314,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 							zap.Error(werr))
 					}
 				} else {
+					resTimestampMock = models.CapturedRespTime(ctx)
 					// Partial-response-then-error: we can't safely write
 					// the synth response back to the client because some
 					// real upstream bytes were already forwarded-pending
@@ -324,7 +336,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			resTimestampMock := time.Now()
+			resTimestampMock := models.CapturedRespTime(ctx)
 
 			// Forward response to client.
 			_, err = clientConn.Write(resp)
@@ -366,7 +378,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				utils.LogError(h.Logger, err, "failed to handle chunk response; persisting synthesized mock")
 				reqMethod, reqURI := parseRequestMethodAndURL(finalReq)
 				synthResp := synthesizeUpstreamErrorResponse(reqMethod, reqURI, err)
-				enqueueMock(finalReq, synthResp, reqTimestampMock, time.Now())
+				enqueueMock(finalReq, synthResp, reqTimestampMock, models.CapturedRespTime(ctx))
 				errCh <- nil
 				return nil
 			}
