@@ -171,3 +171,37 @@ func TestUUIDBytesCellRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestUUIDKeyJSONBNotMisroutedAsUUIDBytes pins that the `{uuid}`
+// dispatch in decodePgUntaggedMapping does NOT mis-route a user
+// JSONB column whose top-level shape happens to be `{"uuid":
+// "<text-string>"}`. The dispatch gate keys off the `!!binary` tag
+// emitted by marshalUUIDBytesYAML; an untagged `{uuid: <plain
+// string>}` mapping must round-trip as a map (the JSONB shape),
+// not surface as a YAML load error from a base64-decode failure.
+//
+// Without the gate, this test would fail at yaml.Unmarshal time
+// because base64 decode of "550e8400-e29b-41d4-a716-446655440000"
+// errors on the hyphens.
+func TestUUIDKeyJSONBNotMisroutedAsUUIDBytes(t *testing.T) {
+	row := PostgresV3Cells{NewValueCell(map[string]interface{}{
+		"uuid": "550e8400-e29b-41d4-a716-446655440000",
+	})}
+	body, err := yaml.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out PostgresV3Cells
+	if err := yaml.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal must not fail on plain {uuid:string} JSONB: %v\n--YAML--\n%s", err, body)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 cell, got %d", len(out))
+	}
+	// The exact rehydrated map type is map[string]any (yaml.v3's
+	// generic decode); the asserts here only require non-misrouting,
+	// not a specific decoded type.
+	if _, isUUID := out[0].Value.([16]uint8); isUUID {
+		t.Errorf("JSONB {uuid:string} mis-routed to [16]uint8\n--YAML--\n%s", body)
+	}
+}

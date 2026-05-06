@@ -1049,6 +1049,20 @@ func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 		v, err := decodeHardwareAddrMapping(node)
 		return v, true, err
 	case keysEqual(keys, []string{"uuid"}):
+		// Tightened dispatch: `{uuid: ...}` is a much more common key
+		// in user-shaped JSONB than `{macaddr}` or `{prefix}`, so an
+		// untagged-key match alone would mis-route a JSONB column
+		// like `{"uuid": "<text-uuid-string>"}` here, fail base64
+		// decode, and surface as a YAML unmarshal error that prevents
+		// mocks.yaml from loading at all. Require the value to
+		// actually be a `!!binary` payload of exactly 16 bytes (the
+		// shape marshalUUIDBytesYAML emits). Anything else falls
+		// through to the generic any-decode path so JSONB round-trips
+		// losslessly as `map[string]any`, matching how it would have
+		// before this PR added uuid dispatch.
+		if !isUUIDBytesMapping(node) {
+			return nil, false, nil
+		}
 		v, err := decodeUUIDBytesMapping(node)
 		return v, true, err
 	}
@@ -1672,6 +1686,38 @@ func decodeHardwareAddrMapping(node *yaml.Node) (net.HardwareAddr, error) {
 	return net.HardwareAddr(b), nil
 }
 
+// isUUIDBytesMapping reports whether an untagged YAML mapping carries
+// the exact `{uuid: !!binary <base64-of-16-bytes>}` shape that
+// marshalUUIDBytesYAML emits. Used as the dispatch gate in
+// decodePgUntaggedMapping so a user-shaped JSONB value like
+// `{"uuid": "<text-uuid-string>"}` (a common app pattern) doesn't
+// mis-route into decodeUUIDBytesMapping and surface as a YAML load
+// error. The check is intentionally strict: the !!binary tag is the
+// distinguishing signal between "this was emitted as a uuid cell" and
+// "this is a JSONB map that happens to have a uuid key".
+func isUUIDBytesMapping(node *yaml.Node) bool {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return false
+	}
+	mn, ok := fields["uuid"]
+	if !ok || mn == nil || mn.Kind != yaml.ScalarNode {
+		return false
+	}
+	if mn.Tag != "!!binary" {
+		return false
+	}
+	raw := mn.Value
+	if strings.ContainsAny(raw, " \t\r\n") {
+		raw = stripBase64Whitespace(raw)
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return false
+	}
+	return len(b) == 16
+}
+
 // decodeUUIDBytesMapping reconstructs a `[16]uint8` from the
 // `{uuid: !!binary <base64>}` mapping shape emitted by
 // marshalUUIDBytesYAML. The 16-byte length is enforced explicitly
@@ -2005,11 +2051,11 @@ const (
 	// Tag 30 — Go `[16]uint8` (the underlying type of `uuid.UUID`).
 	// pgx's UUIDArrayCodec returns each `uuid[]` element as a raw
 	// `[16]uint8` fixed-array; without an explicit case the encoder
-	// falls into the `default:` arm and tears down the entire
-	// agent→k8s-proxy mock stream (see record.go HandleOutgoing).
-	// Gob-encoded as `[16]uint8` after the tag, same framing as
-	// every other case in this catalogue (the gob stream carries
-	// the fixed-array shape on the wire; not a 16-byte raw payload).
+	// falls into the `default:` arm with "unsupported Value type
+	// [16]uint8" and the mock for that row is dropped. Gob-encoded
+	// as `[16]uint8` after the tag, same framing as every other
+	// case in this catalogue (the gob stream carries the
+	// fixed-array shape on the wire; not a 16-byte raw payload).
 	cellTagUUIDBytes byte = 30
 )
 
