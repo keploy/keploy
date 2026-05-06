@@ -334,6 +334,25 @@ func TestPostgresV3Cell_Gob_AllTypes(t *testing.T) {
 		{"bytes", []byte{0x01, 0x02, 0x03}},
 		{"time", time.Date(2026, 4, 24, 14, 25, 37, 580669000, time.UTC)},
 		{"raw", PostgresV3CellRaw{Format: 1, Bytes: []byte{0x00, 0x00, 0x00, 0x01}}},
+		// Tag 30 — Go [16]uint8 (the underlying shape of uuid.UUID).
+		// Regression case: provider-engagement May 2026 — pgx's
+		// UUIDArrayCodec returns each `uuid[]` element as a raw
+		// [16]uint8, the encoder fell into the default arm with
+		// "unsupported Value type [16]uint8", and the streaming HTTP
+		// handler exited at the first encode error, silently dropping
+		// 22 tests' worth of mocks. Both the bare element and the
+		// []interface{}-wrapped slice (the actual uuid[] case) must
+		// round-trip cleanly.
+		{"uuidBytes_bare", [16]uint8{
+			0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+			0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+		}},
+		{"uuidBytes_array_two", []interface{}{
+			[16]uint8{0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+				0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55},
+			[16]uint8{0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0xcc, 0xcc,
+				0xdd, 0xdd, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

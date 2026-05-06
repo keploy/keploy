@@ -1934,6 +1934,13 @@ const (
 	// / datemultirange — added in PG 14). Length-prefixed sequence
 	// of nested Range cells through tag 28.
 	cellTagMultirange byte = 29
+	// Tag 30 — Go `[16]uint8` (the underlying type of `uuid.UUID`).
+	// pgx's UUIDArrayCodec returns each `uuid[]` element as a raw
+	// `[16]uint8` fixed-array; without an explicit case the encoder
+	// falls into the `default:` arm and tears down the entire
+	// agent→k8s-proxy mock stream (see record.go HandleOutgoing).
+	// Encoded as 16 raw bytes after the tag.
+	cellTagUUIDBytes byte = 30
 )
 
 // Geometric sub-discriminators for cellTagGeom. Stable across versions
@@ -2442,6 +2449,16 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		}
 		buf.WriteByte(cellTagRaw)
 		if err := enc.Encode(*v); err != nil {
+			return nil, err
+		}
+	case [16]uint8:
+		// pgx's UUIDArrayCodec returns each `uuid[]` element as a raw
+		// `[16]uint8` and the bare `uuid` column scan path lands here
+		// too when callers Scan into `*[16]byte` instead of pgtype.UUID.
+		// Write the 16 bytes verbatim after the tag so GobDecode can
+		// reconstruct the same fixed-array shape.
+		buf.WriteByte(cellTagUUIDBytes)
+		if err := enc.Encode(v); err != nil {
 			return nil, err
 		}
 	default:
@@ -2960,6 +2977,17 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 			out[i] = elem.Value
 		}
 		c.Value = out
+	case cellTagUUIDBytes:
+		// Symmetric to the [16]uint8 GobEncode case: read the 16 raw
+		// bytes and reconstruct the fixed-array shape pgx originally
+		// produced. We decode into a [16]uint8 (not uuid.UUID) so the
+		// models package stays free of a uuid dependency; callers that
+		// want uuid.UUID can convert with `uuid.UUID(arr)`.
+		var arr [16]uint8
+		if err := dec.Decode(&arr); err != nil {
+			return fmt.Errorf("PostgresV3Cell.GobDecode uuidBytes: %w", err)
+		}
+		c.Value = arr
 	default:
 		return fmt.Errorf("PostgresV3Cell.GobDecode: unknown tag %d", tag)
 	}
