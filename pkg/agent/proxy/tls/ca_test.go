@@ -105,12 +105,154 @@ func TestLoadSystemCABundle_FallbackOnEmpty(t *testing.T) {
 	}
 }
 
-// TestLoadSystemCABundle_NoSources verifies that when no path is readable the
-// function logs at Info level and returns (nil, "") — no error, no warning.
-// Info (rather than Warn) is deliberate: distroless/scratch images routinely
-// ship without a system trust store and emitting a Warn in that configuration
-// would be alarmist noise.
-func TestLoadSystemCABundle_NoSources(t *testing.T) {
+// withDistroLayout temporarily forces the loader's "is this a distro-shaped
+// image?" probe to a fixed boolean. Restores the original on test cleanup.
+// Used by the no-sources tests to assert ERROR-vs-INFO selection.
+func withDistroLayout(t *testing.T, present bool) {
+	t.Helper()
+	orig := hasDistroTrustLayoutFn
+	hasDistroTrustLayoutFn = func() bool { return present }
+	t.Cleanup(func() { hasDistroTrustLayoutFn = orig })
+}
+
+// TestLoadSystemCABundle_NoSources_DistroImageErrors covers the regression
+// captured in keploy/k8s-proxy#375: a Debian/Ubuntu/Alpine/RHEL-shaped agent
+// image where the bundle should have been installed by the
+// `ca-certificates` package but isn't readable at runtime (build regression
+// or runtime overlay shadow). This is a real misconfiguration that causes
+// CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call from
+// any orphan-mutated app pod — log at ERROR so alert pipelines catch it.
+// (We intentionally do NOT abort the agent: the proxy still works for
+// redirected traffic; the loud log is the operator-facing signal.)
+func TestLoadSystemCABundle_NoSources_DistroImageErrors(t *testing.T) {
+	withDistroLayout(t, true)
+	dir := t.TempDir()
+	missing1 := filepath.Join(dir, "a.crt")
+	missing2 := filepath.Join(dir, "b.crt")
+
+	logger, logs := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPaths(logger, []string{missing1, missing2})
+	if data != nil {
+		t.Fatalf("expected nil data, got %d bytes", len(data))
+	}
+	if source != "" {
+		t.Fatalf("expected empty source, got %q", source)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	if entry.Level != zap.ErrorLevel {
+		t.Fatalf("expected error level (image looks distro-shaped → missing bundle is a regression), got %s", entry.Level)
+	}
+	if !strings.Contains(entry.Message, "No system CA bundle found") {
+		t.Fatalf("unexpected log message: %q", entry.Message)
+	}
+	// severity_reason is a stable enum string (alert rules key off it).
+	// Assert exact equality so an accidental wording change in production
+	// fails this test instead of slipping past — that's the whole reason
+	// the field exists separately from the human-readable explanation.
+	var sawReason bool
+	for _, f := range entry.Context {
+		if f.Key == "severity_reason" {
+			sawReason = true
+			if f.String != severityReasonDistroLayoutPresent {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonDistroLayoutPresent, f.String)
+			}
+		}
+	}
+	if !sawReason {
+		t.Fatalf("expected a severity_reason field on the ERROR entry; got context=%+v", entry.Context)
+	}
+}
+
+// TestLoadSystemCABundle_EmbeddedFallback_ReturnsBytes is the headline
+// regression for keploy/k8s-proxy#375 defense-in-depth. When every disk
+// path comes up empty, the production entry point must NOT return (nil, "")
+// — it must return the embedded Mozilla NSS roots. Apps mutated by keploy
+// then have a real trust store no matter what the agent image's filesystem
+// looks like (broken build, weird volume mount, SELinux denial,
+// distroless).
+func TestLoadSystemCABundle_EmbeddedFallback_ReturnsBytes(t *testing.T) {
+	// Force the disk path to fail by pointing the search at temp-dir paths
+	// that don't exist. Pass embeddedFallbackRoots as the fallback (the
+	// same blob the production loadSystemCABundle uses).
+	dir := t.TempDir()
+	missing1 := filepath.Join(dir, "a.crt")
+	missing2 := filepath.Join(dir, "b.crt")
+
+	logger, _ := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
+
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty data from embedded fallback, got empty")
+	}
+	if !bytes.Equal(data, embeddedFallbackRoots) {
+		t.Fatalf("expected returned bytes to equal embeddedFallbackRoots; got %d bytes vs %d bytes", len(data), len(embeddedFallbackRoots))
+	}
+	if source != systemCABundleSourceEmbedded {
+		t.Fatalf("expected source=%q, got %q", systemCABundleSourceEmbedded, source)
+	}
+}
+
+// TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots is a
+// build-time sanity check that the embedded blob actually parses as a
+// PEM bundle and contains a non-trivial number of x509 root
+// certificates. If a future refresh of mozilla_roots.pem accidentally
+// truncates or replaces the file with garbage, CI catches it here.
+//
+// We assert >=100 roots — Mozilla NSS typically ships ~140-150. Below
+// 100 strongly indicates a bad refresh.
+func TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots(t *testing.T) {
+	if len(embeddedFallbackRoots) == 0 {
+		t.Fatalf("embeddedFallbackRoots is empty; the go:embed directive may have failed at build time")
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(embeddedFallbackRoots) {
+		t.Fatalf("AppendCertsFromPEM rejected embeddedFallbackRoots — bundle is not valid PEM or contains no certs")
+	}
+
+	// Count BEGIN CERTIFICATE blocks as a cheap proxy for the cert count
+	// (CertPool doesn't expose a count post-1.20). Mozilla's NSS bundle
+	// has been ~140 since 2024; >=100 is a generous lower bound that
+	// catches truncation and accidental empty-file commits without
+	// being brittle when a few CAs are added/removed in a refresh.
+	const minCerts = 100
+	count := bytes.Count(embeddedFallbackRoots, []byte("-----BEGIN CERTIFICATE-----"))
+	if count < minCerts {
+		t.Fatalf("embeddedFallbackRoots has only %d cert(s); expected >=%d (Mozilla NSS bundle is typically ~140). Refresh may have produced a truncated file.", count, minCerts)
+	}
+}
+
+// TestLoadSystemCABundle_DiskTakesPrecedence verifies the embedded fallback
+// is ONLY consulted after the disk search exhausts. When a disk path has
+// content, the function must return that content (not the embedded blob).
+// Otherwise operators who deliberately mount a custom CA store at one of
+// the search paths would see their override silently replaced.
+func TestLoadSystemCABundle_DiskTakesPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, "primary.crt")
+	if err := os.WriteFile(primary, []byte(systemBundleA), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, _ := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{primary}, embeddedFallbackRoots)
+	if string(data) != systemBundleA {
+		t.Fatalf("disk path should win over embedded fallback; got %q", string(data[:min(len(data), 40)]))
+	}
+	if source != primary {
+		t.Fatalf("expected source=%q, got %q", primary, source)
+	}
+}
+
+// TestLoadSystemCABundle_NoSources_DistrolessImageStaysInfo verifies that a
+// truly distroless / scratch agent image (no /etc/ssl/certs, no /etc/pki/tls)
+// still logs at INFO. Distroless deployments deliberately ship without a
+// trust store, and bumping severity there would create alert fatigue.
+func TestLoadSystemCABundle_NoSources_DistrolessImageStaysInfo(t *testing.T) {
+	withDistroLayout(t, false)
 	dir := t.TempDir()
 	missing1 := filepath.Join(dir, "a.crt")
 	missing2 := filepath.Join(dir, "b.crt")
@@ -128,10 +270,177 @@ func TestLoadSystemCABundle_NoSources(t *testing.T) {
 	}
 	entry := logs.All()[0]
 	if entry.Level != zap.InfoLevel {
-		t.Fatalf("expected info level (not warn), got %s", entry.Level)
+		t.Fatalf("expected info level (image is distroless → missing bundle is expected), got %s", entry.Level)
 	}
 	if !strings.Contains(entry.Message, "No system CA bundle found") {
 		t.Fatalf("unexpected log message: %q", entry.Message)
+	}
+	// Exact-equality assertion on the stable enum value — see the
+	// matching block in TestLoadSystemCABundle_NoSources_DistroImageErrors
+	// for the rationale.
+	var sawReason bool
+	for _, f := range entry.Context {
+		if f.Key == "severity_reason" {
+			sawReason = true
+			if f.String != severityReasonNoDistroLayout {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonNoDistroLayout, f.String)
+			}
+		}
+	}
+	if !sawReason {
+		t.Fatalf("expected a severity_reason field on the INFO entry; got context=%+v", entry.Context)
+	}
+}
+
+// TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistroErrors mirrors
+// TestLoadSystemCABundle_NoSources_DistroImageErrors but exercises the
+// PRODUCTION entry shape — loadSystemCABundleFromPathsAndFallback with a
+// non-nil fallback — so that we cover the real outcome an operator sees
+// when /etc/ssl/certs is missing on a distro-shaped image: the agent
+// returns the embedded Mozilla NSS bytes and the source flips to the
+// "<embedded:...>" sentinel, on top of the same ERROR severity as the
+// disk-only test asserts. The disk-only twin remains so we keep the
+// no-fallback behaviour pinned for any future caller that opts out of
+// the embedded blob.
+func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistroErrors(t *testing.T) {
+	withDistroLayout(t, true)
+	dir := t.TempDir()
+	missing1 := filepath.Join(dir, "a.crt")
+	missing2 := filepath.Join(dir, "b.crt")
+
+	logger, logs := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
+
+	if !bytes.Equal(data, embeddedFallbackRoots) {
+		t.Fatalf("expected embedded fallback bytes when fallback is supplied; got %d bytes vs %d", len(data), len(embeddedFallbackRoots))
+	}
+	if source != systemCABundleSourceEmbedded {
+		t.Fatalf("expected source=%q, got %q", systemCABundleSourceEmbedded, source)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	if entry.Level != zap.ErrorLevel {
+		t.Fatalf("expected ERROR (distro layout present), got %s", entry.Level)
+	}
+	if !strings.Contains(entry.Message, "No system CA bundle found") {
+		t.Fatalf("unexpected log message: %q", entry.Message)
+	}
+	// The fallback-supplied branch's message must reference the embedded
+	// roots — that's the operator-facing distinction between this branch
+	// and the no-fallback one (see message-conditioning in
+	// loadSystemCABundleFromPathsAndFallback). Asserting on the
+	// "embedded Mozilla NSS roots" phrase pins the message body so a
+	// future refactor can't silently revert to the misleading "falling
+	// back to embedded" wording when fallback is empty.
+	if !strings.Contains(entry.Message, "embedded Mozilla NSS roots") {
+		t.Fatalf("expected message to mention embedded Mozilla NSS roots when fallback is supplied; got %q", entry.Message)
+	}
+	// severity_reason still pins to the distro_layout_present enum.
+	var sawReason bool
+	for _, f := range entry.Context {
+		if f.Key == "severity_reason" {
+			sawReason = true
+			if f.String != severityReasonDistroLayoutPresent {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonDistroLayoutPresent, f.String)
+			}
+		}
+	}
+	if !sawReason {
+		t.Fatalf("expected a severity_reason field on the ERROR entry; got context=%+v", entry.Context)
+	}
+	// embedded_fallback_bytes must report the supplied fallback length,
+	// not zero — otherwise a future regression that drops the fallback
+	// silently would still claim the production path was exercised.
+	var sawBytes bool
+	for _, f := range entry.Context {
+		if f.Key == "embedded_fallback_bytes" {
+			sawBytes = true
+			if f.Integer != int64(len(embeddedFallbackRoots)) {
+				t.Fatalf("embedded_fallback_bytes: got %d, want %d", f.Integer, len(embeddedFallbackRoots))
+			}
+		}
+	}
+	if !sawBytes {
+		t.Fatalf("expected embedded_fallback_bytes field; got context=%+v", entry.Context)
+	}
+}
+
+// TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistrolessStaysInfo
+// is the INFO twin of the test above — distroless image, no disk bundle,
+// embedded fallback supplied. Production behaviour: log at INFO (no alert
+// fatigue), return embedded bytes + the "<embedded:...>" source.
+func TestLoadSystemCABundle_NoSources_WithEmbeddedFallback_DistrolessStaysInfo(t *testing.T) {
+	withDistroLayout(t, false)
+	dir := t.TempDir()
+	missing1 := filepath.Join(dir, "a.crt")
+	missing2 := filepath.Join(dir, "b.crt")
+
+	logger, logs := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing1, missing2}, embeddedFallbackRoots)
+
+	if !bytes.Equal(data, embeddedFallbackRoots) {
+		t.Fatalf("expected embedded fallback bytes; got %d bytes vs %d", len(data), len(embeddedFallbackRoots))
+	}
+	if source != systemCABundleSourceEmbedded {
+		t.Fatalf("expected source=%q, got %q", systemCABundleSourceEmbedded, source)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	if entry.Level != zap.InfoLevel {
+		t.Fatalf("expected INFO (distroless image), got %s", entry.Level)
+	}
+	if !strings.Contains(entry.Message, "embedded Mozilla NSS roots") {
+		t.Fatalf("expected message to mention embedded Mozilla NSS roots when fallback is supplied; got %q", entry.Message)
+	}
+	var sawReason bool
+	for _, f := range entry.Context {
+		if f.Key == "severity_reason" {
+			sawReason = true
+			if f.String != severityReasonNoDistroLayout {
+				t.Fatalf("severity_reason: expected exact %q, got %q", severityReasonNoDistroLayout, f.String)
+			}
+		}
+	}
+	if !sawReason {
+		t.Fatalf("expected a severity_reason field on the INFO entry; got context=%+v", entry.Context)
+	}
+}
+
+// TestLoadSystemCABundle_NoSources_NilFallback_DoesNotClaimFallback locks in
+// the message-conditioning Copilot flagged: when fallback is nil (the
+// disk-only entry point loadSystemCABundleFromPaths) the log line MUST NOT
+// say it's falling back to the embedded Mozilla NSS roots — there is no
+// fallback to fall back to. A regression here would mislead operators
+// into thinking the agent self-healed when it didn't.
+func TestLoadSystemCABundle_NoSources_NilFallback_DoesNotClaimFallback(t *testing.T) {
+	withDistroLayout(t, true)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "a.crt")
+
+	logger, logs := newObservedLogger(t)
+	data, source := loadSystemCABundleFromPathsAndFallback(logger, []string{missing}, nil)
+	if data != nil {
+		t.Fatalf("expected nil data when fallback is nil; got %d bytes", len(data))
+	}
+	if source != "" {
+		t.Fatalf("expected empty source when fallback is nil; got %q", source)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 log entry, got %d", logs.Len())
+	}
+	entry := logs.All()[0]
+	// Must NOT claim a fallback happened.
+	if strings.Contains(entry.Message, "falling back to the agent's embedded Mozilla NSS roots") {
+		t.Fatalf("nil-fallback path must not claim a fallback occurred; got %q", entry.Message)
+	}
+	// Must explicitly state the resulting bundle is incomplete so an
+	// operator reading this line knows the trust store is broken.
+	if !strings.Contains(entry.Message, "only the Keploy MITM CA") {
+		t.Fatalf("nil-fallback path should call out the keploy-only outcome; got %q", entry.Message)
 	}
 }
 
