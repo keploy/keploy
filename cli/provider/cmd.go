@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-
 	"strings"
 	"time"
 
@@ -294,6 +293,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
+		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -333,6 +334,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
+		cmd.Flags().Bool("capture-packets", c.cfg.Record.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
+		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
 		// when the operator already knows they need to bump these (saw
 		// per_conn_cap / channel_full drops in agent logs). Env vars
@@ -391,66 +394,68 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
-		"testsets":               "test-sets",
-		"fullBody":               "full",
-		"reportPath":             "report-path",
-		"tc":                     "test-case",
-		"delay":                  "delay",
-		"apiTimeout":             "api-timeout",
-		"mongoPassword":          "mongo-password",
-		"tlsPrivateKeyPath":      "tls-private-key-path",
-		"coverageReportPath":     "coverage-report-path",
-		"language":               "language",
-		"ignoreOrdering":         "ignore-ordering",
-		"coverage":               "coverage",
-		"removeUnusedMocks":      "remove-unused-mocks",
-		"goCoverage":             "go-coverage",
-		"fallBackOnMiss":         "fallBack-on-miss",
-		"basePath":               "base-path",
-		"updateTemplate":         "update-template",
-		"mocking":                "mocking",
-		"configPath":             "config-path",
-		"path":                   "path",
-		"port":                   "port",
-		"grpcPort":               "grpc-port",
-		"ssePort":                "sse-port",
-		"proxyPort":              "proxy-port",
-		"incomingProxyPort":      "incoming-proxy-port",
-		"dnsPort":                "dns-port",
-		"command":                "command",
-		"cmdType":                "cmd-type",
-		"buildDelay":             "build-delay",
-		"containerName":          "container-name",
-		"networkName":            "network-name",
-		"passThroughPorts":       "pass-through-ports",
-		"memoryLimit":            "memory-limit",
-		"maxMemoryPerConnection": "max-memory-per-conn",
-		"queueSize":              "queue-size",
-		"appId":                  "app-id",
-		"appName":                "app-name",
-		"generateGithubActions":  "generate-github-actions",
-		"disableTele":            "disable-tele",
-		"disableANSI":            "disable-ansi",
-		"jsonOutput":             "json",
-		"selectedTests":          "selected-tests",
-		"testReport":             "test-report",
-		"enableTesting":          "enable-testing",
-		"inDocker":               "in-docker",
-		"keployContainer":        "keploy-container",
-		"keployNetwork":          "keploy-network",
-		"recordTimer":            "record-timer",
-		"healthUrl":              "health-url",
-		"healthPollTimeout":      "health-poll-timeout",
-		"urlMethods":             "url-methods",
-		"inCi":                   "in-ci",
-		"protoFile":              "proto-file",
-		"protoDir":               "proto-dir",
-		"protoInclude":           "proto-include",
-		"allowHighRisk":          "allow-high-risk",
-		"disableMapping":         "disable-mapping",
-		"compareAll":             "compare-all",
-		"schemaMatch":            "schema-match",
-		"updateTestMapping":      "update-test-mapping",
+		"testsets":                  "test-sets",
+		"fullBody":                  "full",
+		"reportPath":                "report-path",
+		"tc":                        "test-case",
+		"delay":                     "delay",
+		"apiTimeout":                "api-timeout",
+		"mongoPassword":             "mongo-password",
+		"tlsPrivateKeyPath":         "tls-private-key-path",
+		"coverageReportPath":        "coverage-report-path",
+		"language":                  "language",
+		"ignoreOrdering":            "ignore-ordering",
+		"coverage":                  "coverage",
+		"removeUnusedMocks":         "remove-unused-mocks",
+		"goCoverage":                "go-coverage",
+		"fallBackOnMiss":            "fallBack-on-miss",
+		"basePath":                  "base-path",
+		"updateTemplate":            "update-template",
+		"mocking":                   "mocking",
+		"configPath":                "config-path",
+		"path":                      "path",
+		"port":                      "port",
+		"grpcPort":                  "grpc-port",
+		"ssePort":                   "sse-port",
+		"proxyPort":                 "proxy-port",
+		"incomingProxyPort":         "incoming-proxy-port",
+		"dnsPort":                   "dns-port",
+		"command":                   "command",
+		"cmdType":                   "cmd-type",
+		"buildDelay":                "build-delay",
+		"containerName":             "container-name",
+		"networkName":               "network-name",
+		"passThroughPorts":          "pass-through-ports",
+		"memoryLimit":               "memory-limit",
+		"maxMemoryPerConnection":    "max-memory-per-conn",
+		"queueSize":                 "queue-size",
+		"appId":                     "app-id",
+		"appName":                   "app-name",
+		"generateGithubActions":     "generate-github-actions",
+		"disableTele":               "disable-tele",
+		"disableANSI":               "disable-ansi",
+		"jsonOutput":                "json",
+		"selectedTests":             "selected-tests",
+		"testReport":                "test-report",
+		"enableTesting":             "enable-testing",
+		"inDocker":                  "in-docker",
+		"keployContainer":           "keploy-container",
+		"keployNetwork":             "keploy-network",
+		"recordTimer":               "record-timer",
+		"healthUrl":                 "health-url",
+		"healthPollTimeout":         "health-poll-timeout",
+		"urlMethods":                "url-methods",
+		"inCi":                      "in-ci",
+		"protoFile":                 "proto-file",
+		"protoDir":                  "proto-dir",
+		"protoInclude":              "proto-include",
+		"allowHighRisk":             "allow-high-risk",
+		"disableMapping":            "disable-mapping",
+		"compareAll":                "compare-all",
+		"schemaMatch":               "schema-match",
+		"updateTestMapping":         "update-test-mapping",
+		"capturePackets":            "capture-packets",
+		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -1247,6 +1252,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		if cmd.Name() == "record" {
+			opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
+			if err != nil {
+				errMsg := "failed to read the opportunistic-tls-intercept flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
+		}
+
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
@@ -1279,6 +1294,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		capturePackets, err := cmd.Flags().GetBool("capture-packets")
+		if err != nil {
+			errMsg := "failed to read the capture-packets flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.CapturePackets = capturePackets
+
+		opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
+		if err != nil {
+			errMsg := "failed to read the opportunistic-tls-intercept flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.OpportunisticTLSIntercept = opportunisticTLSIntercept
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {
