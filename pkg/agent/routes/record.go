@@ -216,19 +216,19 @@ func (a *Agent) HandlePcapStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
-	// Probe the broadcaster up-front so a "capture not active"
-	// error surfaces as 503 rather than as an empty-but-OK stream.
-	// StreamPcap blocks until ctx is done, so the actual subscribe
-	// happens inside it; we call it synchronously and rely on its
-	// fast-path error.
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush() // commit the response head before the long block
-	if err := a.svc.StreamPcap(r.Context(), w, flusher.Flush); err != nil {
-		// Headers are already sent; we cannot signal failure as a
-		// status code. Log and let the client see a short body.
-		a.logger.Warn("pcap stream ended with error",
-			zap.Error(err))
+	// Subscribe synchronously BEFORE committing the status code.
+	// SubscribePcap writes the pcap file header into w, which
+	// triggers an implicit 200 in net/http — this is intentional.
+	// If capture is not active it returns an error without writing
+	// to w, so we can still return 503 cleanly.
+	unsub, err := a.svc.SubscribePcap(w, flusher.Flush)
+	if err != nil {
+		http.Error(w, "packet capture not active: "+err.Error(), http.StatusServiceUnavailable)
+		return
 	}
+	defer unsub()
+	flusher.Flush() // push the pcap file header to the client
+	<-r.Context().Done()
 }
 
 // HandleKeylogStream is a long-lived chunked response that emits

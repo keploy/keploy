@@ -21,6 +21,12 @@ type Service interface {
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	// SubscribePcap synchronously subscribes w to the proxy's packet
+	// broadcaster. Returns an unsub func and nil on success; returns
+	// an error (and nil unsub) when capture is not active. Unlike
+	// StreamPcap, this does NOT block — it lets the caller write the
+	// correct HTTP status code before the long-lived relay begins.
+	SubscribePcap(w io.Writer, flush func()) (func(), error)
 	// StreamPcap subscribes w to the proxy's packet broadcaster and
 	// blocks until ctx is cancelled or the proxy stops capturing.
 	// flush, when non-nil, runs after each packet so chunked HTTP

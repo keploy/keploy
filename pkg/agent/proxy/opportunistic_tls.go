@@ -299,7 +299,7 @@ func (p *Proxy) continuePlainRelay(ctx context.Context, srcConn, dstConn net.Con
 // until either side closes. Returns nil on clean shutdown; only
 // surfaces errors that aren't ordinary closed-connection states.
 func relayPlaintext(ctx context.Context, a, b net.Conn) error {
-	g, gctx := errgroup.WithContext(ctx)
+	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		_, err := io.Copy(b, a)
 		_ = closeWriteIfPossible(b)
@@ -316,10 +316,15 @@ func relayPlaintext(ctx context.Context, a, b net.Conn) error {
 
 	select {
 	case <-ctx.Done():
+		// Unblock the io.Copy goroutines immediately — without this
+		// they stay blocked in Read until the remote closes, which
+		// can stall a graceful proxy shutdown for the full connection
+		// lifetime.
+		_ = a.SetDeadline(time.Now())
+		_ = b.SetDeadline(time.Now())
 		<-done
 		return ctx.Err()
 	case err := <-done:
-		_ = gctx
 		return err
 	}
 }

@@ -150,6 +150,17 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
+// SubscribePcap synchronously subscribes w to the proxy's packet
+// broadcaster. Returns an unsub func and nil on success; returns an
+// error (and nil unsub) when capture is not active. Does not block.
+func (a *Agent) SubscribePcap(w io.Writer, flush func()) (func(), error) {
+	streamer, ok := a.Proxy.(coreAgent.PcapStreamer)
+	if !ok {
+		return nil, errors.New("packet capture not supported by this proxy")
+	}
+	return streamer.SubscribePcap(w, flush)
+}
+
 // StreamPcap subscribes w to the proxy's packet broadcaster. Blocks
 // until ctx is cancelled. Returns an error when the underlying Proxy
 // does not implement PcapStreamer (third-party impls) or when
@@ -157,11 +168,7 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 // session). Error reporting is up to the HTTP layer; the recorder
 // treats it as "no stream available".
 func (a *Agent) StreamPcap(ctx context.Context, w io.Writer, flush func()) error {
-	streamer, ok := a.Proxy.(coreAgent.PcapStreamer)
-	if !ok {
-		return errors.New("packet capture not supported by this proxy")
-	}
-	unsub, err := streamer.SubscribePcap(w, flush)
+	unsub, err := a.SubscribePcap(w, flush)
 	if err != nil {
 		return err
 	}
