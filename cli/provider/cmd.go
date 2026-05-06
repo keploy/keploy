@@ -293,6 +293,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
+		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -1280,6 +1282,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		capturePackets, err := cmd.Flags().GetBool("capture-packets")
+		if err != nil {
+			errMsg := "failed to read the capture-packets flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.CapturePackets = capturePackets
+
+		opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
+		if err != nil {
+			errMsg := "failed to read the opportunistic-tls-intercept flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.OpportunisticTLSIntercept = opportunisticTLSIntercept
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {

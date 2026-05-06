@@ -573,7 +573,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		DestInfo:           info,
 		clientClose:        make(chan bool, 1),
 		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
+		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
 		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:           opts.Agent.IsDocker,
 		EnableIPv6Redirect: opts.Agent.EnableIPv6Redirect,

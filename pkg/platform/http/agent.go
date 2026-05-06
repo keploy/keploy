@@ -896,6 +896,12 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.CapturePackets {
+		args = append(args, "--capture-packets")
+	}
+	if opts.OpportunisticTLSIntercept {
+		args = append(args, "--opportunistic-tls-intercept")
+	}
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}

@@ -111,7 +111,9 @@ type SetupOptions struct {
 	IncomingProxyPort uint16
 	DnsPort           uint32
 	Mode              Mode
-	GlobalPassthrough bool
+	GlobalPassthrough         bool
+	CapturePackets            bool
+	OpportunisticTLSIntercept bool
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetworks       []string
