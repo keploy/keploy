@@ -48,6 +48,13 @@ type pcapSubscriber struct {
 	w      *pcapgo.Writer
 	flush  func()
 	failed atomic.Bool
+	// mu serialises WritePacket+flush so that unsub() can wait for any
+	// in-flight flush to finish before marking the subscriber closed.
+	// Without this, the HTTP server's finishRequest() (which runs in
+	// the connection goroutine the moment the handler returns) races
+	// with the capture loop's flush() call on the same bufio.Writer.
+	mu     sync.Mutex
+	closed bool
 }
 
 // write fans the (ci, data) pair out to every active subscriber.
@@ -62,13 +69,20 @@ func (b *pcapBroadcaster) write(ci gopacket.CaptureInfo, data []byte) {
 		if s.failed.Load() {
 			continue
 		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			continue
+		}
 		if err := s.w.WritePacket(ci, data); err != nil {
 			s.failed.Store(true)
+			s.mu.Unlock()
 			continue
 		}
 		if s.flush != nil {
 			s.flush()
 		}
+		s.mu.Unlock()
 	}
 }
 
@@ -95,6 +109,15 @@ func (b *pcapBroadcaster) subscribe(w io.Writer, flush func()) (func(), error) {
 	b.subs = append(b.subs, s)
 	b.mu.Unlock()
 	return func() {
+		// Mark closed while holding the subscriber mutex so no new
+		// WritePacket+flush sequence can start after we return. Any
+		// in-flight flush() finishes before we acquire the lock, which
+		// means the HTTP server's finishRequest() (called the moment
+		// the handler returns) cannot race with a concurrent flush().
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for i, sub := range b.subs {

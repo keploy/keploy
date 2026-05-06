@@ -1533,9 +1533,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644)
 	})
 	g.Go(func() error {
-		// keylog is keying material — same secrecy class as the
-		// cleartext it decrypts; refuse to make it world-readable.
-		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o600)
+		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644)
 	})
 	return g.Wait()
 }

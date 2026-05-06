@@ -604,10 +604,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		TLSPrivateKey:  tlsPrivateKey,
-		CapturePackets: r.config.Record.CapturePackets,
+		Rules:                     r.config.BypassRules,
+		MongoPassword:             r.config.Test.MongoPassword,
+		TLSPrivateKey:             tlsPrivateKey,
+		CapturePackets:            r.config.Record.CapturePackets,
+		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
 	})
 	if err != nil {
 

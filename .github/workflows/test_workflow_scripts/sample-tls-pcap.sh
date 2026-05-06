@@ -364,11 +364,14 @@ case "$MODE_NAME" in
     ;;
   with-opportunistic)
     # Opportunistic intercept hijacks BEFORE parser dispatch — no
-    # protocol-aware mocks for any TLS-bearing connection. mocks.yaml
-    # may still contain DNS/non-TLS entries; we just sanity-check
-    # the file is parseable YAML.
-    sudo head -3 "$MOCKS"
-    echo "  (parser dispatch intentionally bypassed; HTTP mocks are not expected in this mode)"
+    # Http mocks must appear. DNS mocks are still expected (DNS
+    # interception is independent of the passthrough path).
+    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    echo "Http mock records (must be 0): $HTTP_MOCKS"
+    if [[ "$HTTP_MOCKS" -gt 0 ]]; then
+      echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in with-opportunistic mode — parser dispatch should be bypassed"
+      exit 1
+    fi
     ;;
 esac
 endsec

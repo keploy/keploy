@@ -83,10 +83,18 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 
 	cleanup := func() {
 		cancelRelay()
-		// Give the goroutines a beat to exit on their own; if they're
-		// blocked on a read after the deadline, they'll wake up and
-		// observe ctx cancellation. Avoids leaking the goroutines.
+		// Unblock any goroutine currently sleeping inside Read() by
+		// setting an already-expired deadline. Without this, a goroutine
+		// blocked in from.Read() can't observe ctx cancellation until the
+		// opportunisticPeekChunkTimeout (5 s) fires — adding a 5 s stall
+		// to every TLS connection before hijackAndMITM can start.
+		_ = srcConn.SetReadDeadline(time.Now())
+		_ = dstConn.SetReadDeadline(time.Now())
 		wg.Wait()
+		// Clear deadlines so hijackAndMITM / continuePlainRelay can use
+		// the connections normally.
+		_ = srcConn.SetReadDeadline(time.Time{})
+		_ = dstConn.SetReadDeadline(time.Time{})
 	}
 
 	for {

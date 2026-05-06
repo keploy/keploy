@@ -1238,6 +1238,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		opportunisticTLSIntercept, err := cmd.Flags().GetBool("opportunistic-tls-intercept")
+		if err != nil {
+			errMsg := "failed to read the opportunistic-tls-intercept flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
