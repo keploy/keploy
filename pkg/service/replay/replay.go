@@ -172,7 +172,7 @@ type Replayer struct {
 	totalTestFailed       int
 	totalTestObsolete     int
 	totalTestIgnored      int
-	totalMocksConsumed    int // distinct mocks consumed across all test sets in the current run; used for telemetry on TestRun event
+	consumedMockNames     map[string]struct{} // distinct mock names consumed across all test sets in the current run; size emitted as Mocks-Consumed on the TestRun event
 	totalTestTimeTaken    time.Duration
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
@@ -289,7 +289,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.completeTestReportMu.Lock()
 	r.completeTestReport = make(map[string]TestReportVerdict)
 	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
-	r.totalMocksConsumed = 0
+	r.consumedMockNames = make(map[string]struct{})
 	r.totalTestTimeTaken = 0
 	r.completeTestReportMu.Unlock()
 	r.failedTCsBySetID = make(map[string][]string)
@@ -430,6 +430,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initObsolete := r.totalTestObsolete
 		initIgnored := r.totalTestIgnored
 		initTimeTaken := r.totalTestTimeTaken
+		// Snapshot a copy of the run-level distinct mock set so per-attempt
+		// additions can be reverted on retry just like the int totals above.
+		initConsumedMockNames := make(map[string]struct{}, len(r.consumedMockNames))
+		for k := range r.consumedMockNames {
+			initConsumedMockNames[k] = struct{}{}
+		}
 		r.completeTestReportMu.RUnlock()
 
 		var initialFailedTCs map[string]bool
@@ -453,6 +459,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.totalTestObsolete = initObsolete
 			r.totalTestIgnored = initIgnored
 			r.totalTestTimeTaken = initTimeTaken
+			// Re-clone from the snapshot so the next RunTestSet attempt
+			// mutates a fresh per-attempt copy without polluting the
+			// preserved snapshot for any further retry.
+			r.consumedMockNames = make(map[string]struct{}, len(initConsumedMockNames))
+			for k := range initConsumedMockNames {
+				r.consumedMockNames[k] = struct{}{}
+			}
 			r.completeTestReportMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
@@ -609,7 +622,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.completeTestReportMu.RLock()
 	passed := r.totalTestPassed
 	failed := r.totalTestFailed
-	mocksConsumed := r.totalMocksConsumed
+	mocksConsumed := len(r.consumedMockNames)
 	r.completeTestReportMu.RUnlock()
 	r.telemetry.TestRun(passed, failed, len(testSets), mocksConsumed, testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
@@ -2467,8 +2480,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	// Merge mock NAMES (not the count) into the run-level distinct
+	// set so duplicates across test sets aren't double-counted.
 	r.completeTestReportMu.Lock()
-	r.totalMocksConsumed += len(totalConsumedMocks)
+	for name := range totalConsumedMocks {
+		r.consumedMockNames[name] = struct{}{}
+	}
 	r.completeTestReportMu.Unlock()
 
 	return testSetStatus, nil

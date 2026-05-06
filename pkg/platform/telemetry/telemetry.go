@@ -135,14 +135,18 @@ func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 	tel.sendTracked("MockTestRun", dataMap)
 }
 
-// RecordSessionCompleted fires at the end of a successful record session
-// with totals. record always captures one test-set per invocation, so we
-// don't include a test-set count.
-func (tel *Telemetry) RecordSessionCompleted(testCount, mockCount int64, durationMs int64) {
+// RecordSessionCompleted fires at the end of any record session that
+// actually started recording (frame channels were created and data
+// flowed). status is "completed" for a clean exit (or user Ctrl+C)
+// and "aborted" for an error path that surfaced a stopReason. Record
+// always captures one test-set per invocation, so a test-set count is
+// intentionally omitted.
+func (tel *Telemetry) RecordSessionCompleted(testCount, mockCount int64, durationMs int64, status string) {
 	dataMap := map[string]interface{}{
 		"test_count":  testCount,
 		"mock_count":  mockCount,
 		"duration_ms": durationMs,
+		"status":      status,
 	}
 	tel.sendTracked(models.TeleEventRecordSessionCompleted, dataMap)
 }

@@ -1,11 +1,12 @@
 package models
 
-
-// Event-type names emitted by this package. Only the names this file's
-// methods actually emit are listed; existing pre-existing emissions
-// (Ping, RecordedTestSuite, RecordedBatch, TestSetRun, MockTestRun,
-// RecordedMocks) keep their original string literals to avoid churn in
-// callers we did not touch.
+// Shared event-type string constants used by the telemetry emitter
+// (pkg/platform/telemetry). Only the event names introduced or
+// modified by this PR are extracted as constants. Pre-existing event
+// names (Ping, RecordedTestSuite, RecordedBatch, TestSetRun,
+// MockTestRun, RecordedMocks) remain inline string literals at their
+// existing call sites to avoid churn in code paths this PR does not
+// touch.
 const (
 	TeleEventTestRun                = "TestRun"
 	TeleEventRecordSessionCompleted = "RecordSessionCompleted"

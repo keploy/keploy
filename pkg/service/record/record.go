@@ -212,7 +212,14 @@ func (r *Recorder) Start(ctx context.Context) error {
 			for _, c := range mockCountMap {
 				totalMocks += c
 			}
-			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds())
+			// "completed" for a clean exit / user Ctrl+C, "aborted"
+			// when an error path set stopReason. Lets dashboards split
+			// successful sessions from failures without losing either.
+			status := "completed"
+			if stopReason != "" {
+				status = "aborted"
+			}
+			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status)
 		}
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
