@@ -361,6 +361,39 @@ func TestEncodeBinaryRow_RealWorldExample(t *testing.T) {
 	t.Logf("✓ Successfully encoded real-world example with NULL date_of_birth field: %d bytes", len(result))
 }
 
+// TestEncodeBinaryRow_FewerValuesThanColumns guards the bounds check at
+// binaryProtocolRowPacket.go:209. Before the fix, a BinaryRow whose Values
+// slice was shorter than its column list panicked the agent goroutine with
+// "index out of range" inside EncodeBinaryRow when the null bitmap declared
+// the missing column non-null. We now return an error so the recovery path
+// closes the connection cleanly.
+func TestEncodeBinaryRow_FewerValuesThanColumns(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	columns := []*mysql.ColumnDefinition41{
+		{Name: "a", Type: byte(mysql.FieldTypeVarString)},
+		{Name: "b", Type: byte(mysql.FieldTypeVarString)},
+		{Name: "c", Type: byte(mysql.FieldTypeVarString)},
+	}
+
+	row := &mysql.BinaryRow{
+		Header: mysql.Header{SequenceID: 1},
+		Values: []mysql.ColumnEntry{
+			{Type: mysql.FieldTypeVarString, Name: "a", Value: "x"},
+		},
+		// Bitmap claims columns b and c are non-null even though the row
+		// only carries a value for column a — exactly the malformed-mock
+		// shape that crashed the encoder.
+		RowNullBuffer: []byte{0x00},
+		OkAfterRow:    true,
+	}
+
+	if _, err := EncodeBinaryRow(ctx, logger, row, columns); err == nil {
+		t.Fatal("expected error, got nil — encoder accepted a row with fewer values than non-null columns")
+	}
+}
+
 // TestCoerceToString tests the coerceToString helper function
 func TestCoerceToString(t *testing.T) {
 	tests := []struct {

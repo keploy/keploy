@@ -211,6 +211,14 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			continue
 		}
 
+		// The null bitmap declares this column non-null, so we must have a
+		// matching ColumnEntry. Returning an error here lets the recovery
+		// path close the connection cleanly instead of taking the agent
+		// down via an index-out-of-range panic on a malformed mock.
+		if i >= len(row.Values) {
+			return nil, fmt.Errorf("encode: missing value for column %q (row has %d values, columns has %d)", col.Name, len(row.Values), len(columns))
+		}
+
 		ce := row.Values[i]
 
 		if ce.Value == nil {
