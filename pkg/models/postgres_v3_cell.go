@@ -1939,7 +1939,9 @@ const (
 	// `[16]uint8` fixed-array; without an explicit case the encoder
 	// falls into the `default:` arm and tears down the entire
 	// agent→k8s-proxy mock stream (see record.go HandleOutgoing).
-	// Encoded as 16 raw bytes after the tag.
+	// Gob-encoded as `[16]uint8` after the tag, same framing as
+	// every other case in this catalogue (the gob stream carries
+	// the fixed-array shape on the wire; not a 16-byte raw payload).
 	cellTagUUIDBytes byte = 30
 )
 
@@ -2455,8 +2457,10 @@ func (c PostgresV3Cell) GobEncode() ([]byte, error) {
 		// pgx's UUIDArrayCodec returns each `uuid[]` element as a raw
 		// `[16]uint8` and the bare `uuid` column scan path lands here
 		// too when callers Scan into `*[16]byte` instead of pgtype.UUID.
-		// Write the 16 bytes verbatim after the tag so GobDecode can
-		// reconstruct the same fixed-array shape.
+		// Gob-encode the [16]uint8 after the tag (same framing as
+		// every other case in this switch — gob carries the
+		// fixed-array shape on the wire) so GobDecode can reconstruct
+		// it symmetrically.
 		buf.WriteByte(cellTagUUIDBytes)
 		if err := enc.Encode(v); err != nil {
 			return nil, err
@@ -2978,11 +2982,11 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		}
 		c.Value = out
 	case cellTagUUIDBytes:
-		// Symmetric to the [16]uint8 GobEncode case: read the 16 raw
-		// bytes and reconstruct the fixed-array shape pgx originally
-		// produced. We decode into a [16]uint8 (not uuid.UUID) so the
-		// models package stays free of a uuid dependency; callers that
-		// want uuid.UUID can convert with `uuid.UUID(arr)`.
+		// Symmetric to the [16]uint8 GobEncode case: gob-decode the
+		// fixed-array shape pgx originally produced. We decode into a
+		// [16]uint8 (not uuid.UUID) so the models package stays free
+		// of a uuid dependency; callers that want uuid.UUID can
+		// convert with `uuid.UUID(arr)`.
 		var arr [16]uint8
 		if err := dec.Decode(&arr); err != nil {
 			return fmt.Errorf("PostgresV3Cell.GobDecode uuidBytes: %w", err)
