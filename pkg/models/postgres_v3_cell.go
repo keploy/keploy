@@ -245,6 +245,18 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 		// `{macaddr: !!binary <base64>}` so the decode side
 		// recovers the named type.
 		return marshalHardwareAddrYAML(v), nil
+	case [16]uint8:
+		// PG `uuid` scanned into a `[16]byte`-shaped destination
+		// (the underlying type of uuid.UUID, and what pgx's
+		// UUIDArrayCodec hands back for each `uuid[]` element).
+		// Without explicit dispatch yaml.v3 reflects on the fixed
+		// array and emits it as a sequence of ints, which decodes
+		// back as `[]any{int64...}` — same fidelity-loss class as
+		// HardwareAddr, breaking the codec's encode-plan dispatch
+		// for `uuid`. Emit a single-key mapping
+		// `{uuid: !!binary <base64>}` so the decode side recovers
+		// the fixed-array shape symmetrically with the gob path.
+		return marshalUUIDBytesYAML(v), nil
 	}
 	return c.Value, nil
 }
@@ -609,6 +621,26 @@ func marshalHardwareAddrYAML(v net.HardwareAddr) *yaml.Node {
 				Kind:  yaml.ScalarNode,
 				Tag:   "!!binary",
 				Value: base64.StdEncoding.EncodeToString(v),
+			},
+		},
+	}
+}
+
+// marshalUUIDBytesYAML emits a `[16]uint8` as a single-key mapping
+// `{uuid: !!binary <base64>}`. Same shape rationale as
+// marshalHardwareAddrYAML: the single-key mapping disambiguates
+// against the unnamed `[]byte` cell (which goes through the
+// `case []byte:` arm and emits a bare `!!binary` scalar) so the
+// cell-level decode never confuses a `bytea` column with a `uuid`
+// column. The 16-byte length is implicit in the payload.
+func marshalUUIDBytesYAML(v [16]uint8) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			scalarKeyNode("uuid"), {
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!binary",
+				Value: base64.StdEncoding.EncodeToString(v[:]),
 			},
 		},
 	}
@@ -1015,6 +1047,9 @@ func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 		return v, true, err
 	case keysEqual(keys, []string{"macaddr"}):
 		v, err := decodeHardwareAddrMapping(node)
+		return v, true, err
+	case keysEqual(keys, []string{"uuid"}):
+		v, err := decodeUUIDBytesMapping(node)
 		return v, true, err
 	}
 	return nil, false, nil
@@ -1635,6 +1670,39 @@ func decodeHardwareAddrMapping(node *yaml.Node) (net.HardwareAddr, error) {
 		return nil, fmt.Errorf("pg/macaddr: base64 decode: %w", err)
 	}
 	return net.HardwareAddr(b), nil
+}
+
+// decodeUUIDBytesMapping reconstructs a `[16]uint8` from the
+// `{uuid: !!binary <base64>}` mapping shape emitted by
+// marshalUUIDBytesYAML. The 16-byte length is enforced explicitly
+// — fixed-array sizing must be exact, and a wrong-length payload
+// would silently truncate or zero-pad if we just `copy`'d.
+func decodeUUIDBytesMapping(node *yaml.Node) ([16]uint8, error) {
+	var arr [16]uint8
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return arr, fmt.Errorf("pg/uuid: %w", err)
+	}
+	mn, ok := fields["uuid"]
+	if !ok || mn == nil {
+		return arr, fmt.Errorf("pg/uuid: missing 'uuid' field")
+	}
+	if mn.Kind != yaml.ScalarNode {
+		return arr, fmt.Errorf("pg/uuid: 'uuid' must be a scalar, got kind=%d", mn.Kind)
+	}
+	raw := mn.Value
+	if strings.ContainsAny(raw, " \t\r\n") {
+		raw = stripBase64Whitespace(raw)
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return arr, fmt.Errorf("pg/uuid: base64 decode: %w", err)
+	}
+	if len(b) != 16 {
+		return arr, fmt.Errorf("pg/uuid: expected 16 bytes, got %d", len(b))
+	}
+	copy(arr[:], b)
+	return arr, nil
 }
 
 // isPostgresV3CellRawNode reports whether a YAML mapping node has
