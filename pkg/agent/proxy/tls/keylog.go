@@ -22,13 +22,19 @@ import (
 // handshake.
 type keyLogSink struct {
 	mu   sync.RWMutex
-	subs []keyLogSub
+	subs []*keyLogSub
 	next atomic.Int64
 }
 
 type keyLogSub struct {
 	id int64
 	w  io.Writer
+	// mu serialises Write so that unsub() can mark closed and wait
+	// for any in-flight Write to finish before returning. Without
+	// this, a caller that passes a writer which panics on use-after-
+	// close would race with the unsub that tears it down.
+	mu     sync.Mutex
+	closed bool
 }
 
 func (s *keyLogSink) Write(p []byte) (int, error) {
@@ -40,21 +46,32 @@ func (s *keyLogSink) Write(p []byte) (int, error) {
 	// drove this Write — every active TLS connection in the
 	// recorded application calls into this path on every handshake.
 	for _, sub := range subs {
-		_, _ = sub.w.Write(p)
+		sub.mu.Lock()
+		if !sub.closed {
+			_, _ = sub.w.Write(p)
+		}
+		sub.mu.Unlock()
 	}
 	return len(p), nil
 }
 
 func (s *keyLogSink) add(w io.Writer) func() {
-	id := s.next.Add(1)
+	sub := &keyLogSub{id: s.next.Add(1), w: w}
 	s.mu.Lock()
-	s.subs = append(s.subs, keyLogSub{id: id, w: w})
+	s.subs = append(s.subs, sub)
 	s.mu.Unlock()
 	return func() {
+		// Mark closed while holding the subscriber mutex so no new
+		// Write can start after we return. Any in-flight Write
+		// finishes before we acquire the lock.
+		sub.mu.Lock()
+		sub.closed = true
+		sub.mu.Unlock()
+
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		for i, sub := range s.subs {
-			if sub.id == id {
+		for i, elem := range s.subs {
+			if elem.id == sub.id {
 				s.subs = append(s.subs[:i], s.subs[i+1:]...)
 				return
 			}
