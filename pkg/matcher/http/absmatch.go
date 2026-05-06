@@ -164,7 +164,12 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	tcs1.HTTPReq.Header["Keploy-Test-Set-Id"] = "dummyTestSet"
 
 	// compare http req headers
-	ok := matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
+	ok := matcher.CompareHeaders(
+		pkg.ToHTTPHeaderWithExact(tcs1.HTTPReq.Header, tcs1.HTTPReq.HeaderValues),
+		pkg.ToHTTPHeaderWithExact(tcs2.HTTPReq.Header, tcs2.HTTPReq.HeaderValues),
+		&reqCompare.HeaderResult,
+		reqHeaderNoise,
+	)
 	if !ok {
 		logger.Debug("test case http req headers are not equal", zap.Any("tcs1HttpReqHeaders", tcs1.HTTPReq.Header), zap.Any("tcs2HttpReqHeaders", tcs2.HTTPReq.Header))
 		pass = false
@@ -347,7 +352,12 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	}
 
 	// compare http resp headers
-	ok = matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPResp.Header), pkg.ToHTTPHeader(tcs2.HTTPResp.Header), &respCompare.HeadersResult, headerNoise)
+	ok = matcher.CompareHeaders(
+		pkg.ToHTTPHeaderWithExact(tcs1.HTTPResp.Header, tcs1.HTTPResp.HeaderValues),
+		pkg.ToHTTPHeaderWithExact(tcs2.HTTPResp.Header, tcs2.HTTPResp.HeaderValues),
+		&respCompare.HeadersResult,
+		headerNoise,
+	)
 	if !ok {
 		logger.Debug("test case http resp headers are not equal", zap.Any("tcs1HttpRespHeaders", tcs1.HTTPResp.Header), zap.Any("tcs2HttpRespHeaders", tcs2.HTTPResp.Header))
 		pass = false

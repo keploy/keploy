@@ -17,17 +17,18 @@ type BodyRef struct {
 }
 
 type HTTPReq struct {
-	Method     Method            `json:"method" yaml:"method"`
-	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
-	ProtoMinor int               `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
-	URL        string            `json:"url" yaml:"url"`
-	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
-	Header     map[string]string `json:"header" yaml:"header"`
-	Body       string            `json:"body" yaml:"body"`
-	BodyRef    BodyRef           `json:"body_ref,omitempty" yaml:"body_ref,omitempty"` // set when body is offloaded to assets (>1MB)
-	Binary     string            `json:"binary" yaml:"binary,omitempty"`
-	Form       []FormData        `json:"form" yaml:"form,omitempty"`
-	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
+	Method       Method              `json:"method" yaml:"method"`
+	ProtoMajor   int                 `json:"proto_major" yaml:"proto_major"` // e.g. 1
+	ProtoMinor   int                 `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
+	URL          string              `json:"url" yaml:"url"`
+	URLParams    map[string]string   `json:"url_params" yaml:"url_params,omitempty"`
+	Header       map[string]string   `json:"header" yaml:"header"`
+	HeaderValues map[string][]string `json:"header_values,omitempty" yaml:"header_values,omitempty"`
+	Body         string              `json:"body" yaml:"body"`
+	BodyRef      BodyRef             `json:"body_ref,omitempty" yaml:"body_ref,omitempty"` // set when body is offloaded to assets (>1MB)
+	Binary       string              `json:"binary" yaml:"binary,omitempty"`
+	Form         []FormData          `json:"form" yaml:"form,omitempty"`
+	Timestamp    time.Time           `json:"timestamp" yaml:"timestamp"`
 }
 
 type HTTPSchema struct {
@@ -50,17 +51,18 @@ type FormData struct {
 }
 
 type HTTPResp struct {
-	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
-	Header        map[string]string `json:"header" yaml:"header"`
-	Body          string            `json:"body" yaml:"body"`
-	StreamBody    []HTTPStreamChunk `json:"-" yaml:"-"`
-	BodySkipped   bool              `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
-	BodySize      int64             `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
-	StatusMessage string            `json:"status_message" yaml:"status_message"`
-	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
-	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
-	Binary        string            `json:"binary" yaml:"binary,omitempty"`
-	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
+	StatusCode    int                 `json:"status_code" yaml:"status_code"` // e.g. 200
+	Header        map[string]string   `json:"header" yaml:"header"`
+	HeaderValues  map[string][]string `json:"header_values,omitempty" yaml:"header_values,omitempty"`
+	Body          string              `json:"body" yaml:"body"`
+	StreamBody    []HTTPStreamChunk   `json:"-" yaml:"-"`
+	BodySkipped   bool                `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
+	BodySize      int64               `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
+	StatusMessage string              `json:"status_message" yaml:"status_message"`
+	ProtoMajor    int                 `json:"proto_major" yaml:"proto_major"`
+	ProtoMinor    int                 `json:"proto_minor" yaml:"proto_minor"`
+	Binary        string              `json:"binary" yaml:"binary,omitempty"`
+	Timestamp     time.Time           `json:"timestamp" yaml:"timestamp"`
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default
@@ -81,31 +83,33 @@ type HTTPResp struct {
 // before this change continue to decode.
 
 type httpReqBSON struct {
-	Method     Method            `bson:"method"`
-	ProtoMajor int               `bson:"protomajor"`
-	ProtoMinor int               `bson:"protominor"`
-	URL        string            `bson:"url"`
-	URLParams  map[string]string `bson:"urlparams"`
-	Header     map[string]string `bson:"header"`
-	Body       string            `bson:"body"`
-	BodyRef    BodyRef           `bson:"bodyref"`
-	Binary     string            `bson:"binary"`
-	Form       []FormData        `bson:"form"`
-	Timestamp  string            `bson:"timestamp"`
+	Method       Method              `bson:"method"`
+	ProtoMajor   int                 `bson:"protomajor"`
+	ProtoMinor   int                 `bson:"protominor"`
+	URL          string              `bson:"url"`
+	URLParams    map[string]string   `bson:"urlparams"`
+	Header       map[string]string   `bson:"header"`
+	HeaderValues map[string][]string `bson:"headervalues,omitempty"`
+	Body         string              `bson:"body"`
+	BodyRef      BodyRef             `bson:"bodyref"`
+	Binary       string              `bson:"binary"`
+	Form         []FormData          `bson:"form"`
+	Timestamp    string              `bson:"timestamp"`
 }
 
 type httpReqBSONReader struct {
-	Method     Method            `bson:"method"`
-	ProtoMajor int               `bson:"protomajor"`
-	ProtoMinor int               `bson:"protominor"`
-	URL        string            `bson:"url"`
-	URLParams  map[string]string `bson:"urlparams"`
-	Header     map[string]string `bson:"header"`
-	Body       string            `bson:"body"`
-	BodyRef    BodyRef           `bson:"bodyref"`
-	Binary     string            `bson:"binary"`
-	Form       []FormData        `bson:"form"`
-	Timestamp  bson.RawValue     `bson:"timestamp"`
+	Method       Method              `bson:"method"`
+	ProtoMajor   int                 `bson:"protomajor"`
+	ProtoMinor   int                 `bson:"protominor"`
+	URL          string              `bson:"url"`
+	URLParams    map[string]string   `bson:"urlparams"`
+	Header       map[string]string   `bson:"header"`
+	HeaderValues map[string][]string `bson:"headervalues,omitempty"`
+	Body         string              `bson:"body"`
+	BodyRef      BodyRef             `bson:"bodyref"`
+	Binary       string              `bson:"binary"`
+	Form         []FormData          `bson:"form"`
+	Timestamp    bson.RawValue       `bson:"timestamp"`
 }
 
 // MarshalBSON writes HTTPReq with the Timestamp field serialised as an
@@ -113,17 +117,18 @@ type httpReqBSONReader struct {
 // it.
 func (h HTTPReq) MarshalBSON() ([]byte, error) {
 	return bson.Marshal(httpReqBSON{
-		Method:     h.Method,
-		ProtoMajor: h.ProtoMajor,
-		ProtoMinor: h.ProtoMinor,
-		URL:        h.URL,
-		URLParams:  h.URLParams,
-		Header:     h.Header,
-		Body:       h.Body,
-		BodyRef:    h.BodyRef,
-		Binary:     h.Binary,
-		Form:       h.Form,
-		Timestamp:  FormatMockTimestamp(h.Timestamp),
+		Method:       h.Method,
+		ProtoMajor:   h.ProtoMajor,
+		ProtoMinor:   h.ProtoMinor,
+		URL:          h.URL,
+		URLParams:    h.URLParams,
+		Header:       h.Header,
+		HeaderValues: h.HeaderValues,
+		Body:         h.Body,
+		BodyRef:      h.BodyRef,
+		Binary:       h.Binary,
+		Form:         h.Form,
+		Timestamp:    FormatMockTimestamp(h.Timestamp),
 	})
 }
 
@@ -142,47 +147,50 @@ func (h *HTTPReq) UnmarshalBSON(data []byte) error {
 	}
 
 	*h = HTTPReq{
-		Method:     raw.Method,
-		ProtoMajor: raw.ProtoMajor,
-		ProtoMinor: raw.ProtoMinor,
-		URL:        raw.URL,
-		URLParams:  raw.URLParams,
-		Header:     raw.Header,
-		Body:       raw.Body,
-		BodyRef:    raw.BodyRef,
-		Binary:     raw.Binary,
-		Form:       raw.Form,
-		Timestamp:  ts,
+		Method:       raw.Method,
+		ProtoMajor:   raw.ProtoMajor,
+		ProtoMinor:   raw.ProtoMinor,
+		URL:          raw.URL,
+		URLParams:    raw.URLParams,
+		Header:       raw.Header,
+		HeaderValues: raw.HeaderValues,
+		Body:         raw.Body,
+		BodyRef:      raw.BodyRef,
+		Binary:       raw.Binary,
+		Form:         raw.Form,
+		Timestamp:    ts,
 	}
 	return nil
 }
 
 type httpRespBSON struct {
-	StatusCode    int               `bson:"statuscode"`
-	Header        map[string]string `bson:"header"`
-	Body          string            `bson:"body"`
-	StreamBody    []HTTPStreamChunk `bson:"streambody"`
-	BodySkipped   bool              `bson:"bodyskipped"`
-	BodySize      int64             `bson:"bodysize"`
-	StatusMessage string            `bson:"statusmessage"`
-	ProtoMajor    int               `bson:"protomajor"`
-	ProtoMinor    int               `bson:"protominor"`
-	Binary        string            `bson:"binary"`
-	Timestamp     string            `bson:"timestamp"`
+	StatusCode    int                 `bson:"statuscode"`
+	Header        map[string]string   `bson:"header"`
+	HeaderValues  map[string][]string `bson:"headervalues,omitempty"`
+	Body          string              `bson:"body"`
+	StreamBody    []HTTPStreamChunk   `bson:"streambody"`
+	BodySkipped   bool                `bson:"bodyskipped"`
+	BodySize      int64               `bson:"bodysize"`
+	StatusMessage string              `bson:"statusmessage"`
+	ProtoMajor    int                 `bson:"protomajor"`
+	ProtoMinor    int                 `bson:"protominor"`
+	Binary        string              `bson:"binary"`
+	Timestamp     string              `bson:"timestamp"`
 }
 
 type httpRespBSONReader struct {
-	StatusCode    int               `bson:"statuscode"`
-	Header        map[string]string `bson:"header"`
-	Body          string            `bson:"body"`
-	StreamBody    []HTTPStreamChunk `bson:"streambody"`
-	BodySkipped   bool              `bson:"bodyskipped"`
-	BodySize      int64             `bson:"bodysize"`
-	StatusMessage string            `bson:"statusmessage"`
-	ProtoMajor    int               `bson:"protomajor"`
-	ProtoMinor    int               `bson:"protominor"`
-	Binary        string            `bson:"binary"`
-	Timestamp     bson.RawValue     `bson:"timestamp"`
+	StatusCode    int                 `bson:"statuscode"`
+	Header        map[string]string   `bson:"header"`
+	HeaderValues  map[string][]string `bson:"headervalues,omitempty"`
+	Body          string              `bson:"body"`
+	StreamBody    []HTTPStreamChunk   `bson:"streambody"`
+	BodySkipped   bool                `bson:"bodyskipped"`
+	BodySize      int64               `bson:"bodysize"`
+	StatusMessage string              `bson:"statusmessage"`
+	ProtoMajor    int                 `bson:"protomajor"`
+	ProtoMinor    int                 `bson:"protominor"`
+	Binary        string              `bson:"binary"`
+	Timestamp     bson.RawValue       `bson:"timestamp"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -190,6 +198,7 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 	return bson.Marshal(httpRespBSON{
 		StatusCode:    h.StatusCode,
 		Header:        h.Header,
+		HeaderValues:  h.HeaderValues,
 		Body:          h.Body,
 		StreamBody:    h.StreamBody,
 		BodySkipped:   h.BodySkipped,
@@ -216,6 +225,7 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 	*h = HTTPResp{
 		StatusCode:    raw.StatusCode,
 		Header:        raw.Header,
+		HeaderValues:  raw.HeaderValues,
 		Body:          raw.Body,
 		StreamBody:    raw.StreamBody,
 		BodySkipped:   raw.BodySkipped,

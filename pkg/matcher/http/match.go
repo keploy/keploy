@@ -146,7 +146,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	res.BodyResult[0].Normal = pass
 
-	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
+	if !matcherUtils.CompareHeaders(
+		pkg.ToHTTPHeaderWithExact(tc.HTTPResp.Header, tc.HTTPResp.HeaderValues),
+		pkg.ToHTTPHeaderWithExact(actualResponse.Header, actualResponse.HeaderValues),
+		hRes,
+		headerNoise,
+	) {
 		res.HeadersResult = *hRes
 
 		// If body matches but content-length differs, ignore the content-length difference
