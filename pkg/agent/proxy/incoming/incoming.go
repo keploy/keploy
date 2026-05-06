@@ -189,6 +189,11 @@ type tcpForwarderState struct {
 	done     chan struct{} // closed when the accept loop exits
 }
 
+const (
+	ingressTargetListenTimeout = 3 * time.Second
+	ingressTargetPollInterval  = 25 * time.Millisecond
+)
+
 func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
 	return &goTCPIngressHook{
 		pm:         pm,
@@ -201,6 +206,21 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
+
+	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+		if err != nil {
+			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
+				zap.String("target", newAppAddr),
+				zap.Duration("timeout", ingressTargetListenTimeout),
+				zap.Error(err))
+		} else {
+			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
+				zap.String("target", newAppAddr))
+		}
+	} else {
+		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
+			zap.Uint16("orig_port", origPort))
+	}
 
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
@@ -254,6 +274,39 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	h.mu.Unlock()
 
 	return nil
+}
+
+func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
+	if newPort == 0 {
+		return false, nil
+	}
+	return true, waitForIngressTarget(ctx, addr, timeout)
+}
+
+func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(ingressTargetPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp4", addr, ingressTargetPollInterval)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s to listen: %w", addr, lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {

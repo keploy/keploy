@@ -177,9 +177,14 @@ func (s *Session) AddPostRecordHook(h PostRecordHook) {
 }
 
 // MarkMockIncomplete sets the session's incomplete-mock flag. EmitMock
-// drops silently while the flag is set. Reason is logged at Debug so
-// operators can trace why a mock was withheld (memory pressure, channel
-// full, dropped chunk, parser-internal inconsistency).
+// drops silently while the flag is set. Reason is logged at Debug the
+// first time the flag flips per session so operators investigating
+// "why was a mock withheld?" (memory pressure, channel full, dropped
+// chunk, parser-internal inconsistency) can enable --debug to see it;
+// subsequent calls within the same session are no-ops and emit nothing.
+// Production runs stay quiet because the forward path is unaffected —
+// only mock recording is impacted, which is an internal concern not a
+// user-facing problem.
 //
 // The relay calls this when it gates a chunk at the tee; parsers call
 // it when they cannot continue decoding a mock cleanly. Safe to call
@@ -189,7 +194,7 @@ func (s *Session) MarkMockIncomplete(reason string) {
 		return
 	}
 	if !s.mockIncomplete.Swap(true) && s.Logger != nil {
-		s.Logger.Debug("mock marked incomplete", zap.String("reason", reason))
+		s.Logger.Debug("mock marked incomplete", zap.String("reason", reason), zap.String("connID", s.ClientConnID))
 	}
 }
 
@@ -298,6 +303,19 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// connection goes idle, producing spurious aborts after a
 		// benign drop (memory pressure, chunk gate, short write).
 		s.mockIncomplete.Store(false)
+		if s.Logger != nil {
+			// Debug-level: this fires on every mock that loses an
+			// upstream chunk (per-request frequency on a misconfigured
+			// connection), and the user-facing impact is already
+			// captured by the consumed-mocks count + replay-time
+			// missing-mock errors. Operators investigating "why is my
+			// recording incomplete?" enable --debug to chain this back
+			// to the originating MarkMockIncomplete reason.
+			s.Logger.Debug("emitMockCore: dropped mock due to mockIncomplete flag",
+				zap.String("connID", s.ClientConnID),
+				zap.String("mockName", m.Name),
+			)
+		}
 		if s.OnPendingCleared != nil {
 			s.OnPendingCleared()
 		}

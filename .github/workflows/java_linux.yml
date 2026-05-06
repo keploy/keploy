@@ -16,13 +16,13 @@ jobs:
         config:
           - job: record_latest_replay_build
             record_src: latest
-            replay_src: build
+            replay_src: build-no-race
           - job: record_build_replay_latest
-            record_src: build
+            record_src: build-no-race
             replay_src: latest
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-no-race
+            replay_src: build-no-race
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
@@ -88,13 +88,13 @@ jobs:
         config:
           - job: record_latest_replay_build
             record_src: latest
-            replay_src: build
+            replay_src: build-no-race
           - job: record_build_replay_latest
-            record_src: build
+            record_src: build-no-race
             replay_src: latest
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-no-race
+            replay_src: build-no-race
     name: mysql-dual-conn (${{ matrix.config.job }})
     steps:
       - name: Checkout repository

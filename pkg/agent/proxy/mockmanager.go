@@ -1643,6 +1643,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			IsFiltered:       new.TestModeInfo.IsFiltered,
 			SortOrder:        new.TestModeInfo.SortOrder,
 			Type:             new.Spec.Metadata["type"],
+			Lifetime:         new.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 		}); err != nil {
@@ -1690,6 +1691,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			IsFiltered:       mock.TestModeInfo.IsFiltered,
 			SortOrder:        mock.TestModeInfo.SortOrder,
 			Type:             mock.Spec.Metadata["type"],
+			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
@@ -1728,6 +1730,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			IsFiltered:       mock.TestModeInfo.IsFiltered,
 			SortOrder:        mock.TestModeInfo.SortOrder,
 			Type:             mock.Spec.Metadata["type"],
+			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
@@ -1743,6 +1746,69 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 		m.bumpRevisionAll()
 	}
 	return deletedGlobal
+}
+
+// DeleteStartupMock removes a matched startup-tier mock from the
+// startup tree so the next identical query at boot phase picks the
+// next-recorded same-shape mock in chronological order. This is the
+// boot-path analogue of DeleteFilteredMock for the startup tier.
+//
+// Required for boot-phase replay correctness: when an application
+// issues the same query repeatedly during recording while DB state
+// mutates, the recorder captures multiple same-shape mocks with
+// diverging responses. The matcher's boot-phase tiebreaker (see
+// mongo/v2 match.go: `bootPhaseAwareRequestTimeDiff`) orders them
+// earliest-first; this consumer advances through that order so the
+// booting app sees the same response chain it saw at record time.
+// Without consumption, the matcher repeatedly picks the same earliest
+// mock and follow-on revalidation queries fail.
+//
+// Implementation note: the startup tree is keyed by a tier-local
+// TestModeInfo copy (see the comment on the SetMocksWithWindow branch
+// that builds m.startup), so a direct key-based delete using
+// mock.TestModeInfo from the caller would miss. Instead, scan by name
+// to find the live tier-local key, then delete via that key.
+//
+// Returns true if the mock was found and removed; false if the mock
+// was never in the startup tree (e.g. it was a filtered/session/
+// connection-tier mock, or a prior DeleteStartupMock already consumed
+// it).
+func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
+	if mock.Name == "" {
+		return false
+	}
+	m.treesMu.RLock()
+	tree := m.startup
+	m.treesMu.RUnlock()
+	if tree == nil {
+		return false
+	}
+
+	// The startup tree is keyed off a tier-local TestModeInfo copy whose
+	// ID was stamped at insert time and may not match the live mock's
+	// .ID (which can be re-stamped by SetUnFilteredMocks). We can't
+	// look up by mock.TestModeInfo directly. Iterate the tree with key
+	// access to find the entry whose value matches by name, then delete
+	// via the actual stored key.
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+	it := tree.rbt.Iterator()
+	for it.Next() {
+		mk, ok := it.Value().(*models.Mock)
+		if !ok || mk == nil || mk.Name != mock.Name {
+			continue
+		}
+		key := it.Key()
+		tree.rbt.Remove(key)
+		if info, ok := key.(models.TestModeInfo); ok {
+			delete(tree.idIndex, info.ID)
+		}
+		// Bump the global revision so any cached snapshot held by a
+		// matcher consumer rebuilds on next access.
+		m.bumpRevisionAll()
+		return true
+	}
+	return false
 }
 
 // MarkMockAsUsed marks the given mock as used (consumed) without modifying
@@ -1767,6 +1833,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		IsFiltered:       mock.TestModeInfo.IsFiltered,
 		SortOrder:        mock.TestModeInfo.SortOrder,
 		Type:             mock.Spec.Metadata["type"],
+		Lifetime:         mock.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 	}); err != nil {

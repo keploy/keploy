@@ -64,15 +64,19 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
-	MemoryLimit       uint64          `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
-	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	Filters     []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// TestCaseNaming controls how default test case filenames are generated.
+	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
+	// "sequential" preserves the legacy `test-N.yaml` numbering.
+	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
+	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
@@ -81,6 +85,39 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
+
+	// RecordBuffer tunes the per-connection record buffer. Defaults
+	// suit ~99% of workloads; only touch these if you see "mock
+	// incomplete" warnings with reason "per_conn_cap" or "channel_full"
+	// in the agent logs.
+	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+}
+
+// RecordBuffer tunes the per-connection recording queue used by the
+// agent's relay. The two knobs guard the same in-flight queue but in
+// different units: MaxMemoryPerConnection is a byte budget,
+// QueueSize is a slot count. Whichever fills first triggers a drop
+// and marks the in-flight mock incomplete (the forward path is
+// unaffected — user traffic always succeeds).
+//
+// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+// override the yaml/flag values when set.
+type RecordBuffer struct {
+	// MaxMemoryPerConnection caps the bytes the recorder may hold
+	// in the per-connection queue while the parser catches up.
+	// Maps to relay.Config.PerConnCap. Zero resolves to the relay's
+	// built-in default (64 MiB). Increase if you see drops with
+	// reason "per_conn_cap" — usually means responses are larger
+	// than the default budget (e.g. >10 MB query results).
+	MaxMemoryPerConnection uint64 `json:"maxMemoryPerConnection" yaml:"maxMemoryPerConnection" mapstructure:"maxMemoryPerConnection"`
+
+	// QueueSize is the number of chunk slots in the recording queue.
+	// Each slot holds one ~32 KiB chunk. Maps to
+	// relay.Config.TeeChanBuf. Zero resolves to the relay's built-in
+	// default (1024). Increase if you see drops with reason
+	// "channel_full" — usually means bursty traffic (many small
+	// messages back-to-back) that the parser can't keep up with.
+	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
 }
 
 type Contract struct {
