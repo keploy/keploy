@@ -129,6 +129,12 @@ func (p *Proxy) recordViaSupervisor(
 		BumpActivity:         sv.BumpActivity,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
+		// User-tunable record-buffer caps. Snapshotted onto the Proxy
+		// at startup from config.Record.RecordBuffer (yaml/flag/env).
+		// Zero values fall through to relay package defaults via
+		// withDefaults() — preserving the zero-config path.
+		PerConnCap: p.recordBufferCap,
+		TeeChanBuf: p.recordBufferQueueSize,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()

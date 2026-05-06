@@ -704,6 +704,66 @@ func TestCleanShutdownOnCtxCancel(t *testing.T) {
 	}
 }
 
+// TestRunReturnsPromptlyWhenDestClosesWhileClientIdle is a regression
+// guard for the 60s tail introduced by issue #4173. The relay starts
+// two forwarder goroutines and joins them via wgForward.Wait(). When
+// the upstream side closes (e.g. an AWS ALB sending FIN at idle
+// timeout), the FromDest forwarder reads EOF and exits — but the
+// FromClient forwarder is still parked in a blocking Read on the
+// client conn, with no event to wake it. Without the
+// closeStopping+nudgeDeadline coordinator added to run(), Run() then
+// blocks until the application's HTTP client closes the client side
+// itself (typically 60s for botocore's default read_timeout).
+//
+// The test pipes both sides explicitly, lets the relay reach a
+// steady-state where both forwarders are blocked in Read, then closes
+// the dest peer and asserts that Run returns within a short bound.
+// On the regression, this hangs until t.Fatalf fires.
+func TestRunReturnsPromptlyWhenDestClosesWhileClientIdle(t *testing.T) {
+	t.Parallel()
+	clientApp, srcProxy := net.Pipe()
+	dstProxy, destSvc := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientApp.Close()
+		_ = destSvc.Close()
+		_ = srcProxy.Close()
+		_ = dstProxy.Close()
+	})
+
+	r := New(Config{}, srcProxy, dstProxy)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	// Let both forwarder goroutines reach their respective Read calls.
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate the upstream peer closing the connection (FIN) while the
+	// client side stays idle — the exact production shape from #4173.
+	// The FromDest forwarder will read 0/EOF; the FromClient forwarder
+	// is still parked in Read on srcProxy (clientApp has sent nothing).
+	_ = destSvc.Close()
+
+	// With the fix: FromDest's defer fires closeStopping() and
+	// nudgeDeadline(srcProxy); FromClient's Read returns Timeout(),
+	// loops up, observes stopping closed, exits; wgForward.Wait()
+	// completes; Run returns. All within ~ms.
+	//
+	// Without the fix: Run would block until clientApp.Close() or ctx
+	// cancellation — neither of which we trigger in this test. The
+	// timeout below is the regression guard.
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("Run returned non-nil error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return within 2s after dest close while client idle (regression of #4173 — relay stuck waiting for FromClient forwarder)")
+	}
+}
+
 func TestFinalizeMockIsNoop(t *testing.T) {
 	t.Parallel()
 	drops := newDropSink()

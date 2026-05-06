@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 
 	"strings"
 	"time"
@@ -302,6 +303,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// at the correct JDK with --ca-java-home=/path/to/jdk. Empty
 		// string = auto-detect from /proc/<client-pid>/{environ,exe}.
 		cmd.Flags().String("ca-java-home", c.cfg.Agent.CAJavaHome, "Override JAVA_HOME for Keploy CA truststore install (auto-detected from /proc/<client-pid> by default)")
+		// Mirror the orchestrator-side --max-memory-per-conn / --queue-size
+		// flags on the agent command so containerised agents
+		// (docker-compose, k8s sidecar) honour values forwarded via argv
+		// — the host's keploy.yml is not bind-mounted into the agent
+		// container, so argv is the only propagation channel here.
+		// Hidden: only relevant when the operator already knows they
+		// need to bump these (saw drops with reason per_conn_cap /
+		// channel_full). See pkg/agent/proxy/relay/config.go.
+		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024).")
+		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
+		_ = cmd.Flags().MarkHidden("queue-size")
 
 	default:
 		return errors.New("unknown command name")
@@ -320,6 +333,15 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
+		// Advanced record-buffer tuning. Hidden from --help: only relevant
+		// when the operator already knows they need to bump these (saw
+		// per_conn_cap / channel_full drops in agent logs). Env vars
+		// KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+		// override these flags.
+		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024). Bump if you see channel_full drops.")
+		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
+		_ = cmd.Flags().MarkHidden("queue-size")
 	case "test":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -369,64 +391,66 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
-		"testsets":              "test-sets",
-		"fullBody":              "full",
-		"reportPath":            "report-path",
-		"tc":                    "test-case",
-		"delay":                 "delay",
-		"apiTimeout":            "api-timeout",
-		"mongoPassword":         "mongo-password",
-		"tlsPrivateKeyPath":     "tls-private-key-path",
-		"coverageReportPath":    "coverage-report-path",
-		"language":              "language",
-		"ignoreOrdering":        "ignore-ordering",
-		"coverage":              "coverage",
-		"removeUnusedMocks":     "remove-unused-mocks",
-		"goCoverage":            "go-coverage",
-		"fallBackOnMiss":        "fallBack-on-miss",
-		"basePath":              "base-path",
-		"updateTemplate":        "update-template",
-		"mocking":               "mocking",
-		"configPath":            "config-path",
-		"path":                  "path",
-		"port":                  "port",
-		"grpcPort":              "grpc-port",
-		"ssePort":               "sse-port",
-		"proxyPort":             "proxy-port",
-		"incomingProxyPort":     "incoming-proxy-port",
-		"dnsPort":               "dns-port",
-		"command":               "command",
-		"cmdType":               "cmd-type",
-		"buildDelay":            "build-delay",
-		"containerName":         "container-name",
-		"networkName":           "network-name",
-		"passThroughPorts":      "pass-through-ports",
-		"memoryLimit":           "memory-limit",
-		"appId":                 "app-id",
-		"appName":               "app-name",
-		"generateGithubActions": "generate-github-actions",
-		"disableTele":           "disable-tele",
-		"disableANSI":           "disable-ansi",
-		"jsonOutput":            "json",
-		"selectedTests":         "selected-tests",
-		"testReport":            "test-report",
-		"enableTesting":         "enable-testing",
-		"inDocker":              "in-docker",
-		"keployContainer":       "keploy-container",
-		"keployNetwork":         "keploy-network",
-		"recordTimer":           "record-timer",
-		"healthUrl":             "health-url",
-		"healthPollTimeout":     "health-poll-timeout",
-		"urlMethods":            "url-methods",
-		"inCi":                  "in-ci",
-		"protoFile":             "proto-file",
-		"protoDir":              "proto-dir",
-		"protoInclude":          "proto-include",
-		"allowHighRisk":         "allow-high-risk",
-		"disableMapping":        "disable-mapping",
-		"compareAll":            "compare-all",
-		"schemaMatch":           "schema-match",
-		"updateTestMapping":     "update-test-mapping",
+		"testsets":               "test-sets",
+		"fullBody":               "full",
+		"reportPath":             "report-path",
+		"tc":                     "test-case",
+		"delay":                  "delay",
+		"apiTimeout":             "api-timeout",
+		"mongoPassword":          "mongo-password",
+		"tlsPrivateKeyPath":      "tls-private-key-path",
+		"coverageReportPath":     "coverage-report-path",
+		"language":               "language",
+		"ignoreOrdering":         "ignore-ordering",
+		"coverage":               "coverage",
+		"removeUnusedMocks":      "remove-unused-mocks",
+		"goCoverage":             "go-coverage",
+		"fallBackOnMiss":         "fallBack-on-miss",
+		"basePath":               "base-path",
+		"updateTemplate":         "update-template",
+		"mocking":                "mocking",
+		"configPath":             "config-path",
+		"path":                   "path",
+		"port":                   "port",
+		"grpcPort":               "grpc-port",
+		"ssePort":                "sse-port",
+		"proxyPort":              "proxy-port",
+		"incomingProxyPort":      "incoming-proxy-port",
+		"dnsPort":                "dns-port",
+		"command":                "command",
+		"cmdType":                "cmd-type",
+		"buildDelay":             "build-delay",
+		"containerName":          "container-name",
+		"networkName":            "network-name",
+		"passThroughPorts":       "pass-through-ports",
+		"memoryLimit":            "memory-limit",
+		"maxMemoryPerConnection": "max-memory-per-conn",
+		"queueSize":              "queue-size",
+		"appId":                  "app-id",
+		"appName":                "app-name",
+		"generateGithubActions":  "generate-github-actions",
+		"disableTele":            "disable-tele",
+		"disableANSI":            "disable-ansi",
+		"jsonOutput":             "json",
+		"selectedTests":          "selected-tests",
+		"testReport":             "test-report",
+		"enableTesting":          "enable-testing",
+		"inDocker":               "in-docker",
+		"keployContainer":        "keploy-container",
+		"keployNetwork":          "keploy-network",
+		"recordTimer":            "record-timer",
+		"healthUrl":              "health-url",
+		"healthPollTimeout":      "health-poll-timeout",
+		"urlMethods":             "url-methods",
+		"inCi":                   "in-ci",
+		"protoFile":              "proto-file",
+		"protoDir":               "proto-dir",
+		"protoInclude":           "proto-include",
+		"allowHighRisk":          "allow-high-risk",
+		"disableMapping":         "disable-mapping",
+		"compareAll":             "compare-all",
+		"schemaMatch":            "schema-match",
+		"updateTestMapping":      "update-test-mapping",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -1066,6 +1090,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.EnableSampling = enableSampling
+
+			// Resolve record-buffer values: flag overrides yaml, env
+			// overrides flag. Range validation and clamping live in
+			// clampRecordBuffer (pkg/agent/proxy/proxy.go); only the
+			// cross-check against MemoryLimit happens here so the user
+			// gets fast feedback at the CLI surface.
+			if err := c.resolveRecordBufferUint64(cmd, "max-memory-per-conn", "KEPLOY_RECORD_MAX_MEMORY_PER_CONN", &c.cfg.Record.RecordBuffer.MaxMemoryPerConnection); err != nil {
+				return err
+			}
+			if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
+				return err
+			}
+
+			// Cross-check: a single connection's recording buffer must
+			// not exceed the docker container's memory limit. Otherwise
+			// even one large response can OOM-kill the agent before any
+			// concurrency. Mirrors k8s-proxy's ApplyRecordConfig — both
+			// produce the same UX (fail at config time, not at runtime)
+			// with a UI-aligned error string. Record.MemoryLimit is in
+			// MB and is only meaningful for docker run / docker compose
+			// (zeroed earlier for native runs), so we gate on >0 to
+			// skip native runs where this comparison is moot.
+			if c.cfg.Record.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
+				memBytes := c.cfg.Record.MemoryLimit * 1024 * 1024
+				if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
+					return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
+						bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
+						c.cfg.Record.MemoryLimit)
+				}
+			}
 		}
 
 		if cmd.Name() == "test" {
@@ -1349,6 +1403,35 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Agent.MemoryLimit = memoryLimit
 		}
+
+		// Resolve record-buffer values forwarded via argv from the
+		// orchestrator (host CLI). The agent's own keploy.yml may also
+		// set these; argv wins if explicitly passed. Env vars on the
+		// agent process win over argv (lets operators tune a running
+		// container without rebuilding the orchestrator command).
+		if err := c.resolveRecordBufferUint64(cmd, "max-memory-per-conn", "KEPLOY_RECORD_MAX_MEMORY_PER_CONN", &c.cfg.Record.RecordBuffer.MaxMemoryPerConnection); err != nil {
+			return err
+		}
+		if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
+			return err
+		}
+
+		// Cross-check: max-memory-per-conn must not exceed the agent's
+		// memory limit. The agent's --memory-limit (Agent.MemoryLimit in
+		// MB) is what memoryguard enforces; if the per-connection buffer
+		// alone is larger than the agent's whole budget, a single large
+		// response will OOM the recording loop before any concurrency.
+		// Skip when MemoryLimit=0 (uncapped); proxy.go's
+		// clampRecordBuffer still applies the 2 GiB upper bound there.
+		if c.cfg.Agent.MemoryLimit > 0 && c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > 0 {
+			memBytes := c.cfg.Agent.MemoryLimit * 1024 * 1024
+			if c.cfg.Record.RecordBuffer.MaxMemoryPerConnection > memBytes {
+				return fmt.Errorf("Max Memory Per API Call (%d MB) cannot exceed the Keploy Agent Memory Limit (%d MB).",
+					bytesToMBCeil(c.cfg.Record.RecordBuffer.MaxMemoryPerConnection),
+					c.cfg.Agent.MemoryLimit)
+			}
+		}
+
 		if _, err := memoryguard.LimitBytes(c.cfg.Agent.MemoryLimit); err != nil {
 			utils.LogError(c.logger, err, "invalid memory limit for keploy agent; use a positive MB value within int64 range or set --memory-limit=0 to disable")
 			return err
@@ -1362,6 +1445,74 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	return nil
+}
+
+// resolveRecordBufferUint64 applies flag→env override semantics for one
+// record-buffer uint64 field. Used by ValidateFlags' record and agent
+// branches which would otherwise duplicate this dance verbatim.
+//
+// Semantics: a Changed flag wins over the existing config value; an
+// env var wins over both. Malformed env values are warned and ignored
+// (the config keeps whatever the flag/yaml resolved to) — record-path
+// configuration mistakes must never tear down the daemon.
+func (c *CmdConfigurator) resolveRecordBufferUint64(cmd *cobra.Command, flagName, envName string, target *uint64) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetUint64(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := strconv.ParseUint(envVal, 10, 64)
+		if err != nil {
+			c.logger.Debug("ignoring malformed env var; expected unsigned integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// resolveRecordBufferInt is the int sibling of resolveRecordBufferUint64.
+// Kept as a separate helper rather than a generic because cobra's flag
+// accessors are typed and the env-parse uses strconv.Atoi here.
+func (c *CmdConfigurator) resolveRecordBufferInt(cmd *cobra.Command, flagName, envName string, target *int) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetInt(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := strconv.Atoi(envVal)
+		if err != nil {
+			c.logger.Debug("ignoring malformed env var; expected integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// bytesToMBCeil converts bytes to MiB with ceiling rounding so the
+// formatted error never under-reports the configured value (e.g.,
+// 1.5 MiB worth of bytes prints as "2 MB", not "1 MB"). Float
+// formatting was tempting but a trailing ".00" looks awkward in the
+// majority case where users enter whole-MB values; ceil-int strikes
+// the right balance.
+func bytesToMBCeil(b uint64) uint64 {
+	const mib = uint64(1024 * 1024)
+	return (b + mib - 1) / mib
 }
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
