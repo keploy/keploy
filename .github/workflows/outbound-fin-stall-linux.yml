@@ -1,0 +1,94 @@
+name: Outbound FIN Stall Regression (Linux)
+# Regression test for issue #4173 — the relay's two-forwarder join
+# stalled on outbound captures whenever the upstream gracefully closed
+# an idle keepalive connection between requests. Fix in PR #4174 wakes
+# the peer forwarder via the existing closeStopping/nudgeDeadline
+# machinery so wgForward.Wait() unblocks promptly.
+#
+# The matrix runs the same urllib3 + silent-upstream test against two
+# keploy binaries:
+#   - record_with_build  → uses the PR's binary. MUST pass.
+#   - record_with_latest → uses the published `latest`. Demonstrates
+#                          the bug on releases that pre-date the fix
+#                          (call-2 fails with ReadTimeoutError after
+#                          60s and only one of two outbound mocks
+#                          gets captured). Marked continue-on-error
+#                          so it documents the bug without blocking
+#                          PR merges; flip to a hard gate once a
+#                          release containing the fix is published
+#                          as `latest`.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  outbound_fin_stall_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_with_build
+            record_src: build
+            # The PR's binary MUST keep this test green. If this leg
+            # fails, either the fix regressed or the test parameters
+            # drift from what reproduces the bug.
+            continue_on_error: false
+          - job: record_with_latest
+            record_src: latest
+            # The published `latest` is expected to fail this test
+            # until a release containing the fix ships. Marked
+            # continue-on-error so the failure is visible but does
+            # not block the PR.
+            continue_on_error: true
+    name: outbound-fin-stall (${{ matrix.config.job }})
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.config.continue_on_error }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Run regression test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        # `bash <script>` rather than `source` so the script's
+        # intentional `set +e` is not overridden by the workflow
+        # step's default `-eo pipefail`. The script captures exit
+        # codes and runs cleanup-then-fail explicitly.
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/outbound-fin-stall/python-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: outbound-fin-stall-${{ matrix.config.job }}-logs
+          path: |
+            .github/workflows/test_workflow_scripts/python/outbound-fin-stall/record_logs.txt
+            .github/workflows/test_workflow_scripts/python/outbound-fin-stall/upstream_logs.txt
+            .github/workflows/test_workflow_scripts/python/outbound-fin-stall/keploy/
+          if-no-files-found: warn
+          retention-days: 7

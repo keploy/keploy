@@ -120,8 +120,19 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	MemoryLimit       uint64
 	ConfigPath        string
-	ExtraArgs         []string
-	EnableSampling    int
+	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
+	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
+	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
+	// the host's keploy.yml, so this is the propagation channel. Zero falls
+	// through to the relay package's default. Users override via the
+	// orchestrator's --max-memory-per-conn flag, KEPLOY_RECORD_MAX_MEMORY_PER_CONN
+	// env, or keploy.yml record.recordBuffer.maxMemoryPerConnection.
+	RecordBufferMaxMemoryPerConn uint64
+	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
+	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
+	RecordBufferQueueSize int
+	ExtraArgs             []string
+	EnableSampling        int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF

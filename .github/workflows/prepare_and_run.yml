@@ -686,6 +686,21 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+  run_http_stale_pool_race_linux:
+    # Regression guard for issue #4165 (upstream-pool half-close race
+    # in handleHttp1ZeroCopy). Bursty client + gunicorn --keep-alive 2
+    # exposes the race; the matrix runs both `build` (must pass) and
+    # `latest` (currently demonstrates the bug, continue-on-error).
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/http-stale-pool-race-linux.yml
+  run_outbound_fin_stall_linux:
+    # Regression guard for issue #4173 (relay forwarder join stall on
+    # upstream FIN during outbound capture). urllib3 client + fake
+    # upstream that FINs after idle exposes the bug; matrix runs both
+    # `build` (must pass) and `latest` (currently demonstrates the
+    # bug — call-2 hits the 60s read_timeout, continue-on-error).
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/outbound-fin-stall-linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
@@ -1125,6 +1140,8 @@ jobs:
       - run_node_docker
       - run_python_docker
       - run_python_linux
+      - run_http_stale_pool_race_linux
+      - run_outbound_fin_stall_linux
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
@@ -1145,6 +1162,8 @@ jobs:
             "${{ needs.run_node_docker.result }}" \
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
+            "${{ needs.run_http_stale_pool_race_linux.result }}" \
+            "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \

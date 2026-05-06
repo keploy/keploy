@@ -911,6 +911,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
+	// Forward record-buffer tuning to the native agent. Only set when
+	// non-zero so the agent's own keploy.yml / env-var / default
+	// resolution still wins when the orchestrator hasn't overridden.
+	if opts.RecordBufferMaxMemoryPerConn > 0 {
+		args = append(args, "--max-memory-per-conn", strconv.FormatUint(opts.RecordBufferMaxMemoryPerConn, 10))
+	}
+	if opts.RecordBufferQueueSize > 0 {
+		args = append(args, "--queue-size", strconv.Itoa(opts.RecordBufferQueueSize))
+	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {

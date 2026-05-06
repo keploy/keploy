@@ -454,8 +454,45 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := enc.Encode(m); err != nil {
-				a.logger.Error("gob encode failed", zap.Error(err))
-				return
+				// enc.Encode(m) folds two distinct failure modes into
+				// one error: (a) per-mock serialization errors (an
+				// un-encodable Go type inside m's Spec, e.g. a postgres
+				// cell whose type isn't yet covered by
+				// PostgresV3Cell.GobEncode) and (b) write errors
+				// against w (client gone, broken pipe, connection
+				// reset, use of closed network connection). They MUST
+				// be handled differently:
+				//
+				//   (a) skip + continue — the producer keeps pushing
+				//       onto mockChan and a return here would silently
+				//       drop every subsequent mock for the rest of the
+				//       recording. RCA May 2026: a single [16]uint8
+				//       case in a uuid[] column truncated 22 tests'
+				//       worth of mocks because this handler exited at
+				//       the first encode error.
+				//
+				//   (b) return — the stream is no longer viable;
+				//       continuing would tight-loop draining mockChan
+				//       while every Encode reproduces the same write
+				//       error, spamming logs.
+				//
+				// utils.IsShutdownError matches the (b) cases (EOF,
+				// connection refused/reset, broken pipe, use of closed
+				// network connection); everything else is treated as
+				// (a).
+				if utils.IsShutdownError(err) {
+					a.logger.Debug("outgoing stream client gone; ending mock stream",
+						zap.Error(err),
+					)
+					return
+				}
+				a.logger.Error("gob encode failed; skipping this mock and continuing the stream",
+					zap.Error(err),
+					zap.String("mockKind", string(m.Kind)),
+					zap.String("mockName", m.Name),
+					zap.String("next_step", "the named mock was DROPPED from this recording. Inspect the error to identify the unsupported Go type, then extend the gob encoder for that mock kind (e.g. PostgresV3Cell.Gob{En,De}code + the codec catalogue for postgres mocks) and re-record. Until that lands, replays of test cases that depend on this mock will report no candidates from the matcher."),
+				)
+				continue
 			}
 			flusher.Flush()
 		}
