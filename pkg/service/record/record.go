@@ -88,6 +88,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
 
+	sessionStart := time.Now()
+
 	// Auto-register mockDB.Close if it implements io.Closer. MockYaml
 	// implements Close unconditionally: in gob mode it drains the
 	// async writer and flushes the file; in yaml mode it is a no-op
@@ -212,6 +214,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
 			})
+			totalMocks := 0
+			for _, c := range mockCountMap {
+				totalMocks += c
+			}
+			// "completed" for a clean exit / user Ctrl+C, "aborted"
+			// when an error path set stopReason. Lets dashboards split
+			// successful sessions from failures without losing either.
+			status := "completed"
+			if stopReason != "" {
+				status = "aborted"
+			}
+			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status)
 		}
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
