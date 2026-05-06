@@ -261,7 +261,7 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// authoritative CA for the upstream's chain.
 	serverName := hostFromAddr(dstAddr)
 	upstreamCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec — MITM proxy
+		InsecureSkipVerify: true, //nolint:gosec // lgtm[go/disabled-tls-certificate-check] — MITM proxy by design; keploy is not the authoritative CA for the upstream chain
 		ServerName:         serverName,
 		KeyLogWriter:       pTls.KeyLogWriter(),
 	}
