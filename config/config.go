@@ -85,6 +85,67 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
+	// CapturePackets toggles raw network packet capture on the proxy ports
+	// during recording. When enabled, a pcap file is written into the
+	// freshly-created test-set directory under the keploy folder.
+	CapturePackets bool `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
+	// OpportunisticTLSIntercept enables a "sniff first, hijack if TLS"
+	// passthrough mode. The proxy lets the app and upstream talk to
+	// each other (relaying bytes verbatim, like GlobalPassthrough)
+	// while peeking each chunk for the start of a TLS handshake.
+	// As soon as a chunk on the client side starts with a TLS
+	// ClientHello, the proxy hijacks: it terminates TLS with the
+	// client (presenting keploy's MITM cert, with KeyLogWriter
+	// wired so the keylog file populates), opens a fresh tls.Client
+	// to the upstream, and then relays cleartext both ways without
+	// parser dispatch or mock recording. This gives a decryptable
+	// pcap for sessions that would otherwise have been pure
+	// passthrough — handy for debugging captured TLS traffic.
+	//
+	// Independent of GlobalPassthrough — the two flags are
+	// alternatives, not a hierarchy. When OpportunisticTLSIntercept
+	// is set it takes precedence; the proxy ignores
+	// GlobalPassthrough for that connection's outcome.
+	//
+	// Caveats: cert pinning breaks the same way it does for default
+	// record mode (the app must trust keploy's CA); SCRAM-*-PLUS
+	// and other channel-binding mechanisms reject the MITM cert and
+	// must be disabled client-side; MITM-incompatible workloads
+	// should stick with GlobalPassthrough.
+	OpportunisticTLSIntercept bool `json:"opportunisticTlsIntercept" yaml:"opportunisticTlsIntercept" mapstructure:"opportunisticTlsIntercept"`
+
+	// RecordBuffer tunes the per-connection record buffer. Defaults
+	// suit ~99% of workloads; only touch these if you see "mock
+	// incomplete" warnings with reason "per_conn_cap" or "channel_full"
+	// in the agent logs.
+	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
+}
+
+// RecordBuffer tunes the per-connection recording queue used by the
+// agent's relay. The two knobs guard the same in-flight queue but in
+// different units: MaxMemoryPerConnection is a byte budget,
+// QueueSize is a slot count. Whichever fills first triggers a drop
+// and marks the in-flight mock incomplete (the forward path is
+// unaffected — user traffic always succeeds).
+//
+// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+// override the yaml/flag values when set.
+type RecordBuffer struct {
+	// MaxMemoryPerConnection caps the bytes the recorder may hold
+	// in the per-connection queue while the parser catches up.
+	// Maps to relay.Config.PerConnCap. Zero resolves to the relay's
+	// built-in default (64 MiB). Increase if you see drops with
+	// reason "per_conn_cap" — usually means responses are larger
+	// than the default budget (e.g. >10 MB query results).
+	MaxMemoryPerConnection uint64 `json:"maxMemoryPerConnection" yaml:"maxMemoryPerConnection" mapstructure:"maxMemoryPerConnection"`
+
+	// QueueSize is the number of chunk slots in the recording queue.
+	// Each slot holds one ~32 KiB chunk. Maps to
+	// relay.Config.TeeChanBuf. Zero resolves to the relay's built-in
+	// default (1024). Increase if you see drops with reason
+	// "channel_full" — usually means bursty traffic (many small
+	// messages back-to-back) that the parser can't keep up with.
+	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
 }
 
 type Contract struct {

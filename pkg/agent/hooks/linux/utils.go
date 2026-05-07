@@ -3,23 +3,19 @@
 package linux
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 )
 
-func GetSelfInodeNumber() (uint64, error) {
+func GetSelfInodeNumber() (uint64, uint64, error) {
 	p := filepath.Join("/proc", "self", "ns", "pid")
 
 	f, err := os.Stat(p)
 	if err != nil {
-		return 0, errors.New("failed to get inode of the keploy process")
+		return 0, 0, fmt.Errorf("failed to stat %s for keploy pid namespace: %w", p, err)
 	}
-	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-	Ino := (f.Sys().(*syscall.Stat_t)).Ino
-	if Ino != 0 {
-		return Ino, nil
-	}
-	return 0, nil
+	st := f.Sys().(*syscall.Stat_t)
+	return st.Ino, uint64(st.Dev), nil
 }

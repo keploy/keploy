@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
 	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -528,8 +529,9 @@ func buildDestTLSConfigV2(sess *supervisor.Session) *tls.Config {
 		}
 	}
 	return &tls.Config{
-		ServerName: serverName,
-		MinVersion: tls.VersionTLS12,
+		ServerName:   serverName,
+		MinVersion:   tls.VersionTLS12,
+		KeyLogWriter: pTls.KeyLogWriter(),
 	}
 }
 

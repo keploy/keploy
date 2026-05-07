@@ -693,6 +693,14 @@ jobs:
     # `latest` (currently demonstrates the bug, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/http-stale-pool-race-linux.yml
+  run_outbound_fin_stall_linux:
+    # Regression guard for issue #4173 (relay forwarder join stall on
+    # upstream FIN during outbound capture). urllib3 client + fake
+    # upstream that FINs after idle exposes the bug; matrix runs both
+    # `build` (must pass) and `latest` (currently demonstrates the
+    # bug — call-2 hits the 60s read_timeout, continue-on-error).
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/outbound-fin-stall-linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
@@ -709,6 +717,12 @@ jobs:
   run_schema_match_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/schema_match_linux.yml
+  # End-to-end coverage for --capture-packets: drives a real
+  # outbound-HTTPS workload through the keploy proxy and verifies the
+  # streamed traffic.pcap + sslkeys.log decrypt cleanly with tshark.
+  run_sample_tls_pcap:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/sample_tls_pcap.yml
 
   # -------------------------------------------------------------------
   # macOS test jobs — self-hosted runner loads the linux/arm64 image
@@ -1127,10 +1141,12 @@ jobs:
       - run_python_docker
       - run_python_linux
       - run_http_stale_pool_race_linux
+      - run_outbound_fin_stall_linux
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
       - run_schema_match_linux
+      - run_sample_tls_pcap
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1147,10 +1163,12 @@ jobs:
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
+            "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
+            "${{ needs.run_sample_tls_pcap.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
