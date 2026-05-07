@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -148,35 +150,105 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
-// outgoingMockChanCap is the buffer depth of the agent → CLI mock
-// stream. The channel pipes typed mocks captured by the recorder
-// goroutines into the gob-encoded HTTP stream the CLI consumes; a
-// deeper buffer absorbs producer bursts at the cost of holding that
-// many in-flight Mocks in memory inside the agent.
+// SubscribePcap synchronously subscribes w to the proxy's packet
+// broadcaster. Returns an unsub func and nil on success; returns an
+// error (and nil unsub) when capture is not active. Does not block.
+func (a *Agent) SubscribePcap(w io.Writer, flush func()) (func(), error) {
+	streamer, ok := a.Proxy.(coreAgent.PcapStreamer)
+	if !ok {
+		return nil, errors.New("packet capture not supported by this proxy")
+	}
+	return streamer.SubscribePcap(w, flush)
+}
+
+// StreamPcap subscribes w to the proxy's packet broadcaster. Blocks
+// until ctx is cancelled. Returns an error when the underlying Proxy
+// does not implement PcapStreamer (third-party impls) or when
+// capture is not active (--capture-packets was off for this
+// session). Error reporting is up to the HTTP layer; the recorder
+// treats it as "no stream available".
+func (a *Agent) StreamPcap(ctx context.Context, w io.Writer, flush func()) error {
+	unsub, err := a.SubscribePcap(w, flush)
+	if err != nil {
+		return err
+	}
+	defer unsub()
+	<-ctx.Done()
+	return nil
+}
+
+// StreamKeylog subscribes w to the package-level NSS keylog fanout.
+// Blocks until ctx is cancelled. Always succeeds — when capture is
+// off the sink is just empty and w receives no bytes until the
+// recorder also turns capture on (or the call ends).
+func (a *Agent) StreamKeylog(ctx context.Context, w io.Writer) error {
+	unsub := pTls.AddKeyLogSubscriber(w)
+	defer unsub()
+	<-ctx.Done()
+	return nil
+}
+
+// outgoingMockBufferBytes is the byte budget for the agent → CLI mock
+// channel. This is the *design* unit — operators (and the comment
+// block in pkg/agent/proxy/syncMock/syncMock.go's drop log) reason
+// about memory, not slot count, and PR #4172's relay-layer cap
+// (DefaultPerConnCap, also bytes) uses the same convention. At
+// 64 MiB this matches PR #4172's per-connection budget, which keeps
+// the two layers symmetric and easy to audit against the agent's
+// cgroup limit.
 //
-// Sizing tradeoff: each Mock can carry MiB-scale payloads (HTTP
-// request/response body strings, postgres v3 bind values whose raw
-// bytes are now capped per-value via the integrations recorder fix
-// in feat/postgres-v3-ssl-tls-coverage but can still aggregate per
-// mock — multiple Bind parameters, plus DataRow cells on the
-// response side). At 100 entries the worst-case pinned memory for
-// a "fat" mock workload (e.g. the 60-VU × 1 MiB inserts shape that
-// triggered the OOM observed on PR #4135's go-memory-load CI run
-// 24990909605, job 73176710440) is bounded; 1000 was unsafe because
-// the slow CLI consumer (gob-encoded over HTTP, then disk-write per
-// mock) reliably underran the producer and let the channel fill,
-// pinning ~1 GiB of bodies before memoryguard's 500 ms tick could
-// react.
+// Implementation detail: a Go channel is slot-counted, so the
+// runtime cap is derived as outgoingMockBufferBytes / nominalMockSizeBytes.
+// nominalMockSizeBytes is an *estimate* of "what one mock typically
+// costs in memory" — it is NOT a measured average, and the runtime
+// neither tracks per-mock byte size nor enforces this value as a
+// per-mock ceiling. It exists solely to translate the design-unit
+// byte budget into the slot count Go channels actually need.
 //
-// 100 was chosen so that it stays well above any normal-traffic
-// micro-burst (typical postgres recordings emit ~10–30 mocks/s) yet
-// the ceiling is reached fast enough that syncMock's existing
-// outChan-overflow drop-with-Error path becomes the dominant
-// backpressure signal long before the cgroup limit is hit. The
-// drop path is intentional: it is far better to lose a mock and
-// keep recording than to OOM-kill the agent and lose every mock
-// captured in the run.
-const outgoingMockChanCap = 100
+// 4 KiB was picked from the per-mock size distribution observed in
+// production bundles (provider-engagement test EKS, 2026-05-04:
+// median ~1 KiB, mean ~2.3 KiB, p95 ~10 KiB, max ~27 KiB). 4 KiB
+// sits between mean and p95 — high enough that workloads with
+// mostly-typical mocks fit comfortably under the byte budget, low
+// enough that workloads skewed toward p95 still get a useful number
+// of slots. A workload with consistently-larger mocks (e.g. mostly
+// p95+ Postgres rows) will pin proportionally more memory at slot
+// cap than the nominal 64 MiB; this is the same expected-vs-worst
+// tradeoff every slot-counted Go channel makes.
+//
+// Bumped (effectively) from 100-slot to 64 MiB-equivalent after
+// the same production bundles showed the old 100-slot cap silently
+// dropping ≥2048 mocks per pod within minutes of recording start.
+// At the bundles' MEAN per-mock size of ~2.3 KiB (computed as
+// 1.0 MiB total / 450 mocks for the 8eafdd8e bundle, ~2.2 KiB
+// for 452c57e7, ~2.5 KiB for c48b2e08), 100 slots held only
+// ~230 KiB worst-case — less than 1/4 of the 1.0 MiB the
+// *successful* part of those sessions ended up writing to disk.
+// The mean is what matters here, not the median (~1 KiB), because
+// the producer fills slots with whatever it produces — bigger
+// individual mocks weigh more on the channel even at slot cap.
+//
+// Why "byte budget then derive" instead of "two independent caps
+// (slots AND bytes) like PR #4172"? PR #4172 needs the two-cap shape
+// because individual chunks at the relay layer can be up to 32 KiB
+// each (forward buffer size) and a single connection might emit
+// thousands of them — the slot cap protects against pathological
+// chunk-count explosions even when bytes are fine. At the
+// outChan layer downstream of the relay, mocks are already
+// per-protocol-message granularity (one HTTP req/resp pair, one
+// PG query, etc.) — count and bytes track each other much more
+// tightly, so a single byte budget is sufficient and avoids the
+// "two knobs, both must be set, can drift" maintenance burden.
+//
+// The drop path itself is unchanged and still intentional: it is
+// far better to lose a mock and keep recording than to OOM-kill the
+// agent and lose every mock captured in the run. We just stop hitting
+// the cliff at trivial loads.
+const (
+	outgoingMockBufferBytes int64 = 64 * 1024 * 1024 // 64 MiB
+	nominalMockSizeBytes    int64 = 4 * 1024         // 4 KiB
+	outgoingMockChanCap           = int(outgoingMockBufferBytes / nominalMockSizeBytes)
+)
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, outgoingMockChanCap)

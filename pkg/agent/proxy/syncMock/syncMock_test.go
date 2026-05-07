@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -835,6 +836,71 @@ func TestSendToOutChanDropsAfterBudget(t *testing.T) {
 	entry := logs.All()[0]
 	if entry.Level != zap.ErrorLevel {
 		t.Fatalf("expected Error level on drop log, got %v", entry.Level)
+	}
+}
+
+// TestSendToOutChanLoudOnFirstDrop validates the two-message-shape
+// behaviour: the very first drop's Error carries the expanded
+// "recording is now LOSSY" wording, and subsequent sampled
+// emissions (n%1024 == 0) carry the TERSE default. Per Copilot
+// review on PR #4176 the loud signal rides on the existing Error
+// log on the n==1 branch rather than as a separate Warn — one
+// clear actionable line at the moment capture goes lossy, no
+// log-level duplication.
+func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 1)
+	mgr := &SyncMockManager{
+		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
+	}
+	mgr.SetOutputChannel(ch)
+
+	core, logs := observer.New(zap.ErrorLevel)
+	mgr.SetLogger(zap.New(core))
+
+	// Fill the slot so the next send hits the drop branch.
+	ch <- &models.Mock{}
+
+	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+
+	if got := mgr.DropCount(); got != 1 {
+		t.Fatalf("expected dropCount=1, got %d", got)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
+	}
+	first := logs.All()[0]
+	if first.Level != zap.ErrorLevel {
+		t.Fatalf("expected Error level, got %v", first.Level)
+	}
+	// The first-drop message must carry the operator-actionable
+	// "LOSSY" wording — the whole point of the expanded n==1
+	// message is to surface the actionable cliff signal *the moment*
+	// capture stops being whole, so the operator can react before
+	// the per-1024 sampler hides hundreds of subsequent drops.
+	if !strings.Contains(first.Message, "LOSSY") {
+		t.Errorf("first-drop Error missing LOSSY wording: %q", first.Message)
+	}
+
+	// Now drive dropCount up to the next sampler milestone (1024)
+	// without paying the per-drop wall-clock cost, then walk
+	// sendToOutChan once more to fire the n==1024 branch. The
+	// emitted message must be the TERSE default — without "LOSSY"
+	// — so the sampled telemetry doesn't drown a stuck consumer's
+	// goroutine in the long actionable string.
+	mgr.dropCount.Store(sendDropSampleRate - 1) // next Add brings n to 1024
+	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	if logs.Len() != 2 {
+		t.Fatalf("expected a second Error log at n==%d, got total=%d",
+			sendDropSampleRate, logs.Len())
+	}
+	second := logs.All()[1]
+	if second.Level != zap.ErrorLevel {
+		t.Fatalf("expected Error level on second sampled emission, got %v", second.Level)
+	}
+	if strings.Contains(second.Message, "LOSSY") {
+		t.Errorf("subsequent sampled Error must use terse default; got %q", second.Message)
 	}
 }
 

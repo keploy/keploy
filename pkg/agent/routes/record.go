@@ -74,6 +74,15 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/mockerrors", a.GetMockErrors)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
+		// Long-lived streaming endpoints. /pcap/traffic emits a
+		// pcap-format byte stream (file header + one record per
+		// packet) over chunked transfer-encoding; /pcap/keylog
+		// emits NSS keylog lines as TLS handshakes happen. The
+		// recorder holds these connections open for the entire
+		// recording session — they exit only when the recorder
+		// closes the request or capture stops.
+		r.Get("/pcap/traffic", a.HandlePcapStream)
+		r.Get("/pcap/keylog", a.HandleKeylogStream)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
 		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
@@ -190,6 +199,75 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
+}
+
+// HandlePcapStream is a long-lived chunked response that emits a
+// pcap-format byte stream — the file header followed by one record
+// per captured frame, flushed to the wire as packets arrive.
+// Returns 503 when capture is not active so the recorder can
+// distinguish "feature off" from a transport failure.
+func (a *Agent) HandlePcapStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by transport", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.tcpdump.pcap")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	// Subscribe synchronously BEFORE committing the status code.
+	// SubscribePcap writes the pcap file header into w, which
+	// triggers an implicit 200 in net/http — this is intentional.
+	// If capture is not active it returns an error without writing
+	// to w, so we can still return 503 cleanly.
+	unsub, err := a.svc.SubscribePcap(w, flusher.Flush)
+	if err != nil {
+		http.Error(w, "packet capture not active: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer unsub()
+	flusher.Flush() // push the pcap file header to the client
+	<-r.Context().Done()
+}
+
+// HandleKeylogStream is a long-lived chunked response that emits
+// NSS keylog lines as stdlib crypto/tls writes them during
+// handshakes. Subscriber-style: lines arrive only while the
+// connection is held; recorders that connect late see only future
+// handshakes, not historical ones.
+func (a *Agent) HandleKeylogStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by transport", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	// Wrap so each Write flushes immediately — keylog lines are
+	// short and bursty, and Wireshark wants them as soon as the
+	// matching encrypted frames arrive in the parallel pcap stream.
+	if err := a.svc.StreamKeylog(r.Context(), &flushOnWrite{w: w, flusher: flusher}); err != nil {
+		a.logger.Warn("keylog stream ended with error", zap.Error(err))
+	}
+}
+
+// flushOnWrite invokes http.Flusher.Flush after every Write so
+// streamed bytes leave the agent's buffer immediately.
+type flushOnWrite struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+}
+
+func (f *flushOnWrite) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if n > 0 {
+		f.flusher.Flush()
+	}
+	return n, err
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
@@ -376,8 +454,45 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := enc.Encode(m); err != nil {
-				a.logger.Error("gob encode failed", zap.Error(err))
-				return
+				// enc.Encode(m) folds two distinct failure modes into
+				// one error: (a) per-mock serialization errors (an
+				// un-encodable Go type inside m's Spec, e.g. a postgres
+				// cell whose type isn't yet covered by
+				// PostgresV3Cell.GobEncode) and (b) write errors
+				// against w (client gone, broken pipe, connection
+				// reset, use of closed network connection). They MUST
+				// be handled differently:
+				//
+				//   (a) skip + continue — the producer keeps pushing
+				//       onto mockChan and a return here would silently
+				//       drop every subsequent mock for the rest of the
+				//       recording. RCA May 2026: a single [16]uint8
+				//       case in a uuid[] column truncated 22 tests'
+				//       worth of mocks because this handler exited at
+				//       the first encode error.
+				//
+				//   (b) return — the stream is no longer viable;
+				//       continuing would tight-loop draining mockChan
+				//       while every Encode reproduces the same write
+				//       error, spamming logs.
+				//
+				// utils.IsShutdownError matches the (b) cases (EOF,
+				// connection refused/reset, broken pipe, use of closed
+				// network connection); everything else is treated as
+				// (a).
+				if utils.IsShutdownError(err) {
+					a.logger.Debug("outgoing stream client gone; ending mock stream",
+						zap.Error(err),
+					)
+					return
+				}
+				a.logger.Error("gob encode failed; skipping this mock and continuing the stream",
+					zap.Error(err),
+					zap.String("mockKind", string(m.Kind)),
+					zap.String("mockName", m.Name),
+					zap.String("next_step", "the named mock was DROPPED from this recording. Inspect the error to identify the unsupported Go type, then extend the gob encoder for that mock kind (e.g. PostgresV3Cell.Gob{En,De}code + the codec catalogue for postgres mocks) and re-record. Until that lands, replays of test cases that depend on this mock will report no candidates from the matcher."),
+				)
+				continue
 			}
 			flusher.Flush()
 		}

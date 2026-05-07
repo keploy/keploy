@@ -104,6 +104,19 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		agentMemoryLimitFlag = " --memory-limit " + strconv.FormatUint(opts.MemoryLimit, 10)
 	}
 
+	// Forward record-buffer tuning to the containerised agent.
+	// Host's keploy.yml is not bind-mounted into the agent container, so
+	// argv is the only propagation channel for these. Empty when the
+	// orchestrator hasn't overridden defaults — the agent then falls
+	// back to its built-in defaults via relay.withDefaults().
+	recordBufferFlags := ""
+	if opts.RecordBufferMaxMemoryPerConn > 0 {
+		recordBufferFlags += " --max-memory-per-conn " + strconv.FormatUint(opts.RecordBufferMaxMemoryPerConn, 10)
+	}
+	if opts.RecordBufferQueueSize > 0 {
+		recordBufferFlags += " --queue-size " + strconv.Itoa(opts.RecordBufferQueueSize)
+	}
+
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
 		if i != 0 {
@@ -145,10 +158,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		if opts.CapturePackets {
+			alias += " --capture-packets"
+		}
+		if opts.OpportunisticTLSIntercept {
+			alias += " --opportunistic-tls-intercept"
+		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
 		alias += agentMemoryLimitFlag
+		alias += recordBufferFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -212,10 +232,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.CapturePackets {
+				alias += " --capture-packets"
+			}
+			if opts.OpportunisticTLSIntercept {
+				alias += " --opportunistic-tls-intercept"
+			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
 			alias += agentMemoryLimitFlag
+			alias += recordBufferFlags
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -264,10 +291,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		if opts.CapturePackets {
+			alias += " --capture-packets"
+		}
+		if opts.OpportunisticTLSIntercept {
+			alias += " --opportunistic-tls-intercept"
+		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
 		alias += agentMemoryLimitFlag
+		alias += recordBufferFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
@@ -331,10 +365,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			if opts.CapturePackets {
+				alias += " --capture-packets"
+			}
+			if opts.OpportunisticTLSIntercept {
+				alias += " --opportunistic-tls-intercept"
+			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
 			alias += agentMemoryLimitFlag
+			alias += recordBufferFlags
 			if models.IsAnsiDisabled {
 				alias += " --disable-ansi"
 			}
@@ -382,10 +423,17 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		if opts.CapturePackets {
+			alias += " --capture-packets"
+		}
+		if opts.OpportunisticTLSIntercept {
+			alias += " --opportunistic-tls-intercept"
+		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
 		alias += agentMemoryLimitFlag
+		alias += recordBufferFlags
 		if models.IsAnsiDisabled {
 			alias += " --disable-ansi"
 		}
