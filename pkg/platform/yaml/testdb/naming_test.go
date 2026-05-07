@@ -429,6 +429,47 @@ func TestInsertTestCase_PropagatesAutoAssignedName(t *testing.T) {
 	}
 }
 
+// TestInsertTestCase_DoesNotPropagateOnFailure guards the second half of
+// the propagation contract: if upsert fails after claimName but before the
+// final rename, tc.Name must be left untouched so the caller does not
+// observe a name that no .yaml file backs. Otherwise a retry would either
+// skip claimName (because tc.Name is now non-empty and treated as
+// caller-supplied) and try to write directly to a name whose placeholder
+// the deferred cleanup just removed, or the wrapper's per-session dedupe
+// would record an event for a capture that was never persisted.
+func TestInsertTestCase_DoesNotPropagateOnFailure(t *testing.T) {
+	parent := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	testSetID := "no-propagation-on-failure"
+	testSetDir := filepath.Join(parent, testSetID)
+	if err := os.MkdirAll(testSetDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Block saveAssets the same way TestUpsert_PlaceholderCleanedUpOnError
+	// does: a regular file sitting where the assets directory should be
+	// makes saveAssets' MkdirAll fail with ENOTDIR, and a >LargeBodyThreshold
+	// body forces saveAssets to actually try the write.
+	if err := os.WriteFile(filepath.Join(testSetDir, "assets"), []byte("blocked"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	bigBody := strings.Repeat("x", LargeBodyThreshold+1)
+	tc := &models.TestCase{
+		Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    "http://api.test/users",
+			Body:   bigBody,
+		},
+	}
+
+	if err := ts.InsertTestCase(t.Context(), tc, testSetID, false); err == nil {
+		t.Fatalf("expected InsertTestCase to fail when assets dir is blocked")
+	}
+	if tc.Name != "" {
+		t.Fatalf("tc.Name leaked on failure; got=%q want=\"\" (no yaml was persisted)", tc.Name)
+	}
+}
+
 func TestGenerateName_NewTestsetDir(t *testing.T) {
 	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
 	dir := filepath.Join(t.TempDir(), "fresh-testset", "tests")
