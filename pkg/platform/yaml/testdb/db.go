@@ -486,6 +486,18 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	writeSucceeded = true
+	// Propagate the auto-assigned name back onto tc so callers can observe
+	// what was actually persisted. Wrappers around InsertTestCase (e.g.
+	// k8s-proxy's testDBWrapper) key per-session dedupe and broadcast state
+	// on tc.Name; without this propagation every auto-named capture in a
+	// test set looks like the same nameless event and silently collapses
+	// into one entry. Done here, after the rename succeeds, so a failure
+	// earlier in upsert (which triggers the deferred placeholder cleanup)
+	// leaves tc.Name unchanged — callers retrying the insert will not
+	// observe a name that no .yaml file backs.
+	if reservedPlaceholder {
+		tc.Name = tcsName
+	}
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
 }
 
