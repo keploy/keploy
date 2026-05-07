@@ -166,6 +166,31 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	return r
 }
 
+// PreClaimPauseBarrier installs the relay's pause barrier synchronously
+// from the caller's goroutine, BEFORE the parser sends a directive that
+// also installs one. This closes the goroutine-scheduling race where a
+// directive sent on a buffered channel takes long enough to reach the
+// directive processor that the C2D/D2C forwarders process another peer
+// exchange in the meantime — for the Postgres SSL preamble that means
+// the C2D forwarder forwards the client's TLS ClientHello to the
+// upstream as cleartext, corrupting the upstream wire so the directive
+// handler's later reads see a TLS record (0x16…) instead of the 'S'
+// SSLResponse it expected.
+//
+// Idempotent: subsequent calls reuse the same pause channel. The
+// matching endPause runs from the directive handler's normal path —
+// callers never need to release the barrier themselves.
+//
+// Returns true if this call installed the barrier (the parser is the
+// writer), false if a barrier was already in effect.
+func (r *Relay) PreClaimPauseBarrier() bool {
+	r.pauseMu.Lock()
+	already := r.pauseCh != nil
+	r.pauseMu.Unlock()
+	r.beginPause()
+	return !already
+}
+
 // ClientStream returns the parser-facing FakeConn populated with
 // chunks read from the real client (bytes flowing client → dest).
 // Safe to call before or after Run starts.

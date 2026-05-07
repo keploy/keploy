@@ -141,6 +141,7 @@ func (p *Proxy) recordViaSupervisor(
 	svSess.DestStream = r.DestStream()
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+	svSess.PreClaimPauseBarrier = r.PreClaimPauseBarrier
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
