@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -261,6 +262,12 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TLSConfig, when non-nil, is applied to the http.Transport used by
+	// the replay client. Lets callers pin a specific cert (e.g. for
+	// short-lived replay pods serving a self-signed cert) without
+	// relaxing TLS verification globally. Default nil preserves the
+	// stdlib system-pool behaviour.
+	TLSConfig *tls.Config
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -505,6 +512,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			},
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -517,6 +525,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else {
@@ -530,6 +539,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  false,
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	}
