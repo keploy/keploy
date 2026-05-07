@@ -290,6 +290,25 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand == nil || pendingRespBundle == nil {
 			return
 		}
+		// If the recorder is force-flushing mid-result-set (i.e., the
+		// next client command arrived before we observed the trailing
+		// EOF / OK_with_EOF terminator from the server), the encoded
+		// mock would otherwise have FinalResponse == nil and the replay
+		// encoder would emit no terminator. Drivers that strictly
+		// require the terminator — most notably Connector/J on Java 8 —
+		// then block in socketRead0 forever waiting for it.
+		//
+		// This race is intrinsic to the byte-relay → async-decode split:
+		// clientBuffChan / destBuffChan feed asyncMySQLDecode through a
+		// single FIFO channel via a non-deterministic select in
+		// handleClientQueries, so on a fast loopback the next client
+		// command can be enqueued before the server's terminator chunk.
+		// Guarding the select doesn't fix it without serializing all
+		// recording, so we synthesize a structurally-correct terminator
+		// here, matching the recorded server's negotiated capabilities,
+		// and stamp it onto the in-memory result set before flushing.
+		closeIncompleteResultSetForFlush(state, decodeCtx,
+			textResultSet, binaryResultSet, pendingRespBundle)
 		requests := []mysql.Request{{PacketBundle: *pendingCommand}}
 		responses := []mysql.Response{{PacketBundle: *pendingRespBundle}}
 		respOp := pendingRespBundle.Header.Type
@@ -710,4 +729,212 @@ func isCommandPacket(msg interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// closeIncompleteResultSetForFlush patches an in-progress result-set
+// response so that flushMock writes a structurally-complete mock even
+// when the recorder is forced to flush before the server has finished
+// streaming the result set. Three race shapes are repaired:
+//
+//  1. stateExpectRows / stateExpectEOFAfterColumns — all column defs
+//     were captured but the trailing EOF / OK_with_EOF terminator
+//     wasn't. Synthesize the terminator and stamp it on FinalResponse.
+//
+//  2. stateExpectColumns with cols < columnCount — the column count
+//     packet was processed and some column defs were captured, but the
+//     decoder lost the rest of the column flight before the next client
+//     command preempted. Truncate columnCount to the number of columns
+//     actually captured, then synthesize the terminator. Replay clients
+//     deserialize this as an empty result set (columns < expected, zero
+//     rows) and proceed cleanly to the next command instead of blocking
+//     on a column def that will never arrive.
+//
+//  3. Already-complete result sets (FinalResponse already populated by
+//     the natural terminator path) — no-op.
+//
+// For any other state — single-packet OK/ERR, prepare-phase
+// intermediate states, etc. — this is a no-op.
+//
+// The synthesized terminator copies the negotiated capabilities so the
+// replay-time encoder hands the driver a packet shape it accepts:
+//
+//   - DEPRECATE_EOF negotiated     → 0xFE-prefixed OK_with_EOF
+//   - DEPRECATE_EOF NOT negotiated → legacy 5-byte EOF
+//   - SESSION_TRACK negotiated     → trailing lenenc info string
+//
+// Sequence ID is one past the highest seq observed across the recorded
+// columns / EOFAfterColumns / rows, falling back to the column-count
+// packet's seq + 1 when the result set has no columns at all. Status
+// flags carry just SERVER_STATUS_AUTOCOMMIT (0x0002), warnings = 0,
+// info = empty — the idle-connection terminator a client sees after a
+// successful result set.
+//
+// The bundle's Header.Type is also rewritten to TextResultSet /
+// BinaryProtocolResultSet so wire.EncodeToBinary's type-switch routes
+// the encode through the result-set encoder rather than the column-
+// count head packet that processFirstResponse originally stored.
+func closeIncompleteResultSetForFlush(
+	state mysqlDecodeState,
+	decodeCtx *wire.DecodeContext,
+	textRs *mysql.TextResultSet,
+	binaryRs *mysql.BinaryProtocolResultSet,
+	bundle *mysql.PacketBundle,
+) {
+	if state != stateExpectRows &&
+		state != stateExpectEOFAfterColumns &&
+		state != stateExpectColumns {
+		return
+	}
+	if bundle == nil {
+		return
+	}
+
+	useDeprecateEOF := decodeCtx != nil && decodeCtx.DeprecateEOF()
+	// Recorder reads the live client's negotiated caps off ClientCaps
+	// (set by handleInitialHandshake when it decoded the live
+	// HandshakeResponse41). PreferRecordedCaps isn't relevant on this
+	// path — that flag is for replay where the live client may differ
+	// from what was recorded.
+	useSessionTrack := decodeCtx != nil &&
+		(decodeCtx.ServerCaps&uint32(mysql.CLIENT_SESSION_TRACK)) != 0 &&
+		(decodeCtx.ClientCaps&uint32(mysql.CLIENT_SESSION_TRACK)) != 0
+
+	switch {
+	case textRs != nil:
+		if textRs.FinalResponse != nil &&
+			(mysqlUtils.IsEOFPacket(textRs.FinalResponse.Data) ||
+				mysqlUtils.IsOKReplacingEOF(textRs.FinalResponse.Data)) {
+			return // already complete
+		}
+		// Repair shape 2: declared more columns than we captured. Keep
+		// only what we have and rewrite the column count to match so
+		// the encoder doesn't promise a column def that isn't there.
+		if uint64(len(textRs.Columns)) < textRs.ColumnCount {
+			textRs.ColumnCount = uint64(len(textRs.Columns))
+			// In legacy (!DEPRECATE_EOF) mode the column flight ends
+			// with an intermediate EOF packet; if we never saw it, fill
+			// in a synthesized one so the structural sequence
+			// "columns → EOF → rows → terminator" stays valid.
+			if !useDeprecateEOF && len(textRs.EOFAfterColumns) == 0 {
+				eofSeq := nextSeqIDForResultSet(
+					columnHeadersOf(textRs.Columns), nil, nil,
+				)
+				textRs.EOFAfterColumns = []byte{
+					0x05, 0x00, 0x00, eofSeq,
+					0xFE, 0x00, 0x00, 0x02, 0x00,
+				}
+			}
+		}
+		seq := nextSeqIDForResultSet(
+			columnHeadersOf(textRs.Columns),
+			textRs.EOFAfterColumns,
+			textRowHeadersOf(textRs.Rows),
+		)
+		data, respType := buildResultSetTerminator(seq, useDeprecateEOF, useSessionTrack)
+		textRs.FinalResponse = &mysql.GenericResponse{Data: data, Type: respType}
+		bundle.Header.Type = string(mysql.Text)
+		bundle.Message = textRs
+
+	case binaryRs != nil:
+		if binaryRs.FinalResponse != nil &&
+			(mysqlUtils.IsEOFPacket(binaryRs.FinalResponse.Data) ||
+				mysqlUtils.IsOKReplacingEOF(binaryRs.FinalResponse.Data)) {
+			return
+		}
+		if uint64(len(binaryRs.Columns)) < binaryRs.ColumnCount {
+			binaryRs.ColumnCount = uint64(len(binaryRs.Columns))
+			if !useDeprecateEOF && len(binaryRs.EOFAfterColumns) == 0 {
+				eofSeq := nextSeqIDForResultSet(
+					columnHeadersOf(binaryRs.Columns), nil, nil,
+				)
+				binaryRs.EOFAfterColumns = []byte{
+					0x05, 0x00, 0x00, eofSeq,
+					0xFE, 0x00, 0x00, 0x02, 0x00,
+				}
+			}
+		}
+		seq := nextSeqIDForResultSet(
+			columnHeadersOf(binaryRs.Columns),
+			binaryRs.EOFAfterColumns,
+			binaryRowHeadersOf(binaryRs.Rows),
+		)
+		data, respType := buildResultSetTerminator(seq, useDeprecateEOF, useSessionTrack)
+		binaryRs.FinalResponse = &mysql.GenericResponse{Data: data, Type: respType}
+		bundle.Header.Type = string(mysql.Binary)
+		bundle.Message = binaryRs
+	}
+}
+
+// buildResultSetTerminator returns the wire bytes (with header) of a
+// minimal result-set terminator packet matching the negotiated caps.
+func buildResultSetTerminator(seqID byte, deprecateEOF, sessionTrack bool) ([]byte, string) {
+	if deprecateEOF {
+		// OK_with_EOF: 0xFE | affected=0 | last_id=0 | status=2 | warn=0
+		// Plus an optional lenenc info string when SESSION_TRACK was
+		// negotiated (without it, Connector/J 8.x rejects the packet).
+		payload := []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
+		if sessionTrack {
+			payload = append(payload, 0x00) // info: empty lenenc string
+		}
+		out := make([]byte, 4+len(payload))
+		out[0] = byte(len(payload))
+		out[1] = byte(len(payload) >> 8)
+		out[2] = byte(len(payload) >> 16)
+		out[3] = seqID
+		copy(out[4:], payload)
+		return out, mysql.StatusToString(mysql.OK)
+	}
+	// Legacy EOF: 0xFE | warnings(2) | status_flags(2)
+	return []byte{
+		0x05, 0x00, 0x00, seqID,
+		0xFE, 0x00, 0x00, 0x02, 0x00,
+	}, mysql.StatusToString(mysql.EOF)
+}
+
+// nextSeqIDForResultSet picks the seq id one past the highest observed
+// across the recorded columns / EOFAfterColumns / rows. Falls back to 2
+// (one past the column-count head packet) if nothing is recorded.
+func nextSeqIDForResultSet(columnHdrs []mysql.Header, eofAfterCols []byte, rowHdrs []mysql.Header) byte {
+	max := byte(0)
+	for _, h := range columnHdrs {
+		if h.SequenceID > max {
+			max = h.SequenceID
+		}
+	}
+	if len(eofAfterCols) >= 4 && eofAfterCols[3] > max {
+		max = eofAfterCols[3]
+	}
+	for _, h := range rowHdrs {
+		if h.SequenceID > max {
+			max = h.SequenceID
+		}
+	}
+	if max == 0 {
+		max = 1
+	}
+	return max + 1
+}
+
+func columnHeadersOf(cols []*mysql.ColumnDefinition41) []mysql.Header {
+	out := make([]mysql.Header, 0, len(cols))
+	for _, c := range cols {
+		out = append(out, c.Header)
+	}
+	return out
+}
+
+func textRowHeadersOf(rows []*mysql.TextRow) []mysql.Header {
+	out := make([]mysql.Header, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Header)
+	}
+	return out
+}
+
+func binaryRowHeadersOf(rows []*mysql.BinaryRow) []mysql.Header {
+	out := make([]mysql.Header, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Header)
+	}
+	return out
 }

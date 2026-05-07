@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -146,6 +148,44 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
 	return a.Proxy.SetGracefulShutdown(ctx)
+}
+
+// SubscribePcap synchronously subscribes w to the proxy's packet
+// broadcaster. Returns an unsub func and nil on success; returns an
+// error (and nil unsub) when capture is not active. Does not block.
+func (a *Agent) SubscribePcap(w io.Writer, flush func()) (func(), error) {
+	streamer, ok := a.Proxy.(coreAgent.PcapStreamer)
+	if !ok {
+		return nil, errors.New("packet capture not supported by this proxy")
+	}
+	return streamer.SubscribePcap(w, flush)
+}
+
+// StreamPcap subscribes w to the proxy's packet broadcaster. Blocks
+// until ctx is cancelled. Returns an error when the underlying Proxy
+// does not implement PcapStreamer (third-party impls) or when
+// capture is not active (--capture-packets was off for this
+// session). Error reporting is up to the HTTP layer; the recorder
+// treats it as "no stream available".
+func (a *Agent) StreamPcap(ctx context.Context, w io.Writer, flush func()) error {
+	unsub, err := a.SubscribePcap(w, flush)
+	if err != nil {
+		return err
+	}
+	defer unsub()
+	<-ctx.Done()
+	return nil
+}
+
+// StreamKeylog subscribes w to the package-level NSS keylog fanout.
+// Blocks until ctx is cancelled. Always succeeds — when capture is
+// off the sink is just empty and w receives no bytes until the
+// recorder also turns capture on (or the call ends).
+func (a *Agent) StreamKeylog(ctx context.Context, w io.Writer) error {
+	unsub := pTls.AddKeyLogSubscriber(w)
+	defer unsub()
+	<-ctx.Done()
+	return nil
 }
 
 // outgoingMockBufferBytes is the byte budget for the agent → CLI mock

@@ -85,6 +85,34 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
+	// CapturePackets toggles raw network packet capture on the proxy ports
+	// during recording. When enabled, a pcap file is written into the
+	// freshly-created test-set directory under the keploy folder.
+	CapturePackets bool `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
+	// OpportunisticTLSIntercept enables a "sniff first, hijack if TLS"
+	// passthrough mode. The proxy lets the app and upstream talk to
+	// each other (relaying bytes verbatim, like GlobalPassthrough)
+	// while peeking each chunk for the start of a TLS handshake.
+	// As soon as a chunk on the client side starts with a TLS
+	// ClientHello, the proxy hijacks: it terminates TLS with the
+	// client (presenting keploy's MITM cert, with KeyLogWriter
+	// wired so the keylog file populates), opens a fresh tls.Client
+	// to the upstream, and then relays cleartext both ways without
+	// parser dispatch or mock recording. This gives a decryptable
+	// pcap for sessions that would otherwise have been pure
+	// passthrough — handy for debugging captured TLS traffic.
+	//
+	// Independent of GlobalPassthrough — the two flags are
+	// alternatives, not a hierarchy. When OpportunisticTLSIntercept
+	// is set it takes precedence; the proxy ignores
+	// GlobalPassthrough for that connection's outcome.
+	//
+	// Caveats: cert pinning breaks the same way it does for default
+	// record mode (the app must trust keploy's CA); SCRAM-*-PLUS
+	// and other channel-binding mechanisms reject the MITM cert and
+	// must be disabled client-side; MITM-incompatible workloads
+	// should stick with GlobalPassthrough.
+	OpportunisticTLSIntercept bool `json:"opportunisticTlsIntercept" yaml:"opportunisticTlsIntercept" mapstructure:"opportunisticTlsIntercept"`
 
 	// RecordBuffer tunes the per-connection record buffer. Defaults
 	// suit ~99% of workloads; only touch these if you see "mock
