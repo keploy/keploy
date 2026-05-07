@@ -15,6 +15,14 @@ type AgentHooks interface {
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error
 	AfterSimulate(ctx context.Context, testSetID string, tcName string) error
+	// SetFreezeAnchor advertises the earliest recording-era timestamp that
+	// the user app should see during this test run. Hook implementations
+	// that drive a clock-mock (e.g. the LD_PRELOAD time-freeze in the
+	// enterprise build) should pin the offset file to this instant before
+	// the user app's first datetime.now() call so any cached recorded
+	// credentials, JWTs, or TLS certs look fresh. A zero anchor means
+	// "no anchor available" and should be treated as a no-op.
+	SetFreezeAnchor(ctx context.Context, anchor time.Time) error
 }
 type AgentHook struct{}
 
@@ -32,6 +40,9 @@ func (n *AgentHook) BeforeTestSetCompose(ctx context.Context, id string) error {
 	return nil
 }
 func (n *AgentHook) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+	return nil
+}
+func (n *AgentHook) SetFreezeAnchor(ctx context.Context, anchor time.Time) error {
 	return nil
 }
 
