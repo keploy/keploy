@@ -358,6 +358,13 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 			return tcsInfo{name: "", path: tcsPath}, err
 		}
 		tcsName = claimed
+		// Propagate the auto-assigned name back onto tc so callers can
+		// observe what was actually written to disk. Wrappers around
+		// InsertTestCase (e.g. k8s-proxy's testDBWrapper) key per-session
+		// dedupe and broadcast state on tc.Name; without this propagation
+		// every auto-named capture in a test set looks like the same
+		// nameless event and silently collapses into one entry.
+		tc.Name = claimed
 		reservedPlaceholder = true
 	} else {
 		tcsName = tc.Name
