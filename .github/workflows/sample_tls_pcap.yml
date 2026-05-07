@@ -45,6 +45,9 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
+          - job: record_latest_replay_latest
+            record_src: latest
+            replay_src: latest
         mode:
           - name: capture-only
             flags: "--capture-packets"
