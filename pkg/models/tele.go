@@ -1,5 +1,17 @@
 package models
 
+// Shared event-type string constants used by the telemetry emitter
+// (pkg/platform/telemetry). Only the event names introduced or
+// modified by this PR are extracted as constants. Pre-existing event
+// names (Ping, RecordedTestSuite, RecordedBatch, TestSetRun,
+// MockTestRun, RecordedMocks) remain inline string literals at their
+// existing call sites to avoid churn in code paths this PR does not
+// touch.
+const (
+	TeleEventTestRun                = "TestRun"
+	TeleEventRecordSessionCompleted = "RecordSessionCompleted"
+)
+
 type TeleEvent struct {
 	InstallationID string                 `json:"installationId"`
 	EventType      string                 `json:"eventType"`

@@ -896,6 +896,12 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.CapturePackets {
+		args = append(args, "--capture-packets")
+	}
+	if opts.OpportunisticTLSIntercept {
+		args = append(args, "--opportunistic-tls-intercept")
+	}
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
@@ -1096,7 +1102,7 @@ func (a *AgentClient) requestAgentStop() error {
 	return nil
 }
 
-// stopAgent stops the agent process gracefully
+// stopAgent stops the agent process gracefully.
 func (a *AgentClient) stopAgent() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1509,4 +1515,93 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			// retry
 		}
 	}
+}
+
+// StreamPcapArtifacts opens long-lived chunked GETs against the
+// agent's /pcap/traffic and /pcap/keylog endpoints and writes the
+// streamed bytes into destDir under traffic.pcap and sslkeys.log
+// respectively. Blocks until ctx is cancelled (recording stop) or
+// the agent's HTTP server closes the response. Best-effort: a
+// transport failure on either stream is logged via the returned
+// error but never fatal to the recording. Designed for k8s live
+// recording where the session has no defined end — bytes flow into
+// the local files continuously instead of being fetched on stop.
+func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) error {
+	if destDir == "" {
+		return errors.New("destDir is required")
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return fmt.Errorf("create dest dir %s: %w", destDir, err)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644)
+	})
+	g.Go(func() error {
+		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644)
+	})
+	return g.Wait()
+}
+
+// streamPcapArtifact holds a single GET open and copies its body
+// into dstFile until the server closes the stream or ctx is done.
+// 503 means "capture not active" — silently skipped so the recorder
+// stays a no-op for non-capture sessions. Other non-200s surface as
+// errors. Context cancellation returns nil so callers don't see
+// spurious errors at recording stop.
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode) error {
+	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build pcap stream request: %w", err)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return fmt.Errorf("dial %s: %w", url, err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
+			a.logger.Debug("failed to close pcap stream body", zap.String("url", url), zap.Error(cerr))
+		}
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusServiceUnavailable:
+		a.logger.Debug("agent reports no pcap stream available; capture likely off",
+			zap.String("url", url))
+		return nil
+	case http.StatusOK:
+		// fall through to the long copy below
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("stream %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	out, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dstFile, err)
+	}
+	defer func() {
+		if cerr := out.Close(); cerr != nil {
+			a.logger.Warn("failed to close pcap dst file",
+				zap.String("path", dstFile), zap.Error(cerr))
+		}
+	}()
+
+	a.logger.Debug("pcap stream connected",
+		zap.String("url", url), zap.String("path", dstFile))
+	written, copyErr := io.Copy(out, resp.Body)
+	a.logger.Debug("pcap stream ended",
+		zap.String("url", url),
+		zap.String("path", dstFile),
+		zap.Int64("bytes", written),
+		zap.Error(copyErr))
+	if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
+		return copyErr
+	}
+	return nil
 }

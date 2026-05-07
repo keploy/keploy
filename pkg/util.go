@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -206,13 +207,28 @@ func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string)
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
-		match := IsTime(j)
-		if match {
-			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
-			header[i] = []string{j}
-			continue
-		}
-		header[i] = strings.Split(j, ",")
+		// Emit one wire header per YAML key. The recorded value is kept
+		// intact even when it contains commas — this is the canonical
+		// comma-folded form for RFC 7230 list-valued headers (Accept,
+		// Accept-Encoding, Baggage, Forwarded, Via, ...) and is what
+		// most HTTP clients (axios, requests, fetch) actually emit on
+		// the wire. Splitting on "," and sending one wire header per
+		// element fans out into multiple same-name headers; that breaks
+		// strict-mapping server middlewares such as
+		// `Response(headers=dict(**request.headers), ...)` which raise
+		// `TypeError: dict() got multiple values for keyword argument
+		// 'accept'` on duplicate field names — a known FastAPI /
+		// Starlette failure mode reproducible during replay even when
+		// the original client sent exactly one Accept header.
+		//
+		// Trade-off: a recording whose on-wire request actually used
+		// repeated same-name headers (rare on the request side; common
+		// only for Set-Cookie which is a response header and never
+		// built by this helper) replays as a single comma-folded
+		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
+		// semantically equivalent for list-valued headers, so this
+		// folding is wire-safe for the headers that actually matter.
+		header[i] = []string{j}
 	}
 	return header
 }
@@ -246,6 +262,12 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TLSConfig, when non-nil, is applied to the http.Transport used by
+	// the replay client. Lets callers pin a specific cert (e.g. for
+	// short-lived replay pods serving a self-signed cert) without
+	// relaxing TLS verification globally. Default nil preserves the
+	// stdlib system-pool behaviour.
+	TLSConfig *tls.Config
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -490,6 +512,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			},
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -502,6 +525,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else {
@@ -515,6 +539,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  false,
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	}

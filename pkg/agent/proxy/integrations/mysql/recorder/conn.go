@@ -215,6 +215,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			tlsConfig := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         dstURL,
+				KeyLogWriter:       pTls.KeyLogWriter(),
 			}
 			logger.Debug("Upgrading the destination connection to TLS", zap.String("ServerName", tlsConfig.ServerName))
 

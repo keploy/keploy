@@ -196,6 +196,16 @@ func isZeroDateString(s string) bool {
 func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
 	body := new(bytes.Buffer)
 
+	// The binary protocol null bitmap covers `len(columns)` flags plus a
+	// 2-bit reserved prefix, packed into ceil((len+2)/8) bytes. Validate
+	// up-front so the per-column isNull() lookup below cannot index past
+	// the end of a malformed buffer (the recurrent MySQL Fuzzer panic at
+	// binaryProtocolRowPacket.go:74).
+	wantBitmapLen := (len(columns) + 7 + 2) / 8
+	if len(row.RowNullBuffer) < wantBitmapLen {
+		return nil, fmt.Errorf("encode: null bitmap too short: have %d bytes, need %d for %d columns", len(row.RowNullBuffer), wantBitmapLen, len(columns))
+	}
+
 	// OK byte
 	if err := body.WriteByte(0x00); err != nil {
 		return nil, fmt.Errorf("failed to write OK byte: %w", err)
@@ -209,6 +219,14 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 	for i, col := range columns {
 		if isNull(row.RowNullBuffer, i) {
 			continue
+		}
+
+		// The null bitmap declares this column non-null, so we must have a
+		// matching ColumnEntry. Returning an error here lets the recovery
+		// path close the connection cleanly instead of taking the agent
+		// down via an index-out-of-range panic on a malformed mock.
+		if i >= len(row.Values) {
+			return nil, fmt.Errorf("encode: missing value for column %q (row has %d values, columns has %d)", col.Name, len(row.Values), len(columns))
 		}
 
 		ce := row.Values[i]
