@@ -77,6 +77,14 @@ func newRedactingCore(c zapcore.Core) zapcore.Core {
 	return &redactingCore{Core: c}
 }
 
+// Inner returns the wrapped core. Used by callers that need to compose
+// new cores around the same redaction-aware structure (e.g. teeing on a
+// second sink with a different level filter) without double-wrapping
+// redaction.
+func (c *redactingCore) Inner() zapcore.Core {
+	return c.Core
+}
+
 func (c *redactingCore) With(fields []zapcore.Field) zapcore.Core {
 	if r := loadRedactor(); r != nil {
 		for i := range fields {
@@ -302,4 +310,117 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 		LogCfg.Level,
 	)
 	return zap.New(newRedactingCore(core)), nil
+}
+
+// cappedWriteSyncer wraps a WriteSyncer and stops accepting bytes once
+// the running total of accepted bytes reaches cap. Past the cap, Write
+// reports success and discards the input — this is intentional so that
+// hitting the cap never tears down the logger or causes the goroutine
+// logging to error out. The caller queries Capped() at the end of the
+// run to learn whether truncation occurred.
+type cappedWriteSyncer struct {
+	inner   zapcore.WriteSyncer
+	cap     int64
+	written atomic.Int64
+	capped  atomic.Bool
+}
+
+func newCappedWriteSyncer(inner zapcore.WriteSyncer, cap int64) *cappedWriteSyncer {
+	return &cappedWriteSyncer{inner: inner, cap: cap}
+}
+
+func (s *cappedWriteSyncer) Write(p []byte) (int, error) {
+	written := s.written.Load()
+	if written >= s.cap {
+		s.capped.Store(true)
+		return len(p), nil
+	}
+	remaining := s.cap - written
+	if int64(len(p)) > remaining {
+		n, err := s.inner.Write(p[:remaining])
+		s.written.Add(int64(n))
+		s.capped.Store(true)
+		// Report we accepted the full slice so zap doesn't retry; the
+		// overflow is intentionally dropped.
+		return len(p), err
+	}
+	n, err := s.inner.Write(p)
+	s.written.Add(int64(n))
+	return n, err
+}
+
+func (s *cappedWriteSyncer) Sync() error    { return s.inner.Sync() }
+func (s *cappedWriteSyncer) Capped() bool   { return s.capped.Load() }
+func (s *cappedWriteSyncer) Written() int64 { return s.written.Load() }
+
+// DebugFileSink is the caller-side handle for the debug-level file sink
+// attached by AddDebugFileSink. It owns the buffered + capped writer
+// chain in front of the underlying file. Flush before closing the file
+// to guarantee all in-flight bytes hit disk.
+type DebugFileSink struct {
+	capped   *cappedWriteSyncer
+	buffered *zapcore.BufferedWriteSyncer
+}
+
+// Flush flushes the in-memory write buffer to the underlying file.
+// Call before closing the file at the end of a run.
+func (s *DebugFileSink) Flush() error {
+	if s == nil || s.buffered == nil {
+		return nil
+	}
+	return s.buffered.Sync()
+}
+
+// Capped reports whether the sink dropped any bytes due to its cap.
+// Call after Flush at end-of-run to populate bundle metadata.
+func (s *DebugFileSink) Capped() bool {
+	if s == nil || s.capped == nil {
+		return false
+	}
+	return s.capped.Capped()
+}
+
+// Written reports how many bytes were successfully written to the file.
+func (s *DebugFileSink) Written() int64 {
+	if s == nil || s.capped == nil {
+		return 0
+	}
+	return s.capped.Written()
+}
+
+// AddDebugFileSink returns a new logger that, in addition to whatever
+// sinks the input logger already had, writes every debug-level-or-above
+// entry to file via a 256 KiB buffered, capBytes-capped pipeline. Used
+// by `keploy cloud replay` to capture the full debug stream for the
+// support bundle without lifting the console level.
+//
+// The new sink is composed alongside the input logger's existing core
+// via zapcore.NewTee. Each branch keeps its own level filter (the
+// existing console core honors LogCfg.Level; the new debug-file core
+// is locked at DebugLevel). The new branch is wrapped in its own
+// redactingCore so field-level redaction runs before bytes hit the
+// file, and the writer is wrapped in redactingWriter so post-encode
+// redaction catches non-string fields rendered via reflection.
+//
+// Caller owns `file`. Call DebugFileSink.Flush before closing the file
+// at end-of-run.
+func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.Logger, *DebugFileSink) {
+	if logger == nil || file == nil {
+		return logger, nil
+	}
+	if capBytes <= 0 {
+		capBytes = 100 << 20 // 100 MiB default
+	}
+	capped := newCappedWriteSyncer(zapcore.AddSync(file), capBytes)
+	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10}
+	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
+	debugCore := newRedactingCore(zapcore.NewCore(
+		encoder,
+		wrapWriter(buffered),
+		zap.NewAtomicLevelAt(zap.DebugLevel),
+	))
+	newLogger := logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(c, debugCore)
+	}))
+	return newLogger, &DebugFileSink{capped: capped, buffered: buffered}
 }
