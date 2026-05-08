@@ -241,6 +241,36 @@ func New() (*zap.Logger, *os.File, error) {
 	return logger, logFile, nil
 }
 
+// reattachDebugFileSink wraps logger with a tee branch onto the active
+// debug-file sink (registered via SetDebugFileSink), reusing the
+// existing buffered + capped writer chain so any in-flight rotation
+// state is preserved. No-op when no sink is registered.
+//
+// Called by every helper that REBUILDS the core from scratch
+// (AddMode, ChangeLogLevel, RedirectToStderr, ChangeColorEncoding) —
+// without it, those helpers silently discard the file-sink tee that
+// AddDebugFileSink installed at boot, and subsequent debug records
+// only land on stdout/stderr. That is the bug that caused the
+// keploy-agent's per-test-set agent-debug.log files to come out
+// empty even though the rotation primitive was firing correctly:
+// the tee was already gone by the time the first BeforeSimulate
+// rotation ran.
+func reattachDebugFileSink(logger *zap.Logger) *zap.Logger {
+	sink := GetDebugFileSink()
+	if sink == nil || sink.buffered == nil {
+		return logger
+	}
+	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
+	debugCore := newRedactingCore(zapcore.NewCore(
+		encoder,
+		wrapWriter(sink.buffered),
+		zap.NewAtomicLevelAt(zap.DebugLevel),
+	))
+	return logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(c, debugCore)
+	}))
+}
+
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	LogCfg.Level = zap.NewAtomicLevelAt(level)
 	if level == zap.DebugLevel {
@@ -257,7 +287,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	)
 
 	logger := zap.New(newRedactingCore(core))
-	return logger, nil
+	return reattachDebugFileSink(logger), nil
 }
 
 // RedirectToStderr re-creates the logger writing to stderr instead of stdout.
@@ -272,7 +302,7 @@ func RedirectToStderr() (*zap.Logger, error) {
 	)
 
 	logger := zap.New(newRedactingCore(core))
-	return logger, nil
+	return reattachDebugFileSink(logger), nil
 }
 
 func AddMode(mode string) (*zap.Logger, error) {
@@ -291,7 +321,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 	)
 
 	logger := zap.New(newRedactingCore(core))
-	return logger, nil
+	return reattachDebugFileSink(logger), nil
 }
 
 func ChangeColorEncoding() (*zap.Logger, error) {
@@ -311,7 +341,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 		wrapWriter(zapcore.AddSync(os.Stdout)),
 		LogCfg.Level,
 	)
-	return zap.New(newRedactingCore(core)), nil
+	return reattachDebugFileSink(zap.New(newRedactingCore(core))), nil
 }
 
 // cappedWriteSyncer wraps a WriteSyncer and stops accepting bytes once

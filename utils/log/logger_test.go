@@ -379,6 +379,118 @@ func TestRotateDebugFileForTestSet_NilSinkIsSafe(t *testing.T) {
 	}
 }
 
+// TestDebugFileSink_SurvivesAddMode is the regression test for the
+// empty-per-test-set-file bug: AddMode rebuilds the core from scratch
+// and the file-sink tee was being silently discarded. Without
+// reattachDebugFileSink in AddMode, the second log record would not
+// appear in the file.
+func TestDebugFileSink_SurvivesAddMode(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+
+	tmp, err := os.CreateTemp(t.TempDir(), "addmode-*.log")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer tmp.Close()
+	wrapped, sink := AddDebugFileSink(logger, tmp, 0)
+	SetDebugFileSink(sink)
+	defer SetDebugFileSink(nil)
+
+	wrapped.Debug("before-addmode")
+
+	// Simulate the agent CLI's Validate path: AddMode mutates the live
+	// logger via *logger = *new (the same pointee-overwrite pattern
+	// the codebase uses everywhere).
+	rebuilt, err := AddMode("agent")
+	if err != nil {
+		t.Fatalf("AddMode: %v", err)
+	}
+	*wrapped = *rebuilt
+
+	wrapped.Debug("after-addmode")
+
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	contents, _ := os.ReadFile(tmp.Name())
+	got := string(contents)
+	if !strings.Contains(got, "before-addmode") {
+		t.Errorf("before-addmode missing from file: %s", got)
+	}
+	if !strings.Contains(got, "after-addmode") {
+		t.Errorf("after-addmode missing from file (the regression): %s", got)
+	}
+}
+
+// TestDebugFileSink_RotateAfterAddMode confirms that rotation still
+// works after the logger has been rebuilt — the buffered+capped
+// chain is the same instance, so RotateForScope swaps a file that
+// the post-AddMode tee branch is already writing to.
+func TestDebugFileSink_RotateAfterAddMode(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+
+	dir := t.TempDir()
+	originPath := filepath.Join(dir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	SetDebugFileSink(sink)
+	defer SetDebugFileSink(nil)
+
+	rebuilt, _ := AddMode("agent")
+	*wrapped = *rebuilt
+
+	if err := sink.RotateForScope("ts-x"); err != nil {
+		t.Fatalf("RotateForScope: %v", err)
+	}
+	wrapped.Debug("post-rebuild-post-rotate")
+
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	scopedPath := filepath.Join(dir, "ts-x", "agent-debug.log")
+	contents, err := os.ReadFile(scopedPath)
+	if err != nil {
+		t.Fatalf("read scoped file: %v", err)
+	}
+	if !strings.Contains(string(contents), "post-rebuild-post-rotate") {
+		t.Errorf("post-rebuild-post-rotate missing from %s: %s", scopedPath, contents)
+	}
+}
+
+func TestDebugFileSink_SurvivesChangeLogLevel(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+
+	tmp, _ := os.CreateTemp(t.TempDir(), "level-*.log")
+	defer tmp.Close()
+	wrapped, sink := AddDebugFileSink(logger, tmp, 0)
+	SetDebugFileSink(sink)
+	defer SetDebugFileSink(nil)
+
+	rebuilt, err := ChangeLogLevel(zap.DebugLevel)
+	if err != nil {
+		t.Fatalf("ChangeLogLevel: %v", err)
+	}
+	*wrapped = *rebuilt
+
+	wrapped.Debug("post-changeloglevel")
+	_ = sink.Flush()
+	contents, _ := os.ReadFile(tmp.Name())
+	if !strings.Contains(string(contents), "post-changeloglevel") {
+		t.Errorf("ChangeLogLevel dropped the file sink: %s", contents)
+	}
+}
+
 func TestSetGetDebugFileSink(t *testing.T) {
 	SetRedactor(nil)
 	defer SetDebugFileSink(nil)
