@@ -37,7 +37,7 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	atomic.AddInt64(&b.cnt, int64(len(p)))
 	return b.mu.Write(p)
 }
-func (b *syncBuffer) Sync() error  { return nil }
+func (b *syncBuffer) Sync() error    { return nil }
 func (b *syncBuffer) String() string { return b.mu.String() }
 
 func TestAddDebugFileSink_BeforeAttach_NotInFile(t *testing.T) {

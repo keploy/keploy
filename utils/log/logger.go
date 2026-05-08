@@ -419,10 +419,10 @@ func (s *cappedWriteSyncer) swap(inner zapcore.WriteSyncer) {
 // The mu mutex serializes Swap against itself; concurrent Writes through
 // the buffered/capped chain are still safe via cappedWriteSyncer.mu.
 type DebugFileSink struct {
-	mu          sync.Mutex
-	capped      *cappedWriteSyncer
-	buffered    *zapcore.BufferedWriteSyncer
-	originPath  string // path the sink was originally bound to (best-effort, used to derive rotation paths)
+	mu           sync.Mutex
+	capped       *cappedWriteSyncer
+	buffered     *zapcore.BufferedWriteSyncer
+	originPath   string // path the sink was originally bound to (best-effort, used to derive rotation paths)
 	currentScope string // last scope value seen by RotateForScope (e.g. test-set ID); empty for the original file
 }
 
