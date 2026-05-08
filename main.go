@@ -263,6 +263,10 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 		return nil, nil
 	}
 	*logger = *wrapped
+	// Publish the sink so cross-package helpers (e.g. the agent's
+	// per-test-set rotation in pkg/agent/routes) can reach it without
+	// threading the sink through every constructor.
+	log.SetDebugFileSink(sink)
 	logger.Debug("KEPLOY_DEBUG_FILE attached", zap.String("path", path))
 	return f, sink
 }

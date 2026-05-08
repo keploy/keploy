@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -318,7 +320,14 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 // hitting the cap never tears down the logger or causes the goroutine
 // logging to error out. The caller queries Capped() at the end of the
 // run to learn whether truncation occurred.
+//
+// The inner WriteSyncer (and its underlying file, if owned) can be
+// swapped at runtime via Swap. Used for per-test-set log rotation in
+// the keploy-agent: BeforeSimulate flips the file when the test set
+// changes. Writes are serialized through s.mu so a concurrent Write
+// can't tear into a half-swapped inner.
 type cappedWriteSyncer struct {
+	mu      sync.Mutex
 	inner   zapcore.WriteSyncer
 	cap     int64
 	written atomic.Int64
@@ -330,6 +339,8 @@ func newCappedWriteSyncer(inner zapcore.WriteSyncer, cap int64) *cappedWriteSync
 }
 
 func (s *cappedWriteSyncer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	written := s.written.Load()
 	if written >= s.cap {
 		s.capped.Store(true)
@@ -349,17 +360,40 @@ func (s *cappedWriteSyncer) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (s *cappedWriteSyncer) Sync() error    { return s.inner.Sync() }
+func (s *cappedWriteSyncer) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inner.Sync()
+}
+
 func (s *cappedWriteSyncer) Capped() bool   { return s.capped.Load() }
 func (s *cappedWriteSyncer) Written() int64 { return s.written.Load() }
+
+// swap atomically replaces the inner WriteSyncer and resets the cap
+// counters. Called by DebugFileSink.Swap after the upstream buffer has
+// been flushed; bytes written before swap are guaranteed to land in
+// the OLD inner because this method holds the write mutex.
+func (s *cappedWriteSyncer) swap(inner zapcore.WriteSyncer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inner = inner
+	s.written.Store(0)
+	s.capped.Store(false)
+}
 
 // DebugFileSink is the caller-side handle for the debug-level file sink
 // attached by AddDebugFileSink. It owns the buffered + capped writer
 // chain in front of the underlying file. Flush before closing the file
 // to guarantee all in-flight bytes hit disk.
+//
+// The mu mutex serializes Swap against itself; concurrent Writes through
+// the buffered/capped chain are still safe via cappedWriteSyncer.mu.
 type DebugFileSink struct {
-	capped   *cappedWriteSyncer
-	buffered *zapcore.BufferedWriteSyncer
+	mu          sync.Mutex
+	capped      *cappedWriteSyncer
+	buffered    *zapcore.BufferedWriteSyncer
+	originPath  string // path the sink was originally bound to (best-effort, used to derive rotation paths)
+	currentScope string // last scope value seen by RotateForScope (e.g. test-set ID); empty for the original file
 }
 
 // Flush flushes the in-memory write buffer to the underlying file.
@@ -422,5 +456,152 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 	newLogger := logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, debugCore)
 	}))
-	return newLogger, &DebugFileSink{capped: capped, buffered: buffered}
+	return newLogger, &DebugFileSink{
+		capped:     capped,
+		buffered:   buffered,
+		originPath: file.Name(),
+	}
+}
+
+// Swap atomically swaps the underlying file the sink writes to. The
+// caller opens newFile; the previous file is returned so the caller
+// can close it after Swap returns. Buffered writes are flushed to the
+// previous file before the swap, and the cap-tripped state is reset.
+//
+// Concurrent log Writes are safe — they serialize through the inner
+// cappedWriteSyncer's mutex, so no record can land half-written
+// across the swap boundary.
+func (s *DebugFileSink) Swap(newFile *os.File) error {
+	if s == nil || s.capped == nil || s.buffered == nil || newFile == nil {
+		return fmt.Errorf("debug file sink: swap called on uninitialized sink or nil file")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.buffered.Sync(); err != nil {
+		return fmt.Errorf("debug file sink: flush before swap: %w", err)
+	}
+	s.capped.swap(zapcore.AddSync(newFile))
+	s.originPath = newFile.Name()
+	return nil
+}
+
+// RotateForScope swaps the sink to a per-scope file derived from the
+// sink's origin path. Scope semantics are caller-defined; for the
+// keploy-agent debug log this is the test set ID, and the resulting
+// path is "<dir>/<scope>/<basename>" — e.g. an origin of
+// "/keploy-host/agent-debug.log" with scope "test-set-3" yields
+// "/keploy-host/test-set-3/agent-debug.log".
+//
+// On the first call with a given scope, the new directory is created,
+// the new file is opened (truncated), the buffered writer is flushed
+// to the previous file, the inner is swapped, and the previous file
+// is closed. Repeated calls with the same scope are no-ops. An empty
+// scope rotates back to the origin path.
+//
+// All errors are returned to the caller — typical caller logs at warn
+// and proceeds without rotation rather than failing the surrounding
+// operation. The method is concurrency-safe: parallel calls serialize
+// through the sink mutex.
+func (s *DebugFileSink) RotateForScope(scope string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if scope == s.currentScope {
+		s.mu.Unlock()
+		return nil
+	}
+	prevScope := s.currentScope
+	prevOrigin := s.originPath
+	s.mu.Unlock()
+
+	// Compute the target path before reacquiring the mutex so we can
+	// fail with no side effects if the origin path is unset.
+	if prevOrigin == "" {
+		return fmt.Errorf("debug file sink: origin path unset; cannot derive scoped path")
+	}
+	dir := filepath.Dir(prevOrigin)
+	base := filepath.Base(prevOrigin)
+	// Compute the absolute origin: when rotating away from a scoped
+	// file back to the unscoped one, prevOrigin is the scoped path,
+	// which sits one directory deeper than the original. Re-anchor by
+	// chopping prevScope off prevOrigin's tail.
+	originDir := dir
+	if prevScope != "" && filepath.Base(dir) == prevScope {
+		originDir = filepath.Dir(dir)
+	}
+	target := filepath.Join(originDir, scope, base)
+	if scope == "" {
+		target = filepath.Join(originDir, base)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("debug file sink: mkdir %q: %w", filepath.Dir(target), err)
+	}
+	newFile, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("debug file sink: open %q: %w", target, err)
+	}
+
+	s.mu.Lock()
+	if err := s.buffered.Sync(); err != nil {
+		s.mu.Unlock()
+		_ = newFile.Close()
+		return fmt.Errorf("debug file sink: flush before swap: %w", err)
+	}
+	s.capped.swap(zapcore.AddSync(newFile))
+	s.originPath = target
+	s.currentScope = scope
+	s.mu.Unlock()
+	return nil
+}
+
+// CurrentScope reports the scope currently in effect (last value
+// passed to RotateForScope), or "" if no rotation has happened.
+func (s *DebugFileSink) CurrentScope() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentScope
+}
+
+// globalSinkHolder lets atomic.Value store the same concrete type for
+// the package-wide debug file sink (atomic.Value panics on type
+// changes across Stores).
+type globalSinkHolder struct{ s *DebugFileSink }
+
+var globalSink atomic.Value
+
+// SetDebugFileSink registers s as the package-wide active debug file
+// sink. Subsequent calls to DebugFileSink() return s. Pass nil to
+// clear. Used by main entrypoints to publish the sink so cross-package
+// helpers (e.g. RotateDebugFileForTestSet) can reach it without an
+// explicit dependency injection chain.
+func SetDebugFileSink(s *DebugFileSink) {
+	globalSink.Store(globalSinkHolder{s: s})
+}
+
+// GetDebugFileSink returns the package-wide active sink registered by
+// SetDebugFileSink, or nil when none is registered.
+func GetDebugFileSink() *DebugFileSink {
+	v := globalSink.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(globalSinkHolder).s
+}
+
+// RotateDebugFileForTestSet is the package-level convenience helper
+// the keploy-agent's BeforeSimulate route handler calls when a new
+// test set begins. It locates the active sink (if any) and rotates
+// to a per-test-set scope. Errors are returned for the caller to log;
+// they are never fatal — log capture is a best-effort observability
+// feature.
+func RotateDebugFileForTestSet(testSetID string) error {
+	sink := GetDebugFileSink()
+	if sink == nil {
+		return nil
+	}
+	return sink.RotateForScope(testSetID)
 }

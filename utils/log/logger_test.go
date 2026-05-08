@@ -256,6 +256,148 @@ func TestAddDebugFileSink_RedactionOnceInvariant(t *testing.T) {
 	}
 }
 
+func TestDebugFileSink_RotateForScope(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+
+	dir := t.TempDir()
+	originPath := filepath.Join(dir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	if sink == nil {
+		t.Fatalf("AddDebugFileSink returned nil")
+	}
+	defer SetDebugFileSink(nil)
+
+	wrapped.Debug("origin-line")
+
+	if err := sink.RotateForScope("test-set-1"); err != nil {
+		t.Fatalf("RotateForScope: %v", err)
+	}
+	wrapped.Debug("scope-1-line")
+
+	if err := sink.RotateForScope("test-set-2"); err != nil {
+		t.Fatalf("RotateForScope: %v", err)
+	}
+	wrapped.Debug("scope-2-line")
+
+	// Repeat scope is a no-op.
+	if err := sink.RotateForScope("test-set-2"); err != nil {
+		t.Fatalf("repeat RotateForScope: %v", err)
+	}
+	wrapped.Debug("scope-2-line-2")
+
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	originBytes, _ := os.ReadFile(originPath)
+	if !strings.Contains(string(originBytes), "origin-line") {
+		t.Errorf("origin-line missing from %s: %s", originPath, originBytes)
+	}
+	if strings.Contains(string(originBytes), "scope-1-line") {
+		t.Errorf("scope-1-line leaked into origin file: %s", originBytes)
+	}
+
+	scope1Path := filepath.Join(dir, "test-set-1", "agent-debug.log")
+	scope1Bytes, err := os.ReadFile(scope1Path)
+	if err != nil {
+		t.Fatalf("read scope-1 file: %v", err)
+	}
+	if !strings.Contains(string(scope1Bytes), "scope-1-line") {
+		t.Errorf("scope-1-line missing from %s: %s", scope1Path, scope1Bytes)
+	}
+	if strings.Contains(string(scope1Bytes), "scope-2-line") {
+		t.Errorf("scope-2-line leaked into scope-1 file: %s", scope1Bytes)
+	}
+
+	scope2Path := filepath.Join(dir, "test-set-2", "agent-debug.log")
+	scope2Bytes, err := os.ReadFile(scope2Path)
+	if err != nil {
+		t.Fatalf("read scope-2 file: %v", err)
+	}
+	if !strings.Contains(string(scope2Bytes), "scope-2-line") || !strings.Contains(string(scope2Bytes), "scope-2-line-2") {
+		t.Errorf("scope-2 file missing expected lines: %s", scope2Bytes)
+	}
+
+	if got := sink.CurrentScope(); got != "test-set-2" {
+		t.Errorf("CurrentScope: got %q, want test-set-2", got)
+	}
+}
+
+func TestDebugFileSink_RotateBackToOrigin(t *testing.T) {
+	SetRedactor(nil)
+	console := &syncBuffer{}
+	logger := newConsoleLogger(console, zap.InfoLevel)
+
+	dir := t.TempDir()
+	originPath := filepath.Join(dir, "agent-debug.log")
+	originFile, err := os.Create(originPath)
+	if err != nil {
+		t.Fatalf("create origin: %v", err)
+	}
+	defer originFile.Close()
+
+	wrapped, sink := AddDebugFileSink(logger, originFile, 0)
+	defer SetDebugFileSink(nil)
+
+	if err := sink.RotateForScope("ts-a"); err != nil {
+		t.Fatalf("RotateForScope: %v", err)
+	}
+	wrapped.Debug("scoped-record")
+
+	if err := sink.RotateForScope(""); err != nil {
+		t.Fatalf("RotateForScope back to origin: %v", err)
+	}
+	wrapped.Debug("post-rotation-origin-record")
+
+	if err := sink.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	originBytes, _ := os.ReadFile(originPath)
+	if !strings.Contains(string(originBytes), "post-rotation-origin-record") {
+		t.Errorf("post-rotation record missing from origin: %s", originBytes)
+	}
+	scopedPath := filepath.Join(dir, "ts-a", "agent-debug.log")
+	scopedBytes, _ := os.ReadFile(scopedPath)
+	if !strings.Contains(string(scopedBytes), "scoped-record") {
+		t.Errorf("scoped record missing from scoped file: %s", scopedBytes)
+	}
+}
+
+func TestRotateDebugFileForTestSet_NilSinkIsSafe(t *testing.T) {
+	SetDebugFileSink(nil)
+	if err := RotateDebugFileForTestSet("anything"); err != nil {
+		t.Errorf("RotateDebugFileForTestSet with nil sink: got %v, want nil", err)
+	}
+}
+
+func TestSetGetDebugFileSink(t *testing.T) {
+	SetRedactor(nil)
+	defer SetDebugFileSink(nil)
+
+	if got := GetDebugFileSink(); got != nil {
+		t.Errorf("GetDebugFileSink with nothing registered: got %v, want nil", got)
+	}
+
+	logger := newConsoleLogger(&syncBuffer{}, zap.InfoLevel)
+	tmp, _ := os.CreateTemp(t.TempDir(), "global-*.log")
+	defer tmp.Close()
+	_, sink := AddDebugFileSink(logger, tmp, 0)
+	SetDebugFileSink(sink)
+
+	if got := GetDebugFileSink(); got != sink {
+		t.Errorf("GetDebugFileSink: got %v, want %v", got, sink)
+	}
+}
+
 func BenchmarkAddDebugFileSink_Write(b *testing.B) {
 	SetRedactor(nil)
 	console := &syncBuffer{}
