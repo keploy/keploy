@@ -55,6 +55,28 @@ func start(ctx context.Context) {
 	}
 	utils.LogFile = logFile
 
+	// If KEPLOY_DEBUG_FILE is set, tee debug-level log records into that
+	// file in addition to whatever sinks log.New configured. Used by
+	// `keploy cloud replay` to capture the agent container's debug
+	// stream into the user's keploy folder via a bind mount; the
+	// support-bundle pipeline picks the file up automatically since it
+	// lives under cfg.Path. Also useful as a generic "give me the full
+	// debug log without --debug printing it to my terminal" knob for
+	// any keploy invocation.
+	debugFile, debugSink := maybeAttachDebugFileSink(logger)
+	if debugFile != nil {
+		defer func() {
+			if debugSink != nil {
+				if ferr := debugSink.Flush(); ferr != nil {
+					logger.Warn("KEPLOY_DEBUG_FILE: flush failed", zap.Error(ferr))
+				}
+			}
+			if cerr := debugFile.Close(); cerr != nil {
+				logger.Warn("KEPLOY_DEBUG_FILE: close failed", zap.Error(cerr))
+			}
+		}()
+	}
+
 	// Start pprof HTTP server for live profiling if PPROF_PORT is set
 	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
 		go func() {
@@ -214,4 +236,37 @@ func start(ctx context.Context) {
 	if conf.Path != "" {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+
+// maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, if set, opens that
+// path and attaches a debug-level file sink onto logger via the same
+// in-place pointee mutation pattern the rest of the codebase uses for
+// runtime logger swaps (see ChangeLogLevel / RedirectToStderr). Returns
+// the opened file and sink handle so the caller can defer Flush + Close.
+//
+// All errors are non-fatal — if the file can't be opened (read-only mount,
+// permission, etc.), the process continues with the original logger.
+func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink) {
+	path := strings.TrimSpace(os.Getenv("KEPLOY_DEBUG_FILE"))
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		logger.Warn("KEPLOY_DEBUG_FILE set but could not be opened; continuing without debug capture",
+			zap.String("path", path), zap.Error(err))
+		return nil, nil
+	}
+	wrapped, sink := log.AddDebugFileSink(logger, f, 100<<20)
+	if wrapped == nil || sink == nil {
+		_ = f.Close()
+		return nil, nil
+	}
+	*logger = *wrapped
+	// Publish the sink so cross-package helpers (e.g. the agent's
+	// per-test-set rotation in pkg/agent/routes) can reach it without
+	// threading the sink through every constructor.
+	log.SetDebugFileSink(sink)
+	logger.Debug("KEPLOY_DEBUG_FILE attached", zap.String("path", path))
+	return f, sink
 }

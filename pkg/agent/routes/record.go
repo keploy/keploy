@@ -22,6 +22,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -152,6 +153,17 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
+	}
+
+	// Rotate the debug-file sink (if attached via KEPLOY_DEBUG_FILE)
+	// to a per-test-set scope so each test set's agent log lands in
+	// its own file alongside the rest of the test set's artifacts.
+	// Best-effort: a rotation failure is logged at warn and the
+	// simulate proceeds — the existing single-file capture continues
+	// to receive bytes.
+	if err := log.RotateDebugFileForTestSet(req.TestSetID); err != nil {
+		a.logger.Warn("debug file rotation for test set failed; continuing without rotation",
+			zap.String("testSetID", req.TestSetID), zap.Error(err))
 	}
 
 	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
