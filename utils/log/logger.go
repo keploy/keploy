@@ -476,7 +476,18 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 		capBytes = 100 << 20 // 100 MiB default
 	}
 	capped := newCappedWriteSyncer(zapcore.AddSync(file), capBytes)
-	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10}
+	// FlushInterval defaults to 30 s in zap; that's too long for the
+	// agent's per-test-set restart cadence in DockerCompose mode where
+	// short-lived agent processes can shut down before a single auto-flush
+	// fires, leaving the per-test-set scoped file empty. 500 ms is a
+	// pragmatic compromise: records reach disk well before any plausible
+	// SIGTERM grace window expires, with negligible overhead at the
+	// volumes keploy actually emits.
+	buffered := &zapcore.BufferedWriteSyncer{
+		WS:            capped,
+		Size:          256 << 10,
+		FlushInterval: 500 * time.Millisecond,
+	}
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	debugCore := newRedactingCore(zapcore.NewCore(
 		encoder,
@@ -582,6 +593,16 @@ func (s *DebugFileSink) RotateForScope(scope string) error {
 	s.originPath = target
 	s.currentScope = scope
 	s.mu.Unlock()
+
+	// Write a synchronous header DIRECTLY to the new file, bypassing the
+	// buffered chain, so the file is guaranteed non-empty even when the
+	// process shuts down before the 500 ms flush interval fires or
+	// before any further records are emitted post-rotation. Doubles as
+	// an audit breadcrumb (operators can grep "rotated to scope" in the
+	// bundle to confirm the rotation actually happened).
+	header := fmt.Sprintf("[keploy log] rotated to scope=%q at %s\n",
+		scope, time.Now().UTC().Format(time.RFC3339Nano))
+	_, _ = newFile.WriteString(header)
 	return nil
 }
 
