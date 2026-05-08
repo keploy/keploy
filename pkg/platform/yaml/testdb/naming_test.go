@@ -386,6 +386,90 @@ func TestUpsert_PlaceholderCleanedUpOnError(t *testing.T) {
 	}
 }
 
+// TestInsertTestCase_PropagatesAutoAssignedName guards the contract that
+// callers of InsertTestCase observe the on-disk name on tc.Name when they
+// did not pre-name the case themselves. Wrappers (e.g. k8s-proxy's
+// testDBWrapper) key per-session dedupe on tc.Name; if the auto-assigned
+// name is not propagated back, every nameless capture in a test set
+// collapses into one entry and the live recording UI loses visibility
+// into the actual capture count until the session stops.
+func TestInsertTestCase_PropagatesAutoAssignedName(t *testing.T) {
+	parent := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	testSetID := "propagation"
+
+	tc1 := httpTC("GET", "http://api.test/users")
+	if err := ts.InsertTestCase(t.Context(), tc1, testSetID, false); err != nil {
+		t.Fatalf("insert tc1: %v", err)
+	}
+	if tc1.Name != "get-users-1" {
+		t.Fatalf("tc1.Name not propagated; got=%q want=get-users-1", tc1.Name)
+	}
+
+	tc2 := httpTC("GET", "http://api.test/users")
+	if err := ts.InsertTestCase(t.Context(), tc2, testSetID, false); err != nil {
+		t.Fatalf("insert tc2: %v", err)
+	}
+	if tc2.Name != "get-users-2" {
+		t.Fatalf("tc2.Name not propagated; got=%q want=get-users-2", tc2.Name)
+	}
+	if tc1.Name == tc2.Name {
+		t.Fatalf("expected distinct names across two captures, got both %q", tc1.Name)
+	}
+
+	// Pre-named cases (e.g. via the Keploy-Test-Name header path) must
+	// be left unchanged so callers can still drive deterministic naming.
+	tc3 := httpTC("GET", "http://api.test/users")
+	tc3.Name = "custom-name"
+	if err := ts.InsertTestCase(t.Context(), tc3, testSetID, false); err != nil {
+		t.Fatalf("insert tc3: %v", err)
+	}
+	if tc3.Name != "custom-name" {
+		t.Fatalf("explicit tc.Name overwritten; got=%q want=custom-name", tc3.Name)
+	}
+}
+
+// TestInsertTestCase_DoesNotPropagateOnFailure guards the second half of
+// the propagation contract: if upsert fails after claimName but before the
+// final rename, tc.Name must be left untouched so the caller does not
+// observe a name that no .yaml file backs. Otherwise a retry would either
+// skip claimName (because tc.Name is now non-empty and treated as
+// caller-supplied) and try to write directly to a name whose placeholder
+// the deferred cleanup just removed, or the wrapper's per-session dedupe
+// would record an event for a capture that was never persisted.
+func TestInsertTestCase_DoesNotPropagateOnFailure(t *testing.T) {
+	parent := t.TempDir()
+	ts := NewWithNaming(zap.NewNop(), parent, NamingDescriptive)
+	testSetID := "no-propagation-on-failure"
+	testSetDir := filepath.Join(parent, testSetID)
+	if err := os.MkdirAll(testSetDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Block saveAssets the same way TestUpsert_PlaceholderCleanedUpOnError
+	// does: a regular file sitting where the assets directory should be
+	// makes saveAssets' MkdirAll fail with ENOTDIR, and a >LargeBodyThreshold
+	// body forces saveAssets to actually try the write.
+	if err := os.WriteFile(filepath.Join(testSetDir, "assets"), []byte("blocked"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	bigBody := strings.Repeat("x", LargeBodyThreshold+1)
+	tc := &models.TestCase{
+		Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    "http://api.test/users",
+			Body:   bigBody,
+		},
+	}
+
+	if err := ts.InsertTestCase(t.Context(), tc, testSetID, false); err == nil {
+		t.Fatalf("expected InsertTestCase to fail when assets dir is blocked")
+	}
+	if tc.Name != "" {
+		t.Fatalf("tc.Name leaked on failure; got=%q want=\"\" (no yaml was persisted)", tc.Name)
+	}
+}
+
 func TestGenerateName_NewTestsetDir(t *testing.T) {
 	ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
 	dir := filepath.Join(t.TempDir(), "fresh-testset", "tests")

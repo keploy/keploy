@@ -445,8 +445,50 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
+	// Compute the freeze anchor as the earliest ReqTimestampMock across the
+	// stored mocks and forward it to AgentHooks. The hook implementation
+	// decides whether to apply it (a no-op when freezeTime is off). Doing
+	// this here, alongside the StoreMocks write, guarantees the anchor is
+	// known to the hook before BeforeTestRun fires — i.e. before the user
+	// app's first datetime.now() call — which is what closes the bootstrap
+	// gap that lets boto3 / JWT libs see "now > recorded Expiration" and
+	// kill the worker.
+	if anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered); !anchor.IsZero() {
+		if err := ActiveHooks.SetFreezeAnchor(ctx, anchor); err != nil {
+			a.logger.Warn("SetFreezeAnchor hook returned error",
+				zap.Error(err), zap.Time("anchor", anchor))
+		}
+	}
+
 	a.logger.Debug("Successfully stored mocks for client")
 	return nil
+}
+
+// earliestReqTimestamp returns the earliest non-zero ReqTimestampMock seen
+// across the supplied mock slices, or a zero time.Time if none are set.
+// Used to seed the time-freeze offset before the user app's first
+// datetime.now() so cached recorded credentials don't appear expired.
+func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
+	var anchor time.Time
+	consider := func(m *models.Mock) {
+		if m == nil {
+			return
+		}
+		ts := m.Spec.ReqTimestampMock
+		if ts.IsZero() {
+			return
+		}
+		if anchor.IsZero() || ts.Before(anchor) {
+			anchor = ts
+		}
+	}
+	for _, m := range filtered {
+		consider(m)
+	}
+	for _, m := range unfiltered {
+		consider(m)
+	}
+	return anchor
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
