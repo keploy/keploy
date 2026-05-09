@@ -474,6 +474,28 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if ctx.Err() == context.Canceled {
 					return err
 				}
+				// DockerCompose: when the user-app container exits,
+				// compose's --abort-on-container-exit cancels our inner
+				// runTestSetCtx. RunTestSet then returns one of three
+				// statuses depending on which goroutine wins the race —
+				// AppHalted, FaultUserApp, or UserAbort (the last one
+				// happens at line ~964 when the ctx-Done select case
+				// fires before the appErr-status mapping). The outer
+				// ctx is intact (we already early-returned above if it
+				// was), so all three are recoverable: the next test set
+				// builds a fresh compose. Other errors still abort.
+				if cmdType == utils.DockerCompose &&
+					(testSetStatus == models.TestSetStatusAppHalted ||
+						testSetStatus == models.TestSetStatusFaultUserApp ||
+						testSetStatus == models.TestSetStatusUserAbort) {
+					utils.LogError(r.logger, err,
+						"test set failed because the app exited; continuing to next test set",
+						zap.String("test-set", testSet),
+						zap.String("status", string(testSetStatus)))
+					testSetResult = false
+					testRunResult = false
+					break
+				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
