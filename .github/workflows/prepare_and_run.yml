@@ -33,7 +33,7 @@ env:
   # three workflows track the same integrations ref. Pin to a specific
   # SHA via the repo var if a feat branch needs to carry a cross-repo
   # change.
-  INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+  INTEGRATION_REF: 'debug/window-shift-diagnostic'  # TODO: revert after window-shift race confirmed
 
 jobs:
   # -------------------------------------------------------------------
