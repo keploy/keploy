@@ -447,7 +447,11 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 
 	// Second pass: noise-aware match for mocks with obfuscated values.
-	// Pre-parse request body once to avoid repeated JSON parsing per mock.
+	// Pre-compute request-side properties once so we don't re-derive them per
+	// candidate mock: JSON unmarshaling for the JSON-noise path, and the
+	// form-encoded heuristic (which itself runs url.ParseQuery) for the
+	// form-body path.
+	reqBodyStr := string(body)
 	isReqJSON := pkg.IsJSON(body)
 	var reqData interface{}
 	if isReqJSON {
@@ -455,6 +459,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 			isReqJSON = false
 		}
 	}
+	reqIsForm := !isReqJSON && looksLikeFormEncoded(reqBodyStr)
 
 	for _, mock := range schemaMatched {
 		nc := util.NewNoiseChecker(mock.Noise)
@@ -479,8 +484,8 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// tested against the mock's noise patterns; a match wildcards that
 		// segment. The remaining keys must be the same set on both sides
 		// and each non-wildcarded value(s) must be byte-equal.
-		if looksLikeFormEncoded(string(body)) && looksLikeFormEncoded(mockBody) {
-			if formBodiesMatchModuloNoise(mockBody, string(body), nc) {
+		if reqIsForm && looksLikeFormEncoded(mockBody) {
+			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
 				h.Logger.Debug("http mock matched",
 					zap.String("mock", mock.Name),
 					zap.Float64("match_percentage", 100.0),
@@ -756,16 +761,28 @@ func looksLikeFormEncoded(body string) bool {
 }
 
 // formBodiesMatchModuloNoise compares two form-encoded bodies treating any
-// "key=value" segment whose key matches a Mock.Noise regex as a wildcard.
-// After wildcarding, the surviving key sets on both sides must be equal,
-// and each surviving key's value(s) must be byte-equal.
+// individual "key=value" segment that matches a Mock.Noise regex as a
+// wildcard. Noise is evaluated *per occurrence*, not per key: a body like
+// `a=NOISY&a=2` keeps the second 'a' occurrence as a non-noisy, must-match
+// value even though the first occurrence is wildcarded.
+//
+// Match semantics: for every key, collect the ordered list of non-noisy
+// values on each side. Both sides must declare the same key set (modulo
+// keys whose every occurrence is noisy and absent on the other side), and
+// the surviving non-noisy values for each key must match byte-for-byte in
+// order.
 //
 // Splitting is done on raw bytes (Split on '&', IndexByte on '=') rather
 // than via url.ParseQuery so the segment passed to nc.IsNoisy carries the
 // same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
-// (^<raw_key>=[^&]+$). Multi-valued keys (a=1&a=2) are handled positionally.
+// (^<raw_key>=[^&]+$).
 func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker) bool {
-	parse := func(body string) map[string][]string {
+	// nonNoisyByKey returns, per key, the ordered list of values whose
+	// "key=value" segment does NOT match any noise pattern. Keys whose
+	// every occurrence is noisy still appear in the map (with a nil/empty
+	// slice) so the cross-side presence check treats them as "declared
+	// but fully wildcarded" rather than missing.
+	nonNoisyByKey := func(body string) map[string][]string {
 		out := make(map[string][]string)
 		if body == "" {
 			return out
@@ -782,17 +799,15 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 				key = seg[:eqIdx]
 				val = seg[eqIdx+1:]
 			}
+			if _, exists := out[key]; !exists {
+				out[key] = nil
+			}
+			if nc.IsNoisy(key + "=" + val) {
+				continue
+			}
 			out[key] = append(out[key], val)
 		}
 		return out
-	}
-	isNoisy := func(key string, vals []string) bool {
-		for _, v := range vals {
-			if nc.IsNoisy(key + "=" + v) {
-				return true
-			}
-		}
-		return false
 	}
 	sliceEqual := func(a, b []string) bool {
 		if len(a) != len(b) {
@@ -806,26 +821,28 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 		return true
 	}
 
-	mockKV := parse(mockBody)
-	reqKV := parse(reqBody)
+	mockKV := nonNoisyByKey(mockBody)
+	reqKV := nonNoisyByKey(reqBody)
 
+	// Cross-check both directions: same declared key set, same non-noisy
+	// values per key in order. A key that is fully wildcarded on the mock
+	// side (every occurrence noisy → entry present, slice empty) still
+	// requires the request to declare the key; the inverse holds too. This
+	// prevents a permissive mock from silently absorbing requests that
+	// omit or add a non-noisy key.
 	for k, mv := range mockKV {
-		if isNoisy(k, mv) {
-			continue
-		}
 		rv, ok := reqKV[k]
-		if !ok || !sliceEqual(mv, rv) {
+		if !ok {
+			return false
+		}
+		if !sliceEqual(mv, rv) {
 			return false
 		}
 	}
-	for k, rv := range reqKV {
-		if _, ok := mockKV[k]; ok {
-			continue
+	for k := range reqKV {
+		if _, ok := mockKV[k]; !ok {
+			return false
 		}
-		if isNoisy(k, rv) {
-			continue
-		}
-		return false
 	}
 	return true
 }

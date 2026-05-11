@@ -670,6 +670,63 @@ func TestExactBodyMatch_FormEncodedExtraKeyOnRequest(t *testing.T) {
 	}
 }
 
+// TestExactBodyMatch_FormEncodedPerOccurrenceNoise guards against a
+// regression flagged in PR review: if formBodiesMatchModuloNoise wildcards a
+// whole key whenever *any* of its occurrences is noisy, a mismatch on a
+// non-noisy sibling occurrence would silently pass. The fix evaluates noise
+// per "key=value" segment and requires the non-noisy occurrences to match
+// in order.
+func TestExactBodyMatch_FormEncodedPerOccurrenceNoise(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-multi",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^a=NOISY$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "a=NOISY&a=2",
+				},
+			},
+		},
+	}
+	// First occurrence of 'a' is wildcarded; second occurrence differs.
+	reqBody := []byte("a=NOISY&a=DIFF")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match — the second 'a' occurrence differs and is not noisy")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedNoisyAcrossPositions covers the symmetric
+// case where the noisy occurrences sit at different positions on the two
+// sides — the surviving non-noisy values should still compare equal.
+func TestExactBodyMatch_FormEncodedNoisyAcrossPositions(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-multi",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^a=NOISY$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "a=NOISY&a=2",
+				},
+			},
+		},
+	}
+	// Both sides have one 'a=NOISY' (wildcarded) and one non-noisy 'a=2'.
+	// Positions of the noisy occurrence differ between mock and request.
+	reqBody := []byte("a=2&a=NOISY")
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected match — non-noisy values are equal regardless of where noisy slots sit")
+	}
+	if match.Name != "mock-multi" {
+		t.Errorf("expected mock-multi, got %s", match.Name)
+	}
+}
+
 func TestExactBodyMatch_NoNoisePatterns(t *testing.T) {
 	h := newHTTP()
 	// Mock has no Noise patterns — second pass should skip it
