@@ -21,9 +21,6 @@ jobs:
           - name: go-memory-load-mysql
             path: go-memory-load-mysql
             script_dir: go_memory_load_mysql
-          - name: go-memory-load-mongo
-            path: go-memory-load-mongo
-            script_dir: go_memory_load_mongo
           - name: go-memory-load-grpc
             path: go-memory-load-grpc
             script_dir: go_memory_load_grpc
@@ -80,7 +77,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker.sh
 
       - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
-        if: ${{ always() && (matrix.app.name == 'echo-sql' || matrix.app.name == 'go-memory-load-mongo' || matrix.app.name == 'go-memory-load-mysql') }}
+        if: ${{ always() && (matrix.app.name == 'echo-sql' || matrix.app.name == 'go-memory-load-mysql') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
@@ -88,5 +85,73 @@ jobs:
             samples-go/${{ matrix.app.path }}/keploy/
             samples-go/${{ matrix.app.path }}/record.txt
             samples-go/${{ matrix.app.path }}/test.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # go-memory-load-mongo is resource-intensive: MongoDB + API + Keploy containers
+  # compete for the runner's 2 vCPUs. Running all three config variants in parallel
+  # starves each job of CPU and causes EOF failures under load. max-parallel: 1
+  # sequences them so each variant gets the full runner for its own run.
+  golang_docker_mongo:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: go-memory-load-mongo (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          ref: feat/all-memory-load-apps
+          path: samples-go
+
+      - name: Run go-memory-load-mongo application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/go-memory-load-mongo
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/go_memory_load_mongo/golang-docker.sh
+
+      - name: Upload go-memory-load-mongo recorded mocks and replay logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-memory-load-mongo-${{ matrix.config.job }}-recordings
+          path: |
+            samples-go/go-memory-load-mongo/keploy/
+            samples-go/go-memory-load-mongo/record.txt
+            samples-go/go-memory-load-mongo/test.txt
           if-no-files-found: warn
           retention-days: 7
