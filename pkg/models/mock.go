@@ -43,8 +43,13 @@ const (
 
 	// Aerospike covers all Aerospike traffic — info text frames,
 	// AS_MSG binary frames, and their compressed wrapper. The frame
-	// type lives in Spec.Aerospike.Type so consumers discriminate
-	// there rather than on Kind, mirroring the PostgresV3 pattern.
+	// type is carried per request/response on
+	// Request.Header.Type / Response.Header.Type (a uint8 wire byte)
+	// and on the parallel PacketInfo.Type string (one of
+	// aerospike.FrameInfo / FrameAdmin / FrameMessage /
+	// FrameMessageCompressed); consumers discriminate there rather
+	// than on Kind so a single Mock can carry a tend handshake plus
+	// the follow-on data ops without needing distinct Kinds.
 	Aerospike Kind = "Aerospike"
 )
 

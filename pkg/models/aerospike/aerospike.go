@@ -33,10 +33,16 @@ const (
 // Mock.Spec.AerospikeResponses; this struct is preserved as the
 // canonical envelope when an integration prefers a single grouped
 // payload (e.g. a captured info-protocol burst).
+// Spec mirrors mysql.Spec / postgres.Spec — required envelope
+// fields (Metadata, Requests, Responses, Header, Message) are
+// always serialised so a tool reading the on-disk YAML can
+// rely on these keys being present even when their value is
+// the zero value. Optional fields (Meta, CreatedAt, timestamps)
+// keep `omitempty`.
 type Spec struct {
-	Metadata         map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	Requests         []Request         `json:"requests,omitempty" yaml:"requests,omitempty"`
-	Responses        []Response        `json:"responses,omitempty" yaml:"responses,omitempty"`
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Requests         []Request         `json:"requests" yaml:"requests"`
+	Responses        []Response        `json:"responses" yaml:"responses"`
 	CreatedAt        int64             `json:"created,omitempty" yaml:"created,omitempty"`
 	ReqTimestampMock time.Time         `json:"ReqTimestampMock,omitempty" yaml:"ReqTimestampMock,omitempty"`
 	ResTimestampMock time.Time         `json:"ResTimestampMock,omitempty" yaml:"ResTimestampMock,omitempty"`
@@ -44,23 +50,23 @@ type Spec struct {
 
 // Request is one client → server frame.
 type Request struct {
-	Header  *PacketInfo       `json:"header,omitempty" yaml:"header,omitempty"`
+	Header  *PacketInfo       `json:"header" yaml:"header"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
-	Message yaml.Node         `json:"message,omitempty" yaml:"message,omitempty"`
+	Message yaml.Node         `json:"message" yaml:"message"`
 }
 
 // Response is one server → client frame.
 type Response struct {
-	Header  *PacketInfo       `json:"header,omitempty" yaml:"header,omitempty"`
+	Header  *PacketInfo       `json:"header" yaml:"header"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
-	Message yaml.Node         `json:"message,omitempty" yaml:"message,omitempty"`
+	Message yaml.Node         `json:"message" yaml:"message"`
 }
 
 // PacketInfo is the decoded outer proto header plus a string-typed
 // FrameType for human-readable diffs.
 type PacketInfo struct {
-	Header *Header   `json:"header,omitempty" yaml:"header,omitempty"`
-	Type   FrameType `json:"packet_type,omitempty" yaml:"packet_type,omitempty"`
+	Header *Header   `json:"header" yaml:"header"`
+	Type   FrameType `json:"packet_type" yaml:"packet_type"`
 }
 
 // Header mirrors wire.Header but stays in the on-disk model so the
