@@ -418,8 +418,15 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 // ExactBodyMatch performs exact body matching with noise awareness.
 // First pass: fast string equality.
-// Second pass: noise-aware JSON comparison that skips obfuscated fields
-// identified by Mock.Noise patterns.
+// Second pass: noise-aware comparison that skips obfuscated fields identified
+// by Mock.Noise patterns. Three body shapes are handled in the second pass:
+//   1. A mock body that is itself entirely a noise value — auto-match.
+//   2. application/x-www-form-urlencoded — per-segment noise check (see
+//      formBodiesMatchModuloNoise). Lets a noise regex of the shape
+//      ^<key>=[^&]+$ wildcard a rotating field (IRSA WebIdentityToken=…,
+//      OAuth client_assertion=…, etc.) without depending on the SDK to
+//      produce byte-identical request bodies at replay.
+//   3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
@@ -466,6 +473,23 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 				zap.Int("noisy_fields_skipped", 1),
 				zap.String("match_type", "exact_body_fully_noisy"))
 			return true, mock
+		}
+
+		// Form-encoded noise-aware comparison. Each "key=value" segment is
+		// tested against the mock's noise patterns; a match wildcards that
+		// segment. The remaining keys must be the same set on both sides
+		// and each non-wildcarded value(s) must be byte-equal.
+		if looksLikeFormEncoded(string(body)) && looksLikeFormEncoded(mockBody) {
+			if formBodiesMatchModuloNoise(mockBody, string(body), nc) {
+				h.Logger.Debug("http mock matched",
+					zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.String("match_type", "exact_body_form_noise_aware"))
+				return true, mock
+			}
+			// Mock body is form-encoded — JSON path can't fire, skip to
+			// the next mock.
+			continue
 		}
 
 		// JSON-level comparison skipping noisy fields
@@ -712,6 +736,98 @@ func mediaTypesOverlap(a, b []string) bool {
 		}
 	}
 	return false
+}
+
+// looksLikeFormEncoded heuristically classifies body as application/
+// x-www-form-urlencoded payload. Used by the noise-aware ExactBodyMatch
+// pass to decide whether to take the form-segment path. Heuristic mirrors
+// enterprise/pkg/secret's same-named helper: must contain '=', must not
+// start with a JSON or XML marker, and must parse via url.ParseQuery.
+func looksLikeFormEncoded(body string) bool {
+	if !strings.Contains(body, "=") {
+		return false
+	}
+	trimmed := strings.TrimSpace(body)
+	if len(trimmed) > 0 && (trimmed[0] == '<' || trimmed[0] == '{' || trimmed[0] == '[') {
+		return false
+	}
+	_, err := url.ParseQuery(body)
+	return err == nil
+}
+
+// formBodiesMatchModuloNoise compares two form-encoded bodies treating any
+// "key=value" segment whose key matches a Mock.Noise regex as a wildcard.
+// After wildcarding, the surviving key sets on both sides must be equal,
+// and each surviving key's value(s) must be byte-equal.
+//
+// Splitting is done on raw bytes (Split on '&', IndexByte on '=') rather
+// than via url.ParseQuery so the segment passed to nc.IsNoisy carries the
+// same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
+// (^<raw_key>=[^&]+$). Multi-valued keys (a=1&a=2) are handled positionally.
+func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker) bool {
+	parse := func(body string) map[string][]string {
+		out := make(map[string][]string)
+		if body == "" {
+			return out
+		}
+		for _, seg := range strings.Split(body, "&") {
+			if seg == "" {
+				continue
+			}
+			eqIdx := strings.IndexByte(seg, '=')
+			var key, val string
+			if eqIdx < 0 {
+				key = seg
+			} else {
+				key = seg[:eqIdx]
+				val = seg[eqIdx+1:]
+			}
+			out[key] = append(out[key], val)
+		}
+		return out
+	}
+	isNoisy := func(key string, vals []string) bool {
+		for _, v := range vals {
+			if nc.IsNoisy(key + "=" + v) {
+				return true
+			}
+		}
+		return false
+	}
+	sliceEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	mockKV := parse(mockBody)
+	reqKV := parse(reqBody)
+
+	for k, mv := range mockKV {
+		if isNoisy(k, mv) {
+			continue
+		}
+		rv, ok := reqKV[k]
+		if !ok || !sliceEqual(mv, rv) {
+			return false
+		}
+	}
+	for k, rv := range reqKV {
+		if _, ok := mockKV[k]; ok {
+			continue
+		}
+		if isNoisy(k, rv) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // updateMock processes the matched mock based on its Lifetime.

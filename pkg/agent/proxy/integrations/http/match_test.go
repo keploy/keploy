@@ -578,6 +578,98 @@ func TestExactBodyMatch_FullyNoisyBody(t *testing.T) {
 	}
 }
 
+// TestExactBodyMatch_FormEncodedKeyNoise covers the IRSA-shaped case: a
+// form-encoded STS AssumeRoleWithWebIdentity request whose WebIdentityToken
+// rotates every replay. Recording-side obfuscation has marked the
+// WebIdentityToken key as noise via ^WebIdentityToken=[^&]+$; the matcher
+// must skip that segment and exact-match the rest.
+func TestExactBodyMatch_FormEncodedKeyNoise(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&Version=2011-06-15" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+						"&RoleSessionName=botocore-session-1" +
+						"&WebIdentityToken=long-recorded-jwt-bytes-here",
+				},
+			},
+		},
+	}
+	// Live request differs only in the WebIdentityToken value (placeholder
+	// from materializeProjectedVolume) — every other field is identical.
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&Version=2011-06-15" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+		"&RoleSessionName=botocore-session-1" +
+		"&WebIdentityToken=placeholder-service-account-token")
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected form-body noise-aware match to succeed")
+	}
+	if match.Name != "mock-sts" {
+		t.Errorf("expected mock-sts, got %s", match.Name)
+	}
+}
+
+// TestExactBodyMatch_FormEncodedMismatchOnNonNoisyField guards against the
+// matcher relaxing too much: a divergent NON-noisy field (here RoleArn)
+// must still cause the match to fail.
+func TestExactBodyMatch_FormEncodedMismatchOnNonNoisyField(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+						"&WebIdentityToken=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fdifferent" +
+		"&WebIdentityToken=B")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when a non-noisy field (RoleArn) differs")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedExtraKeyOnRequest covers the symmetric
+// failure: live request carries a non-noisy key the mock doesn't declare.
+// The matcher must reject — otherwise SNS PublishBatch (with its many
+// .member.N keys) could absorb arbitrary unrelated requests.
+func TestExactBodyMatch_FormEncodedExtraKeyOnRequest(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity&WebIdentityToken=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity&WebIdentityToken=B&UnknownKey=value")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when request carries an extra non-noisy key")
+	}
+}
+
 func TestExactBodyMatch_NoNoisePatterns(t *testing.T) {
 	h := newHTTP()
 	// Mock has no Noise patterns — second pass should skip it
