@@ -973,7 +973,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
 		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
-		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, r.firstRun)
+		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, testSetID, r.firstRun)
 		if err != nil {
 			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
