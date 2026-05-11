@@ -760,6 +760,51 @@ func looksLikeFormEncoded(body string) bool {
 	return err == nil
 }
 
+// valueHasUnixTimestamp reports whether s contains a decimal run that looks
+// like a modern unix timestamp — 10 digits in [1_500_000_000, 2_500_000_000]
+// (seconds, 2017-07-14 → 2049-03-22) or 13 digits in
+// [1_500_000_000_000, 2_500_000_000_000] (milliseconds, same range). Used
+// by formBodiesMatchModuloNoise to wildcard form segments whose value
+// embeds a record-time timestamp the recorder didn't tag as noise.
+//
+// The 10/13-digit gate is deliberate: 11- and 12-digit runs (e.g. 12-digit
+// AWS account IDs) are not plausible unix timestamps in either unit and
+// must not be wildcarded.
+func valueHasUnixTimestamp(s string) bool {
+	const (
+		secMin uint64 = 1_500_000_000
+		secMax uint64 = 2_500_000_000
+		msMin  uint64 = 1_500_000_000_000
+		msMax  uint64 = 2_500_000_000_000
+	)
+	n := len(s)
+	for i := 0; i < n; {
+		if s[i] < '0' || s[i] > '9' {
+			i++
+			continue
+		}
+		j := i
+		for j < n && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		runLen := j - i
+		if runLen == 10 || runLen == 13 {
+			var v uint64
+			for k := i; k < j; k++ {
+				v = v*10 + uint64(s[k]-'0')
+			}
+			if runLen == 10 && v >= secMin && v <= secMax {
+				return true
+			}
+			if runLen == 13 && v >= msMin && v <= msMax {
+				return true
+			}
+		}
+		i = j
+	}
+	return false
+}
+
 // formBodiesMatchModuloNoise compares two form-encoded bodies treating any
 // individual "key=value" segment that matches a Mock.Noise regex as a
 // wildcard. Noise is evaluated *per occurrence*, not per key: a body like
@@ -803,6 +848,15 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 				out[key] = nil
 			}
 			if nc.IsNoisy(key + "=" + val) {
+				continue
+			}
+			// Stop-gap until the recorder emits explicit noise patterns
+			// for rotating-timestamp keys (botocore RoleSessionName,
+			// OAuth nonces, …): wildcard any segment whose value
+			// embeds a modern unix timestamp. valueHasUnixTimestamp's
+			// digit-width gate (10 or 13 only) keeps 12-digit AWS
+			// account IDs out of scope.
+			if valueHasUnixTimestamp(val) {
 				continue
 			}
 			out[key] = append(out[key], val)
