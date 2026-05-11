@@ -6,15 +6,14 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-mongo-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
-RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-400}"
+RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
 MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
-# Hill-shaped VU ramp: 2→4→8→4. Peak reduced from 12→8 VUs so the recording
-# phase fits within CI's 2-vCPU runner without starving the Keploy proxy or
-# MongoDB containers. Still exercises meaningful concurrent load for mock coverage.
-# globalNoise in keploy.yml covers variable response fields (id, timestamps,
+# Hill-shaped VU ramp: 4→8→12→4. Saturates the system by a small fraction so
+# Keploy's recording captures real concurrent load while staying within CI memory
+# limits. globalNoise in keploy.yml covers variable response fields (id, timestamps,
 # etc.) so concurrent-VU FIFO mock collisions don't fail assertions.
-MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-2,4,8,4}"
+MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
