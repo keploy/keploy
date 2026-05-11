@@ -1452,16 +1452,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			for i, m := range expectedTestMockMappings[testCase.Name] {
 				expectedNames[i] = m.Name
 			}
-
-			// Grace period: the previous test's HTTP response has been received, but
-			// background DB goroutines it spawned may still be in-flight inside the
-			// proxy. Without this pause, UpdateMockParams for T(N) fires while
-			// T(N-1)'s goroutines are still searching the mock pool, causing them to
-			// consume T(N)'s mocks (window-shift race). The measured overlap is always
-			// under 3.2 ms; 10 ms gives 3× safety margin with negligible total cost
-			// (~28 s extra for 2800 tests).
-			time.Sleep(10 * time.Millisecond)
-
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
