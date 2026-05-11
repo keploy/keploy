@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -204,10 +205,10 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	return nil
 }
 
-func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
-	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID))
+func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
+	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID), zap.String("testSetID", testSetID))
 
-	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, firstRun); err != nil {
+	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
 		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
 	}
 
@@ -225,10 +226,33 @@ func (h *Hooks) BeforeTestResult(ctx context.Context, testRunID string, testSetI
 }
 
 func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bool) error {
+	// Rotate the CLI-side debug-file sink back to its unscoped (origin)
+	// path so trailing work after the test set finishes (cross-set
+	// reporting, AfterTestRun, bundle finalize) lands in the top-level
+	// cloud-debug.log rather than the per-set file we just closed. The
+	// agent-side sink lives in a separate process and is unaffected; it
+	// rotates on its own schedule via HandleBeforeTestSetCompose.
+	if err := log.RotateDebugFileToUnscoped(); err != nil {
+		h.logger.Warn("debug file rotation to unscoped failed", zap.String("testSetID", testSetID), zap.Error(err))
+	}
 	return nil
 }
 
 func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
+	// Rotate the CLI-side debug-file sink to a per-test-set scope so the
+	// cloud-replay command's debug stream for this test set lands in
+	// <cfg.Path>/<testSetID>/cloud-debug.log. Fires per test set in the
+	// outer replay loop (replay.go:402), BEFORE the NO_TESTS_TO_RUN
+	// short-circuit, so every test set the run touches gets a per-set
+	// CLI log folder regardless of whether it had test cases to
+	// simulate. The agent-side sink (when an agent comes up for this
+	// test set in DockerCompose mode) rotates independently via
+	// HandleBeforeTestSetCompose; each process owns its own global
+	// sink. No-op when the sink isn't attached (i.e. when the cloud
+	// debug-bundle pipeline is disabled).
+	if err := log.RotateDebugFileForTestSet(testSetID); err != nil {
+		h.logger.Warn("debug file rotation for test set failed", zap.String("testSetID", testSetID), zap.Error(err))
+	}
 	return nil
 }
 
