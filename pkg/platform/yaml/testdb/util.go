@@ -326,7 +326,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 				// decodes it back as map[string]interface{} (yaml.v3) or
 				// map[interface{}]interface{} (yaml.v2). Asserting on
 				// map[AssertionType]interface{} always failed and silently
-				// dropped the noise config (#3872) — accept both shapes.
+				// dropped the noise config (#3872), accept both shapes.
 				populateNoise(raw, tc.Noise)
 			}
 		}
@@ -361,7 +361,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 // as map[string]interface{} from yaml.v3 or map[interface{}]interface{} from
 // yaml.v2) into the tc.Noise map[string][]string that the rest of keploy
 // expects. The previous code asserted the raw value as
-// map[models.AssertionType]interface{} — that type never matched what the
+// map[models.AssertionType]interface{}, that type never matched what the
 // YAML libraries produce, so noise assertions were silently dropped on load.
 func populateNoise(raw interface{}, noise map[string][]string) {
 	if raw == nil {
