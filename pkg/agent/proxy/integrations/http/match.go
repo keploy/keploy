@@ -420,13 +420,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 // First pass: fast string equality.
 // Second pass: noise-aware comparison that skips obfuscated fields identified
 // by Mock.Noise patterns. Three body shapes are handled in the second pass:
-//   1. A mock body that is itself entirely a noise value — auto-match.
-//   2. application/x-www-form-urlencoded — per-segment noise check (see
-//      formBodiesMatchModuloNoise). Lets a noise regex of the shape
-//      ^<key>=[^&]+$ wildcard a rotating field (IRSA WebIdentityToken=…,
-//      OAuth client_assertion=…, etc.) without depending on the SDK to
-//      produce byte-identical request bodies at replay.
-//   3. JSON — field-by-field comparison via JSONBodyMatchScore.
+//  1. A mock body that is itself entirely a noise value — auto-match.
+//  2. application/x-www-form-urlencoded — per-segment noise check (see
+//     formBodiesMatchModuloNoise). Lets a noise regex of the shape
+//     ^<key>=[^&]+$ wildcard a rotating field (IRSA WebIdentityToken=…,
+//     OAuth client_assertion=…, etc.) without depending on the SDK to
+//     produce byte-identical request bodies at replay.
+//  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
