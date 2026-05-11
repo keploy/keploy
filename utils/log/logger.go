@@ -476,7 +476,15 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 		capBytes = 100 << 20 // 100 MiB default
 	}
 	capped := newCappedWriteSyncer(zapcore.AddSync(file), capBytes)
-	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10}
+	// FlushInterval defaults to 30s in zap, which is too coarse: a
+	// short test set (e.g. 2 test cases finishing in < 30s) can write
+	// less than the 256 KiB buffer size and never trigger an
+	// auto-flush. If the agent process is then killed by
+	// docker-compose teardown before main's defer runs Flush(), the
+	// buffered bytes are LOST and the per-test-set file ends up
+	// empty. 1s keeps the buffering performance benefit while
+	// bounding data-loss-on-crash to ~1s of records.
+	buffered := &zapcore.BufferedWriteSyncer{WS: capped, Size: 256 << 10, FlushInterval: time.Second}
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	debugCore := newRedactingCore(zapcore.NewCore(
 		encoder,

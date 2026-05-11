@@ -9,7 +9,6 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -208,16 +207,10 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
 	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID), zap.String("testSetID", testSetID))
 
-	// Rotate the CLI-side debug-file sink to the per-test-set scope
-	// BEFORE we POST to the agent. This is the one per-test-set
-	// boundary that fires in DockerCompose mode (which is the only
-	// mode cloud-replay uses), so both processes rotate at the same
-	// hook: the CLI rotates its own sink here, then the agent rotates
-	// its sink when HandleBeforeTestSetCompose receives the POST.
-	// No-op when no sink is registered (record / test / non-cloud).
-	if err := log.RotateDebugFileForTestSet(testSetID); err != nil {
-		h.logger.Warn("debug file rotation for test set failed", zap.String("testSetID", testSetID), zap.Error(err))
-	}
+	// Deliberately no log.RotateDebugFileForTestSet here. The CLI's
+	// debug log stays at a single <cfg.Path>/cloud-debug.log for the
+	// whole run; only the agent's debug log rotates per test set
+	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
 		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
