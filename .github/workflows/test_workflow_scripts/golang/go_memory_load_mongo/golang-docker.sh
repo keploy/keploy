@@ -472,12 +472,7 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-# Disable strict mock-window filtering for this app: recording with 12 concurrent
-# VUs produces overlapping per-test HTTP windows (~1-2 ms wide). MongoDB mocks
-# captured during that overlap are excluded by strict windowing even though they
-# belong to the test, causing connection EOF failures. Timestamp-based matching
-# in the unfiltered pool selects the correct mocks reliably without the filter.
-run_with_keploy_privileges env KEPLOY_STRICT_MOCK_WINDOW=0 "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
 replay_pid=$!
 echo "Started Keploy test process with PID: $replay_pid"
 
