@@ -635,17 +635,3 @@ func RotateDebugFileForTestSet(testSetID string) error {
 	}
 	return sink.RotateForScope(testSetID)
 }
-
-// RotateDebugFileToUnscoped flips the active sink back to its original
-// (pre-rotation) path. Paired with RotateDebugFileForTestSet at the
-// test-set boundary so trailing work after a test set finishes (CLI
-// cleanup, AfterTestRun, etc.) lands in the top-level log rather than
-// the just-closed per-set file. No-op when no sink is registered or
-// when the sink is already at the unscoped path.
-func RotateDebugFileToUnscoped() error {
-	sink := GetDebugFileSink()
-	if sink == nil {
-		return nil
-	}
-	return sink.RotateForScope("")
-}
