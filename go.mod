@@ -199,10 +199,3 @@ require (
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 )
-
-// The Aerospike parser lives in the sibling integrations repo and
-// registers itself via init(). Blank-imported by
-// pkg/agent/proxy/parsers.go so the proxy actually dispatches to it.
-require github.com/keploy/integrations v0.0.0-00010101000000-000000000000
-
-replace github.com/keploy/integrations => ../integrations
