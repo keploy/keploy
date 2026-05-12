@@ -343,3 +343,86 @@ jobs:
           echo "::group::Keploy Report"
           sudo -E "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
           echo "::endgroup::"
+
+  aerospike_fuzzer:
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'aerospike_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
+    # Typical fuzzer run is 3-5 min; cap at 30 so a hung
+    # capture-layer shutdown cannot hold the runner for 6h.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+
+    name: Aerospike Fuzzer (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Download Keploy Binary (for Record)
+        id: record_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Download Keploy Binary (for Replay)
+        id: replay_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Download and Extract Aerospike Fuzzer
+        id: aerospike_fuzzer
+        run: |
+          set -e
+          KEY="releases/aerospike-fuzzer/latest/aerospike-fuzzer-linux-amd64.tar.gz"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf aerospike-fuzzer-linux-amd64.tar.gz
+          chmod +x ./aerospike-fuzzer
+          echo "path=$(realpath ./aerospike-fuzzer)" >> $GITHUB_OUTPUT
+
+      - name: Run Aerospike Fuzzer Test
+        env:
+          RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
+          REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
+          AEROSPIKE_FUZZER_BIN: ${{ steps.aerospike_fuzzer.outputs.path }}
+        run: |
+          chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/aerospike/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/aerospike/golang-linux.sh
+
+      - name: Upload Aerospike Fuzzer recorded mocks and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerospike-fuzzer-${{ matrix.config.job }}-recordings
+          path: |
+            keploy/
+            golden/
+            record.txt
+            test.txt
+          if-no-files-found: warn
+          retention-days: 7
