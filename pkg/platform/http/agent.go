@@ -438,187 +438,73 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 		return nil
 	}
 
-	requestBody := models.BeforeSimulateRequest{
+	return a.postAgentHook(ctx, "/hooks/before-simulate", models.BeforeSimulateRequest{
 		TimeStamp:    *timestamp,
 		TestSetID:    testSetID,
 		TestCaseName: tcName,
-	}
-	if a.conf.Agent.AgentURI == "" {
-		return nil
-	}
-
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/before-simulate")
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
-	}
-	return nil
+	})
 }
 
 func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetID string) error {
-
-	requestBody := models.AfterSimulateRequest{
+	return a.postAgentHook(ctx, "/hooks/after-simulate", models.AfterSimulateRequest{
 		TestSetID:    testSetID,
 		TestCaseName: tcName,
-	}
-	if a.conf.Agent.AgentURI == "" {
-		return nil
-	}
-
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/after-simulate")
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
-	}
-	return nil
+	})
 }
 
 func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error {
-
-	requestBody := models.BeforeTestRunReq{
+	return a.postAgentHook(ctx, "/hooks/before-test-run", models.BeforeTestRunReq{
 		TestRunID: testRunID,
-	}
-	if a.conf.Agent.AgentURI == "" {
-		return nil
-	}
-
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/before-test-run")
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
-	}
-	return nil
-
+	})
 }
 
 func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
-
-	requestBody := models.BeforeTestSetCompose{
+	return a.postAgentHook(ctx, "/hooks/before-test-set-compose", models.BeforeTestSetCompose{
 		TestRunID: testRunID,
 		TestSetID: testSetID,
-	}
-	if a.conf.Agent.AgentURI == "" {
-		return nil
-	}
-
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/before-test-set-compose")
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
-	}
-	return nil
-
+	})
 }
 
 func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
-
-	requestBody := models.AfterTestRunReq{
+	return a.postAgentHook(ctx, "/hooks/after-test-run", models.AfterTestRunReq{
 		TestRunID:  testRunID,
 		TestSetIDs: testSetIDs,
 		Coverage:   coverage,
-	}
+	})
+}
+
+func (a *AgentClient) postAgentHook(ctx context.Context, endpoint string, payload interface{}) error {
 	if a.conf.Agent.AgentURI == "" {
 		return nil
 	}
 
-	body, err := json.Marshal(requestBody)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/after-test-run")
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, endpoint), bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", endpoint), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
 		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
 	}
 	return nil
-
 }
+
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	requestBody := models.StoreMocksReq{
 		Filtered:   filtered,
