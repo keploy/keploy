@@ -441,7 +441,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --debug --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
@@ -466,7 +466,7 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --debug --generate-github-actions=false 2>&1 | tee test.txt &
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
 replay_pid=$!
 echo "Started Keploy test process with PID: $replay_pid"
 
