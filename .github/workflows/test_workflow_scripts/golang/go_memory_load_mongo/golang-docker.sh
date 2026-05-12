@@ -17,13 +17,7 @@ MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
-# Large-payload disabled for MongoDB: Keploy records >1 MB MongoDB document
-# responses as BodySkipped mocks. During replay, serving an incomplete BSON
-# response corrupts the Go MongoDB driver's connection pool — every subsequent
-# DB operation in the test run fails with EOF, causing a full cascade failure.
-# MySQL handles this gracefully (per-query isolation); MongoDB does not.
-# Large-payload coverage is provided by the go-memory-load-mysql pipeline.
-LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-0}"
+LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
