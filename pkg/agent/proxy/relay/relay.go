@@ -103,7 +103,8 @@ type Relay struct {
 	runErr atomic.Pointer[error]
 
 	// preDispatchActive is true between [Relay.Run]'s pre-spawn
-	// [beginPause] (gated on [Config.PreDispatchPause]) and the
+	// [installPreDispatchPause] call (gated on
+	// [Config.PreDispatchPause]) and the
 	// [directive.KindResumePreDispatch] handler. While set, the
 	// forward loop:
 	//
@@ -312,15 +313,15 @@ func (r *Relay) run(ctx context.Context) error {
 	// have replied with 'S' and the client may already have written
 	// TLS bytes that the C2D forwarder forwarded as plaintext.
 	//
-	// installPreDispatchPauseLocked is the no-deadline-kick variant
-	// of beginPause: there are no in-flight Reads yet (forwarders are
+	// installPreDispatchPause is the no-deadline-kick variant of
+	// beginPause: there are no in-flight Reads yet (forwarders are
 	// not running), so the deadline kick beginPause uses to wake a
 	// blocked Read would just leave the read deadlines stuck in the
 	// past — making the forwarder Read return EAGAIN forever in a
 	// tight loop until endPause clears it. The pause channel and the
 	// parker tracking are set up identically.
 	if r.cfg.PreDispatchPause {
-		r.installPreDispatchPauseLocked()
+		r.installPreDispatchPause()
 		r.preDispatchActive.Store(true)
 	}
 
@@ -678,14 +679,14 @@ func (r *Relay) beginPause() chan struct{} {
 	return pc
 }
 
-// installPreDispatchPauseLocked installs the pause channel + parker
+// installPreDispatchPause installs the pause channel + parker
 // tracking WITHOUT touching the live sockets' read deadlines. Use
 // before any forwarder has started reading — the deadline-kick the
 // regular beginPause does would otherwise leave the sockets in a
 // permanent timeout state until endPause cleared it, starving the
-// forwarders out of their pause-aware Read loop. Caller must hold
-// pauseMu.
-func (r *Relay) installPreDispatchPauseLocked() {
+// forwarders out of their pause-aware Read loop. Acquires pauseMu
+// internally; callers must NOT already hold it.
+func (r *Relay) installPreDispatchPause() {
 	r.pauseMu.Lock()
 	defer r.pauseMu.Unlock()
 	r.installPauseChLocked()

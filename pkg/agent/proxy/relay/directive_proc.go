@@ -68,7 +68,7 @@ func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d
 		// supervisor's job. Ack and move on.
 		return directive.Ack{Kind: d.Kind, OK: true}
 	case directive.KindResumePreDispatch:
-		return r.handleResumePreDispatch(d)
+		return r.handleResumePreDispatch(ctx, stopping, d)
 	default:
 		return directive.Ack{
 			Kind: d.Kind,
@@ -545,40 +545,52 @@ func (r *Relay) handleAbortMock(d directive.Directive) directive.Ack {
 // handleResumePreDispatch ends the pre-dispatch pause window installed
 // by run() under Config.PreDispatchPause. It:
 //
-//  1. Pulls everything from the per-direction stashes under stashMu.
-//     Those are the bytes the forwarders read + teed during pre-
-//     dispatch but did NOT write to the real peer (because pre-dispatch
-//     is precisely the mode where the parser is in charge of the first
-//     chunk's destiny). Without this drain, the connection would
-//     proceed with the real peers missing the prefix the parser just
-//     decided was fine to forward — the upstream would see byte N+1
-//     of the stream as if it were byte 0, and the protocol would
-//     desynchronize on the very next message.
+//  1. Nudges both real sockets' read deadlines into the past and waits
+//     for both forwarders to mark themselves parked on the pause
+//     channel. This is the critical synchronisation step. Pre-dispatch
+//     starts WITHOUT a deadline kick (so the forwarders' first Read
+//     proceeds), so by the time this directive arrives a forwarder may
+//     still be blocked in a Read that hasn't returned yet. If we
+//     snapshot the stash and call endPause without first draining the
+//     in-flight Reads through the post-Read pause path, those Reads
+//     would return AFTER our snapshot took the stash, land in the
+//     post-Read recheck still seeing pauseCh != nil, append to the
+//     stash, and then be dropped by endPause's unconditional
+//     stashedC2D/stashedD2C = nil. Bytes lost silently, live stream
+//     desynchronizes.
 //
-//  2. Writes each stashed payload to the corresponding live peer in
+//  2. Pulls everything from the per-direction stashes under stashMu.
+//     With both forwarders parked, no concurrent appends can race
+//     this read. The bytes are the prefix the forwarders teed during
+//     pre-dispatch but did NOT write to the real peer.
+//
+//  3. Writes each stashed payload to the corresponding live peer in
 //     read order. C2D stash goes to dst (the real upstream service);
 //     D2C stash goes to src (the real client). A short write or error
 //     on either peer is logged and surfaced via Ack.OK=false, but we
 //     still endPause so the connection's forwarders aren't permanently
 //     stuck — the supervisor will fall through to passthrough.
 //
-//  3. Clears r.preDispatchActive so subsequent forward-loop iterations
+//  4. Clears r.preDispatchActive so subsequent forward-loop iterations
 //     take the standard path (pre-Read park works, post-Read recheck
 //     stops teeing during transient pauses).
 //
-//  4. Calls endPause to close the pause channel — forwarders parked on
+//  5. Calls endPause to close the pause channel — forwarders parked on
 //     it wake up and resume normal Read→Write→Tee operation.
-func (r *Relay) handleResumePreDispatch(d directive.Directive) directive.Ack {
+func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	log := r.cfg.Logger
 
-	// Pull the stashed payloads under the mutex; subsequent forwarder
-	// post-Read rechecks may add new stash entries before endPause
-	// closes the pause channel, but those would still be processed
-	// by the standard pause path (we've cleared preDispatchActive
-	// just below, so no further tee happens; the bytes get stashed-
-	// and-dropped on endPause, which is the right behaviour for any
-	// in-flight read that started before this resume directive
-	// arrived).
+	// Synchronise with the forwarders before touching the stash. The
+	// nudge wakes any forwarder blocked in Read; the wait ensures both
+	// of them have reached the post-Read pause path (either with bytes
+	// to stash, or with a deadline error producing no stash) and
+	// marked themselves parked. After this returns, both forwarders
+	// are blocked on pauseCh and no concurrent stash appends can race
+	// the snapshot below.
+	r.nudgeDeadline(r.dst.Load())
+	r.nudgeDeadline(r.src.Load())
+	r.waitForwardersParked(ctx, stopping)
+
 	r.stashMu.Lock()
 	c2dStash := r.stashedC2D
 	d2cStash := r.stashedD2C
@@ -586,10 +598,10 @@ func (r *Relay) handleResumePreDispatch(d directive.Directive) directive.Ack {
 	r.stashedD2C = nil
 	r.stashMu.Unlock()
 
-	// Clear the pre-dispatch flag before draining so any concurrent
-	// post-Read recheck (a forwarder that woke from the deadline kick
-	// after stashing) does not double-tee the same bytes we are about
-	// to write.
+	// Clear the pre-dispatch flag before draining so any path that
+	// reads it (currently only the forward loop, which is parked
+	// behind pauseCh until endPause below — the flag clear here is
+	// belt-and-braces) sees the standard pause semantics.
 	r.preDispatchActive.Store(false)
 
 	var drainErr error

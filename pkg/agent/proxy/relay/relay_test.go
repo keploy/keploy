@@ -882,12 +882,18 @@ func TestPreDispatchPause_HoldsC2DUntilResume(t *testing.T) {
 	go h.writeClient(payload)
 
 	// destSvc must NOT receive the payload while pre-dispatch is active.
-	// Use a short read deadline to assert the bytes are being held.
+	// Use a short read deadline and assert the Read times out specifically
+	// (not a closed-connection / EOF / unrelated error — those would make
+	// this test pass trivially without proving the pause guarantee).
 	_ = h.destSvc.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 	buf := make([]byte, len(payload))
-	if n, err := h.destSvc.Read(buf); err == nil {
+	n, err := h.destSvc.Read(buf)
+	if err == nil {
 		t.Fatalf("destSvc should have timed out while pre-dispatch held the write; got %d bytes %q",
 			n, buf[:n])
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("destSvc Read should have failed with a timeout (net.Error.Timeout()==true); got %v (n=%d)", err, n)
 	}
 	_ = h.destSvc.SetReadDeadline(time.Time{})
 
@@ -957,11 +963,17 @@ func TestPreDispatchPause_HoldsD2CUntilResume(t *testing.T) {
 	go h.writeDest(payload)
 
 	// clientApp must NOT receive the payload while pre-dispatch held.
+	// Assert specifically on timeout so the test cannot be falsified by
+	// an unrelated read error (e.g. the connection getting torn down).
 	_ = h.clientApp.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 	buf := make([]byte, len(payload))
-	if n, err := h.clientApp.Read(buf); err == nil {
+	n, err := h.clientApp.Read(buf)
+	if err == nil {
 		t.Fatalf("clientApp should have timed out while pre-dispatch held the write; got %d bytes %q",
 			n, buf[:n])
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("clientApp Read should have failed with a timeout (net.Error.Timeout()==true); got %v (n=%d)", err, n)
 	}
 	_ = h.clientApp.SetReadDeadline(time.Time{})
 
