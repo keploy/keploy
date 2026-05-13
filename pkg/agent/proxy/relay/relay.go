@@ -693,7 +693,7 @@ func (r *Relay) installPreDispatchPause() {
 }
 
 // installPauseChLocked is the shared body of beginPause and
-// installPreDispatchPauseLocked. Returns the active pause channel and
+// installPreDispatchPause. Returns the active pause channel and
 // guarantees the per-direction park signals are armed. Caller must
 // hold pauseMu.
 func (r *Relay) installPauseChLocked() chan struct{} {
@@ -822,6 +822,17 @@ func (r *Relay) endPause() {
 	r.stashedC2D = nil
 	r.stashedD2C = nil
 	r.stashMu.Unlock()
+	// Always clear the pre-dispatch flag when a pause window ends.
+	// This covers both ResumePreDispatch (the explicit no-TLS resume
+	// path, which also clears it directly before calling endPause as
+	// defence-in-depth) and the TLS-upgrade path (handleUpgradeTLS
+	// transitions from pre-dispatch into its own pause + upgrade and
+	// then calls endPause; without this clear the flag would leak
+	// past the TLS upgrade and corrupt the semantics of any future
+	// pause on the connection — pre-Read park would stay skipped
+	// and post-Read pauses would tee into the parser FakeConn even
+	// when they shouldn't).
+	r.preDispatchActive.Store(false)
 }
 
 // clearDeadline drops any read deadline previously installed on the

@@ -580,6 +580,25 @@ func (r *Relay) handleAbortMock(d directive.Directive) directive.Ack {
 func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	log := r.cfg.Logger
 
+	// Defensive precondition: only act on connections that actually
+	// have an active pre-dispatch pause. A duplicate ResumePreDispatch
+	// or a parser bug that fires it after the pause already ended
+	// (e.g. UpgradeTLS already ran) would otherwise nudge deadlines
+	// into the past on the live sockets — and since endPause only
+	// clears deadlines while pauseCh is non-nil, those past deadlines
+	// would persist, putting the forwarders into a tight EAGAIN loop
+	// for the rest of the connection. Reject loudly instead: the
+	// supervisor will surface the error and the connection falls
+	// through to passthrough, which is the right blast radius for a
+	// directive-protocol violation.
+	if !r.preDispatchActive.Load() || r.currentPauseCh() == nil {
+		return directive.Ack{
+			Kind: d.Kind,
+			OK:   false,
+			Err:  errors.New("resume-pre-dispatch: no active pre-dispatch pause to release"),
+		}
+	}
+
 	// Synchronise with the forwarders before touching the stash. The
 	// nudge wakes any forwarder blocked in Read; the wait ensures both
 	// of them have reached the post-Read pause path (either with bytes
