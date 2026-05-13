@@ -493,19 +493,23 @@ func (r *Relay) forward(
 					)
 				}
 				// In pre-dispatch mode the parser needs to SEE the
-				// stashed bytes via its FakeConn — that's the whole
-				// point of installing the pause before forwarders
-				// spawn. Tee a chunk with ReadAt set and WrittenAt
-				// left zero (the real Write is deferred to either
-				// the KindResumePreDispatch drain or the TLS upgrade
-				// handler's own write path; in neither case do we
-				// have a meaningful WrittenAt to record at chunk
-				// emission time). The standard pause path (TLS
-				// upgrade after a parser already had its chance to
-				// inspect a prior chunk) does NOT tee — those bytes
-				// are protocol preamble the parser explicitly does
-				// not want to consume via its FakeConn.
-				if r.preDispatchActive.Load() {
+				// client's first message via its FakeConn — that's
+				// how it inspects e.g. postgres SSLRequest before
+				// deciding between ResumePreDispatch (plain) and
+				// UpgradeTLS (SSL). The TLS-upgrade handler consumes
+				// the server's preamble reply (the SSLResponse byte)
+				// from the stash directly via takeStashedPrefix on
+				// the FromDest direction, so a D2C tee during pre-
+				// dispatch would leave that byte sitting in the
+				// DestStream FakeConn buffer — where the post-
+				// handshake captureSessionV2 would read it AS IF it
+				// were the first post-auth message, mis-parse it,
+				// and corrupt the session mock. Restrict the tee to
+				// FromClient so the parser sees what it asked for
+				// (the client's first chunk) and nothing it didn't
+				// (the server's preamble reply belongs to the
+				// directive handler, not the parser).
+				if r.preDispatchActive.Load() && dir == fakeconn.FromClient {
 					chunk := fakeconn.Chunk{
 						Dir:    dir,
 						Bytes:  stash,
@@ -513,7 +517,7 @@ func (r *Relay) forward(
 						SeqNo:  seq.Add(1),
 					}
 					teed := t.push(chunk)
-					if teed && dir == fakeconn.FromClient && r.cfg.OnClientChunkTeed != nil {
+					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
 					}
 				}
