@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -66,6 +67,8 @@ func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d
 		// The relay is not the mock committer — that is the
 		// supervisor's job. Ack and move on.
 		return directive.Ack{Kind: d.Kind, OK: true}
+	case directive.KindResumePreDispatch:
+		return r.handleResumePreDispatch(d)
 	default:
 		return directive.Ack{
 			Kind: d.Kind,
@@ -535,6 +538,134 @@ func (r *Relay) handleAbortMock(d directive.Directive) directive.Ack {
 			reason = "abort_mock"
 		}
 		r.cfg.OnMarkMockIncomplete(reason)
+	}
+	return directive.Ack{Kind: d.Kind, OK: true}
+}
+
+// handleResumePreDispatch ends the pre-dispatch pause window installed
+// by run() under Config.PreDispatchPause. It:
+//
+//  1. Pulls everything from the per-direction stashes under stashMu.
+//     Those are the bytes the forwarders read + teed during pre-
+//     dispatch but did NOT write to the real peer (because pre-dispatch
+//     is precisely the mode where the parser is in charge of the first
+//     chunk's destiny). Without this drain, the connection would
+//     proceed with the real peers missing the prefix the parser just
+//     decided was fine to forward — the upstream would see byte N+1
+//     of the stream as if it were byte 0, and the protocol would
+//     desynchronize on the very next message.
+//
+//  2. Writes each stashed payload to the corresponding live peer in
+//     read order. C2D stash goes to dst (the real upstream service);
+//     D2C stash goes to src (the real client). A short write or error
+//     on either peer is logged and surfaced via Ack.OK=false, but we
+//     still endPause so the connection's forwarders aren't permanently
+//     stuck — the supervisor will fall through to passthrough.
+//
+//  3. Clears r.preDispatchActive so subsequent forward-loop iterations
+//     take the standard path (pre-Read park works, post-Read recheck
+//     stops teeing during transient pauses).
+//
+//  4. Calls endPause to close the pause channel — forwarders parked on
+//     it wake up and resume normal Read→Write→Tee operation.
+func (r *Relay) handleResumePreDispatch(d directive.Directive) directive.Ack {
+	log := r.cfg.Logger
+
+	// Pull the stashed payloads under the mutex; subsequent forwarder
+	// post-Read rechecks may add new stash entries before endPause
+	// closes the pause channel, but those would still be processed
+	// by the standard pause path (we've cleared preDispatchActive
+	// just below, so no further tee happens; the bytes get stashed-
+	// and-dropped on endPause, which is the right behaviour for any
+	// in-flight read that started before this resume directive
+	// arrived).
+	r.stashMu.Lock()
+	c2dStash := r.stashedC2D
+	d2cStash := r.stashedD2C
+	r.stashedC2D = nil
+	r.stashedD2C = nil
+	r.stashMu.Unlock()
+
+	// Clear the pre-dispatch flag before draining so any concurrent
+	// post-Read recheck (a forwarder that woke from the deadline kick
+	// after stashing) does not double-tee the same bytes we are about
+	// to write.
+	r.preDispatchActive.Store(false)
+
+	var drainErr error
+	if len(c2dStash) > 0 {
+		dst := *r.dst.Load()
+		for _, p := range c2dStash {
+			if dst == nil {
+				break
+			}
+			wn, werr := dst.Write(p.bytes)
+			if werr != nil {
+				if log != nil {
+					log.Debug("relay: ResumePreDispatch C2D drain write error",
+						zap.Error(werr),
+						zap.Int("payload_bytes", len(p.bytes)),
+						zap.Int("written_bytes", wn),
+					)
+				}
+				if r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_c2d_write_error")
+				}
+				drainErr = fmt.Errorf("resume-pre-dispatch C2D drain: %w", werr)
+				break
+			}
+			if wn != len(p.bytes) {
+				if r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_c2d_short_write")
+				}
+				drainErr = errors.New("resume-pre-dispatch C2D drain: short write on destination socket")
+				break
+			}
+		}
+	}
+	if drainErr == nil && len(d2cStash) > 0 {
+		src := *r.src.Load()
+		for _, p := range d2cStash {
+			if src == nil {
+				break
+			}
+			wn, werr := src.Write(p.bytes)
+			if werr != nil {
+				if log != nil {
+					log.Debug("relay: ResumePreDispatch D2C drain write error",
+						zap.Error(werr),
+						zap.Int("payload_bytes", len(p.bytes)),
+						zap.Int("written_bytes", wn),
+					)
+				}
+				if r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_d2c_write_error")
+				}
+				drainErr = fmt.Errorf("resume-pre-dispatch D2C drain: %w", werr)
+				break
+			}
+			if wn != len(p.bytes) {
+				if r.cfg.OnMarkMockIncomplete != nil {
+					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_d2c_short_write")
+				}
+				drainErr = errors.New("resume-pre-dispatch D2C drain: short write on source socket")
+				break
+			}
+		}
+	}
+
+	// Always endPause, even on a partial drain: the alternative is
+	// to leave the forwarders permanently parked on the pause channel
+	// while the supervisor decides what to do, which deadlocks the
+	// only path that can tear the relay down (parser exits → relayCtx
+	// cancels → forwarders return via ctx.Done in their pause select).
+	// That select IS armed (see the pre-Read park) but we'd rather not
+	// rely on cancellation timing here — making the wake-up
+	// unconditional is cheap and easier to reason about.
+	r.endPause()
+
+	if drainErr != nil {
+		return directive.Ack{Kind: d.Kind, OK: false, Err: drainErr}
 	}
 	return directive.Ack{Kind: d.Kind, OK: true}
 }

@@ -860,3 +860,140 @@ func (d *dropSink) count(reason string) int {
 	}
 	return n
 }
+
+// TestPreDispatchPause_HoldsC2DUntilResume — the canonical scenario the
+// pre-dispatch pause exists to handle: bytes the client sends DO NOT
+// reach the real destination until the parser explicitly releases the
+// pause. The parser's FakeConn DOES see those bytes (otherwise it
+// couldn't decide whether to release or escalate to a TLS upgrade).
+// Mirrors the Postgres SSL preamble race (keploy/enterprise#2012):
+// without this guarantee, the C2D forwarder would deliver SSLRequest
+// to the server while the parser was still scheduling, the server's
+// 'S' reply would race back through D2C to the client, and the
+// recorder would see whatever byte landed instead of 'S'.
+func TestPreDispatchPause_HoldsC2DUntilResume(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{PreDispatchPause: true})
+
+	// Client writes the first chunk. Without pre-dispatch this would
+	// land on destSvc within microseconds; with pre-dispatch it must
+	// be held until the parser releases.
+	payload := []byte("first-chunk")
+	go h.writeClient(payload)
+
+	// destSvc must NOT receive the payload while pre-dispatch is active.
+	// Use a short read deadline to assert the bytes are being held.
+	_ = h.destSvc.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, len(payload))
+	if n, err := h.destSvc.Read(buf); err == nil {
+		t.Fatalf("destSvc should have timed out while pre-dispatch held the write; got %d bytes %q",
+			n, buf[:n])
+	}
+	_ = h.destSvc.SetReadDeadline(time.Time{})
+
+	// The parser's FakeConn DOES see the chunk — the whole point of
+	// pre-dispatch is that the parser inspects the first message
+	// before any byte hits the real peer.
+	c, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ClientStream.ReadChunk during pre-dispatch: %v", err)
+	}
+	if string(c.Bytes) != string(payload) {
+		t.Fatalf("ClientStream chunk bytes=%q, want %q", c.Bytes, payload)
+	}
+	if c.Dir != fakeconn.FromClient {
+		t.Fatalf("ClientStream chunk Dir=%v, want FromClient", c.Dir)
+	}
+	if c.ReadAt.IsZero() {
+		t.Fatalf("ClientStream chunk missing ReadAt: %+v", c)
+	}
+
+	// The handler drains the C2D stash to destSvc synchronously and
+	// destSvc is a net.Pipe — the Write blocks until somebody reads.
+	// Start the reader BEFORE issuing the directive so the handler's
+	// Write can complete (otherwise the ack never lands).
+	gotCh := make(chan []byte, 1)
+	go func() { gotCh <- h.readDest(len(payload)) }()
+
+	h.r.Directives() <- directive.ResumePreDispatch("parser-decided-no-tls")
+	select {
+	case a := <-h.r.Acks():
+		if a.Kind != directive.KindResumePreDispatch || !a.OK {
+			t.Fatalf("bad ResumePreDispatch ack: %+v", a)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no ack for ResumePreDispatch")
+	}
+
+	got := <-gotCh
+	if string(got) != string(payload) {
+		t.Fatalf("dest got %q after resume, want %q", got, payload)
+	}
+
+	// Subsequent traffic flows normally — pre-dispatch is a one-shot
+	// gate, not a sticky mode. Write a new payload and confirm it
+	// reaches destSvc without another directive round-trip.
+	post := []byte("post-resume")
+	go h.writeClient(post)
+	got = h.readDest(len(post))
+	if string(got) != string(post) {
+		t.Fatalf("post-resume dest got %q, want %q", got, post)
+	}
+}
+
+// TestPreDispatchPause_HoldsD2CUntilResume — symmetric to the C2D test,
+// but exercises the destination→client direction. In the postgres SSL
+// scenario this is the load-bearing one: the server's 'S' reply must
+// NOT reach the client before the parser decides whether to handle the
+// TLS upgrade itself (otherwise the client reacts with TLS ClientHello
+// and the parser-driven handshake collides with the wild one).
+func TestPreDispatchPause_HoldsD2CUntilResume(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{PreDispatchPause: true})
+
+	// Simulate Postgres replying. The real client must NOT see this
+	// until the parser explicitly resumes.
+	payload := []byte("S") // mimics the SSLResponse byte
+	go h.writeDest(payload)
+
+	// clientApp must NOT receive the payload while pre-dispatch held.
+	_ = h.clientApp.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, len(payload))
+	if n, err := h.clientApp.Read(buf); err == nil {
+		t.Fatalf("clientApp should have timed out while pre-dispatch held the write; got %d bytes %q",
+			n, buf[:n])
+	}
+	_ = h.clientApp.SetReadDeadline(time.Time{})
+
+	// The parser's DestStream sees the chunk.
+	d, err := h.r.DestStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("DestStream.ReadChunk during pre-dispatch: %v", err)
+	}
+	if string(d.Bytes) != string(payload) {
+		t.Fatalf("DestStream chunk bytes=%q, want %q", d.Bytes, payload)
+	}
+	if d.Dir != fakeconn.FromDest {
+		t.Fatalf("DestStream chunk Dir=%v, want FromDest", d.Dir)
+	}
+
+	// Same pipe-blocking concern as the C2D test: drain Write blocks
+	// until the test reads. Spawn the reader first.
+	gotCh := make(chan []byte, 1)
+	go func() { gotCh <- h.readClient(len(payload)) }()
+
+	h.r.Directives() <- directive.ResumePreDispatch("parser-decided-no-tls")
+	select {
+	case a := <-h.r.Acks():
+		if a.Kind != directive.KindResumePreDispatch || !a.OK {
+			t.Fatalf("bad ResumePreDispatch ack: %+v", a)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no ack for ResumePreDispatch")
+	}
+
+	got := <-gotCh
+	if string(got) != string(payload) {
+		t.Fatalf("client got %q after resume, want %q", got, payload)
+	}
+}

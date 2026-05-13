@@ -123,6 +123,24 @@ func (p *Proxy) recordViaSupervisor(
 	// connection (no pending requests) from a parser that received
 	// bytes but isn't emitting a mock (hang candidate). EmitMock's
 	// OnPendingCleared clears the flag after each successful emit.
+	// Opt-in pre-dispatch pause: parsers that need to deterministically
+	// observe the first chunk on a connection before any byte reaches
+	// the real peer implement the WantsPreDispatchPause capability.
+	// Today only postgres v3 sets this (to close the SSL preamble
+	// race; see keploy/enterprise#2012). Most parsers don't need it
+	// and would deadlock if their first action wasn't a ResumePreDispatch
+	// directive — so we ONLY engage pre-dispatch when the parser
+	// explicitly asks for it via this opt-in.
+	//
+	// Duck-typed instead of extending the IntegrationsV2 interface so
+	// each parser stays free to add the method independently and we
+	// don't have to touch every IntegrationsV2 implementation in this
+	// change.
+	var preDispatchPause bool
+	if pp, ok := parser.(interface{ WantsPreDispatchPause() bool }); ok {
+		preDispatchPause = pp.WantsPreDispatchPause()
+	}
+
 	r := relay.New(relay.Config{
 		Logger:               logger,
 		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
@@ -133,8 +151,9 @@ func (p *Proxy) recordViaSupervisor(
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
 		// withDefaults() — preserving the zero-config path.
-		PerConnCap: p.recordBufferCap,
-		TeeChanBuf: p.recordBufferQueueSize,
+		PerConnCap:       p.recordBufferCap,
+		TeeChanBuf:       p.recordBufferQueueSize,
+		PreDispatchPause: preDispatchPause,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
