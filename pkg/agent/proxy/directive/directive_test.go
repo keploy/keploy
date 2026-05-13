@@ -10,12 +10,13 @@ import (
 func TestKindString(t *testing.T) {
 	t.Parallel()
 	cases := map[Kind]string{
-		KindUpgradeTLS:   "upgrade-tls",
-		KindPauseDir:     "pause",
-		KindResumeDir:    "resume",
-		KindAbortMock:    "abort-mock",
-		KindFinalizeMock: "finalize-mock",
-		Kind(99):         "unknown",
+		KindUpgradeTLS:        "upgrade-tls",
+		KindPauseDir:          "pause",
+		KindResumeDir:         "resume",
+		KindAbortMock:         "abort-mock",
+		KindFinalizeMock:      "finalize-mock",
+		KindResumePreDispatch: "resume-pre-dispatch",
+		Kind(99):              "unknown",
 	}
 	for k, want := range cases {
 		if got := k.String(); got != want {
@@ -57,5 +58,18 @@ func TestSimpleHelpers(t *testing.T) {
 	r := Resume(fakeconn.FromDest, "resume")
 	if r.Kind != KindResumeDir || r.Dir != fakeconn.FromDest {
 		t.Errorf("Resume = %+v", r)
+	}
+	rpd := ResumePreDispatch("parser-decided-no-tls")
+	if rpd.Kind != KindResumePreDispatch {
+		t.Errorf("ResumePreDispatch kind = %v, want %v", rpd.Kind, KindResumePreDispatch)
+	}
+	if rpd.Reason != "parser-decided-no-tls" {
+		t.Errorf("ResumePreDispatch reason = %q, want %q", rpd.Reason, "parser-decided-no-tls")
+	}
+	// ResumePreDispatch does not target a direction (the relay drains
+	// both directions' stashes regardless), so Dir should be the zero
+	// value.
+	if rpd.Dir != fakeconn.Direction(0) {
+		t.Errorf("ResumePreDispatch Dir = %v, want zero value (directive applies to both directions)", rpd.Dir)
 	}
 }
