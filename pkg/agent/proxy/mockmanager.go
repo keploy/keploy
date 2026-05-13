@@ -1489,6 +1489,16 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
+	// DEBUG_TRACE: collect PostgresV3 mock names in the main loop only
+	// when Debug logging is enabled, so non-Debug runs don't allocate
+	// the slice or do the per-mock kind check beyond what the swap
+	// already does. The Check() call short-circuits below if the level
+	// is filtered out.
+	debugV3Trace := m.logger != nil && m.logger.Core().Enabled(zap.DebugLevel)
+	var v3Names []string
+	if debugV3Trace {
+		v3Names = make([]string, 0, 8)
+	}
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
@@ -1514,6 +1524,9 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
 		}
 		newStateless[k][key] = append(newStateless[k][key], mock)
+		if debugV3Trace && mock.Kind == models.PostgresV3 {
+			v3Names = append(v3Names, mock.Name)
+		}
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
@@ -1527,22 +1540,19 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.bumpRevisionAll()
 	// DEBUG_TRACE: prove what landed in m.filtered after the swap +
 	// bump. Lists every PostgresV3 mock so we can correlate by mock name
-	// against the failing hashes the parser later misses.
-	if m.logger != nil {
-		newRev := m.Revision()
-		v3Names := make([]string, 0, 8)
-		for _, mk := range mocks {
-			if mk == nil || mk.Kind != models.PostgresV3 {
-				continue
-			}
-			v3Names = append(v3Names, mk.Name)
+	// against the failing hashes the parser later misses. Gated behind
+	// logger.Check so non-Debug runs pay nothing for the fmt.Sprintf
+	// + Revision() read.
+	if debugV3Trace {
+		if ce := m.logger.Check(zap.DebugLevel, "DEBUG_TRACE SetFilteredMocks: tree swapped + revision bumped"); ce != nil {
+			ce.Write(
+				zap.String("mockManagerPtr", fmt.Sprintf("%p", m)),
+				zap.Int("inputMocks", len(mocks)),
+				zap.Int("postgresV3Mocks", len(v3Names)),
+				zap.Strings("postgresV3MockNames", v3Names),
+				zap.Uint64("newRevision", m.Revision()),
+			)
 		}
-		m.logger.Debug("DEBUG_TRACE SetFilteredMocks: tree swapped + revision bumped",
-			zap.String("mockManagerPtr", fmt.Sprintf("%p", m)),
-			zap.Int("inputMocks", len(mocks)),
-			zap.Int("postgresV3Mocks", len(v3Names)),
-			zap.Strings("postgresV3MockNames", v3Names),
-			zap.Uint64("newRevision", newRev))
 	}
 }
 
