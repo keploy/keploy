@@ -1525,6 +1525,25 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		m.bumpRevisionKind(k)
 	}
 	m.bumpRevisionAll()
+	// DEBUG_TRACE: prove what landed in m.filtered after the swap +
+	// bump. Lists every PostgresV3 mock so we can correlate by mock name
+	// against the failing hashes the parser later misses.
+	if m.logger != nil {
+		newRev := m.Revision()
+		v3Names := make([]string, 0, 8)
+		for _, mk := range mocks {
+			if mk == nil || mk.Kind != models.PostgresV3 {
+				continue
+			}
+			v3Names = append(v3Names, mk.Name)
+		}
+		m.logger.Debug("DEBUG_TRACE SetFilteredMocks: tree swapped + revision bumped",
+			zap.String("mockManagerPtr", fmt.Sprintf("%p", m)),
+			zap.Int("inputMocks", len(mocks)),
+			zap.Int("postgresV3Mocks", len(v3Names)),
+			zap.Strings("postgresV3MockNames", v3Names),
+			zap.Uint64("newRevision", newRev))
+	}
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
