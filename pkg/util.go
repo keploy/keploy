@@ -82,6 +82,49 @@ type StreamingHTTPResponse struct {
 	StreamConfig  HTTPStreamConfig
 }
 
+// RenderTestCaseTemplates renders template placeholders in a test case.
+// It handles both TemplatizedValues and SecretValues from the utils package.
+// Returns nil if there are no templates to render.
+func RenderTestCaseTemplates(tc *models.TestCase, logger *zap.Logger) error {
+	if len(utils.TemplatizedValues) == 0 && len(utils.SecretValues) == 0 {
+		return nil
+	}
+
+	testCaseBytes, err := json.Marshal(tc)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal the testcase for templating")
+		return err
+	}
+
+	// Build the template data map
+	// Secrets are stored under a single "secret" key, regardless of their count
+	capacity := len(utils.TemplatizedValues)
+	if len(utils.SecretValues) > 0 {
+		capacity++
+	}
+	templateData := make(map[string]interface{}, capacity)
+	for k, v := range utils.TemplatizedValues {
+		templateData[k] = v
+	}
+	if len(utils.SecretValues) > 0 {
+		templateData["secret"] = utils.SecretValues
+	}
+
+	// Render Keploy placeholders ({{ .x }}, {{ string .y }}, etc.)
+	renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+	if rerr != nil {
+		logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
+	}
+
+	err = json.Unmarshal([]byte(renderedStr), tc)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
+		return err
+	}
+
+	return nil
+}
+
 func InitSortCounter(counter int64) {
 	atomic.StoreInt64(&SortCounter, counter)
 }
@@ -276,6 +319,7 @@ type preparedHTTPRequest struct {
 	Client  *http.Client
 }
 
+	// Decode URL-encoded template placeholders (e.g., %7B becomes {)
 // prepareHTTPRequest handles all common request preparation logic shared between
 // SimulateHTTP and SimulateHTTPStreaming: URL decoding, template rendering,
 // body loading, multipart construction, compression, and client creation.
@@ -287,6 +331,10 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			tc.HTTPReq.URL = decoded
 		}
 	}
+
+	// Render template values in the test case before simulation
+	if err := RenderTestCaseTemplates(tc, logger); err != nil {
+		return nil, err
 
 	// TODO: adjust this logic in the render function in order to remove the redundant code.
 	// Convert testcase to string and render template values before simulation.
