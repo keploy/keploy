@@ -48,7 +48,7 @@ func getCompiled(pattern string) *regexp.Regexp {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
 		// Fallback to a regex that never matches to avoid panics / repeated compiles
-		compiled, _ = regexp.Compile(`(?!)`)
+		compiled, _ = regexp.Compile(`$.^`)
 	}
 
 	regexCacheMu.Lock()
@@ -734,7 +734,7 @@ var ansiRegex *regexp.Regexp
 func init() {
 	re, err := regexp.Compile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	if err != nil {
-		re, _ = regexp.Compile(`(?!)`)
+		re, _ = regexp.Compile(`$.^`)
 	}
 	ansiRegex = re
 }
