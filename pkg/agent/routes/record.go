@@ -233,8 +233,10 @@ func (a *Agent) HandlePcapStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	// Subscribe synchronously BEFORE committing the status code.
-	// SubscribePcap writes the pcap file header into w, which
-	// triggers an implicit 200 in net/http — this is intentional.
+	// SubscribePcap writes the pcap file header into w and flushes it
+	// (triggering an implicit 200 in net/http) before registering the
+	// subscriber, so the client sees a well-formed stream and we don't
+	// race with the capture goroutine on the response's bufio.Writer.
 	// If capture is not active it returns an error without writing
 	// to w, so we can still return 503 cleanly.
 	unsub, err := a.svc.SubscribePcap(w, flusher.Flush)
@@ -243,7 +245,6 @@ func (a *Agent) HandlePcapStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsub()
-	flusher.Flush() // push the pcap file header to the client
 	<-r.Context().Done()
 }
 
