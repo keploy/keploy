@@ -36,6 +36,7 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	err := server.ListenAndServe()
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
+		return err
 	}
 	return nil
 }
