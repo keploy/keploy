@@ -1116,6 +1116,8 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					// Only log as error if it's not a shutdown/network closed error
 					if isShutdownError(err) || isNetworkClosedErr(err) {
 						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+					} else if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+						p.logger.Debug("failed to handle the client connection", zap.Error(err))
 					} else {
 						utils.LogError(p.logger, err, "failed to handle the client connection")
 					}
@@ -1963,7 +1965,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
-		if parser.MatchType(parserCtx, initialBuf) {
+		matched := parser.MatchType(parserCtx, initialBuf)
+		p.logger.Debug("Parser match result", zap.String("ParserType", string(parserPair.ParserType)), zap.Bool("matched", matched))
+		if matched {
 			matchedParser = parser
 			parserType = parserPair.ParserType
 			generic = false
@@ -2045,7 +2049,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
+				if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+					logger.Debug("failed to mock the outgoing message", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to mock the outgoing message")
+				}
 				// Send specific error type to error channel for external monitoring
 				p.sendMockNotFoundError(err)
 				return err
