@@ -42,19 +42,49 @@ send_request(){
 
 container_name="proxyStressApp"
 
-for i in {1..2}; do
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local log="${container_name}${label}.txt"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-        echo "FAIL: Data race during recording"; exit 1
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "$log"
+    if grep "WARNING: DATA RACE" "$log"; then
+        echo "FAIL: Data race during recording${label:+ (json)}"; exit 1
     fi
-    if grep -q "panic:" "${container_name}.txt"; then
-        echo "FAIL: Panic during recording"; cat "${container_name}.txt"; exit 1
+    if grep -q "panic:" "$log"; then
+        echo "FAIL: Panic during recording${label:+ (json)}"; cat "$log"; exit 1
     fi
     sleep 5
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    # State-bleed guard. The yaml iterations populated postgres (via
+    # docker-compose volume) with rows whose IDs were assigned starting
+    # from an empty DB. Recording the same traffic again with the
+    # accumulated state captures bind values that reference rows only
+    # the polluted DB had — postgres-v3's transactional matcher then
+    # fails at replay-time with "no recorded invocation shares this SQL
+    # hash". `docker compose down -v` clears the named volumes so the
+    # json record pass starts from the same blank state.
+    docker compose down -v || true
+    sleep 2
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
+
+# Match any *.yaml under a tests/ dir so we are agnostic to the testcase
+# naming scheme (legacy "test-N.yaml" vs descriptive slugs).
 test_count=$(find ./keploy -name '*.yaml' -path '*/tests/*' 2>/dev/null | wc -l)
 echo "Total recorded test cases: $test_count"
 if [ "$test_count" -eq 0 ]; then echo "FAIL: No test cases recorded"; exit 1; fi
@@ -79,4 +109,17 @@ for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
     [ -f "$report_file" ] && echo "$(basename "$report_file"): $(grep 'status:' "$report_file" | head -1 | awk '{print $2}')"
 done
 
-echo "Proxy stress test PASSED — all fixes validated e2e"
+if json_pass_supported; then
+    # Reuse the compose service name (`proxyStressApp`) — there is no
+    # `${container}_json` service in docker-compose. Format dispatch is
+    # auto-detected per file by NewMockReaderAny / GetTestCases on the
+    # replay side, so the --storage-format flag here only affects what
+    # extension the json *report* gets written under.
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false |& tee "${test_container}_json.txt" || true
+    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then echo "FAIL: Data race during json replay"; exit 1; fi
+    if grep -q "panic:" "${test_container}_json.txt"; then echo "FAIL: Panic during json replay"; cat "${test_container}_json.txt"; exit 1; fi
+    json_scan_reports || true
+    echo "Proxy stress test PASSED — yaml + json"
+else
+    echo "Proxy stress test PASSED — yaml only (json pass skipped for compat-matrix cell)"
+fi

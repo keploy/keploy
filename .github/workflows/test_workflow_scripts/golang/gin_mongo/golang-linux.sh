@@ -195,6 +195,46 @@ for record_iteration in {1..2}; do
     echo "Recorded test case and mocks for iteration ${record_iteration}"
 done
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    # Additional record pass with --storage-format json. The new test-sets
+    # land alongside the yaml ones in the same keploy/ tree
+    # (FindLastIndexAny picks the next free index across both extensions),
+    # so the subsequent default-format replay exercises the read-side
+    # auto-detect path over a directory that mixes yaml and json fixtures.
+    for record_iteration in {1..2}; do
+        app_name="ginMongo_json_${record_iteration}"
+        "$RECORD_BIN" record --storage-format json -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
+
+        KEPLOY_PID=$!
+
+        if ! send_request "$KEPLOY_PID"; then
+            echo "::error::Failed to drive gin-mongo traffic for json record iteration ${record_iteration}"
+            cat "${app_name}.txt" || true
+            exit 1
+        fi
+
+        if unexpected_errors="$(has_unexpected_errors "${app_name}.txt")"; then
+            echo "Error found in pipeline..."
+            printf '%s\n' "$unexpected_errors"
+            cat "${app_name}.txt"
+            exit 1
+        fi
+        if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+          echo "Race condition detected in json recording, stopping pipeline..."
+          cat "${app_name}.txt"
+          exit 1
+        fi
+        sleep 5
+        wait
+        echo "Recorded json test case and mocks for iteration ${record_iteration}"
+    done
+else
+    echo "Skipping --storage-format json record pass: at least one binary is the released keploy (no json support)."
+fi
+
 # Keep MongoDB running during test replay. Keploy will serve mocks for
 # matched requests; unmatched requests fall through to the real database
 # which returns the same data recorded earlier, preventing flaky failures
@@ -249,31 +289,70 @@ fi
 all_passed=true
 
 
-# Get the test results from the testReport file.
-for test_set in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$test_set-report.yaml"
-
-    # Extract the test status
+# Default-format (yaml) report scan. Glob picks up reports for every
+# test-set in test-run-0 — including the json-recorded ones, since the
+# default replay above wrote yaml reports for the entire directory.
+shopt -s nullglob
+yaml_reports=( ./keploy/reports/test-run-0/test-set-*-report.yaml )
+shopt -u nullglob
+if [ ${#yaml_reports[@]} -eq 0 ]; then
+    echo "::error::No yaml test-set reports found under ./keploy/reports/test-run-0/"
+    cat "test_logs.txt"
+    exit 1
+fi
+for report_file in "${yaml_reports[@]}"; do
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$test_set: $test_status"
-
-    # Check if any test set did not pass
+    echo "yaml report $(basename "$report_file"): $test_status"
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        echo "Test-set-$test_set did not pass."
-        break # Exit the loop early as all tests need to pass
+        echo "$(basename "$report_file") did not pass."
+        break
     fi
 done
 
+if json_pass_supported; then
+    # Second replay pass with --storage-format json — exercises the json
+    # write path AND, because the keploy/ tree holds both yaml- and
+    # json-recorded test-sets, validates that a json-mode replay reads
+    # the yaml fixtures via the read-side auto-detect path.
+    "$REPLAY_BIN" test --storage-format json -c "./ginApp" --delay 7 2>&1 | tee test_logs_json.txt
+    replay_status_json=${PIPESTATUS[0]}
+
+    if [ "$replay_status_json" -ne 0 ]; then
+        echo "::error::Keploy json replay failed with exit code ${replay_status_json}"
+        cat test_logs_json.txt
+        exit "$replay_status_json"
+    fi
+
+    if unexpected_errors="$(has_unexpected_errors "test_logs_json.txt")"; then
+        echo "Error found in pipeline (json replay)..."
+        printf '%s\n' "$unexpected_errors"
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+
+    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+        echo "Race condition detected in json test, stopping pipeline..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+
+    if ! json_scan_reports; then
+        all_passed=false
+        cat "test_logs_json.txt"
+    fi
+fi
+
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "All tests passed"
+    if json_pass_supported; then
+        echo "All tests passed (yaml + json)"
+    else
+        echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+    fi
     exit 0
 else
     cat "test_logs.txt"
+    cat "test_logs_json.txt" 2>/dev/null || true
     exit 1
 fi

@@ -307,5 +307,41 @@ if ($status -ne 'PASSED') {
   exit 1
 }
 
-Write-Host "All tests passed successfully!"
+# Json-format replay against the yaml-recorded fixtures.
+$testLogJson = Join-Path $workDir "$testContainer.test.json.txt"
+$testArgsJson = @(
+  'test',
+  '--storage-format', 'json',
+  '-c', 'go run .',
+  '--api-timeout', '60',
+  '--delay', '30',
+  '--debug',
+  '--generate-github-actions=false'
+)
+& $env:REPLAY_BIN @testArgsJson 2>&1 | Tee-Object -FilePath $testLogJson
+
+$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
+if (-not $reportFilesJson) {
+  Write-Error "No json report files found."
+  Get-Content $testLogJson -ErrorAction SilentlyContinue | Select-Object -Last 200
+  exit 1
+}
+$anyJsonFailed = $false
+foreach ($file in $reportFilesJson) {
+  try {
+    $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+  } catch {
+    Write-Error "Failed to parse json report $($file.Name): $_"
+    $anyJsonFailed = $true
+    continue
+  }
+  Write-Host "json report $($file.Name): $($obj.status)"
+  if ($obj.status -ne "PASSED") { $anyJsonFailed = $true }
+}
+if ($anyJsonFailed) {
+  Write-Error "Some json tests failed."
+  exit 1
+}
+
+Write-Host "All tests passed successfully (yaml + json)!"
 exit 0

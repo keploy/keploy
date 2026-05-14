@@ -25,14 +25,20 @@ type TestReport struct {
 	Logger *zap.Logger
 	Path   string
 	Name   string
+	Format yaml.Format
 }
 
 func New(logger *zap.Logger, reportPath string) *TestReport {
+	return NewWithFormat(logger, reportPath, yaml.FormatYAML)
+}
+
+func NewWithFormat(logger *zap.Logger, reportPath string, format yaml.Format) *TestReport {
 	return &TestReport{
 		tests:  make(map[string]map[string][]models.TestResult),
 		m:      sync.Mutex{},
 		Logger: logger,
 		Path:   reportPath,
+		Format: format,
 	}
 }
 
@@ -77,21 +83,23 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
-	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))
-	if err != nil {
-		return nil, err
-	}
-	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
+	// Auto-detect the report format — `keploy report` keeps working for
+	// reports written by a differently-configured prior run.
+	data, detected, err := yaml.ReadFileAny(ctx, fe.Logger, path, reportName, fe.Format)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
 
-	decoder := yamlLib.NewDecoder(bytes.NewReader(data))
 	var doc models.TestReport
-	err = decoder.Decode(&doc)
+	if detected == yaml.FormatJSON {
+		err = yaml.UnmarshalGeneric(yaml.FormatJSON, data, &doc)
+	} else {
+		decoder := yamlLib.NewDecoder(bytes.NewReader(data))
+		err = decoder.Decode(&doc)
+	}
 	if err != nil {
-		return &models.TestReport{}, fmt.Errorf("%s failed to decode the yaml file documents. error: %v", utils.Emoji, err.Error())
+		return &models.TestReport{}, fmt.Errorf("%s failed to decode the report file. error: %v", utils.Emoji, err.Error())
 	}
 	return &doc, nil
 }
@@ -107,17 +115,19 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	testReport.CreatedAt = time.Now().Unix()
 	report := sanitizeReportForYAML(*testReport)
 
-	data := []byte{}
-	d, err := yamlLib.Marshal(&report)
+	d, err := yaml.MarshalGeneric(fe.Format, &report)
 	if err != nil {
-		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
+		return fmt.Errorf("%s failed to marshal report document. error: %s", utils.Emoji, err.Error())
 	}
-	data = append(data, d...)
-	data = append([]byte(utils.GetVersionAsComment()), data...)
 
-	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
+	data := d
+	if fe.Format == yaml.FormatYAML {
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
+	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, testReport.Name, data, false, fe.Format)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.String("session", filepath.Base(reportPath)))
+		utils.LogError(fe.Logger, err, "failed to write the report", zap.String("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil
@@ -159,16 +169,14 @@ func normalizeReportYAMLText(value string) string {
 func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, coverageReport any) error {
 	reportPath := filepath.Join(fe.Path, testRunID)
 
-	data := []byte{}
-	d, err := yamlLib.Marshal(&coverageReport)
+	data, err := yaml.MarshalGeneric(fe.Format, &coverageReport)
 	if err != nil {
-		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
+		return fmt.Errorf("%s failed to marshal coverage document. error: %s", utils.Emoji, err.Error())
 	}
-	data = append(data, d...)
 
-	err = yaml.WriteFile(ctx, fe.Logger, reportPath, "coverage", data, false)
+	err = yaml.WriteFileF(ctx, fe.Logger, reportPath, "coverage", data, false, fe.Format)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the coverage report to yaml", zap.String("session", filepath.Base(reportPath)))
+		utils.LogError(fe.Logger, err, "failed to write the coverage report", zap.String("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil

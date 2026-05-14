@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	mockdb "go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -102,22 +103,24 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
-	// Propagate the config-file mock-format selection into mockdb. The
-	// env var KEPLOY_MOCK_FORMAT still wins if set, so ad-hoc runs can
-	// override without editing keploy.yml.
+	// MockFormat (yaml vs gob — chosen for record-time CPU vs grep-friendliness)
+	// is orthogonal to StorageFormat (yaml vs json — chosen for the on-disk
+	// document encoding). Both knobs flow through here. The KEPLOY_MOCK_FORMAT
+	// env var still wins over Record.MockFormat for ad-hoc runs.
 	mockdb.SetConfiguredMockFormat(c.Record.MockFormat)
 
+	format := yaml.ParseFormat(c.StorageFormat)
 	namingStrategy, err := testdb.ParseNamingStrategy(c.Record.TestCaseNaming)
 	if err != nil {
 		return nil, fmt.Errorf("invalid record.testCaseNaming in keploy.yml: %w (set it to %q or %q)",
 			err, testdb.NamingDescriptive, testdb.NamingSequential)
 	}
-	testDB := testdb.NewWithNaming(logger, c.Path, namingStrategy)
-	mockDB := mockdb.New(logger, c.Path, "")
-	mapDB := mapdb.New(logger, c.Path, "")
+	testDB := testdb.NewWithFormatAndNaming(logger, c.Path, format, namingStrategy)
+	mockDB := mockdb.NewWithFormat(logger, c.Path, "", format)
+	mapDB := mapdb.NewWithFormat(logger, c.Path, "", format)
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
-	reportDB := reportdb.New(logger, c.Path+"/reports")
-	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	reportDB := reportdb.NewWithFormat(logger, c.Path+"/reports", format)
+	testSetDb := testset.NewWithFormat[*models.TestSet](logger, c.Path, format)
 	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{

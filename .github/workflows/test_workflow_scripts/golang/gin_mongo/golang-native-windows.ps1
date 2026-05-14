@@ -182,26 +182,32 @@ if (-not (Test-Path ".\ginApp.exe")) {
 # 2. Recording Phase
 # =============================================================================
 
-for ($i = 1; $i -le 2; $i++) {
-    $appName = "ginApp_${i}" 
+function Invoke-RecordIteration {
+    param(
+        [Parameter(Mandatory)] [int] $Iter,
+        [string] $ExtraFlags = ''
+    )
+    $label = if ($ExtraFlags) { '_json' } else { '' }
+    $appName = "ginApp_${Iter}${label}"
     $logFile = "${appName}.txt"
-    
-    Write-Host "`n=== Iteration ${i}: Recording ==="
+
+    Write-Host "`n=== Iteration ${Iter}${label}: Recording ==="
     $currentDir = (Get-Location).Path
     $keployPath = (Get-Command $env:RECORD_BIN).Source
     $appPath    = (Resolve-Path ".\ginApp.exe").Path
 
-    # Start Keploy
     $recJob = Start-Job -ScriptBlock {
-        param($workDir, $keployBin, $appBin)
+        param($workDir, $keployBin, $appBin, $extra)
         Set-Location -Path $workDir
         $env:Path = $using:env:Path
-        # Ensure we force IPv4 env vars just in case app uses them
         $env:MONGO_URI = "mongodb://127.0.0.1:27017"
         $env:URI = "mongodb://127.0.0.1:27017"
-        
-        & $keployBin record -c $appBin 2>&1
-    } -ArgumentList $currentDir, $keployPath, $appPath
+        if ($extra) {
+            & $keployBin record $extra.Split(' ') -c $appBin 2>&1
+        } else {
+            & $keployBin record -c $appBin 2>&1
+        }
+    } -ArgumentList $currentDir, $keployPath, $appPath, $ExtraFlags
 
     try {
         Send-Request -Job $recJob -LogFile $logFile
@@ -260,6 +266,16 @@ for ($i = 1; $i -le 2; $i++) {
         Write-Error "Race condition detected..."
         exit 1
     }
+}
+
+for ($i = 1; $i -le 2; $i++) {
+    Invoke-RecordIteration -Iter $i
+}
+
+# Supplemental json-format pass — Windows workflows always run build-windows
+# binaries which include --storage-format support, so no gating is needed.
+for ($i = 1; $i -le 2; $i++) {
+    Invoke-RecordIteration -Iter $i -ExtraFlags '--storage-format json'
 }
 
 # =============================================================================
@@ -331,7 +347,36 @@ foreach ($file in $reportFiles) {
 if ($anyFailed) {
     Write-Error "Some tests failed according to reports."
     exit 1
-} else {
-    Write-Host "🎉 All tests passed successfully."
-    exit 0
 }
+
+# Json-format replay + scan.
+Write-Host "Starting Replay (json)..."
+$testLogFileJson = "test_logs_json.txt"
+& $keployPath test --storage-format json -c ".\ginApp.exe" --delay 20 2>&1 | Tee-Object -FilePath $testLogFileJson
+
+$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
+if (-not $reportFilesJson) {
+    Write-Error "No json report files found."
+    exit 1
+}
+$anyJsonFailed = $false
+foreach ($file in $reportFilesJson) {
+    try {
+        $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+    } catch {
+        Write-Error "Failed to parse json report $($file.Name): $_"
+        $anyJsonFailed = $true
+        continue
+    }
+    Write-Host "json report $($file.Name): $($obj.status)"
+    if ($obj.status -ne "PASSED") {
+        $anyJsonFailed = $true
+    }
+}
+if ($anyJsonFailed) {
+    Write-Error "Some json tests failed."
+    exit 1
+}
+
+Write-Host "🎉 All tests passed successfully (yaml + json)."
+exit 0

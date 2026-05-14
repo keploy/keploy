@@ -49,6 +49,14 @@ else
   echo "⚠️ Config file $config_file not found, skipping sed replace."
 fi
 
+# shellcheck disable=SC1091
+if [ -f "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh" ]; then
+  source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+else
+  json_pass_supported() { return 1; }
+  json_scan_reports() { return 1; }
+fi
+
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
 
 # Validates the Keploy test report to ensure all test sets passed
@@ -225,11 +233,50 @@ if [ "$MODE" = "incoming" ]; then
  fi
 
 
- if $all_passed; then
-   echo "✅ Incoming mode passed."
- else
+ if ! $all_passed; then
    echo "::error::One or more test sets failed in $RUN_DIR"
    exit 1
+ fi
+
+ if json_pass_supported; then
+   echo "🧪 Re-running incoming with --storage-format json"
+   # The yaml replay above started the fuzzer server with `keploy -c`.
+   # Keploy stops itself, but the server child it spawned can keep
+   # owning :50051, so the json record's app-launch fails with
+   # "listen tcp :50051: bind: address already in use" and keploy
+   # bails before capturing any test case. Force-kill anything still
+   # holding :50051 before the json record's app starts.
+   sudo pkill -f "$FUZZER_SERVER_BIN" || true
+   sleep 2
+   if [[ "$RECORD_SRC" == "latest" ]]; then
+     "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming_json.txt &
+   else
+     "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming_json.txt &
+   fi
+   sleep 10
+   "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming_json.txt &
+   sleep 10
+   for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
+   curl -sS -X POST http://localhost:18080/run \
+     -H 'Content-Type: application/json' \
+     -d '{"addr":"localhost:50051","seed":42,"total":1000,"text":false,"timeout_sec":60,"max_diffs":5}'
+   sleep 10
+   REC_PID=$(pgrep keploy | sort -n | head -1)
+   sudo kill -INT "$REC_PID" 2>/dev/null || true
+   sleep 5
+   sudo pkill -f "$FUZZER_SERVER_BIN" || true
+   sleep 2
+   check_for_errors record_incoming_json.txt
+   check_for_errors client_incoming_json.txt
+   "$REPLAY_BIN" test --storage-format json -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true 2>&1 | tee test_incoming_json.txt
+   check_for_errors test_incoming_json.txt
+   if ! json_scan_reports; then
+     cat test_incoming_json.txt
+     exit 1
+   fi
+   echo "✅ Incoming mode passed (yaml + json)."
+ else
+   echo "✅ Incoming mode passed (yaml only)."
  fi
 
 elif [ "$MODE" = "outgoing" ]; then
@@ -289,7 +336,36 @@ elif [ "$MODE" = "outgoing" ]; then
  check_for_errors test_outgoing.txt
  check_test_report
  ensure_success_phrase test_outgoing.txt
- echo "✅ Outgoing mode passed. "
+
+ if json_pass_supported; then
+   echo "🧪 Re-running outgoing with --storage-format json"
+   "$FUZZER_SERVER_BIN" &> server_outgoing_json.txt &
+   sleep 5
+   "$RECORD_BIN" record --storage-format json -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing_json.txt &
+   sleep 10
+   for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
+   curl -sS -X POST http://localhost:18080/run \
+     -H 'Content-Type: application/json' \
+     -d '{"addr":"localhost:50051","seed":42,"total":1000,"text":false,"timeout_sec":60,"max_diffs":5}'
+   sleep 10
+   REC_PID=$(pgrep keploy | sort -n | head -1)
+   sudo kill -INT "$REC_PID" 2>/dev/null || true
+   sleep 5
+   sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+   sleep 2
+   check_for_errors server_outgoing_json.txt
+   check_for_errors record_outgoing_json.txt
+   "$REPLAY_BIN" test --storage-format json -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true 2>&1 | tee test_outgoing_json.txt
+   check_for_errors test_outgoing_json.txt
+   if ! json_scan_reports; then
+     cat test_outgoing_json.txt
+     exit 1
+   fi
+   ensure_success_phrase test_outgoing_json.txt
+   echo "✅ Outgoing mode passed (yaml + json)."
+ else
+   echo "✅ Outgoing mode passed (yaml only)."
+ fi
 
 else
  echo "❌ Invalid mode specified: $MODE"

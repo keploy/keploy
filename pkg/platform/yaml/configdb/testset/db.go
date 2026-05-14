@@ -18,6 +18,7 @@ import (
 type Db[T any] struct {
 	logger *zap.Logger
 	path   string
+	Format yaml.Format
 }
 
 type withoutSecrets[T any] interface {
@@ -25,9 +26,14 @@ type withoutSecrets[T any] interface {
 }
 
 func New[T any](logger *zap.Logger, path string) *Db[T] {
+	return NewWithFormat[T](logger, path, yaml.FormatYAML)
+}
+
+func NewWithFormat[T any](logger *zap.Logger, path string, format yaml.Format) *Db[T] {
 	return &Db[T]{
 		logger: logger,
 		path:   path,
+		Format: format,
 	}
 }
 
@@ -36,19 +42,18 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 	var config T
 
-	// Try to read config.yaml, but continue if it doesn't exist
-	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
+	// Auto-detect format so a testset config recorded in the other format
+	// remains readable after a StorageFormat switch.
+	data, detected, err := yaml.ReadFileAny(ctx, db.logger, filePath, "config", db.Format)
 	if err != nil {
-		// Config file missing, create default config and continue with secret loading
 		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
 		config = newValue[T]()
 	} else {
-		// Config file exists, unmarshal it
-		err := yamlLib.Unmarshal(data, &config)
+		err := yaml.UnmarshalGeneric(detected, data, &config)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
-			// Don't return early - continue with secret loading even if config is malformed
-			// Use default config instead
+			// Don't return early - continue with secret loading even if config is malformed.
+			// Use a fresh default value so secret hydration still has somewhere to land.
 			config = newValue[T]()
 			db.logger.Debug("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
 		}
@@ -85,18 +90,21 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 		config = newValue[T]()
 	}
 
+	// Strip secrets via the generic withoutSecrets[T] interface so this
+	// works for any T that opts in (currently *models.TestSet), instead of
+	// hand-rolled type assertions.
 	if secretlessConfig, ok := any(config).(withoutSecrets[T]); ok {
 		config = secretlessConfig.WithoutSecrets()
 	}
 
-	data, err := yamlLib.Marshal(config)
+	data, err := yaml.MarshalGeneric(db.Format, config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 		return err
 	}
-	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
+	err = yaml.WriteFileF(ctx, db.logger, filePath, "config", data, false, db.Format)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
+		utils.LogError(db.logger, err, "failed to write test-set configuration file", zap.String("testSet", testSetID))
 		return err
 	}
 

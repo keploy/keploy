@@ -108,12 +108,15 @@ send_request(){
     dump_and_force_kill_if_stuck "$REC_PID"
 }
 
-# Record and Test cycles
-for i in {1..2}; do
-    app_name="flaskApp_${i}"
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local app_name="flaskApp_${i}${label}"
     send_request &
-    request_pid=$!
-    $RECORD_BIN record -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
+    local request_pid=$!
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -126,11 +129,25 @@ for i in {1..2}; do
     fi
     sleep 5
     if ! wait "$request_pid"; then
-        echo "::error::Request driver failed while recording iteration ${i}"
+        echo "::error::Request driver failed while recording iteration ${i}${label:+ json}"
         exit 1
     fi
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+# Record and Test cycles
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 # Shutdown postgres before test mode - Keploy should use mocks for database interactions
 echo "Shutting down postgres before test mode..."
@@ -174,11 +191,29 @@ do
     fi
 done
 
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+if [ "$all_passed" != true ]; then
     cat "test_logs.txt"
     exit 1
 fi
+
+if json_pass_supported; then
+    $REPLAY_BIN test --storage-format json -c "python3 manage.py runserver" --delay 20    2>&1 | tee test_logs_json.txt
+    if grep "ERROR" "test_logs_json.txt"; then
+        echo "Error found in json replay..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+        echo "Race condition detected in json test..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat test_logs_json.txt
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

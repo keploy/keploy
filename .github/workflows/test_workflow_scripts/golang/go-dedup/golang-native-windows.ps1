@@ -292,6 +292,44 @@ if ($testCount -eq 0) { Write-Error "No test files were created. Review the full
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 
+# Supplemental json-format record. Windows workflows always run build-windows
+# binaries which include --storage-format support, so we skip the bash gate.
+$logPathJson = "$containerName.record.json.txt"
+$recArgsJson = @(
+  'record',
+  '--storage-format', 'json',
+  '-c', $dockerCmd,
+  '--generate-github-actions=false'
+)
+Write-Host "Starting keploy record (json)…"
+$recJobJson = Start-Job -ScriptBlock {
+    & $using:env:RECORD_BIN @($using:recArgsJson) 2>&1 | Tee-Object -FilePath $using:logPathJson
+}
+Start-Sleep -Seconds 30
+# Drive the same traffic
+foreach ($call in @(
+  @{ M='GET';    U="$base/hello/Keploy" },
+  @{ M='POST';   U="$base/user";         B=@{name="John Doe";email="john@keploy.io"} },
+  @{ M='PUT';    U="$base/item/item123"; B=@{id="item123";name="Updated Item";price=99.99} },
+  @{ M='GET';    U="$base/products" },
+  @{ M='DELETE'; U="$base/products/prod001" },
+  @{ M='GET';    U="$base/api/v2/users" }
+)) {
+  try {
+    if ($call.B) {
+      Invoke-RestMethod -Method $call.M -Uri $call.U -Body ($call.B | ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 30 | Out-Null
+    } else {
+      Invoke-RestMethod -Method $call.M -Uri $call.U -TimeoutSec 30 | Out-Null
+    }
+  } catch {}
+}
+Start-Sleep -Seconds 10
+$recProcJson = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -match 'keploy.*record' } | Select-Object -First 1
+if ($recProcJson) { cmd /c "taskkill /PID $($recProcJson.ProcessId) /T /F" 2>$null | Out-Null }
+Stop-Job $recJobJson -ErrorAction SilentlyContinue
+Remove-Job $recJobJson -Force -ErrorAction SilentlyContinue
+
 # =========================
 # ========== REPLAY =======
 # =========================
@@ -350,5 +388,46 @@ if ($status -ne 'PASSED') {
   exit 1
 }
 
-Write-Host "All tests passed successfully!"
+# Json-format replay
+$testLogJson = "$testContainer.test.json.txt"
+$testArgsJson = @(
+  'test',
+  '--storage-format', 'json',
+  '-c', 'go run main.go',
+  '--api-timeout', '60',
+  '--delay', '30',
+  '--generate-github-actions=false'
+)
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $env:REPLAY_BIN @testArgsJson 2>&1 | Tee-Object -FilePath $testLogJson
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+
+$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
+if (-not $reportFilesJson) {
+  Write-Error "No json report files found."
+  Get-Content $testLogJson -ErrorAction SilentlyContinue | Select-Object -Last 200
+  exit 1
+}
+$anyJsonFailed = $false
+foreach ($file in $reportFilesJson) {
+  try {
+    $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+  } catch {
+    Write-Error "Failed to parse json report $($file.Name): $_"
+    $anyJsonFailed = $true
+    continue
+  }
+  Write-Host "json report $($file.Name): $($obj.status)"
+  if ($obj.status -ne "PASSED") { $anyJsonFailed = $true }
+}
+if ($anyJsonFailed) {
+  Write-Error "Some json tests failed."
+  exit 1
+}
+
+Write-Host "All tests passed successfully (yaml + json)!"
 exit 0
