@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models/aerospike"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -39,6 +40,17 @@ const (
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
+
+	// Aerospike covers all Aerospike traffic — info text frames,
+	// AS_MSG binary frames, and their compressed wrapper. The frame
+	// type is carried per request/response on
+	// Request.Header.Type / Response.Header.Type (a uint8 wire byte)
+	// and on the parallel PacketInfo.Type string (one of
+	// aerospike.FrameInfo / FrameAdmin / FrameMessage /
+	// FrameMessageCompressed); consumers discriminate there rather
+	// than on Kind so a single Mock can carry a tend handshake plus
+	// the follow-on data ops without needing distinct Kinds.
+	Aerospike Kind = "Aerospike"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -148,6 +160,14 @@ type MockSpec struct {
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
+
+	// Aerospike carries one or more request/response pairs captured from
+	// an Aerospike client connection. The frame type (info / AS_MSG /
+	// AS_MSG_COMPRESSED) is encoded per request via PacketInfo.Type so
+	// a single Mock can group an info-protocol exchange and the
+	// follow-on data ops without needing distinct Kinds.
+	AerospikeRequests  []aerospike.Request  `json:"AerospikeRequests,omitempty" bson:"aerospike_requests,omitempty"`
+	AerospikeResponses []aerospike.Response `json:"AerospikeResponses,omitempty" bson:"aerospike_responses,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3

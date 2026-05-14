@@ -26,6 +26,7 @@ const (
 	POSTGRES_V3 IntegrationType = "postgres_v3"
 	MONGO_V1    IntegrationType = "mongo_v1"
 	MONGO_V2    IntegrationType = "mongo_v2"
+	AEROSPIKE   IntegrationType = "aerospike"
 )
 
 type Parsers struct {
