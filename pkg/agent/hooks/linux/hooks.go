@@ -182,11 +182,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
-	// Get the first-mounted cgroupv2 path.
-	cGroupPath, err := agent.DetectCgroupPath(h.logger)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to detect the cgroup path")
-		return err
+	// Get the cgroupv2 path — use explicit override if provided (DaemonSet mode),
+	// otherwise auto-detect from /proc/mounts.
+	var cGroupPath string
+	if opts.CgroupPath != "" {
+		cGroupPath = opts.CgroupPath
+		h.logger.Info("Using explicit cgroup path", zap.String("path", cGroupPath))
+	} else {
+		cGroupPath, err = agent.DetectCgroupPath(h.logger)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to detect the cgroup path")
+			return err
+		}
 	}
 
 	// Detect and clean orphaned BPF programs from crashed previous
