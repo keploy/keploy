@@ -1914,7 +1914,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					return err
 				}
 
-				conn := dstConn.(*tls.Conn)
+				conn, ok := dstConn.(*tls.Conn)
+				if !ok {
+					return fmt.Errorf("failed to assert destination connection as tls.Conn for %s: got %T", addr, dstConn)
+				}
 				state := conn.ConnectionState()
 
 				p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
