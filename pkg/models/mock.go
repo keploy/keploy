@@ -70,6 +70,26 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
+	// Format is the per-mock on-disk format hint/override. Empty string
+	// means "fall back to the testset-level format" (whatever the caller
+	// / CLI selected via record.mockFormat / KEPLOY_MOCK_FORMAT).
+	// Recognized values are "yaml" or "gob". Any other non-empty value
+	// is resolved by mockdb.InsertMock's three-step policy: (1) a
+	// recognized override wins, else (2) if the enclosing testset is
+	// already locked to a format (from an earlier InsertMock or a
+	// rehydrated on-disk file), inherit that lock so typo'd / stale
+	// values do not trip the mixed-format guard, else (3) fall back to
+	// the process-wide configured default. We deliberately do not
+	// reject unknown values so a stale or typo'd format never blocks
+	// recording.
+	//
+	// Writers may propagate this field into the on-disk
+	// NetworkTrafficDoc, and readers may load it back from the same
+	// field. However, this metadata alone does not imply that mocks from
+	// both mocks.yaml and mocks.gob are merged when both files exist in a
+	// single test-set directory. No default: an unset Format means "use
+	// whatever mockdb was configured with at startup".
+	Format string `json:"Format,omitempty" bson:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
@@ -698,6 +718,11 @@ func (m *Mock) DeepCopy() *Mock {
 			LifetimeDerived: lifetimeDerived,
 		},
 		ConnectionID: m.ConnectionID,
+		// Format is a per-mock override; it must survive DeepCopy so the
+		// async gob writer's copied payload preserves the caller's
+		// selected on-disk format. Dropping it here would silently demote
+		// gob-tagged mocks to the default format on the write path.
+		Format: m.Format,
 	}
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
