@@ -256,14 +256,19 @@ func extractTarGz(gzipPath, destDir string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
+			const maxFileSize = 10 * 1024 * 1024 // 10MB limit
+			written, err := io.CopyN(outFile, tarReader, maxFileSize)
+			if err != nil && err != io.EOF  {
 				if err := outFile.Close(); err != nil {
 					return err
 				}
 				return err
 			}
-			if err := outFile.Close(); err != nil {
-				return err
+			if written == maxFileSize {
+				if err := outFile.Close(); err != nil {
+					return err
+				}
+				return fmt.Errorf("file %s exceeds maximum allowed size of %d bytes", fileName, maxFileSize)
 			}
 		}
 	}
