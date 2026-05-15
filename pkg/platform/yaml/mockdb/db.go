@@ -609,6 +609,17 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	lock.Lock()
 	defer lock.Unlock()
 
+	// Bail before opening the file if the recorder ctx is already cancelled.
+	// Nothing on disk is touched yet — this is the only safe early-exit
+	// point. Past this point we MUST flush the bufio writer before returning
+	// or we leave a truncated mock on disk (yamlLib.Encoder streams into the
+	// bufio.Writer; that writer's internal buffer auto-flushes when full so
+	// partial mock bytes have already hit the file by the time encoder.Encode
+	// returns — skipping writer.Flush() drops the tail of the mock).
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	// Stream YAML directly to the file instead of marshaling to []byte first.
 	isFileEmpty, err := yaml.CreateYamlFile(ctx, ys.Logger, mockPath, mockFileName)
 	if err != nil {
@@ -624,6 +635,24 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	defer file.Close()
 
 	writer := bufio.NewWriter(file)
+	// Belt-and-braces: always flush the bufio writer before file.Close,
+	// even on an error return below. file.Close() does NOT drain a
+	// wrapping bufio.Writer — without this defer, any partially-encoded
+	// bytes still in the bufio buffer at return time would be silently
+	// discarded, leaving the mocks.yaml truncated mid-mock. The deferred
+	// Flush is best-effort: errors are logged at debug because the
+	// happy-path Flush below surfaces real flush errors as the function
+	// return value; this defer only catches the early-return paths that
+	// would otherwise drop the buffer on the floor (in particular the
+	// shutdown-race path where InsertMock is invoked with a cancelled
+	// ctx after encoder.Encode has streamed into the buffer).
+	defer func() {
+		if flushErr := writer.Flush(); flushErr != nil && ys.Logger != nil {
+			ys.Logger.Debug("deferred bufio flush returned error",
+				zap.String("path", yamlFilePath),
+				zap.Error(flushErr))
+		}
+	}()
 
 	if isFileEmpty {
 		if version := utils.GetVersionAsComment(); version != "" {
@@ -637,10 +666,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		}
 	}
 
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
 	encoder := yamlLib.NewEncoder(writer)
 	if err := encoder.Encode(&mockYaml); err != nil {
 		return fmt.Errorf("failed to encode mock yaml: %w", err)
@@ -649,9 +674,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		return fmt.Errorf("failed to close yaml encoder: %w", err)
 	}
 
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
+	// Always flush — never gate on ctx here. Once encoder.Encode has
+	// run, yamlLib has already streamed bytes into the bufio buffer
+	// (and auto-flushed full pages to the file). Skipping Flush would
+	// leave the file truncated at an arbitrary mid-stream byte offset,
+	// which is exactly the recorder-shutdown-flush truncation bug:
+	// the last mock in flight when SIGINT cancels the recorder ctx
+	// would lose its trailing bytes (rows 2/3 of a multi-row MySQL
+	// binary result set, missing rowNullBuffer, no FinalResponse
+	// marker), tripping wire-encode validation at replay time.
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("failed to flush mock writer: %w", err)
 	}

@@ -26,6 +26,11 @@ const (
 	FolderReports     = "reports"
 	FolderTestReports = "testReports"
 	FolderSchema      = "schema"
+	// FolderAPITests holds the V1 flow's API-test surface — chained CRUD
+	// tests authored via `keploy test-gen`, each in its own per-resource
+	// subdirectory shaped like an OSS test-set. Reserved here so the
+	// test-set scanner never mistakes it for a recorded test-set.
+	FolderAPITests = "api-tests"
 )
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
@@ -207,7 +212,7 @@ func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mo
 
 	for _, v := range files {
 		// Skip ignored folders
-		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema {
+		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema || v.Name() == FolderAPITests {
 			continue
 		}
 
