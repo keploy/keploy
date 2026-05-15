@@ -117,6 +117,43 @@ type Config struct {
 	// idle between requests) from "parser has a request in flight
 	// but isn't emitting a mock" (hang candidate). Nil is safe.
 	OnClientChunkTeed func()
+
+	// PreDispatchPause, when true, makes [Relay.Run] install a pause
+	// barrier BEFORE spawning the forwarder goroutines and switches
+	// the forwarders into pre-dispatch mode for the duration of the
+	// pause. Pre-dispatch mode differs from the standard pause in two
+	// ways:
+	//
+	//  1. The pre-Read pause check is bypassed so the very first Read
+	//     on each direction proceeds. Without this, the forwarders
+	//     would park immediately at the top of their loop and the
+	//     parser would never see the first chunk on its FakeConn
+	//     (the tee is downstream of the Read), deadlocking on the
+	//     parser's first read.
+	//
+	//  2. The post-Read pause check tees the chunk to the parser's
+	//     FakeConn AND stashes the payload, instead of stashing only.
+	//     The parser sees the bytes while the real-peer Write is
+	//     deferred; the parser can inspect, decide, and release the
+	//     pause via [directive.ResumePreDispatch] (which drains the
+	//     stash to the real peer) or escalate to a full TLS upgrade
+	//     via [directive.UpgradeTLS] (which consumes the stash
+	//     directly).
+	//
+	// The exact use case is the Postgres SSL preamble race documented
+	// in keploy/enterprise#2012: the V2 forwarder reads + writes
+	// continuously, so by the time the parser sees SSLRequest on its
+	// FakeConn the server may already have replied with 'S' and the
+	// client may already have started its TLS ClientHello. Holding
+	// writes on the destination→client direction until the parser has
+	// inspected the first chunk closes the race deterministically.
+	//
+	// Default false preserves today's behaviour for parsers that have
+	// not opted in. Most V2 parsers (http, mysql, mongo) do not need
+	// pre-dispatch pause and would deadlock if they didn't issue a
+	// ResumePreDispatch on entry — recordViaSupervisor only sets
+	// this when the parser implements an opt-in capability method.
+	PreDispatchPause bool
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

@@ -39,6 +39,27 @@ const (
 	// that batch multi-frame mocks and want an explicit commit
 	// point rather than relying on EmitMock-per-frame.
 	KindFinalizeMock
+
+	// KindResumePreDispatch releases the pre-dispatch pause set up by
+	// [relay.Config.PreDispatchPause]. The relay drains any bytes
+	// stashed during the pause to the real peers (in the order they
+	// were Read), clears its pre-dispatch state, and closes the
+	// pause channel so the forwarders resume normal Read→Write→Tee
+	// operation.
+	//
+	// Parsers send this directive once their inspection of the first
+	// chunk concludes the connection does NOT need a TLS upgrade
+	// (i.e. the protocol's plaintext path is the right one to record).
+	// For TLS, parsers send [KindUpgradeTLS] instead — that handler
+	// consumes the stash directly via PreambleReadFromDest without
+	// needing a separate resume.
+	//
+	// Ack: OK=true on success; OK=false with Err populated if the
+	// drain Write to either real peer fails. On error the relay still
+	// clears the pre-dispatch state and pause channel so the connection
+	// can either continue (via the surviving peer if any) or be torn
+	// down by the supervisor's fallthrough-to-passthrough path.
+	KindResumePreDispatch
 )
 
 // String returns a short label for logging.
@@ -54,6 +75,8 @@ func (k Kind) String() string {
 		return "abort-mock"
 	case KindFinalizeMock:
 		return "finalize-mock"
+	case KindResumePreDispatch:
+		return "resume-pre-dispatch"
 	default:
 		return "unknown"
 	}
@@ -233,4 +256,10 @@ func Pause(d fakeconn.Direction, reason string) Directive {
 // Resume returns a [KindResumeDir] directive for the given direction.
 func Resume(d fakeconn.Direction, reason string) Directive {
 	return Directive{Kind: KindResumeDir, Dir: d, Reason: reason}
+}
+
+// ResumePreDispatch returns a [KindResumePreDispatch] directive. See
+// the kind's docstring for the lifecycle this directive completes.
+func ResumePreDispatch(reason string) Directive {
+	return Directive{Kind: KindResumePreDispatch, Reason: reason}
 }
