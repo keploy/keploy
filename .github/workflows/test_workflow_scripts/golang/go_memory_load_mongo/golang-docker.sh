@@ -441,7 +441,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 

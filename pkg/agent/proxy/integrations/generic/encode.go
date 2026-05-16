@@ -42,7 +42,6 @@ func (w *captureTeeWriter) Write(p []byte) (int, error) {
 	// Non-blocking tee to capture channel.
 	if !w.stopped {
 		if memoryguard.IsRecordingPaused() {
-			w.stop()
 			return n, nil
 		}
 		buf := make([]byte, len(p))
