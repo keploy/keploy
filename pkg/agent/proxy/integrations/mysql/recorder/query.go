@@ -191,7 +191,15 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// already had data buffered locally when ctx.Done fired) without
 	// stalling the parser exit if the readRelay is genuinely idle.
 	drainBuffChans := func() {
-		const graceWindow = 50 * time.Millisecond
+		// Grace window for read-relays to surface chunks that were
+		// mid-flight at ctx-cancel time. Empirically 50ms was too tight:
+		// when the very last DB op of a fast suite (e.g. a chained-CRUD
+		// final DELETE → PREPARE + EXECUTE inside one handler tick) is
+		// still being decoded by the parser at cancel time, 50ms wasn't
+		// enough for the EXECUTE response to surface. 300ms matches the
+		// V1 sandbox record's inter-step pacing budget and reliably
+		// captures the tail ops.
+		const graceWindow = 300 * time.Millisecond
 		deadline := time.NewTimer(graceWindow)
 		defer deadline.Stop()
 		for {
