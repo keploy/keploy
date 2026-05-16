@@ -23,11 +23,11 @@ import (
 // mocks because the surface is a single method and the call shape is
 // already deterministic per sub-test.
 type stubMappingDB struct {
-	mappings       map[string][]models.MockEntry
-	hasMeaningful  bool
-	err            error
-	calledWithSet  string
-	callCount      int
+	mappings      map[string][]models.MockEntry
+	hasMeaningful bool
+	err           error
+	calledWithSet string
+	callCount     int
 }
 
 func (s *stubMappingDB) Get(_ context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {

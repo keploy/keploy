@@ -178,13 +178,13 @@ func TestDecodeStmtExecute_QueryAttrsExtension(t *testing.T) {
 		0x04, 0x00, 0x00, 0x00, // statement_id = 4
 		0x08,                   // flags = PARAMETER_COUNT_AVAILABLE
 		0x01, 0x00, 0x00, 0x00, // iteration_count = 1
-		0x01,                            // length-encoded parameter_count = 1
-		0x00,                            // null_bitmap (param 0 NOT null)
-		0x01,                            // new_params_bind_flag = 1
-		0xfd, 0x00,                      // type = VAR_STRING
-		0x00,                            // parameter_name length = 0
-		0x05,                            // value length = 5
-		0x61, 0x64, 0x6d, 0x69, 0x6e,    // "admin"
+		0x01,       // length-encoded parameter_count = 1
+		0x00,       // null_bitmap (param 0 NOT null)
+		0x01,       // new_params_bind_flag = 1
+		0xfd, 0x00, // type = VAR_STRING
+		0x00,                         // parameter_name length = 0
+		0x05,                         // value length = 5
+		0x61, 0x64, 0x6d, 0x69, 0x6e, // "admin"
 	}
 
 	clientCapabilities := mysql.CLIENT_QUERY_ATTRIBUTES
@@ -233,11 +233,11 @@ func TestDecodeStmtExecute_QueryAttrsExtensionTwoStrings(t *testing.T) {
 		0x02, 0x00, 0x00, 0x00, // statement_id = 2
 		0x08,                   // flags = PARAMETER_COUNT_AVAILABLE
 		0x01, 0x00, 0x00, 0x00, // iteration_count = 1
-		0x02,                   // length-encoded parameter_count = 2
-		0x00,                   // null_bitmap (neither null)
-		0x01,                   // new_params_bind_flag = 1
-		0xfd, 0x00, 0x00,       // type[0] = VAR_STRING, name length 0
-		0xfd, 0x00, 0x00,       // type[1] = VAR_STRING, name length 0
+		0x02,             // length-encoded parameter_count = 2
+		0x00,             // null_bitmap (neither null)
+		0x01,             // new_params_bind_flag = 1
+		0xfd, 0x00, 0x00, // type[0] = VAR_STRING, name length 0
+		0xfd, 0x00, 0x00, // type[1] = VAR_STRING, name length 0
 		0x05, 'c', 'a', 'r', 'o', 'l',
 		0x13, 'c', 'a', 'r', 'o', 'l', '@', 't', 'a', 's', 'k', 'h', 'u', 'b', '.', 'l', 'o', 'c', 'a', 'l',
 	}
@@ -377,7 +377,7 @@ func TestDecodeStmtExecute_QueryAttrsExtensionZeroParams(t *testing.T) {
 		0x01, 0x00, 0x00, 0x00, // statement_id = 1
 		0x08,                   // flags = PARAMETER_COUNT_AVAILABLE
 		0x01, 0x00, 0x00, 0x00, // iteration_count = 1
-		0x00,                   // length-encoded parameter_count = 0
+		0x00, // length-encoded parameter_count = 0
 	}
 
 	packet, err := DecodeStmtExecute(context.Background(), zap.NewNop(), data, preparedStmts, mysql.CLIENT_QUERY_ATTRIBUTES)

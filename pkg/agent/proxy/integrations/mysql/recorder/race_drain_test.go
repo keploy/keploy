@@ -164,8 +164,8 @@ func prepareCmd(seq byte, q string) []byte {
 // "head packet" and emits the mock immediately on.
 func prepareOkShort(seq byte, stmtID uint32) []byte {
 	payload := []byte{
-		0x00,                                                                       // status (OK marker)
-		byte(stmtID), byte(stmtID >> 8), byte(stmtID >> 16), byte(stmtID >> 24),    // statement_id
+		0x00,                                                                    // status (OK marker)
+		byte(stmtID), byte(stmtID >> 8), byte(stmtID >> 16), byte(stmtID >> 24), // statement_id
 		0x00, 0x00, // num_columns
 		0x00, 0x00, // num_params
 		0x00,       // reserved
