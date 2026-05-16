@@ -418,8 +418,15 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 // ExactBodyMatch performs exact body matching with noise awareness.
 // First pass: fast string equality.
-// Second pass: noise-aware JSON comparison that skips obfuscated fields
-// identified by Mock.Noise patterns.
+// Second pass: noise-aware comparison that skips obfuscated fields identified
+// by Mock.Noise patterns. Three body shapes are handled in the second pass:
+//  1. A mock body that is itself entirely a noise value — auto-match.
+//  2. application/x-www-form-urlencoded — per-segment noise check (see
+//     formBodiesMatchModuloNoise). Lets a noise regex of the shape
+//     ^<key>=[^&]+$ wildcard a rotating field (IRSA WebIdentityToken=…,
+//     OAuth client_assertion=…, etc.) without depending on the SDK to
+//     produce byte-identical request bodies at replay.
+//  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	mockNames := make([]string, len(schemaMatched))
@@ -440,7 +447,11 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 	}
 
 	// Second pass: noise-aware match for mocks with obfuscated values.
-	// Pre-parse request body once to avoid repeated JSON parsing per mock.
+	// Pre-compute request-side properties once so we don't re-derive them per
+	// candidate mock: JSON unmarshaling for the JSON-noise path, and the
+	// form-encoded heuristic (which itself runs url.ParseQuery) for the
+	// form-body path.
+	reqBodyStr := string(body)
 	isReqJSON := pkg.IsJSON(body)
 	var reqData interface{}
 	if isReqJSON {
@@ -448,6 +459,7 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 			isReqJSON = false
 		}
 	}
+	reqIsForm := !isReqJSON && looksLikeFormEncoded(reqBodyStr)
 
 	for _, mock := range schemaMatched {
 		nc := util.NewNoiseChecker(mock.Noise)
@@ -466,6 +478,23 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 				zap.Int("noisy_fields_skipped", 1),
 				zap.String("match_type", "exact_body_fully_noisy"))
 			return true, mock
+		}
+
+		// Form-encoded noise-aware comparison. Each "key=value" segment is
+		// tested against the mock's noise patterns; a match wildcards that
+		// segment. The remaining keys must be the same set on both sides
+		// and each non-wildcarded value(s) must be byte-equal.
+		if reqIsForm && looksLikeFormEncoded(mockBody) {
+			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
+				h.Logger.Debug("http mock matched",
+					zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.String("match_type", "exact_body_form_noise_aware"))
+				return true, mock
+			}
+			// Mock body is form-encoded — JSON path can't fire, skip to
+			// the next mock.
+			continue
 		}
 
 		// JSON-level comparison skipping noisy fields
@@ -712,6 +741,164 @@ func mediaTypesOverlap(a, b []string) bool {
 		}
 	}
 	return false
+}
+
+// looksLikeFormEncoded heuristically classifies body as application/
+// x-www-form-urlencoded payload. Used by the noise-aware ExactBodyMatch
+// pass to decide whether to take the form-segment path. Heuristic mirrors
+// enterprise/pkg/secret's same-named helper: must contain '=', must not
+// start with a JSON or XML marker, and must parse via url.ParseQuery.
+func looksLikeFormEncoded(body string) bool {
+	if !strings.Contains(body, "=") {
+		return false
+	}
+	trimmed := strings.TrimSpace(body)
+	if len(trimmed) > 0 && (trimmed[0] == '<' || trimmed[0] == '{' || trimmed[0] == '[') {
+		return false
+	}
+	_, err := url.ParseQuery(body)
+	return err == nil
+}
+
+// valueHasUnixTimestamp reports whether s contains a decimal run that looks
+// like a modern unix timestamp — 10 digits in [1_500_000_000, 2_500_000_000]
+// (seconds, 2017-07-14 → 2049-03-22) or 13 digits in
+// [1_500_000_000_000, 2_500_000_000_000] (milliseconds, same range). Used
+// by formBodiesMatchModuloNoise to wildcard form segments whose value
+// embeds a record-time timestamp the recorder didn't tag as noise.
+//
+// The 10/13-digit gate is deliberate: 11- and 12-digit runs (e.g. 12-digit
+// AWS account IDs) are not plausible unix timestamps in either unit and
+// must not be wildcarded.
+func valueHasUnixTimestamp(s string) bool {
+	const (
+		secMin uint64 = 1_500_000_000
+		secMax uint64 = 2_500_000_000
+		msMin  uint64 = 1_500_000_000_000
+		msMax  uint64 = 2_500_000_000_000
+	)
+	n := len(s)
+	for i := 0; i < n; {
+		if s[i] < '0' || s[i] > '9' {
+			i++
+			continue
+		}
+		j := i
+		for j < n && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		runLen := j - i
+		if runLen == 10 || runLen == 13 {
+			var v uint64
+			for k := i; k < j; k++ {
+				v = v*10 + uint64(s[k]-'0')
+			}
+			if runLen == 10 && v >= secMin && v <= secMax {
+				return true
+			}
+			if runLen == 13 && v >= msMin && v <= msMax {
+				return true
+			}
+		}
+		i = j
+	}
+	return false
+}
+
+// formBodiesMatchModuloNoise compares two form-encoded bodies treating any
+// individual "key=value" segment that matches a Mock.Noise regex as a
+// wildcard. Noise is evaluated *per occurrence*, not per key: a body like
+// `a=NOISY&a=2` keeps the second 'a' occurrence as a non-noisy, must-match
+// value even though the first occurrence is wildcarded.
+//
+// Match semantics: for every key, collect the ordered list of non-noisy
+// values on each side. Both sides must declare the same key set (modulo
+// keys whose every occurrence is noisy and absent on the other side), and
+// the surviving non-noisy values for each key must match byte-for-byte in
+// order.
+//
+// Splitting is done on raw bytes (Split on '&', IndexByte on '=') rather
+// than via url.ParseQuery so the segment passed to nc.IsNoisy carries the
+// same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
+// (^<raw_key>=[^&]+$).
+func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker) bool {
+	// nonNoisyByKey returns, per key, the ordered list of values whose
+	// "key=value" segment does NOT match any noise pattern. Keys whose
+	// every occurrence is noisy still appear in the map (with a nil/empty
+	// slice) so the cross-side presence check treats them as "declared
+	// but fully wildcarded" rather than missing.
+	nonNoisyByKey := func(body string) map[string][]string {
+		out := make(map[string][]string)
+		if body == "" {
+			return out
+		}
+		for _, seg := range strings.Split(body, "&") {
+			if seg == "" {
+				continue
+			}
+			eqIdx := strings.IndexByte(seg, '=')
+			var key, val string
+			if eqIdx < 0 {
+				key = seg
+			} else {
+				key = seg[:eqIdx]
+				val = seg[eqIdx+1:]
+			}
+			if _, exists := out[key]; !exists {
+				out[key] = nil
+			}
+			if nc.IsNoisy(key + "=" + val) {
+				continue
+			}
+			// Stop-gap until the recorder emits explicit noise patterns
+			// for rotating-timestamp keys (botocore RoleSessionName,
+			// OAuth nonces, …): wildcard any segment whose value
+			// embeds a modern unix timestamp. valueHasUnixTimestamp's
+			// digit-width gate (10 or 13 only) keeps 12-digit AWS
+			// account IDs out of scope.
+			if valueHasUnixTimestamp(val) {
+				continue
+			}
+			out[key] = append(out[key], val)
+		}
+		return out
+	}
+	sliceEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	mockKV := nonNoisyByKey(mockBody)
+	reqKV := nonNoisyByKey(reqBody)
+
+	// Cross-check both directions: same declared key set, same non-noisy
+	// values per key in order. A key that is fully wildcarded on the mock
+	// side (every occurrence noisy → entry present, slice empty) still
+	// requires the request to declare the key; the inverse holds too. This
+	// prevents a permissive mock from silently absorbing requests that
+	// omit or add a non-noisy key.
+	for k, mv := range mockKV {
+		rv, ok := reqKV[k]
+		if !ok {
+			return false
+		}
+		if !sliceEqual(mv, rv) {
+			return false
+		}
+	}
+	for k := range reqKV {
+		if _, ok := mockKV[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // updateMock processes the matched mock based on its Lifetime.

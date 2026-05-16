@@ -563,10 +563,11 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 
 }
 
-func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
+func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
 
 	requestBody := models.BeforeTestSetCompose{
 		TestRunID: testRunID,
+		TestSetID: testSetID,
 	}
 	if a.conf.Agent.AgentURI == "" {
 		return nil

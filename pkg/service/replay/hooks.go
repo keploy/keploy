@@ -204,10 +204,15 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	return nil
 }
 
-func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
-	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID))
+func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
+	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID), zap.String("testSetID", testSetID))
 
-	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, firstRun); err != nil {
+	// Deliberately no log.RotateDebugFileForTestSet here. The CLI's
+	// debug log stays at a single <cfg.Path>/cloud-debug.log for the
+	// whole run; only the agent's debug log rotates per test set
+	// (handled by HandleBeforeTestSetCompose in the agent process).
+
+	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
 		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
 	}
 

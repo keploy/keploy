@@ -24,7 +24,7 @@ type Instrumentation interface {
 	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
 	BeforeTestRun(ctx context.Context, testRunID string) error
-	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
@@ -106,7 +106,7 @@ type TestHooks interface {
 	// for the provided test set during BeforeTestResult processing.
 	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error
-	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
 	BeforeTestSetReplay(ctx context.Context, testSetID string) error
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
