@@ -485,7 +485,16 @@ func (r *Runner) loadMappingsForSet(ctx context.Context, testSetID string) (map[
 		return nil, nil, nil, fmt.Errorf("failed to get mock mappings for test set %q: %w", testSetID, err)
 	}
 	if !hasMeaningful {
-		return nil, nil, nil, fmt.Errorf("no mock mappings found for test set %q", testSetID)
+		// No mappings on disk (OSS-shape recordings, e.g. local sandbox
+		// replay against keploy/<testSetID>/{mocks.yaml,tests}). Fall
+		// back to the "load every mock in the set" path — empty filter
+		// maps make GetFilteredMocks/GetUnFilteredMocks include all
+		// mocks, and useMappingBased flips to false downstream
+		// (runner.go:427), which is the same path the OSS replay code
+		// takes when DisableMapping is set. Returning an error here
+		// would break every repo-mode sandbox replay that lacks the
+		// enterprise-only mappings.yaml.
+		return map[string][]models.MockEntry{}, map[string]bool{}, map[string]bool{}, nil
 	}
 	mocksThatHaveMappings := make(map[string]bool)
 	mocksWeNeed := make(map[string]bool)

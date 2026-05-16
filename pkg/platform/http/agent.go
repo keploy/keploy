@@ -418,14 +418,32 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 
+	// Read the full body so we can include it in the error message when
+	// decode fails — the original `json.NewDecoder(...).Decode` consumed
+	// only the first token, which made "404 page not found\n" responses
+	// from a wrongly-prefixed AgentURI look like a "cannot unmarshal
+	// number into models.AgentResp" error and masked the real misroute.
+	rawBody, readErr := io.ReadAll(res.Body)
+	if readErr != nil {
+		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
+	}
+
 	var mockResp models.AgentResp
-	err = json.NewDecoder(res.Body).Decode(&mockResp)
-	if err != nil {
-		return fmt.Errorf("failed to decode response body for mock outgoing: %s", err.Error())
+	if err := json.Unmarshal(rawBody, &mockResp); err != nil {
+		return fmt.Errorf("failed to decode response body for mock outgoing: %s (raw body: %q, status: %d, contentType: %q, url: %s)", err.Error(), string(rawBody), res.StatusCode, res.Header.Get("Content-Type"), fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI))
 	}
 
 	if mockResp.Error != nil {
 		return mockResp.Error
+	}
+
+	// AgentResp.Error is an `error` interface — JSON cannot decode a
+	// string into it, so the server-side error message is always lost
+	// in the wire format. Treat IsSuccess=false (or a 4xx/5xx status)
+	// as the authoritative signal and surface the raw body so callers
+	// get a real message instead of a silent "success".
+	if !mockResp.IsSuccess || res.StatusCode >= 400 {
+		return fmt.Errorf("mock outgoing returned failure (status %d, body: %q)", res.StatusCode, string(rawBody))
 	}
 
 	return nil
