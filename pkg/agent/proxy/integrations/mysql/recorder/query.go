@@ -32,19 +32,18 @@ type mysqlDecodeItem struct {
 // All packet reassembly, decoding, and mock creation is offloaded to a
 // background goroutine via a buffered decode channel.
 func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
-	// If recording is already paused, pure passthrough.
+	// If recording is paused at connection start, log it and continue into the
+	// normal recording path. The per-packet checks below (IsRecordingPaused
+	// guards before every decodeChan send) will skip mock capture while
+	// pressure is active and resume automatically once it clears — so any
+	// queries that complete after memory recovers are still captured.
+	// The old behaviour (full passthrough for the whole connection) caused the
+	// HTTP test-case to be recorded with no accompanying DB mock, which made
+	// replay fail with "no matching mock found" for teardown endpoints like
+	// GET /orders and GET /analytics/top-products.
 	if memoryguard.IsRecordingPaused() {
-		logger.Debug("memory pressure detected, stopping MySQL recording and falling back to passthrough")
-		done := make(chan struct{}, 2)
-		cp := func(dst, src net.Conn) {
-			_, _ = io.Copy(dst, src)
-			done <- struct{}{}
-		}
-		go cp(destConn, clientConn)
-		go cp(clientConn, destConn)
-		<-done
-		<-done
-		return nil
+		logger.Warn("memory pressure active at MySQL connection start: mocks will be skipped until pressure clears",
+			zap.String("impact", "queries completing while paused will have no mock; recording resumes automatically"))
 	}
 
 	// Buffered channels for raw byte relay. Each Read() result is sent

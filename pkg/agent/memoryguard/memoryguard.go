@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	defaultCheckInterval = 500 * time.Millisecond
+	defaultCheckInterval = 200 * time.Millisecond
 	reclaimCooldown      = 5 * time.Second
-	pauseThresholdRatio  = 0.80
-	resumeThresholdRatio = 0.70 // Lower than pause to avoid rapid toggle (hysteresis)
+	pauseThresholdRatio  = 0.75
+	resumeThresholdRatio = 0.60 // Lower than pause to avoid rapid toggle (hysteresis)
 )
 
 var recordingPaused atomic.Bool
