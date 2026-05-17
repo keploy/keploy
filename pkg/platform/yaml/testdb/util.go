@@ -322,25 +322,12 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		for key, raw := range httpSpec.Assertions {
 			tc.Assertions[key] = raw
 			if key == models.NoiseAssertion {
-				noiseMap, ok := raw.(map[models.AssertionType]interface{})
-				if !ok {
-					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
-					continue
-				}
-				for kt, inner := range noiseMap {
-					field := string(kt)
-					// initialize slice
-					tc.Noise[field] = []string{}
-					arr, ok := inner.([]interface{})
-					if !ok {
-						continue
-					}
-					for _, item := range arr {
-						if s, ok2 := item.(string); ok2 && s != "" {
-							tc.Noise[field] = append(tc.Noise[field], s)
-						}
-					}
-				}
+				// On encode the noise map is `map[string][]string`; YAML
+				// decodes it back as map[string]interface{} (yaml.v3) or
+				// map[interface{}]interface{} (yaml.v2). Asserting on
+				// map[AssertionType]interface{} always failed and silently
+				// dropped the noise config (#3872), accept both shapes.
+				populateNoise(raw, tc.Noise)
 			}
 		}
 
@@ -358,24 +345,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		for key, raw := range grpcSpec.Assertions {
 			tc.Assertions[key] = raw
 			if key == models.NoiseAssertion {
-				noiseMap, ok := raw.(map[models.AssertionType]interface{})
-				if !ok {
-					logger.Debug("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
-					continue
-				}
-				for kt, inner := range noiseMap {
-					field := string(kt)
-					tc.Noise[field] = []string{}
-					arr, ok := inner.([]interface{})
-					if !ok {
-						continue
-					}
-					for _, item := range arr {
-						if s, ok2 := item.(string); ok2 && s != "" {
-							tc.Noise[field] = append(tc.Noise[field], s)
-						}
-					}
-				}
+				populateNoise(raw, tc.Noise)
 			}
 		}
 
@@ -385,4 +355,55 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 	}
 
 	return tc, nil
+}
+
+// populateNoise normalises a YAML-decoded noise assertion (which may arrive
+// as map[string]interface{} from yaml.v3 or map[interface{}]interface{} from
+// yaml.v2) into the tc.Noise map[string][]string that the rest of keploy
+// expects. The previous code asserted the raw value as
+// map[models.AssertionType]interface{}, that type never matched what the
+// YAML libraries produce, so noise assertions were silently dropped on load.
+func populateNoise(raw interface{}, noise map[string][]string) {
+	if raw == nil {
+		return
+	}
+	visit := func(field string, inner interface{}) {
+		noise[field] = []string{}
+		// yaml.v3 decodes string lists as []interface{}.
+		if arr, ok := inner.([]interface{}); ok {
+			for _, item := range arr {
+				if s, ok2 := item.(string); ok2 && s != "" {
+					noise[field] = append(noise[field], s)
+				}
+			}
+			return
+		}
+		// In tests / programmatic constructions the encoder hands back the
+		// concrete []string, so accept that too.
+		if arr, ok := inner.([]string); ok {
+			for _, s := range arr {
+				if s != "" {
+					noise[field] = append(noise[field], s)
+				}
+			}
+		}
+	}
+	switch m := raw.(type) {
+	case map[string]interface{}:
+		for k, v := range m {
+			visit(k, v)
+		}
+	case map[interface{}]interface{}:
+		for k, v := range m {
+			ks, ok := k.(string)
+			if !ok {
+				continue
+			}
+			visit(ks, v)
+		}
+	case map[string][]string:
+		for k, v := range m {
+			visit(k, v)
+		}
+	}
 }
