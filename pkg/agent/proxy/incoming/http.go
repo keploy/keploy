@@ -535,21 +535,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Sampling bypass: no capture, but route through the same
 		// request-framed path so we still get MSG_PEEK pool-liveness
 		// protection. Passing nil for the testcase channel suppresses
-		// capture inside handleHttp1ZeroCopy.
+		// capture inside handleHttp1ZeroCopy; forceClose=false leaves
+		// keep-alive intact so bypass connections are pure passthrough.
 		if pm.sampling && !acquiredLock {
-			pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, nil, actualPort)
+			pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, nil, actualPort, false, nil)
 			return
 		}
 		// Normal mode OR sampling-tracked: zero-copy TCP passthrough with
 		// streaming capture. Forwarding runs at wire speed via io.Copy;
 		// capture is fully decoupled via non-blocking asyncPipeFeeders.
-		// For sampling-tracked, the semaphore stays held (via defer
-		// releaseLock) until the connection closes, limiting concurrent
-		// captures to the configured slot count.
+		//
+		// Sampling-tracked: pass forceClose=true so each captured
+		// exchange terminates the connection (Connection: close on req
+		// and resp), releasing the sampling slot promptly. Without
+		// this, a Go upstream's keep-alive response pins the slot for
+		// the connection's idle lifetime, starving subsequent
+		// connections of capture slots — the symptom is "only N of
+		// many requests captured" on sequential-call workloads. Pass
+		// releaseLock so demote-to-bypass (chunked / memory pressure)
+		// can free the slot mid-connection.
+		//
+		// Normal mode: forceClose=false (keep-alive preserved), and we
+		// release any (unused) lock here since normal mode doesn't
+		// gate on the sampling semaphore.
+		if pm.sampling && acquiredLock {
+			pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, t, actualPort, true, releaseLock)
+			return
+		}
 		if !pm.sampling {
 			releaseLock() // Normal mode has no sampling lock to hold
 		}
-		pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, t, actualPort)
+		pm.handleHttp1ZeroCopy(ctx, clientConn, upConn, logger, t, actualPort, false, nil)
 		return
 	}
 
@@ -990,8 +1006,8 @@ func writeBadRequest(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 }
 
-// handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync,
-// non-sampling) mode.
+// handleHttp1ZeroCopy handles HTTP/1.x connections in normal (non-sync) and
+// sampling modes.
 //
 // Architecture (Option 3 + MSG_PEEK + replay-on-stale): the function frames
 // HTTP/1.1 requests on the downstream so it can manage upstream connection
@@ -1003,9 +1019,27 @@ func writeBadRequest(c net.Conn) {
 // envoy (retry_on: reset-before-request), nginx (proxy_next_upstream), and
 // Go's net/http Transport (errServerClosedIdle).
 //
+// forceClose / releaseSlot govern sampling-tracked behavior:
+//
+//   - forceClose=true: this connection holds a sampling slot. Each captured
+//     non-streaming exchange has Connection: close injected on both req
+//     and resp so the connection terminates after one exchange and the
+//     slot is freed. Without this, a Go upstream's keep-alive response
+//     pins the slot for the connection's idle lifetime, starving
+//     subsequent connections of capture slots ("only N of many requests
+//     captured" symptom).
+//
+//   - releaseSlot (only set when forceClose=true): invoked to free the
+//     sampling slot early when the exchange is demoted to bypass
+//     (chunked / unknown-length body, or memory pressure). After demotion
+//     the connection continues as pure passthrough with no header
+//     mutation, matching the "untracked + unchanged" rule for ineligible
+//     exchanges.
+//
 // Downstream (envoy↔keploy) keep-alive is preserved across the entire
-// connection lifetime; only upstream conns get redialed on stale detect.
-func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16) {
+// connection lifetime for normal mode and sampling-bypass; only upstream
+// conns get redialed on stale detect.
+func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientConn net.Conn, upConn net.Conn, logger *zap.Logger, t chan *models.TestCase, appPort uint16, forceClose bool, releaseSlot func()) {
 	logger.Debug("Using request-framed HTTP/1.1 proxy with MSG_PEEK pool liveness")
 
 	upstreamAddr := upConn.RemoteAddr().String()
@@ -1043,6 +1077,31 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
 	captureEnabled := t != nil && !isIngressRecordingPaused()
+
+	// forceCloseActive mirrors the caller's forceClose intent but can be
+	// flipped to false mid-connection by demoteToBypass when the exchange
+	// turns out to be ineligible for the sampling budget (chunked /
+	// unknown-length body, or mid-stream memory pressure). Once demoted,
+	// the connection becomes pure passthrough: no Connection: close
+	// injection on subsequent iterations, the sampling slot is released,
+	// and capture is disabled — matching the "untracked + unchanged" rule
+	// for non-capturable exchanges. The flag never re-enables itself.
+	forceCloseActive := forceClose
+	demoteToBypass := func() {
+		if !forceCloseActive {
+			return
+		}
+		forceCloseActive = false
+		captureEnabled = false
+		if releaseSlot != nil {
+			releaseSlot()
+		}
+	}
+	// Memory pressure at function entry: demote immediately so the slot
+	// is freed for non-pressure use and we don't inject any headers.
+	if forceCloseActive && isIngressRecordingPaused() {
+		demoteToBypass()
+	}
 
 	// Close the most recent upstream conn on function return. The caller
 	// (handleHttp1Connection) defers Close on its own copy of the original
@@ -1115,6 +1174,25 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		reqTimestamp := wireConn.LastReadTime()
 		if !reqTimestamp.After(iterStart) {
 			reqTimestamp = iterStart
+		}
+
+		// Sampling-tracked demote checks. The user-stated invariant is:
+		// the sampling slot budget applies only to non-streaming
+		// request-response pairs that we actually capture. Anything
+		// else (HTTP Upgrade, chunked / unknown-length body, mid-stream
+		// memory pressure) should be "untracked + unchanged" — i.e.
+		// release the slot and forward without injecting headers.
+		//
+		// Demote MUST happen before any header mutation below so we
+		// never half-modify an exchange we then bail out on.
+		if forceCloseActive && isHTTPUpgrade(req) {
+			demoteToBypass()
+		}
+		if forceCloseActive && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
+			demoteToBypass()
+		}
+		if forceCloseActive && isIngressRecordingPaused() {
+			demoteToBypass()
 		}
 
 		// HTTP Upgrade / CONNECT — bail out to raw byte pump after
@@ -1271,6 +1349,20 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
+		// Sampling-tracked force-close: tell upstream this is a
+		// one-shot exchange so it tears the connection down after the
+		// response. The sampling slot held by this connection is
+		// released when handleHttp1Connection's defer fires — which
+		// happens when this loop returns via the req.Close || resp.Close
+		// branch at the bottom of the iteration. Without this, a Go
+		// upstream's default keep-alive response leaves the slot held
+		// for the idle keep-alive window and starves subsequent
+		// connections of capture slots.
+		if forceCloseActive {
+			req.Close = true
+			req.Header.Set("Connection", "close")
+		}
+
 		// Forward request. On write failure, replay on a fresh upstream
 		// for idempotent methods only. The peek narrows the race; the
 		// replay catches the residual (FIN arrived between peek and
@@ -1391,6 +1483,21 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
+		}
+
+		// Sampling-tracked force-close: also mark the client-facing
+		// response as close so the downstream client tears down its
+		// end after consuming the response. We injected close on the
+		// request above, so a well-behaved upstream will already
+		// respond with Connection: close — this is the belt-and-
+		// suspenders override in case the upstream ignores the request
+		// hint and still hands back a keep-alive response. The loop
+		// exits at the req.Close || resp.Close check at the bottom of
+		// this iteration, which triggers the deferred releaseLock in
+		// the caller and frees the sampling slot.
+		if forceCloseActive {
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
 		}
 
 		if err := resp.Write(clientConn); err != nil {
