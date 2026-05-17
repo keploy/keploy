@@ -44,6 +44,16 @@ type SyncMockManager struct {
 	outChan       chan<- *models.Mock
 	outChanClosed bool
 
+	// pressureWindowStart/End track the most recent memory-pressure
+	// interval. Used in AddMock to drop HTTP TCs whose request lifetime
+	// overlapped with a pressure window: during pressure, Mongo/generic
+	// mocks are dropped at the TCP capture layer before reaching AddMock,
+	// so committing the HTTP TC after pressure clears creates an orphaned
+	// TC (no DB mock) that fails replay with "socket was unexpectedly
+	// closed: EOF". Zero values mean no pressure window has been recorded.
+	pressureWindowStart time.Time
+	pressureWindowEnd   time.Time
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -220,6 +230,36 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		return
 	}
 
+	// Drop HTTP TCs whose request lifetime overlapped with the last
+	// memory-pressure window. During pressure, Mongo/generic mocks are
+	// dropped at the TCP capture layer (captureTeeWriter.Write returns
+	// early) before reaching AddMock. The HTTP TC arrives here only after
+	// the full HTTP round-trip completes — which may be after pressure
+	// clears — so memoryPause is false and the TC would otherwise be
+	// committed without its DB mocks. Replay then fails with
+	// "socket was unexpectedly closed: EOF" because the mock is missing.
+	// Dropping the TC here keeps recording and mock capture consistent:
+	// either both are captured or neither is.
+	if mock.Kind == models.HTTP &&
+		!m.pressureWindowStart.IsZero() && !m.pressureWindowEnd.IsZero() {
+		reqTime := mock.Spec.ReqTimestampMock
+		resTime := mock.Spec.ResTimestampMock
+		// Overlap: pressure window started before response arrived AND
+		// ended after request started → the request was in-flight during pressure.
+		if m.pressureWindowStart.Before(resTime) && m.pressureWindowEnd.After(reqTime) {
+			m.mu.Unlock()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during memory-pressure window; its DB mocks were not captured",
+					zap.Time("req_time", reqTime),
+					zap.Time("res_time", resTime),
+					zap.Time("pressure_start", m.pressureWindowStart),
+					zap.Time("pressure_end", m.pressureWindowEnd),
+				)
+			}
+			return
+		}
+	}
+
 	// Decide forward vs buffer vs drop under a single snapshot of
 	// (outChan, outChanClosed). The trio has three legal outcomes:
 	//
@@ -340,14 +380,20 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	defer m.mu.Unlock()
 
 	m.memoryPause = enabled
-	if !enabled {
+	if enabled {
+		m.pressureWindowStart = time.Now()
+		m.pressureWindowEnd = time.Time{} // clear end — pressure is active
+		for i := range m.buffer {
+			m.buffer[i] = nil
+		}
+		m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
 		return
 	}
-
-	for i := range m.buffer {
-		m.buffer[i] = nil
+	// Pressure cleared: stamp the end of the window so AddMock can
+	// correlate HTTP TCs whose request was in-flight during pressure.
+	if !m.pressureWindowStart.IsZero() {
+		m.pressureWindowEnd = time.Now()
 	}
-	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
