@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
-APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
+APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-grpc-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-120}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
@@ -14,6 +14,10 @@ LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
+# gRPC is a high-throughput protocol — CI runners cap VUs and duration to keep
+# Keploy memory within the RECORD_MEMORY_LIMIT_MB bound.
+K6_VUS="${K6_VUS:-5}"
+K6_DURATION="${K6_DURATION:-45s}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
@@ -116,7 +120,7 @@ final_cleanup() {
     fi
 
     if [ "$rc" -ne 0 ]; then
-        echo "go-memory-load workflow failed (exit code=$rc)"
+        echo "go-memory-load-grpc workflow failed (exit code=$rc)"
         dump_logs
     fi
     stop_keploy_record
@@ -352,7 +356,7 @@ wait_for_http() {
 
     echo "Application did not become available on ${url} in time."
     docker compose ps || true
-    docker compose logs api db || true
+    docker compose logs api || true
     return 1
 }
 
@@ -365,13 +369,17 @@ check_k6_failure_rate() {
         return 1
     fi
 
-    # Extract the http_req_failed percentage, e.g. "3.26%" from:
-    #   http_req_failed.................: 3.26%    ✓ 10   ✗ 296
+    # Extract the grpc_req_failed percentage, e.g. "3.26%" from:
+    #   grpc_req_failed.................: 3.26%    ✓ 10   ✗ 296
+    # Fall back to http_req_failed for compatibility.
     local fail_pct
-    fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+    fail_pct="$(grep -oP 'grpc_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+    if [ -z "$fail_pct" ]; then
+        fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+    fi
 
     if [ -z "$fail_pct" ]; then
-        echo "Could not parse http_req_failed from k6 output. Treating as pass."
+        echo "Could not parse request failure rate from k6 output. Treating as pass."
         return 0
     fi
 
@@ -379,18 +387,17 @@ check_k6_failure_rate() {
     local max_pct
     max_pct="$(awk -v r="$max_rate" 'BEGIN { printf "%.2f", r * 100 }')"
 
-    echo "k6 HTTP failure rate: ${fail_pct}% (max allowed: ${max_pct}%)"
+    echo "k6 request failure rate: ${fail_pct}% (max allowed: ${max_pct}%)"
 
-    # Compare: fail if observed rate exceeds the maximum.
     local exceeded
     exceeded="$(awk -v obs="$fail_pct" -v max="$max_pct" 'BEGIN { print (obs > max) ? "yes" : "no" }')"
 
     if [ "$exceeded" = "yes" ]; then
-        echo "HTTP failure rate ${fail_pct}% exceeds maximum ${max_pct}%. Failing CI."
+        echo "Request failure rate ${fail_pct}% exceeds maximum ${max_pct}%. Failing CI."
         return 1
     fi
 
-    echo "HTTP failure rate is within tolerance."
+    echo "Request failure rate is within tolerance."
     return 0
 }
 
@@ -401,7 +408,7 @@ run_loadtest() {
     # Run k6 but do NOT let threshold failures kill the pipeline.
     # k6 exits non-zero when thresholds are crossed (latency, etc.)
     # which is expected on CI's constrained 2-vCPU runners.
-    # We check the HTTP failure rate ourselves below.
+    # We check the gRPC failure rate ourselves below.
     local k6_rc=0
     docker compose --profile loadtest run --rm --no-deps \
         -e MIXED_API_START_VUS="$MIXED_API_START_VUS" \
@@ -416,10 +423,12 @@ run_loadtest() {
         -e THRESHOLD_LARGE_INSERT_P95="$THRESHOLD_LARGE_INSERT_P95" \
         -e THRESHOLD_LARGE_GET_P95="$THRESHOLD_LARGE_GET_P95" \
         -e THRESHOLD_LARGE_DELETE_P95="$THRESHOLD_LARGE_DELETE_P95" \
+        -e K6_VUS="$K6_VUS" \
+        -e K6_DURATION="$K6_DURATION" \
         k6 run /scripts/scenario.js 2>&1 | tee "$k6_log" || k6_rc=$?
 
     if [ "$k6_rc" -ne 0 ]; then
-        echo "k6 exited with code ${k6_rc} (likely threshold violations). Checking HTTP failure rate..."
+        echo "k6 exited with code ${k6_rc} (likely threshold violations). Checking request failure rate..."
     fi
 
     check_k6_failure_rate "$k6_log" "$CI_MAX_HTTP_FAILURE_RATE"
@@ -462,13 +471,13 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-# run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
-# replay_pid=$!
-# echo "Started Keploy test process with PID: $replay_pid"
-#
-# wait "$replay_pid" || true
-#
-# check_for_errors test.txt
-# check_test_report
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+replay_pid=$!
+echo "Started Keploy test process with PID: $replay_pid"
 
-echo "go-memory-load workflow completed successfully."
+wait "$replay_pid" || true
+
+check_for_errors test.txt
+check_test_report
+
+echo "go-memory-load-grpc workflow completed successfully."

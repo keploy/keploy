@@ -48,6 +48,13 @@ type Agent struct {
 	// still find a hit; they just don't get swamped by one line per
 	// test on large suites.
 	strictLogOnce sync.Once
+
+	// prevWindowMu guards prevWindowAfter / prevWindowBefore so the
+	// window-shift diagnostic in UpdateMockParams can compare old vs
+	// new without a data race when tests replay in parallel.
+	prevWindowMu     sync.Mutex
+	prevWindowAfter  time.Time
+	prevWindowBefore time.Time
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -500,6 +507,33 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Bool("useMappingBased", params.UseMappingBased),
 		zap.Int("mockMappingCount", len(params.MockMapping)),
 		zap.Bool("strictMockWindow", params.StrictMockWindow))
+
+	// Window-shift diagnostic: log whenever the test window advances so
+	// CI post-mortems can spot the race where the new window fires while
+	// in-flight MongoDB/MySQL connections are still serving the OLD window.
+	// The "windowGap" field is the interval between the previous test's
+	// end and the new test's start; a negative gap means the two test
+	// windows OVERLAP — the strongest signal that the replayer advanced
+	// before prior queries completed.  Zero/empty prevWindow means this
+	// is the very first UpdateMockParams in the session.
+	a.prevWindowMu.Lock()
+	prevAfter := a.prevWindowAfter
+	prevBefore := a.prevWindowBefore
+	a.prevWindowAfter = params.AfterTime
+	a.prevWindowBefore = params.BeforeTime
+	a.prevWindowMu.Unlock()
+
+	if !prevBefore.IsZero() {
+		windowGap := params.AfterTime.Sub(prevBefore)
+		a.logger.Debug("UpdateMockParams: window shift",
+			zap.Time("prevWindowAfter", prevAfter),
+			zap.Time("prevWindowBefore", prevBefore),
+			zap.Time("newWindowAfter", params.AfterTime),
+			zap.Time("newWindowBefore", params.BeforeTime),
+			zap.Duration("windowGap", windowGap),
+			zap.Bool("windowsOverlap", windowGap < 0),
+		)
+	}
 
 	// Strict mock-window is OPT-IN via either the per-call flag
 	// (params.StrictMockWindow) or the process-wide KEPLOY_STRICT_MOCK_WINDOW

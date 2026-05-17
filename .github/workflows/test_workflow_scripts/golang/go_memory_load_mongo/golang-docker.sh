@@ -4,11 +4,15 @@ set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
-APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
+APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-mongo-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-120}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
-MIXED_API_START_VUS="${MIXED_API_START_VUS:-2}"
+MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
+# Hill-shaped VU ramp: 4→8→12→4. Saturates the system by a small fraction so
+# Keploy's recording captures real concurrent load while staying within CI memory
+# limits. globalNoise in keploy.yml covers variable response fields (id, timestamps,
+# etc.) so concurrent-VU FIFO mock collisions don't fail assertions.
 MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
@@ -116,7 +120,7 @@ final_cleanup() {
     fi
 
     if [ "$rc" -ne 0 ]; then
-        echo "go-memory-load workflow failed (exit code=$rc)"
+        echo "go-memory-load-mongo workflow failed (exit code=$rc)"
         dump_logs
     fi
     stop_keploy_record
@@ -462,13 +466,13 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-# run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
-# replay_pid=$!
-# echo "Started Keploy test process with PID: $replay_pid"
-#
-# wait "$replay_pid" || true
-#
-# check_for_errors test.txt
-# check_test_report
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+replay_pid=$!
+echo "Started Keploy test process with PID: $replay_pid"
 
-echo "go-memory-load workflow completed successfully."
+wait "$replay_pid" || true
+
+check_for_errors test.txt
+check_test_report
+
+echo "go-memory-load-mongo workflow completed successfully."
