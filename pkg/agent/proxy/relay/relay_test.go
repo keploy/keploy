@@ -977,17 +977,19 @@ func TestPreDispatchPause_HoldsD2CUntilResume(t *testing.T) {
 	}
 	_ = h.clientApp.SetReadDeadline(time.Time{})
 
-	// The parser's DestStream sees the chunk.
-	d, err := h.r.DestStream().ReadChunk()
-	if err != nil {
-		t.Fatalf("DestStream.ReadChunk during pre-dispatch: %v", err)
+	// The parser's DestStream does NOT see the chunk during pre-
+	// dispatch. The directive handler (TLS upgrade) reads server-side
+	// preamble bytes from the stash directly via takeStashedPrefix,
+	// and a tee here would leave those bytes lingering in the FakeConn
+	// buffer for the post-handshake captureSessionV2 to misread as
+	// the first auth-response message. Server-side bytes are stashed
+	// (so the directive handler can claim them) but not teed. Assert
+	// the DestStream stays empty under a short deadline.
+	_ = h.r.DestStream().SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if c, err := h.r.DestStream().ReadChunk(); err == nil {
+		t.Fatalf("DestStream should NOT see the D2C byte during pre-dispatch (UpgradeTLS reads it from the stash); got chunk %q", c.Bytes)
 	}
-	if string(d.Bytes) != string(payload) {
-		t.Fatalf("DestStream chunk bytes=%q, want %q", d.Bytes, payload)
-	}
-	if d.Dir != fakeconn.FromDest {
-		t.Fatalf("DestStream chunk Dir=%v, want FromDest", d.Dir)
-	}
+	_ = h.r.DestStream().SetReadDeadline(time.Time{})
 
 	// Same pipe-blocking concern as the C2D test: drain Write blocks
 	// until the test reads. Spawn the reader first.
