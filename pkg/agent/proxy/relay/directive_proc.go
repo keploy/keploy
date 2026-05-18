@@ -184,6 +184,46 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	clearDeadline(r.dst.Load())
 	clearDeadline(r.src.Load())
 
+	// Pre-dispatch C2D flush. Under Config.PreDispatchPause, the C2D
+	// forwarder stashes the client's first message (e.g. Postgres
+	// SSLRequest) without forwarding it, so the parser can inspect
+	// the chunk via its FakeConn tee and decide whether to issue
+	// UpgradeTLS or ResumePreDispatch. If we entered handleUpgradeTLS
+	// from that path, the SSLRequest is still sitting in r.stashedC2D
+	// and the real Postgres server has not seen it yet — so the
+	// preamble Read from the live dst socket below will block until
+	// the deadline kicks (i/o timeout), the parser returns Err, the
+	// supervisor falls through to passthrough, and the live app sees
+	// the connection EOF before any byte reaches Postgres.
+	//
+	// Flush the C2D stash to dst here so the upstream protocol
+	// exchange that produces the preamble byte can actually happen.
+	// Gated on preDispatchActive so the legacy (post-#4196-pause-only)
+	// path — where the forwarder forwarded the SSLRequest in real time
+	// and only the post-pause-boundary 'S' byte ended up stashed on
+	// the D2C side — keeps the existing semantics.
+	if r.preDispatchActive.Load() {
+		c2dForward := r.takeStashed(fakeconn.FromClient)
+		if c2dForward.len() > 0 {
+			dst := *r.dst.Load()
+			if _, werr := dst.Write(c2dForward.bytes); werr != nil {
+				if log != nil {
+					log.Debug("relay: TLS upgrade pre-dispatch C2D flush failed",
+						zap.Error(werr),
+						zap.Int("bytes", c2dForward.len()),
+						zap.String("directive_reason", d.Reason),
+					)
+				}
+				r.endPause()
+				return directive.Ack{
+					Kind: d.Kind,
+					OK:   false,
+					Err:  fmt.Errorf("TLS upgrade pre-dispatch C2D flush: %w", werr),
+				}
+			}
+		}
+	}
+
 	var preamblePayload []byte
 	if params.PreambleReadFromDest > 0 {
 		// 1a. Try the D2C stash first.
