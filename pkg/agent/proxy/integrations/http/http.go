@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -282,15 +283,37 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
 		},
-		// HTTP is a request-response protocol — every exchange is per-test
-		// by construction. No handshake/session tier exists at the HTTP
-		// layer; outbound calls from an application under test are always
-		// bound to the current test window. Stamp LifetimePerTest + mark
-		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
-		// no-op (the recorder is authoritative at emit time). Leaves
-		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		// Lifetime classification.
+		//
+		// RFC 7231 §4.2.1 defines GET / HEAD / OPTIONS as SAFE methods:
+		// they don't carry test-specific side effects, and the response
+		// is a function of the request URL + headers + body only. An
+		// application caching SAP / Stripe / pricing-service responses
+		// with a TTL (Spring Cache, Caffeine, ESI, etc.) will re-fetch
+		// the same URL when its cache expires — observed in CI on the
+		// sap-demo-java-postgres lane: the app's first GET to
+		// /A_BusinessPartner('203') fires during testcase #6 (cold
+		// cache), the next ~325 testcases hit the warm cache, then the
+		// replay-phase cache expiry forces a re-fetch at testcase #49
+		// of test-set-0 which falls in a different per-test window than
+		// the recorded mock, dropping under strictMockWindow with
+		// "no matching mock found". Tagging safe-method outbound mocks
+		// as LifetimeSession lets the matcher reuse the recorded
+		// response across tests — that's the semantics safe methods
+		// already promise on the wire.
+		//
+		// Non-safe methods (POST / PUT / PATCH / DELETE) keep
+		// LifetimePerTest because their responses CAN encode
+		// test-specific state (created resource IDs, mutated counts,
+		// idempotency-key echoes). A POST recorded for test-A must not
+		// satisfy test-B's POST — that's the cross-test bleed strict
+		// mode exists to prevent.
+		//
+		// LifetimeDerived stays true so DeriveLifetime treats the
+		// recorder as authoritative (no kind-fallback re-classification
+		// on ingest).
 		TestModeInfo: models.TestModeInfo{
-			Lifetime:        models.LifetimePerTest,
+			Lifetime:        httpOutboundLifetime(req.Method),
 			LifetimeDerived: true,
 		},
 	}
@@ -318,4 +341,27 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	case mocks <- newMock:
 	}
 	return nil
+}
+
+// httpOutboundLifetime returns the lifetime tier for a recorded outbound
+// HTTP exchange given the request method. Safe methods (GET / HEAD /
+// OPTIONS per RFC 7231 §4.2.1) carry no test-specific side effects and
+// their response is determined entirely by the request — so the recorded
+// mock is reusable across any test that re-issues the same request, e.g.
+// when the app's HTTP cache (Spring Cache / Caffeine / ESI) expires
+// mid-replay. Non-safe methods (POST / PUT / PATCH / DELETE) keep
+// LifetimePerTest because their responses can encode test-specific state
+// and cross-test reuse would constitute mock bleed.
+//
+// Method comparison is case-insensitive against the canonical RFC tokens.
+// An unknown / empty method is treated as non-safe (defensive default —
+// a per-test mock that turns out to be reusable will reuse on the
+// lifetime-fallback DeriveLifetime path; a session mock that turns out
+// to be test-specific would bleed across tests, which is worse).
+func httpOutboundLifetime(method string) models.Lifetime {
+	switch strings.ToUpper(method) {
+	case "GET", "HEAD", "OPTIONS":
+		return models.LifetimeSession
+	}
+	return models.LifetimePerTest
 }

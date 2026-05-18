@@ -490,6 +490,14 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ReqTimestampMock: m.ReqTimestampMock,
 			ResTimestampMock: m.ResTimestampMock,
 		},
+		// Mirror parseFinalHTTP: safe-method outbound mocks (GET / HEAD /
+		// OPTIONS) tier as LifetimeSession so cache-warming traffic an
+		// app re-fetches across tests survives strictMockWindow. See
+		// httpOutboundLifetime in http.go for the full rationale.
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        httpOutboundLifetime(req.Method),
+			LifetimeDerived: true,
+		},
 	}
 	return mock, nil
 }
