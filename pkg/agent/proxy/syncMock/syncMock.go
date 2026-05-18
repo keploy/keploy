@@ -245,16 +245,18 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	// either both are captured or neither is. We check all historical
 	// windows (not just the last one) because multiple pressure bursts
 	// can occur during a single recording session.
-	if mock.Kind == models.HTTP && len(m.pressureWindows) > 0 {
+	if mock.Kind == models.HTTP {
 		reqTime := mock.Spec.ReqTimestampMock
 		resTime := mock.Spec.ResTimestampMock
+		// Check all completed pressure windows: drop if the HTTP round-trip
+		// overlapped any burst (window started before response, ended after request).
 		for _, w := range m.pressureWindows {
 			// Overlap: pressure window started before response arrived AND
 			// ended after request started → the request was in-flight during pressure.
 			if w.start.Before(resTime) && w.end.After(reqTime) {
 				m.mu.Unlock()
 				if logger := m.dropLogger(); logger != nil {
-					logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during memory-pressure window; its DB mocks were not captured",
+					logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during completed pressure window; its DB mocks were not captured",
 						zap.Time("req_time", reqTime),
 						zap.Time("res_time", resTime),
 						zap.Time("pressure_start", w.start),
@@ -263,6 +265,23 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 				}
 				return
 			}
+		}
+		// Check the currently active (ongoing) pressure window.
+		// currentPressureStart is non-zero while pressure is in progress and
+		// has not yet been moved to pressureWindows. If pressure started before
+		// the HTTP response arrived the DB mocks for this request were already
+		// skipped by the per-packet capture guard → drop the TC now to prevent
+		// a "TC exists, mock missing" mismatch at replay time.
+		if !m.currentPressureStart.IsZero() && m.currentPressureStart.Before(resTime) {
+			m.mu.Unlock()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during active pressure window; its DB mocks were not captured",
+					zap.Time("req_time", reqTime),
+					zap.Time("res_time", resTime),
+					zap.Time("pressure_start", m.currentPressureStart),
+				)
+			}
+			return
 		}
 	}
 
