@@ -2240,7 +2240,26 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	// Reuse the existing MockManager when this proxy has already been
+	// put into mock mode at least once. Replay calls Mock() per test-set
+	// (Agent.MockOutgoing → Proxy.Mock); allocating a fresh MockManager
+	// on every call strands long-lived parser goroutines on the previous
+	// instance. The postgres-v3 replayer's runLoop is the canonical
+	// case — its PerTestProvider/SessionProvider/StartupProvider capture
+	// the *MockManager handed in at MockOutgoing time and keep polling
+	// it for the connection's lifetime. With a per-test-set replacement
+	// the new manager's StoreMocks / UpdateMockParams (and the revision
+	// bumps PR #203 relies on for revision-gated rebuilds) land on the
+	// new instance the parsers cannot see, while the parsers keep
+	// reading test-set-N-1's cohort off the orphaned manager. The
+	// docker-compose lift-app path makes this reproducible: one asyncpg
+	// pool stays warm across test-set boundaries, so the v3 parser's
+	// runLoop survives and observes the MockManager swap. Reusing the
+	// manager keeps revision-tracking continuous; the trees still get
+	// replaced atomically by SetMocksWithWindow per test-set.
+	if p.getMockManager() == nil {
+		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	}
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
