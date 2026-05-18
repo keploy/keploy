@@ -1011,3 +1011,101 @@ func TestPreDispatchPause_HoldsD2CUntilResume(t *testing.T) {
 		t.Fatalf("client got %q after resume, want %q", got, payload)
 	}
 }
+
+// TestDirectiveUpgradeTLS_PreDispatch_FlushesC2DStashBeforePreambleRead
+// pins the SSL-preamble-under-pre-dispatch flow that integrations#200
+// exercised on every TLS postgres lane.
+//
+// Without the fix in handleUpgradeTLS, the C2D stash (the client's
+// SSLRequest, held by the pre-dispatch pause and never forwarded) sits
+// on the relay while the handler tries to read the SSLResponse byte
+// from the live dest socket. Postgres never sees the SSLRequest, so
+// it never replies — the preamble Read blocks until the deadline
+// kick, the directive returns an error, the supervisor falls through
+// to passthrough, and the live app sees `EOF` on its first DB call.
+//
+// This test reproduces that exact wire shape:
+//   - PreDispatchPause=true so r.preDispatchActive is set
+//   - Client writes an 8-byte SSLRequest-shaped payload that the C2D
+//     forwarder stashes (and tees to the parser FakeConn) but does not
+//     forward to dst
+//   - The test reads the stash-flushed bytes from destSvc and
+//     synchronously writes back a single 'S' that the directive
+//     handler picks up via the live-socket preamble Read path
+//
+// Assertions: destSvc receives the SSLRequest in full before any
+// preamble-read activity; the ack returns OK=true with TLSUpgraded=true.
+//
+// Reverting the C2D flush block in handleUpgradeTLS makes this test
+// fail with the original CI symptom: the directive handler's
+// readFullPreamble blocks on dst (the upstream never got the
+// SSLRequest), no byte is ever written to destSvc, the test times out
+// waiting for the flushed SSLRequest, and the eventual ack carries
+// the i/o-timeout error from readFullPreamble.
+func TestDirectiveUpgradeTLS_PreDispatch_FlushesC2DStashBeforePreambleRead(t *testing.T) {
+	t.Parallel()
+
+	upgraderFn := fakeTLSUpgrader(false, false)
+	h := newHarness(t, Config{
+		PreDispatchPause: true,
+		TLSUpgradeFn:     upgraderFn,
+	})
+
+	// Client writes the SSLRequest. Pre-dispatch holds it; the C2D
+	// forwarder stashes the chunk and tees it to the parser via the
+	// ClientStream FakeConn but does NOT write to dst.
+	sslRequest := []byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f} // length=8, code=80877103
+	go h.writeClient(sslRequest)
+
+	// Sync on the parser tee — once the parser sees the chunk, the
+	// forwarder has finished its post-Read pause path and the stash
+	// is committed. Without this read, the directive could race past
+	// an empty stash.
+	chunk, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ClientStream.ReadChunk during pre-dispatch: %v", err)
+	}
+	if string(chunk.Bytes) != string(sslRequest) {
+		t.Fatalf("ClientStream chunk = %v, want SSLRequest %v", chunk.Bytes, sslRequest)
+	}
+
+	// destSvc is a net.Pipe; the handler's dst.Write of the stash and
+	// dst.Read of the preamble both block until the test side reads /
+	// writes. Run that side concurrently with the directive: read the
+	// SSLRequest the handler flushes, then write 'S' so the handler's
+	// preamble Read completes.
+	flushedCh := make(chan []byte, 1)
+	go func() {
+		flushedCh <- h.readDest(len(sslRequest))
+		// Write back the SSLResponse byte after the test sees the
+		// flushed SSLRequest — same ordering as a real postgres.
+		if _, werr := h.destSvc.Write([]byte{'S'}); werr != nil {
+			h.t.Errorf("destSvc.Write 'S': %v", werr)
+		}
+	}()
+
+	d := directive.UpgradeTLS(&tls.Config{}, &tls.Config{}, "postgres sslrequest")
+	d.TLS.PreambleReadFromDest = 1
+	d.TLS.ProceedOnPreamble = []byte{'S'}
+	h.r.Directives() <- d
+
+	flushed := <-flushedCh
+	if string(flushed) != string(sslRequest) {
+		t.Fatalf("dest got %v, want pre-dispatch C2D flush of SSLRequest %v", flushed, sslRequest)
+	}
+
+	select {
+	case ack := <-h.r.Acks():
+		if !ack.OK {
+			t.Fatalf("UpgradeTLS ack failed: %+v", ack)
+		}
+		if !ack.TLSUpgraded {
+			t.Fatalf("expected TLSUpgraded=true on 'S' match, got %+v", ack)
+		}
+		if len(ack.PreamblePayload) != 1 || ack.PreamblePayload[0] != 'S' {
+			t.Fatalf("expected preamble 'S', got %v", ack.PreamblePayload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no UpgradeTLS ack — handler hung (likely a regression: C2D stash not flushed before preamble read)")
+	}
+}
