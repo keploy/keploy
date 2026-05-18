@@ -373,9 +373,9 @@ check_k6_failure_rate() {
     #   grpc_req_failed.................: 3.26%    ✓ 10   ✗ 296
     # Fall back to http_req_failed for compatibility.
     local fail_pct
-    fail_pct="$(grep -oP 'grpc_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+    fail_pct="$(awk '/grpc_req_failed[.]*:/ {for(i=1;i<=NF;i++) {v=$i; if (sub(/%$/,"",v) && v ~ /^[0-9]/) {print v; exit}}}' "$k6_log" || true)"
     if [ -z "$fail_pct" ]; then
-        fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+        fail_pct="$(awk '/http_req_failed[.]*:/ {for(i=1;i<=NF;i++) {v=$i; if (sub(/%$/,"",v) && v ~ /^[0-9]/) {print v; exit}}}' "$k6_log" || true)"
     fi
 
     if [ -z "$fail_pct" ]; then
@@ -438,7 +438,7 @@ section "Building sample application images"
 docker compose build
 
 section "Cleaning previous artifacts"
-sudo rm -rf keploy/
+run_with_keploy_privileges rm -rf keploy/
 rm -f record.txt test.txt docker-compose-tmp.yaml "$MEMORY_VIOLATION_FILE" "$MEMORY_USAGE_LOG"
 cleanup_compose
 
@@ -446,7 +446,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false > >(tee record.txt) 2>&1 &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
