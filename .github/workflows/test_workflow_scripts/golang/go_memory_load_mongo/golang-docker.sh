@@ -6,7 +6,7 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-mongo-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
-RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
+RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-400}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
 MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
 # Hill-shaped VU ramp: 4→8→12→4. Saturates the system by a small fraction so
