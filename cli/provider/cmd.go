@@ -396,9 +396,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		// bugs (see keploy/integrations#203) cannot trigger. When the
 		// flag is set, --delay is honoured only on the FIRST test-set;
 		// subsequent test-sets skip the delay because the app is already
-		// warm. Today wired for the docker-compose command type only —
-		// the path production globality autoreplay uses.
-		cmd.Flags().Bool("keep-app-alive", c.cfg.Test.KeepAppAlive, "Start the user application ONCE for the whole replay run and reuse it across all test-sets (instead of restarting per test-set). --delay applies only to the first test-set. Currently supported on the docker-compose command path.")
+		// warm. Works for every cmdType that has a user application to
+		// manage (docker-compose, docker-run, docker-start, native).
+		cmd.Flags().Bool("keep-app-alive", c.cfg.Test.KeepAppAlive, "Start the user application ONCE for the whole replay run and reuse it across all test-sets (instead of restarting per test-set). --delay applies only to the first test-set. Works with all cmdTypes (docker-compose, docker-run, docker-start, native).")
 	}
 }
 

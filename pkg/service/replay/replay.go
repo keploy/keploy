@@ -393,12 +393,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// (line ~480). Keeps long-lived TCP connections (asyncpg pool,
 	// HikariCP, etc.) warm across the test-set boundary — the
 	// precondition the cross-test-set session/startup-tier staleness
-	// bugs in keploy/integrations#203 need to surface. Restricted to
-	// the docker-compose command path today because that's the path
-	// production globality autoreplay uses; native / single-binary
-	// command types follow a different RunApplication lifecycle that
-	// hasn't been audited for this mode.
-	if r.config.Test.KeepAppAlive && r.instrument && cmdType == utils.DockerCompose {
+	// bugs in keploy/integrations#203 need to surface.
+	//
+	// Supported command types: docker-compose, docker-run,
+	// docker-start, native. All of them ultimately call
+	// r.instrumentation.Run(ctx, opts) — the only difference is what
+	// child command runs — so the same one-shot spawn pattern works
+	// for every cmdType. cmdType == Empty (no -c) means there is no
+	// user application to manage, so we skip the spawn entirely.
+	if r.config.Test.KeepAppAlive && r.instrument && cmdType != utils.Empty {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
 			if appErr := r.RunApplication(ctx, models.RunOptions{
@@ -1286,10 +1289,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Wait for the user application to become ready before firing the first test.
 			// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
 			// See the parallel call in the docker-compose branch above
-			// for the --keep-app-alive rationale; on the non-compose
-			// path the flag is currently a no-op (its one-shot spawn
-			// only fires when cmdType == DockerCompose) so the gate
-			// here is a guard for future expansion.
+			// for the --keep-app-alive rationale. On the non-compose
+			// paths (native, docker-run, docker-start) the one-shot
+			// spawn in Start() also fires when KeepAppAlive is set,
+			// so this gate is symmetric: first test-set waits for the
+			// freshly-spawned app to become ready, subsequent test-
+			// sets skip the wait because the app is already warm.
 			if r.config.Test.KeepAppAlive && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
