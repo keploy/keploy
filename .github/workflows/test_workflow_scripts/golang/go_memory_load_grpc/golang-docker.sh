@@ -16,8 +16,8 @@ LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 # gRPC is a high-throughput protocol — CI runners cap VUs and duration to keep
 # Keploy memory within the RECORD_MEMORY_LIMIT_MB bound.
-K6_VUS="${K6_VUS:-5}"
-K6_DURATION="${K6_DURATION:-45s}"
+K6_VUS="${K6_VUS:-10}"
+K6_DURATION="${K6_DURATION:-90s}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 
 # CI-tuned k6 thresholds — intentionally very relaxed because:
