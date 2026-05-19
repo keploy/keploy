@@ -158,6 +158,13 @@ type Replayer struct {
 	instrument         bool
 	isLastTestSet      bool
 	isLastTestCase     bool
+	// isFirstTestSet mirrors isLastTestSet — true while the test-set
+	// about to run is the first one of the current replay run. Read
+	// by the waitForAppReady gate so --delay applies only to the first
+	// test-set when --keep-app-alive is set (subsequent test-sets
+	// inherit a warm app and would otherwise pay --delay seconds of
+	// dead time per boundary).
+	isFirstTestSet     bool
 	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
 	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
 	testRunID          string               // current test run ID (used by RunTestSet)
@@ -371,6 +378,40 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	hookCancel = inst.HookCancel
 
+	// Hoist cmdType up to before the test-set loop so the one-shot
+	// user-app spawn below can read it. The original assignment that
+	// lived just above the for-range over testSets is removed (kept
+	// in a single canonical location here).
+	cmdType := utils.CmdType(r.config.CommandType)
+
+	// --keep-app-alive: start the user app ONCE on the outer errgroup
+	// so its lifecycle is tied to the whole replay run rather than a
+	// single test-set. The per-test-set RunApplication spawn (and its
+	// sibling NotifyGracefulShutdown notify) below is gated off via
+	// the existing `serveTest` parameter on RunTestSet — we pass
+	// `r.config.Test.KeepAppAlive` as that parameter at the call site
+	// (line ~480). Keeps long-lived TCP connections (asyncpg pool,
+	// HikariCP, etc.) warm across the test-set boundary — the
+	// precondition the cross-test-set session/startup-tier staleness
+	// bugs in keploy/integrations#203 need to surface. Restricted to
+	// the docker-compose command path today because that's the path
+	// production globality autoreplay uses; native / single-binary
+	// command types follow a different RunApplication lifecycle that
+	// hasn't been audited for this mode.
+	if r.config.Test.KeepAppAlive && r.instrument && cmdType == utils.DockerCompose {
+		g.Go(func() error {
+			defer utils.Recover(r.logger)
+			if appErr := r.RunApplication(ctx, models.RunOptions{
+				AppCommand: r.config.Command,
+			}); appErr != (models.AppError{}) && appErr.AppErrorType != models.ErrCtxCanceled {
+				r.logger.Warn("user app exited under --keep-app-alive",
+					zap.String("kind", string(appErr.AppErrorType)),
+					zap.Any("err", appErr))
+			}
+			return nil
+		})
+	}
+
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
@@ -391,7 +432,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	cmdType := utils.CmdType(r.config.CommandType)
+	// cmdType is hoisted above the one-shot RunApplication block; the
+	// original assignment that lived here is removed to keep a single
+	// canonical declaration.
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
@@ -422,6 +465,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if i == len(testSets)-1 {
 			r.isLastTestSet = true
 		}
+		// Mirror of isLastTestSet but for the first-testset boundary.
+		// Set BEFORE the RunTestSet call so the waitForAppReady call
+		// sites in RunTestSet observe the right value. Reset only at
+		// the top of this iteration (so a flaky-retry attempt within
+		// the SAME iteration still observes the same value).
+		r.isFirstTestSet = (i == 0)
 
 		r.completeTestReportMu.RLock()
 		initTotal := r.totalTests
@@ -469,7 +518,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.completeTestReportMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
+			// serveTest=true reuses the pre-existing gating inside
+			// RunTestSet (skips per-test-set RunApplication spawn and
+			// NotifyGracefulShutdown). Today's only way to enable that
+			// path is the --keep-app-alive flag; if it's off, the
+			// historical per-test-set restart behaviour is preserved.
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, r.config.Test.KeepAppAlive)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -1076,7 +1130,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// Wait for the user application to become ready before firing the first test.
 		// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
-		if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+		//
+		// --keep-app-alive: the app was spawned ONCE in Start() and
+		// has already passed its readiness check during the first
+		// test-set; subsequent test-sets inherit the warm app, so
+		// paying --delay seconds (or another HealthURL poll round)
+		// per boundary is dead time. Skip when we're past the first
+		// test-set. The first test-set still runs the wait so the
+		// initial app startup can finish (build/boot/connect) before
+		// the first request fires.
+		if r.config.Test.KeepAppAlive && !r.isFirstTestSet {
+			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1220,7 +1285,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Wait for the user application to become ready before firing the first test.
 			// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
-			if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+			// See the parallel call in the docker-compose branch above
+			// for the --keep-app-alive rationale; on the non-compose
+			// path the flag is currently a no-op (its one-shot spawn
+			// only fires when cmdType == DockerCompose) so the gate
+			// here is a guard for future expansion.
+			if r.config.Test.KeepAppAlive && !r.isFirstTestSet {
+				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 

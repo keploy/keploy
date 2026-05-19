@@ -388,6 +388,17 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
+		// Start the user app ONCE for the whole replay run instead of
+		// restarting it per test-set. Required to surface cross-test-set
+		// bugs that need a long-lived TCP connection (asyncpg, JDBC pool,
+		// etc.) to manifest — without it every test-set gets a fresh app
+		// process and fresh connections, so parser-side cohort-staleness
+		// bugs (see keploy/integrations#203) cannot trigger. When the
+		// flag is set, --delay is honoured only on the FIRST test-set;
+		// subsequent test-sets skip the delay because the app is already
+		// warm. Today wired for the docker-compose command type only —
+		// the path production globality autoreplay uses.
+		cmd.Flags().Bool("keep-app-alive", c.cfg.Test.KeepAppAlive, "Start the user application ONCE for the whole replay run and reuse it across all test-sets (instead of restarting per test-set). --delay applies only to the first test-set. Currently supported on the docker-compose command path.")
 	}
 }
 
@@ -455,6 +466,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
+		"keepAppAlive":              "keep-app-alive",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
