@@ -230,13 +230,29 @@ jobs:
           unzip awscliv2.zip
           sudo ./aws/install --update
 
-      - name: Download and Extract Postgres Fuzzer
+      # Build the postgres-fuzzer from a branch on keploy/go-fuzzers
+      # instead of pulling the latest tarball from S3. Lets us validate a
+      # fuzzer-side fix end-to-end before it merges + releases. Revert this
+      # step back to the S3 download once the fuzzer branch is promoted to
+      # the `releases/postgres-fuzzer/latest/` key.
+      - name: Build Postgres Fuzzer from go-fuzzers branch
         id: postgres_fuzzer
+        env:
+          PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
+          FUZZER_BRANCH: fix/postgres-fuzzer-determinism
         run: |
-          set -e
-          KEY="releases/postgres-fuzzer/latest/postgres-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
-          tar -xzf postgres-fuzzer-linux-amd64.tar.gz
+          set -euo pipefail
+          if [[ -z "${PRO_ACCESS_TOKEN}" ]]; then
+            echo "::error::PRO_ACCESS_TOKEN secret is required to clone keploy/go-fuzzers"
+            exit 1
+          fi
+          git clone --depth 1 --branch "${FUZZER_BRANCH}" \
+            "https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git" \
+            /tmp/go-fuzzers
+          cd /tmp/go-fuzzers
+          go build -trimpath -ldflags "-s -w" \
+            -o "$GITHUB_WORKSPACE/postgres-fuzzer" ./postgres
+          cd "$GITHUB_WORKSPACE"
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
 
