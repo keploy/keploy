@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	intUtil "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -65,14 +66,34 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 	packet.IterationCount = binary.LittleEndian.Uint32(data[pos : pos+4])
 	pos += 4
 
-	if stmtPrepOk.NumParams > 0 || (clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES > 0 && (packet.Flags&mysql.PARAMETER_COUNT_AVAILABLE > 0)) {
-		// Set the parameter count from the prepared statement
+	// CLIENT_QUERY_ATTRIBUTES is negotiated and PARAMETER_COUNT_AVAILABLE flag is set:
+	// mysql2 (Node.js) always takes this path against MySQL 8 — the wire layout
+	// between iteration_count and the NULL bitmap is augmented with a
+	// length-encoded parameter_count, and each declared parameter type is
+	// followed by a length-encoded parameter_name string. See
+	// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
+	// (the CLIENT_QUERY_ATTRIBUTES branch).
+	queryAttrsExtension := clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES > 0 &&
+		(packet.Flags&mysql.PARAMETER_COUNT_AVAILABLE > 0)
+
+	if stmtPrepOk.NumParams > 0 || queryAttrsExtension {
+		// Set the parameter count from the prepared statement by default.
 		packet.ParameterCount = int(stmtPrepOk.NumParams)
 
-		if clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES > 0 && (packet.Flags&mysql.PARAMETER_COUNT_AVAILABLE > 0) {
-			// If query attributes are supported and parameter count is available in the packet,
-			// we could potentially override it here, but for now we use the prepared statement count
-			packet.ParameterCount = int(stmtPrepOk.NumParams)
+		if queryAttrsExtension {
+			// The wire carries a length-encoded parameter_count that overrides
+			// stmtPrepOk.NumParams. mysql2 always sends this byte (typically 0
+			// when num_params==0) and the decoder MUST advance past it,
+			// otherwise it is mis-read as null_bitmap[0] downstream — that is
+			// the root cause of the `value: /Q==` / `value: null` corruption
+			// in mocks.yaml when recording mysql2 traffic.
+			paramCount, isNull, n := utils.ReadLengthEncodedInteger(data[pos:])
+			if isNull || n == 0 {
+				logger.Error("unexpected end of data while reading length-encoded parameter_count", zap.Int("position", pos), zap.Int("data_length", len(data)))
+				return nil, io.ErrUnexpectedEOF
+			}
+			pos += n
+			packet.ParameterCount = int(paramCount)
 		}
 
 		if packet.ParameterCount <= 0 {
@@ -111,6 +132,26 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				packet.Parameters[i].Type = binary.LittleEndian.Uint16(data[pos : pos+2])
 				packet.Parameters[i].Unsigned = (data[pos+1] & 0x80) != 0 // Check if the highest bit is set
 				pos += 2
+
+				if queryAttrsExtension {
+					// Each parameter type is followed by a length-encoded
+					// string parameter_name (usually empty when the binding
+					// is positional, as in mysql2).
+					nameLen, isNull, n := utils.ReadLengthEncodedInteger(data[pos:])
+					if isNull || n == 0 {
+						logger.Error("unexpected end of data while reading parameter_name length", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i))
+						return nil, io.ErrUnexpectedEOF
+					}
+					pos += n
+					if pos+int(nameLen) > len(data) {
+						logger.Error("unexpected end of data while reading parameter_name string", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i), zap.Uint64("name_length", nameLen))
+						return nil, io.ErrUnexpectedEOF
+					}
+					if nameLen > 0 {
+						packet.Parameters[i].Name = string(data[pos : pos+int(nameLen)])
+					}
+					pos += int(nameLen)
+				}
 			}
 		} else {
 			// When NewParamsBindFlag is 0, we reuse the previous parameter types
@@ -212,7 +253,14 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				if len(data[pos:]) < 8 {
 					return nil, fmt.Errorf("malformed FieldTypeDouble value")
 				}
-				param.Value = float64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+				// IEEE-754 reinterpret, NOT a numeric cast — the wire
+				// bytes encode the float's bit pattern. mysql2 binds
+				// integer IDs (1, 2, 6, ...) as FieldTypeDouble; casting
+				// uint64→float64 makes integer 6 read out as ~4.6e+18
+				// (the uint64 of the IEEE-754 bits taken as a float).
+				// The captured YAML then carries nonsense values and the
+				// matcher can't tell IDs apart at COM_STMT_EXECUTE time.
+				param.Value = math.Float64frombits(binary.LittleEndian.Uint64(data[pos : pos+8]))
 				pos += 8
 
 			// Fix: Added support for FieldTypeDate and FieldTypeNewDate.
