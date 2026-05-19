@@ -1414,7 +1414,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// exactly the one client that's actually speaking SSLRequest.
 	// This keeps the short-greeting deadlock (Redis PING, memcached
 	// 'quit', etc.) off the default code path.
-	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequestPrefix(testBuffer) {
+	if isPostgresSSLRequestPrefix(testBuffer) {
 		sslBuf, perr := reader.Peek(8)
 		if perr != nil {
 			utils.LogError(p.logger, perr, "client started with a Postgres SSLRequest prefix (00 00 00 08 04) but did not deliver the full 8-byte packet; the connection likely dropped mid-handshake — verify the client is a standard libpq/pgx/pq and check for a mismatched sslmode or an intermediary terminating the TCP stream",
@@ -1424,46 +1424,80 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		testBuffer = sslBuf
 	}
-	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
-		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
-			zap.Int("sourcePort", sourcePort),
-			zap.String("dstAddr", dstAddr),
-		)
-		// Consume the 8-byte SSLRequest from the buffered reader so the
-		// downstream parser never sees it.
-		if _, derr := reader.Discard(8); derr != nil {
-			utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes; the 8-byte SSLRequest was peeked but the bufio reader could not be advanced. This usually means the underlying TCP connection was reset between peek and discard — retry the client connection, and if it persists capture a packet trace between the client and the proxy listener",
-				zap.Uint32("sourcePort", uint32(sourcePort)),
-				zap.String("dstAddr", dstAddr))
-			return derr
-		}
-		// Reply 'S' (TLS accepted). Write straight to the underlying TCP
-		// connection; writes bypass the buffered reader.
-		if _, werr := srcConn.Write([]byte{'S'}); werr != nil {
-			utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client; the proxy accepted the SSLRequest but could not send the one-byte acknowledgment. Verify the client is still connected (not a half-closed stream), check for client-side read timeouts shorter than the proxy's accept latency, and confirm no firewall is dropping 1-byte segments",
-				zap.Uint32("sourcePort", uint32(sourcePort)),
-				zap.String("dstAddr", dstAddr))
-			return werr
-		}
-		// Re-peek for the TLS ClientHello. The client app sends it as soon
-		// as it gets 'S'. 5 bytes is enough for IsTLSHandshake().
-		testBuffer, err = reader.Peek(5)
-		if err != nil {
-			if err == io.EOF && len(testBuffer) == 0 {
-				p.logger.Debug("Postgres client closed conn after SSLRequest reply")
-				return nil
-			}
-			// Any non-nil error here means we could not read a complete
-			// 5-byte TLS record header — either the client sent fewer
-			// than 5 bytes before closing (EOF with partial buffer) or
-			// the network errored out. Falling through would leave the
-			// downstream TLS detection running against a truncated
-			// prefix and misclassify the stream as plaintext, so bail.
-			utils.LogError(p.logger, err, "failed to read a complete 5-byte TLS record header after replying 'S' to the Postgres SSLRequest; the client did not deliver enough bytes to identify a TLS ClientHello. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the bytes sent immediately after 'S' to verify a full TLS record header arrives (starting with 0x16)",
-				zap.Uint32("sourcePort", uint32(sourcePort)),
+	if isPostgresSSLRequest(testBuffer) {
+		if agent.InterceptPostgresSSLRequest {
+			p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
+				zap.Int("sourcePort", sourcePort),
 				zap.String("dstAddr", dstAddr),
-				zap.Int("bytesRead", len(testBuffer)))
-			return err
+			)
+			// Consume the 8-byte SSLRequest from the buffered reader so the
+			// downstream parser never sees it.
+			if _, derr := reader.Discard(8); derr != nil {
+				utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes; the 8-byte SSLRequest was peeked but the bufio reader could not be advanced. This usually means the underlying TCP connection was reset between peek and discard — retry the client connection, and if it persists capture a packet trace between the client and the proxy listener",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr))
+				return derr
+			}
+			// Reply 'S' (TLS accepted). Write straight to the underlying TCP
+			// connection; writes bypass the buffered reader.
+			if _, werr := srcConn.Write([]byte{'S'}); werr != nil {
+				utils.LogError(p.logger, werr, "failed to write 'S' SSLResponse to Postgres client; the proxy accepted the SSLRequest but could not send the one-byte acknowledgment. Verify the client is still connected (not a half-closed stream), check for client-side read timeouts shorter than the proxy's accept latency, and confirm no firewall is dropping 1-byte segments",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr))
+				return werr
+			}
+			// Re-peek for the TLS ClientHello. The client app sends it as soon
+			// as it gets 'S'. 5 bytes is enough for IsTLSHandshake().
+			testBuffer, err = reader.Peek(5)
+			if err != nil {
+				if err == io.EOF && len(testBuffer) == 0 {
+					p.logger.Debug("Postgres client closed conn after SSLRequest reply")
+					return nil
+				}
+				// Any non-nil error here means we could not read a complete
+				// 5-byte TLS record header — either the client sent fewer
+				// than 5 bytes before closing (EOF with partial buffer) or
+				// the network errored out. Falling through would leave the
+				// downstream TLS detection running against a truncated
+				// prefix and misclassify the stream as plaintext, so bail.
+				utils.LogError(p.logger, err, "failed to read a complete 5-byte TLS record header after replying 'S' to the Postgres SSLRequest; the client did not deliver enough bytes to identify a TLS ClientHello. Check the client's sslmode (require/verify-* should always follow with ClientHello after 'S'), confirm InterceptPostgresSSLRequest is only enabled in pure-proxy builds without a Postgres parser, and capture the bytes sent immediately after 'S' to verify a full TLS record header arrives (starting with 0x16)",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr),
+					zap.Int("bytesRead", len(testBuffer)))
+				return err
+			}
+		} else {
+			p.logger.Debug("Postgres SSLRequest detected but InterceptPostgresSSLRequest is disabled, replying with 'N' to refuse SSL",
+				zap.Int("sourcePort", sourcePort),
+				zap.String("dstAddr", dstAddr),
+			)
+			// Discard the 8-byte SSLRequest from the buffered reader.
+			if _, derr := reader.Discard(8); derr != nil {
+				utils.LogError(p.logger, derr, "failed to discard Postgres SSLRequest bytes; the 8-byte SSLRequest was peeked but the bufio reader could not be advanced.",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr))
+				return derr
+			}
+			// Reply 'N' (TLS refused). Write straight to the underlying TCP connection.
+			if _, werr := srcConn.Write([]byte{'N'}); werr != nil {
+				utils.LogError(p.logger, werr, "failed to write 'N' SSLResponse to Postgres client",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr))
+				return werr
+			}
+			// Re-peek for the client's plaintext startup packet.
+			testBuffer, err = reader.Peek(5)
+			if err != nil {
+				if err == io.EOF && len(testBuffer) == 0 {
+					p.logger.Debug("Postgres client closed conn after SSLRequest reply 'N'")
+					return nil
+				}
+				utils.LogError(p.logger, err, "failed to read client greeting after replying 'N' to the Postgres SSLRequest",
+					zap.Uint32("sourcePort", uint32(sourcePort)),
+					zap.String("dstAddr", dstAddr),
+					zap.Int("bytesRead", len(testBuffer)))
+				return err
+			}
 		}
 	}
 
