@@ -2249,16 +2249,28 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// the *MockManager handed in at MockOutgoing time and keep polling
 	// it for the connection's lifetime. With a per-test-set replacement
 	// the new manager's StoreMocks / UpdateMockParams (and the revision
-	// bumps PR #203 relies on for revision-gated rebuilds) land on the
-	// new instance the parsers cannot see, while the parsers keep
-	// reading test-set-N-1's cohort off the orphaned manager. The
-	// docker-compose lift-app path makes this reproducible: one asyncpg
-	// pool stays warm across test-set boundaries, so the v3 parser's
-	// runLoop survives and observes the MockManager swap. Reusing the
-	// manager keeps revision-tracking continuous; the trees still get
-	// replaced atomically by SetMocksWithWindow per test-set.
-	if p.getMockManager() == nil {
+	// bumps keploy/integrations#203 relies on for revision-gated
+	// rebuilds) land on the new instance the parsers cannot see, while
+	// the parsers keep reading test-set-N-1's cohort off the orphaned
+	// manager. Production globality autoreplay exhibits exactly this
+	// pattern: one user app survives the whole replay, the asyncpg pool
+	// keeps its TCP connection to the proxy warm across test-set
+	// boundaries, the v3 runLoop survives, and PerTestProvider.Current
+	// never observes the swap. Reusing the manager keeps revision-
+	// tracking continuous; the filtered / unfiltered / startup trees
+	// still get replaced atomically by SetMocksWithWindow per test-set,
+	// and ResetForReplaySession below clears connection-scoped state
+	// (connectionTrees, noConnMocks, droppedOutOfWindow) so the
+	// previous test-set's per-connID mock pool doesn't leak into the
+	// next one — SetMocksWithWindow seeds new connection mocks via
+	// AddConnectionMock but never evicts prior entries, so without the
+	// explicit reset a long-lived connection could match
+	// LifetimeConnection mocks from the prior test-set or merge them
+	// with the current one's.
+	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	} else {
+		mm.ResetForReplaySession()
 	}
 
 	if !opts.Mocking {
