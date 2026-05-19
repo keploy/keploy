@@ -42,8 +42,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// replay fail with "no matching mock found" for teardown endpoints like
 	// GET /orders and GET /analytics/top-products.
 	if memoryguard.IsRecordingPaused() {
-		logger.Warn("memory pressure active at MySQL connection start: mocks will be skipped until pressure clears",
-			zap.String("impact", "queries completing while paused will have no mock; recording resumes automatically"))
+		logger.Debug("memory pressure active at MySQL connection start: per-packet guards will skip mocks until pressure clears",
+			zap.String("Client ConnectionID", clientConn.RemoteAddr().String()))
 	}
 
 	// Buffered channels for raw byte relay. Each Read() result is sent
