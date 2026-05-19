@@ -122,9 +122,76 @@ done
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
+    echo "All tests passed (baseline run, no --keep-app-alive)"
 else
     cat "${test_container}.txt"
+    exit 1
+fi
+
+# ── --keep-app-alive regression coverage (docker-compose cmdType) ───────────
+# Second replay run with --keep-app-alive set. The flag starts the
+# compose stack ONCE for the whole replay (lift-app behaviour) instead
+# of restarting it per test-set; this is the cmdType the flag was
+# originally written for (production globality autoreplay uses this
+# path). Asserts every test-set in the new report directory (test-run-1)
+# is PASSED.
+echo "===== --keep-app-alive regression run ====="
+# Wipe any leftover compose state from the baseline run before the
+# second one — docker compose up will reuse stopped containers
+# otherwise and the new run won't be a clean lifecycle test.
+docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+
+ka_container="echoApp_keep_app_alive"
+$REPLAY_BIN test -c "docker compose up" \
+    --containerName "$ka_container" \
+    --apiTimeout 60 \
+    --delay 15 \
+    --keep-app-alive \
+    --generate-github-actions=false &> "${ka_container}.txt"
+
+if grep "ERROR" "${ka_container}.txt"; then
+    echo "Error found in --keep-app-alive replay..."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
+    echo "Race condition detected in --keep-app-alive replay, stopping pipeline..."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+# Reports from the second run land in test-run-1 because the baseline
+# above already produced test-run-0. Glob the latest test-run-* in case
+# keploy's numbering ever drifts.
+latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
+if [ -z "$latest_report_dir" ]; then
+    echo "::error::No test-run-* report directory after --keep-app-alive replay"
+    exit 1
+fi
+echo "--keep-app-alive report dir: $latest_report_dir"
+
+ka_all_passed=true
+for i in {0..1}; do
+    report_file="$latest_report_dir/test-set-$i-report.yaml"
+    if [ ! -f "$report_file" ]; then
+        echo "::error::Missing $report_file"
+        ka_all_passed=false
+        break
+    fi
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    echo "[--keep-app-alive] Test status for test-set-$i: $test_status"
+    if [ "$test_status" != "PASSED" ]; then
+        ka_all_passed=false
+        echo "[--keep-app-alive] Test-set-$i did not pass."
+        break
+    fi
+done
+
+if [ "$ka_all_passed" = true ]; then
+    echo "All tests passed (--keep-app-alive run)"
+    exit 0
+else
+    cat "${ka_container}.txt"
     exit 1
 fi

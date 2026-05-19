@@ -146,18 +146,18 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
-	logger             *zap.Logger
-	testDB             TestDB
-	mockDB             MockDB
-	mappingDB          MappingDB
-	reportDB           ReportDB
-	testSetConf        TestSetConfig
-	telemetry          Telemetry
-	instrumentation    Instrumentation
-	config             *config.Config
-	instrument         bool
-	isLastTestSet      bool
-	isLastTestCase     bool
+	logger          *zap.Logger
+	testDB          TestDB
+	mockDB          MockDB
+	mappingDB       MappingDB
+	reportDB        ReportDB
+	testSetConf     TestSetConfig
+	telemetry       Telemetry
+	instrumentation Instrumentation
+	config          *config.Config
+	instrument      bool
+	isLastTestSet   bool
+	isLastTestCase  bool
 	// isFirstTestSet mirrors isLastTestSet — true while the test-set
 	// about to run is the first one of the current replay run. Read
 	// by the waitForAppReady gate so --delay applies only to the first
