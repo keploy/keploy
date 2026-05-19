@@ -138,9 +138,76 @@ done
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
+    echo "All tests passed (baseline run, no --keep-app-alive)"
 else
     cat "${test_container}.txt"
     exit 1
 fi
+
+# ── --keep-app-alive regression coverage (docker-run cmdType) ───────────────
+# See gin_mongo/golang-linux.sh for the full rationale. Same shape:
+#   - second replay with --keep-app-alive scoped to a single test-set
+#     so cross-test-set state bleed (the bug the flag is designed to
+#     surface in real autoreplay) can't trip the assertion
+#   - capture the replay exit code AND verify a new test-run-* dir
+#     was created — guards against the binary rejecting the flag and
+#     re-using the baseline's report dir, which on the previous
+#     iteration of this script caused record_build_replay_latest to
+#     falsely report PASSED against the stale BASELINE report
+#   - same script runs for all three matrix variants
+#       record_build_replay_build   — passes
+#       record_latest_replay_build  — passes
+#       record_build_replay_latest  — REPLAY_BIN is keploy-latest with
+#                                     no flag → exit non-zero / no new
+#                                     report dir → expected red
+echo "===== --keep-app-alive regression run ====="
+prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+
+ka_container="ginApp_test_keep_app_alive"
+$REPLAY_BIN test -c "docker run --rm -p 8080:8080 --net keploy-network --name $ka_container gin-mongo" \
+    --containerName "$ka_container" \
+    --apiTimeout 60 \
+    --delay 20 \
+    --keep-app-alive \
+    --test-sets test-set-0 \
+    --generate-github-actions=false &> "${ka_container}.txt"
+replay_status=$?
+
+if [ "$replay_status" -ne 0 ]; then
+    echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
+    cat "${ka_container}.txt"
+    exit "$replay_status"
+fi
+
+if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
+    echo "Race condition detected in --keep-app-alive replay, stopping pipeline..."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+if [ "$new_report_count" -le "$prev_report_count" ]; then
+    echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)"
+echo "--keep-app-alive report dir: $latest_report_dir"
+
+report_file="$latest_report_dir/test-set-0-report.yaml"
+if [ ! -f "$report_file" ]; then
+    echo "::error::Missing $report_file"
+    cat "${ka_container}.txt"
+    exit 1
+fi
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+echo "[--keep-app-alive] Test status for test-set-0: $test_status"
+if [ "$test_status" != "PASSED" ]; then
+    echo "[--keep-app-alive] Test-set-0 did not pass."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+echo "All tests passed (--keep-app-alive run)"
+exit 0
