@@ -389,29 +389,60 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// single test-set. The per-test-set RunApplication spawn (and its
 	// sibling NotifyGracefulShutdown notify) below is gated off via
 	// the existing `serveTest` parameter on RunTestSet — we pass
-	// `r.config.Test.KeepAppAlive` as that parameter at the call site
-	// (line ~480). Keeps long-lived TCP connections (asyncpg pool,
-	// HikariCP, etc.) warm across the test-set boundary — the
-	// precondition the cross-test-set session/startup-tier staleness
-	// bugs in keploy/integrations#203 need to surface.
+	// `effectiveKeepAlive` as that parameter at the call site (line
+	// ~480). Keeps long-lived TCP connections (asyncpg pool, HikariCP,
+	// etc.) warm across the test-set boundary — the precondition the
+	// cross-test-set session/startup-tier staleness bugs in
+	// keploy/integrations#203 need to surface.
 	//
 	// Supported command types: docker-compose, docker-run,
 	// docker-start, native. All of them ultimately call
 	// r.instrumentation.Run(ctx, opts) — the only difference is what
 	// child command runs — so the same one-shot spawn pattern works
 	// for every cmdType. cmdType == Empty (no -c) means there is no
-	// user application to manage, so we skip the spawn entirely.
-	if r.config.Test.KeepAppAlive && r.instrument && cmdType != utils.Empty {
+	// user application to manage; the same gate ALSO suppresses
+	// passing serveTest=true to RunTestSet (which would otherwise skip
+	// the per-test-set RunApplication path and leave the app
+	// unstarted), and the per-test-set waitForAppReady skip below
+	// stays armed only when the one-shot spawn actually fired.
+	// Single computed predicate so all three gates move together.
+	effectiveKeepAlive := r.config.Test.KeepAppAlive && r.instrument && cmdType != utils.Empty
+	if effectiveKeepAlive {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
-			if appErr := r.RunApplication(ctx, models.RunOptions{
+			appErr := r.RunApplication(ctx, models.RunOptions{
 				AppCommand: r.config.Command,
-			}); appErr != (models.AppError{}) && appErr.AppErrorType != models.ErrCtxCanceled {
-				r.logger.Warn("user app exited under --keep-app-alive",
-					zap.String("kind", string(appErr.AppErrorType)),
-					zap.Any("err", appErr))
+			})
+			// Two outcomes that are NOT failures from the replay's
+			// point of view:
+			//   1. Zero-value AppError: RunApplication returned cleanly.
+			//   2. ErrCtxCanceled: ctx was cancelled (normal end-of-run
+			//      teardown — the outer Start() defers a graceful
+			//      shutdown notify; the app exits as a consequence).
+			// Either case → return nil; errgroup keeps the run alive.
+			if appErr == (models.AppError{}) || appErr.AppErrorType == models.ErrCtxCanceled {
+				return nil
 			}
-			return nil
+			// Anything else is an app startup / crash failure. Propagate
+			// it back through the errgroup so g.Wait() at the bottom of
+			// Start() surfaces the cause as the run's exit reason and
+			// any sibling goroutine listening on the errgroup-derived
+			// context unblocks. Logging the failure here too because
+			// errgroup only ever returns the FIRST error — if the test
+			// loop trips on a parallel error first, the actionable
+			// next_step that explains WHY tests started failing en
+			// masse would otherwise be hidden.
+			utils.LogError(r.logger, fmt.Errorf("user application failed under --keep-app-alive: %v", appErr),
+				applicationFailedToRunLogMessage,
+				zap.String("kind", string(appErr.AppErrorType)),
+				zap.Any("err", appErr),
+				zap.String("next_step",
+					"the user application started by --keep-app-alive exited or failed to start during the replay run. "+
+						"Check the application's own logs (the -c command's stdout/stderr is captured by keploy) for the root cause. "+
+						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
+						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
+						"restart it per test-set instead."))
+			return appErr
 		})
 	}
 
@@ -523,10 +554,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			// serveTest=true reuses the pre-existing gating inside
 			// RunTestSet (skips per-test-set RunApplication spawn and
-			// NotifyGracefulShutdown). Today's only way to enable that
-			// path is the --keep-app-alive flag; if it's off, the
-			// historical per-test-set restart behaviour is preserved.
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, r.config.Test.KeepAppAlive)
+			// NotifyGracefulShutdown). Pass `effectiveKeepAlive` —
+			// not the raw config bool — so a `--keep-app-alive` set
+			// with `--cmd-type=""` (or with instrument disabled) does
+			// NOT skip per-test-set RunApplication while the one-shot
+			// spawn was also suppressed; that combination would leave
+			// the app entirely unstarted. With this gate the
+			// historical per-test-set restart behaviour is preserved
+			// whenever the one-shot spawn didn't fire.
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -1142,7 +1178,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// test-set. The first test-set still runs the wait so the
 		// initial app startup can finish (build/boot/connect) before
 		// the first request fires.
-		if r.config.Test.KeepAppAlive && !r.isFirstTestSet {
+		//
+		// Gate keyed on `serveTest` (the parameter Start() computes
+		// as `effectiveKeepAlive`) rather than the raw config bool,
+		// so the skip ONLY arms when the one-shot spawn actually
+		// fired. If --keep-app-alive was set on a cmdType where the
+		// one-shot spawn was suppressed (cmdType == Empty / instrument
+		// off), serveTest will be false here and the readiness wait
+		// runs every test-set, matching the historical lifecycle.
+		if serveTest && !r.isFirstTestSet {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 			return models.TestSetStatusUserAbort, context.Canceled
@@ -1291,11 +1335,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// See the parallel call in the docker-compose branch above
 			// for the --keep-app-alive rationale. On the non-compose
 			// paths (native, docker-run, docker-start) the one-shot
-			// spawn in Start() also fires when KeepAppAlive is set,
-			// so this gate is symmetric: first test-set waits for the
-			// freshly-spawned app to become ready, subsequent test-
-			// sets skip the wait because the app is already warm.
-			if r.config.Test.KeepAppAlive && !r.isFirstTestSet {
+			// spawn in Start() also fires when KeepAppAlive is set
+			// AND cmdType is non-empty AND instrument is enabled.
+			// Gate keyed on `serveTest` (the Start()-computed
+			// effectiveKeepAlive predicate) — identical to the compose
+			// branch above — so the readiness skip arms only when the
+			// one-shot spawn actually fired.
+			if serveTest && !r.isFirstTestSet {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 				return models.TestSetStatusUserAbort, context.Canceled
