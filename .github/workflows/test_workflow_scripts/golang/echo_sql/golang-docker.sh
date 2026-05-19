@@ -129,17 +129,25 @@ else
 fi
 
 # ── --keep-app-alive regression coverage (docker-compose cmdType) ───────────
-# Second replay run with --keep-app-alive set. The flag starts the
-# compose stack ONCE for the whole replay (lift-app behaviour) instead
-# of restarting it per test-set; this is the cmdType the flag was
-# originally written for (production globality autoreplay uses this
-# path). Asserts every test-set in the new report directory (test-run-1)
-# is PASSED.
+# See gin_mongo/golang-linux.sh for the full rationale. Same shape:
+#   - second replay with --keep-app-alive scoped to a single test-set
+#     so cross-test-set state bleed (postgres rows recorded during
+#     test-set-0 would otherwise leak into test-set-1's expected
+#     "before" state when the app survives the boundary) can't trip
+#     the assertion
+#   - capture the replay exit code AND verify a new test-run-* dir
+#     was created — guards against the binary rejecting the flag and
+#     re-using the baseline's report dir
+#   - same script for all three matrix variants — keploy-latest's
+#     missing flag causes a non-zero exit and no new test-run-* dir,
+#     so the leg goes red as designed
 echo "===== --keep-app-alive regression run ====="
 # Wipe any leftover compose state from the baseline run before the
 # second one — docker compose up will reuse stopped containers
 # otherwise and the new run won't be a clean lifecycle test.
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+
+prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
 
 ka_container="echoApp_keep_app_alive"
 $REPLAY_BIN test -c "docker compose up" \
@@ -147,12 +155,14 @@ $REPLAY_BIN test -c "docker compose up" \
     --apiTimeout 60 \
     --delay 15 \
     --keep-app-alive \
+    --test-sets test-set-0 \
     --generate-github-actions=false &> "${ka_container}.txt"
+replay_status=$?
 
-if grep "ERROR" "${ka_container}.txt"; then
-    echo "Error found in --keep-app-alive replay..."
+if [ "$replay_status" -ne 0 ]; then
+    echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
     cat "${ka_container}.txt"
-    exit 1
+    exit "$replay_status"
 fi
 
 if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
@@ -161,37 +171,29 @@ if grep "WARNING: DATA RACE" "${ka_container}.txt"; then
     exit 1
 fi
 
-# Reports from the second run land in test-run-1 because the baseline
-# above already produced test-run-0. Glob the latest test-run-* in case
-# keploy's numbering ever drifts.
-latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)"
-if [ -z "$latest_report_dir" ]; then
-    echo "::error::No test-run-* report directory after --keep-app-alive replay"
-    exit 1
-fi
-echo "--keep-app-alive report dir: $latest_report_dir"
-
-ka_all_passed=true
-for i in {0..1}; do
-    report_file="$latest_report_dir/test-set-$i-report.yaml"
-    if [ ! -f "$report_file" ]; then
-        echo "::error::Missing $report_file"
-        ka_all_passed=false
-        break
-    fi
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-    echo "[--keep-app-alive] Test status for test-set-$i: $test_status"
-    if [ "$test_status" != "PASSED" ]; then
-        ka_all_passed=false
-        echo "[--keep-app-alive] Test-set-$i did not pass."
-        break
-    fi
-done
-
-if [ "$ka_all_passed" = true ]; then
-    echo "All tests passed (--keep-app-alive run)"
-    exit 0
-else
+new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+if [ "$new_report_count" -le "$prev_report_count" ]; then
+    echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
     cat "${ka_container}.txt"
     exit 1
 fi
+
+latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)"
+echo "--keep-app-alive report dir: $latest_report_dir"
+
+report_file="$latest_report_dir/test-set-0-report.yaml"
+if [ ! -f "$report_file" ]; then
+    echo "::error::Missing $report_file"
+    cat "${ka_container}.txt"
+    exit 1
+fi
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+echo "[--keep-app-alive] Test status for test-set-0: $test_status"
+if [ "$test_status" != "PASSED" ]; then
+    echo "[--keep-app-alive] Test-set-0 did not pass."
+    cat "${ka_container}.txt"
+    exit 1
+fi
+
+echo "All tests passed (--keep-app-alive run)"
+exit 0
