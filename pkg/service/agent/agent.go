@@ -74,6 +74,10 @@ type Agent struct {
 	// nothing else reads tcChan after that. Without draining, the 100-
 	// slot buffer fills within seconds and subsequent ingress traffic
 	// (including kubelet probes) blocks at the channel send.
+	//
+	// Reads + writes must hold incomingMu — StartIncomingProxy (HTTP
+	// /agent/incoming handler) writes, SetGracefulShutdown (a different
+	// HTTP handler goroutine) reads via the drainOnce closure.
 	tcChan    chan *models.TestCase
 	drainOnce sync.Once
 
@@ -87,7 +91,21 @@ type Agent struct {
 	// takes the recorder to drain its own client-side queue and tear
 	// the connection down; we must not start consuming during that
 	// window.
+	//
+	// Guarded by incomingMu — see tcChan.
 	streamCtx context.Context
+
+	// incomingMu protects streamCtx and tcChan against concurrent access
+	// from StartIncomingProxy and SetGracefulShutdown (different HTTP
+	// handler goroutines). incomingProxyOnce gates the underlying
+	// IncomingProxy.Start so the ListenForIngressEvents goroutine it
+	// spawns runs exactly once per agent process — without this guard a
+	// reconnecting recorder would leak a new watcher goroutine per
+	// /agent/incoming stream (the goroutines all live until SIGTERM
+	// because the ctx is process-scoped now), and we'd accumulate
+	// duplicates that all consume from the same eventChan.
+	incomingMu        sync.Mutex
+	incomingProxyOnce sync.Once
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -206,10 +224,31 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	if a.setupCtx == nil {
 		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
 	}
+
+	// Always refresh streamCtx — a reconnecting recorder gets a new
+	// request ctx each time, and SetGracefulShutdown's drainer must
+	// wait on the LATEST one so it doesn't race with whichever
+	// HandleIncoming for-loop is currently draining the channel.
+	a.incomingMu.Lock()
 	a.streamCtx = ctx
-	tc := a.IncomingProxy.Start(a.setupCtx, opts)
-	a.tcChan = tc
-	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
+	a.incomingMu.Unlock()
+
+	// IncomingProxy.Start spawns a goroutine (`ListenForIngressEvents`)
+	// whose lifetime is now setupCtx-scoped (i.e. process lifetime).
+	// Gate with sync.Once so subsequent /agent/incoming streams reuse
+	// the existing watcher + tcChan instead of leaking a new goroutine
+	// every time. The published tcChan in `a.tcChan` is read under
+	// the same mutex in SetGracefulShutdown.
+	a.incomingProxyOnce.Do(func() {
+		tc := a.IncomingProxy.Start(a.setupCtx, opts)
+		a.incomingMu.Lock()
+		a.tcChan = tc
+		a.incomingMu.Unlock()
+		a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
+	})
+	a.incomingMu.Lock()
+	tc := a.tcChan
+	a.incomingMu.Unlock()
 	return tc, nil
 }
 
@@ -236,14 +275,19 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	// blocks at the channel send. Spin up a background drainer once,
 	// scoped to the agent process lifetime.
 	a.drainOnce.Do(func() {
+		// Snapshot tcChan and streamCtx under the same mutex
+		// StartIncomingProxy uses to write them — otherwise the read
+		// here races with the write there and the Go race detector
+		// flags it. nil streamCtx is legal here: it means
+		// SetGracefulShutdown was called before any /agent/incoming
+		// stream attached (degenerate setup); we skip the wait below.
+		a.incomingMu.Lock()
 		tc := a.tcChan
+		streamCtx := a.streamCtx
+		a.incomingMu.Unlock()
 		if tc == nil {
 			return
 		}
-		// Snapshot streamCtx — nil-safe: nil means SetGracefulShutdown
-		// was called before any /agent/incoming stream attached (legal
-		// in degenerate setups; just skip the wait).
-		streamCtx := a.streamCtx
 		go func() {
 			// Wait for the recorder's /agent/incoming stream to close
 			// before consuming. Otherwise this drainer races with the
