@@ -614,9 +614,9 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 
 	// Build an IngressProxyManager configured for synchronous record mode.
 	pm := &IngressProxyManager{
-		logger:       zap.NewNop(),
-		tcChan:       make(chan *models.TestCase, 4),
-		synchronous:  true,
+		logger:      zap.NewNop(),
+		tcChan:      make(chan *models.TestCase, 4),
+		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
 
@@ -767,9 +767,9 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 	})
 
 	pm := &IngressProxyManager{
-		logger:       zap.NewNop(),
-		tcChan:       make(chan *models.TestCase, 4),
-		synchronous:  true,
+		logger:      zap.NewNop(),
+		tcChan:      make(chan *models.TestCase, 4),
+		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
 
