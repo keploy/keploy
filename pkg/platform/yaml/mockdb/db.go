@@ -206,9 +206,13 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 					isFilteredMock = false
 				case "Http":
 					isFilteredMock = false
+				case "Http2":
+					isFilteredMock = false
 				case "Redis":
 					isFilteredMock = false
 				case "MySQL":
+					isFilteredMock = false
+				case "DNS":
 					isFilteredMock = false
 				}
 				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
@@ -285,9 +289,13 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 					isUnFilteredMock = true
 				case "Http":
 					isUnFilteredMock = true
+				case "Http2":
+					isUnFilteredMock = true
 				case "Redis":
 					isUnFilteredMock = true
 				case "MySQL", "PostgresV2":
+					isUnFilteredMock = true
+				case "DNS":
 					isUnFilteredMock = true
 				}
 				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {

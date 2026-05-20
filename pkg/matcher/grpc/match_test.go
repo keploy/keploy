@@ -106,7 +106,7 @@ func TestMatch_JSONComparison(t *testing.T) {
 			}
 
 			// Run the match
-			matched, result := Match(tc, actualResp, tt.noiseConfig, tt.ignoreOrdering, logger)
+			matched, result := Match(tc, actualResp, tt.noiseConfig, tt.ignoreOrdering, logger, true)
 
 			// Check the result
 			if matched != tt.expectedMatch {
@@ -184,13 +184,13 @@ func TestMatch_IgnoreOrdering(t *testing.T) {
 	noiseConfig := map[string]map[string][]string{}
 
 	// Test with ignoreOrdering = false (should not match)
-	matchedStrict, _ := Match(tc, actualResp, noiseConfig, false, logger)
+	matchedStrict, _ := Match(tc, actualResp, noiseConfig, false, logger, true)
 	if matchedStrict {
 		t.Error("Expected arrays with different ordering to not match when ignoreOrdering=false")
 	}
 
 	// Test with ignoreOrdering = true (should match)
-	matchedIgnoreOrder, _ := Match(tc, actualResp, noiseConfig, true, logger)
+	matchedIgnoreOrder, _ := Match(tc, actualResp, noiseConfig, true, logger, true)
 	if !matchedIgnoreOrder {
 		t.Error("Expected arrays with different ordering to match when ignoreOrdering=true")
 	}

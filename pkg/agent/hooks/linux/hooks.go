@@ -62,15 +62,17 @@ type Hooks struct {
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
-	socket     link.Link
-	connect4   link.Link
-	gp4        link.Link
-	connect6   link.Link
-	gp6        link.Link
-	objects    bpfObjects
-	cgBind4    link.Link
-	cgBind6    link.Link
-	bindEnter  link.Link
+	socket      link.Link
+	connect4    link.Link
+	udp4Sendmsg link.Link
+	gp4         link.Link
+	connect6    link.Link
+	udp6Sendmsg link.Link
+	gp6         link.Link
+	objects     bpfObjects
+	cgBind4     link.Link
+	cgBind6     link.Link
+
 	BindEvents *ebpf.Map
 	sockops    link.Link
 }
@@ -152,16 +154,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1770033571001
-	h.agentRegistartionMap = objs.M_1770033571002
+	h.clientRegistrationMap = objs.M_1770972393001
+	h.agentRegistartionMap = objs.M_1770972393002
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
 
-	// ----- used in case of wsl -----
-	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
+	socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_socket")
+		utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 		return err
 	}
 	h.socket = socket
@@ -226,6 +227,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.connect4 = c4
 
+	udp4, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP4Sendmsg,
+		Program: objs.K_udp4Sendmsg,
+	})
+	if err != nil {
+		h.logger.Error("failed to attach the udp4 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
+	} else {
+		h.udp4Sendmsg = udp4
+	}
+
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet4GetPeername,
@@ -249,6 +261,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 	h.connect6 = c6
+
+	udp6, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP6Sendmsg,
+		Program: objs.K_udp6Sendmsg,
+	})
+	if err != nil {
+		h.logger.Error("failed to attach the udp6 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
+	} else {
+		h.udp6Sendmsg = udp6
+	}
+
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet6GetPeername,
@@ -313,15 +337,22 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
+
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the socket")
+			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
 		}
 	}
 
 	if h.connect4 != nil {
 		if err := h.connect4.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the connect4")
+		}
+	}
+
+	if h.udp4Sendmsg != nil {
+		if err := h.udp4Sendmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp4 sendmsg hook")
 		}
 	}
 
@@ -334,6 +365,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.connect6 != nil {
 		if err := h.connect6.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the connect6")
+		}
+	}
+
+	if h.udp6Sendmsg != nil {
+		if err := h.udp6Sendmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp6 sendmsg hook")
 		}
 	}
 	if h.gp6 != nil {
@@ -364,11 +401,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
 			}
 		}
-		if h.bindEnter != nil {
-			if err := h.bindEnter.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
-			}
-		}
+
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 }

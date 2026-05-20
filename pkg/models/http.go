@@ -6,6 +6,13 @@ import (
 
 type Method string
 
+// BodyRef stores a reference to a large request body that has been offloaded
+// to the assets directory (bodies > 1MB). When BodyRef is set, Body will be empty.
+type BodyRef struct {
+	Path string `json:"path" yaml:"path"` // relative path to the asset file
+	Size int64  `json:"size" yaml:"size"` // original content size in bytes
+}
+
 type HTTPReq struct {
 	Method     Method            `json:"method" yaml:"method"`
 	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
@@ -14,6 +21,7 @@ type HTTPReq struct {
 	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
 	Header     map[string]string `json:"header" yaml:"header"`
 	Body       string            `json:"body" yaml:"body"`
+	BodyRef    BodyRef           `json:"body_ref,omitempty" yaml:"body_ref,omitempty"` // set when body is offloaded to assets (>1MB)
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
@@ -32,15 +40,18 @@ type HTTPSchema struct {
 }
 
 type FormData struct {
-	Key    string   `json:"key" bson:"key" yaml:"key"`
-	Values []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
-	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
+	Key       string   `json:"key" bson:"key" yaml:"key"`
+	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
+	Paths     []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
+	FileNames []string `json:"file_names,omitempty" bson:"file_names,omitempty" yaml:"-"`
 }
 
 type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`
+	BodySkipped   bool              `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
+	BodySize      int64             `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`

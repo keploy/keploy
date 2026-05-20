@@ -118,7 +118,7 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 			t.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
 			continue
 		}
-		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed || testCaseResultMap[testCase.Name].Status == models.TestStatusObsolete {
 			continue
 		}
 		if testCaseResultMap[testCase.Name].FailureInfo.Risk == models.High && !t.config.Normalize.AllowHighRisk {

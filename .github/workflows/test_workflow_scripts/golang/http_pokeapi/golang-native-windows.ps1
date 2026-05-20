@@ -281,6 +281,7 @@ $testArgs = @(
   '-c', 'go run .',
   '--api-timeout', '60',
   '--delay', '30',
+  '--debug',
   # '--port', '8080',
   '--generate-github-actions=false'
 )

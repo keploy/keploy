@@ -20,6 +20,7 @@ type TestReportVerdict struct {
 	total     int
 	passed    int
 	failed    int
+	obsolete  int
 	ignored   int
 	status    bool
 	duration  time.Duration
@@ -140,26 +141,17 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
-func compareMockArrays(arr1, arr2 []string) bool {
-	counts1 := make(map[string]int)
-	counts2 := make(map[string]int)
-
-	for _, mock := range arr1 {
-		counts1[mock]++
+func isMockSubset(subset, superset []string) bool {
+	supersetCounts := make(map[string]int)
+	for _, mock := range superset {
+		supersetCounts[mock]++
 	}
 
-	for _, mock := range arr2 {
-		counts2[mock]++
-	}
-
-	if len(counts1) != len(counts2) {
-		return false
-	}
-
-	for mock, count := range counts1 {
-		if counts2[mock] != count {
+	for _, mock := range subset {
+		if supersetCounts[mock] == 0 {
 			return false
 		}
+		supersetCounts[mock]--
 	}
 
 	return true

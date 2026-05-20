@@ -240,6 +240,54 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 // CompareHTTPResp compares two http responses and returns a boolean value indicating whether they are equal or not.
 func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.RespCompare) {
 	pass := true
+
+	// If either response body was skipped during recording (>1MB), compute body size comparison
+	// and clear both bodies so the normal comparison runs (empty vs empty).
+	var bodySizeResult models.IntResult
+	if tcs1.HTTPResp.BodySkipped || tcs2.HTTPResp.BodySkipped {
+		// Use BodySize from whichever was skipped; for the non-skipped one, use actual body length
+		expectedSize := tcs1.HTTPResp.BodySize
+		if !tcs1.HTTPResp.BodySkipped {
+			expectedSize = int64(len(tcs1.HTTPResp.Body))
+		}
+		actualSize := tcs2.HTTPResp.BodySize
+		if !tcs2.HTTPResp.BodySkipped {
+			actualSize = int64(len(tcs2.HTTPResp.Body))
+		}
+
+		logger.Info("response body was greater than 1MB during recording, comparing body size",
+			zap.String("tcs1", tcs1.Name),
+			zap.String("tcs2", tcs2.Name),
+			zap.Int64("expected_size", expectedSize),
+			zap.Int64("actual_size", actualSize))
+
+		// Log bodies as debug before clearing
+		if !tcs1.HTTPResp.BodySkipped {
+			logger.Debug("tcs1 response body (other side was skipped)",
+				zap.String("testcase", tcs1.Name),
+				zap.String("body", tcs1.HTTPResp.Body))
+		}
+		if !tcs2.HTTPResp.BodySkipped {
+			logger.Debug("tcs2 response body (other side was skipped)",
+				zap.String("testcase", tcs2.Name),
+				zap.String("body", tcs2.HTTPResp.Body))
+		}
+
+		bodySizeResult = models.IntResult{
+			Normal:   expectedSize == actualSize,
+			Expected: int(expectedSize),
+			Actual:   int(actualSize),
+		}
+
+		if !bodySizeResult.Normal {
+			pass = false
+		}
+
+		// Clear both bodies so body comparison below runs as empty vs empty
+		tcs1.HTTPResp.Body = ""
+		tcs2.HTTPResp.Body = ""
+	}
+
 	//compare http resp
 	respCompare := models.RespCompare{
 		StatusCode: models.IntResult{
@@ -253,6 +301,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 			Expected: tcs1.HTTPResp.Body,
 			Actual:   tcs2.HTTPResp.Body,
 		},
+		BodySizeResult: bodySizeResult,
 	}
 
 	if tcs1.HTTPResp.StatusCode != tcs2.HTTPResp.StatusCode {

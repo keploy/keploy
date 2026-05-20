@@ -976,6 +976,78 @@ func (d *DiffsPrinter) RenderAppender() error {
 	return nil
 }
 
+// SchemaError represents a single schema mismatch
+type SchemaError struct {
+	Reason   string
+	Expected string
+	Actual   string
+}
+
+// SchemaDiffPrinter for printing schema mismatch errors
+type SchemaDiffPrinter struct {
+	out      io.Writer
+	testCase string
+	errors   []SchemaError
+}
+
+func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
+	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
+}
+
+func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
+	if out == nil {
+		out = os.Stdout
+	}
+	return SchemaDiffPrinter{
+		out:      out,
+		testCase: testCase,
+		errors:   []SchemaError{},
+	}
+}
+
+func (s *SchemaDiffPrinter) PushError(reason, expected, actual string) {
+	s.errors = append(s.errors, SchemaError{
+		Reason:   reason,
+		Expected: expected,
+		Actual:   actual,
+	})
+}
+
+func (s *SchemaDiffPrinter) Render() error {
+	if len(s.errors) == 0 {
+		return nil
+	}
+
+	table := tablewriter.NewWriter(s.out)
+	table.SetAutoWrapText(false)
+	table.SetHeader([]string{"Schema Check Failed", "Expected", "Actual"})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(
+			tablewriter.Colors{tablewriter.FgHiRedColor},
+			tablewriter.Colors{tablewriter.FgHiGreenColor},
+			tablewriter.Colors{tablewriter.FgHiRedColor},
+		)
+	}
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+
+	for _, e := range s.errors {
+		exp := e.Expected
+		act := e.Actual
+		reason := e.Reason
+
+		if !models.IsAnsiDisabled {
+			// Colorize reason if needed, or keep plain
+		}
+		table.Append([]string{reason, exp, act})
+	}
+
+	fmt.Fprintf(s.out, "\nTestrun failed for testcase with id: %s\n", s.testCase)
+	table.Render()
+	fmt.Fprintln(s.out) // Add a newline after
+	return nil
+}
+
 // stripANSI removes ANSI escape sequences for accurate emptiness checks.
 func stripANSI(s string) string {
 	if s == "" {
