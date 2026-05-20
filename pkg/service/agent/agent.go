@@ -55,6 +55,77 @@ type Agent struct {
 	prevWindowMu     sync.Mutex
 	prevWindowAfter  time.Time
 	prevWindowBefore time.Time
+
+	// setupCtx is the Setup-scoped context captured during Setup().
+	// It outlives any single /agent/incoming HTTP stream — which is the
+	// whole point: StartIncomingProxy uses this instead of the request ctx
+	// so the ingress proxy's :8080 listener survives the recorder closing
+	// the stream on /record/stop. Without this, k8s-proxy's stop sequence
+	// (HTTP graceful-shutdown notification + stream close) collapses the
+	// listener while the agent + app are still running, kubelet probes
+	// get connection refused, and the pod enters CrashLoopBackOff.
+	//
+	// Cancellation semantics, exactly: setupCtx is the ctx returned by
+	// `errgroup.WithContext(parentCtx)` inside Setup, so it cancels when
+	// EITHER (a) the parent ctx cancels — the process-shutdown signal
+	// path (SIGTERM via utils/ctx.go), OR (b) any goroutine added to that
+	// errgroup returns a non-nil error. (b) is the intended hook-load
+	// failure path — if hooks fail mid-flight the proxy should also stop;
+	// don't try to decouple this without first auditing what consumes
+	// `models.ErrGroupKey` downstream.
+	setupCtx context.Context
+
+	// tcChan is the test case channel returned by IncomingProxy.Start.
+	// We hold a reference so SetGracefulShutdown can spawn a drainer:
+	// the recorder closes its consuming HTTP stream on /record/stop and
+	// nothing else reads tcChan after that. Without draining, the 100-
+	// slot buffer fills within seconds and subsequent ingress traffic
+	// (including kubelet probes) blocks at the channel send.
+	//
+	// Reads + writes must hold incomingMu — StartIncomingProxy (HTTP
+	// /agent/incoming handler) writes, SetGracefulShutdown (a different
+	// HTTP handler goroutine) reads when spawning the drainer.
+	tcChan chan *models.TestCase
+
+	// drainCancel cancels the currently-active tcChan drainer (if any).
+	// SetGracefulShutdown stashes the cancel func of the drainer it
+	// spawned; StartIncomingProxy calls it when a new /agent/incoming
+	// stream attaches, so a new recording session takes over the channel
+	// without competing against the previous session's drainer. A new
+	// SetGracefulShutdown after a fresh StartIncomingProxy spawns a
+	// fresh drainer — this gives proper session-aware lifecycle (vs the
+	// original sync.Once design which left a permanent drainer running
+	// after the first /agent/graceful-shutdown and starved any
+	// subsequent reconnect's HandleIncoming of test cases).
+	//
+	// Guarded by drainMu so SetGracefulShutdown and StartIncomingProxy
+	// can't race on the cancel.
+	drainCancel context.CancelFunc
+	drainMu     sync.Mutex
+
+	// streamCtx is the request ctx of the latest /agent/incoming stream
+	// passed into StartIncomingProxy. The drainer in SetGracefulShutdown
+	// waits on its cancellation BEFORE consuming from tcChan — otherwise
+	// the drainer races with the still-active HandleIncoming for-loop
+	// over the same channel and steals tail-end test cases that the
+	// recorder hasn't picked up yet. The /agent/graceful-shutdown call
+	// from the recorder precedes its stream close by however long it
+	// takes the recorder to drain its own client-side queue and tear
+	// the connection down; we must not start consuming during that
+	// window.
+	//
+	// Guarded by incomingMu — see tcChan.
+	streamCtx context.Context
+
+	// incomingMu protects streamCtx and tcChan against concurrent access
+	// from StartIncomingProxy and SetGracefulShutdown (different HTTP
+	// handler goroutines). The single-watcher guarantee — i.e. that
+	// reconnecting recorders don't leak ListenForIngressEvents goroutines
+	// — is enforced inside IncomingProxy.Start itself (via a sync.Once
+	// on the IngressProxyManager), not here, so subsequent Start calls
+	// with different IncomingOptions still update the proxy's filtering
+	// behavior instead of being silently ignored.
+	incomingMu sync.Mutex
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -99,6 +170,11 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
+	// Capture the process-lifetime ctx (with errgroup attached) so
+	// StartIncomingProxy can keep the ingress listener alive across
+	// /agent/incoming HTTP stream closes.
+	a.setupCtx = ctx
 
 	passPortsUint := a.config.Agent.PassThroughPorts
 
@@ -145,7 +221,62 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 }
 
 func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
-	tc := a.IncomingProxy.Start(ctx, opts)
+	// IncomingProxy.Start is given the agent's Setup-scoped ctx so the
+	// ingress proxy's :8080 listener and the WatchBindEvents goroutine
+	// outlive any single /agent/incoming HTTP stream — the listener must
+	// keep serving kubelet probes and forwarding application traffic
+	// right up until the agent process itself receives SIGTERM. See
+	// incident notes 2026-05 (CrashLoopBackOff on /record/stop).
+	//
+	// The CALLER's ctx (the /agent/incoming request) is captured into
+	// a.streamCtx so SetGracefulShutdown's drainer can wait for it to
+	// cancel — that's the signal the recorder has finished consuming
+	// tcChan and the drainer can safely take over without racing.
+	//
+	// Defensive guard: in the normal CLI boot path, Setup() runs in a
+	// goroutine and assigns a.setupCtx before sending the agent port on
+	// startCh, so the HTTP server (and any /agent/incoming handler) can
+	// only come up after setupCtx is set. But misuse from tests or future
+	// embedders that wire this struct manually could skip Setup; passing
+	// a nil ctx into IncomingProxy.Start would later panic inside
+	// WatchBindEvents on `<-ctx.Done()`. Returning a clear error here
+	// makes the misuse diagnosable instead of crashing the agent process.
+	if a.setupCtx == nil {
+		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
+	}
+
+	// IncomingProxy.Start is now idempotent (a sync.Once inside
+	// IngressProxyManager.Start gates the ListenForIngressEvents
+	// goroutine) AND it updates the proxy's IncomingOptions every call,
+	// so we can safely invoke it on each /agent/incoming reconnect to
+	// re-apply opts without leaking watchers or stomping in-flight
+	// captures. Returns the same tcChan on repeat calls.
+	tc := a.IncomingProxy.Start(a.setupCtx, opts)
+
+	// Refresh streamCtx + cache tcChan under the same mutex
+	// SetGracefulShutdown reads them under. A reconnecting recorder
+	// gets a new request ctx each time, and the drainer must wait on
+	// the LATEST one so it doesn't race with whichever HandleIncoming
+	// for-loop is currently draining the channel.
+	a.incomingMu.Lock()
+	a.streamCtx = ctx
+	a.tcChan = tc
+	a.incomingMu.Unlock()
+
+	// Cancel any drainer left over from a previous session — without
+	// this, a recorder reconnecting after /agent/graceful-shutdown
+	// would find the previous session's drainer still consuming
+	// tcChan and the new HandleIncoming for-loop would race for /
+	// lose test cases. Cancelling here gives the new session
+	// uncontested ownership of the channel until its own
+	// /agent/graceful-shutdown (which will spawn a fresh drainer).
+	a.drainMu.Lock()
+	if a.drainCancel != nil {
+		a.drainCancel()
+		a.drainCancel = nil
+	}
+	a.drainMu.Unlock()
+
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
 }
@@ -154,6 +285,82 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 // When this flag is set, connection errors will be logged as debug instead of error.
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
+
+	// Defensive: same misuse case as StartIncomingProxy — a manually-wired
+	// Agent that skipped Setup would crash inside the drainer goroutine on
+	// `<-a.setupCtx.Done()`. Surface as an error so HandleGracefulShutdown
+	// can return 500, matching the no-Warn convention in AGENTS.md.
+	if a.setupCtx == nil {
+		return errors.New("agent setupCtx is not initialized; ensure Setup() was called before SetGracefulShutdown")
+	}
+
+	// The recorder (k8s-proxy / keploy CLI) closes its /agent/incoming
+	// streaming connection right after this call, which means no one
+	// drains tcChan anymore. With the listener now decoupled from the
+	// request ctx (StartIncomingProxy fix above), traffic keeps flowing
+	// through the proxy — and every captured test case still gets sent
+	// onto tcChan. Without an explicit drainer the 100-slot buffer
+	// fills within a few probe cycles, and subsequent ingress traffic
+	// blocks at the channel send.
+	//
+	// Spin up a SESSION-AWARE drainer: it lives only until either the
+	// agent process exits OR the next /agent/incoming stream attaches
+	// (StartIncomingProxy cancels us via drainCancel so the new session
+	// gets uncontested ownership of tcChan).
+	a.incomingMu.Lock()
+	tc := a.tcChan
+	streamCtx := a.streamCtx
+	a.incomingMu.Unlock()
+	if tc != nil {
+		a.drainMu.Lock()
+		// Cancel any drainer left over from a prior graceful-shutdown
+		// before installing the new one. Without this, repeated
+		// /agent/graceful-shutdown calls would leak goroutines (each
+		// waiting on streamCtx then competing on tcChan).
+		if a.drainCancel != nil {
+			a.drainCancel()
+		}
+		drainCtx, cancel := context.WithCancel(a.setupCtx)
+		a.drainCancel = cancel
+		a.drainMu.Unlock()
+
+		go func() {
+			// Wait for the recorder's /agent/incoming stream to close
+			// before consuming. Otherwise this drainer races with the
+			// HandleIncoming for-loop over the same tc channel and
+			// steals tail-end test cases the recorder hasn't picked
+			// up yet — manifests as test cases silently disappearing
+			// from the last few seconds of a recording.
+			//
+			// Note: `Proxy.SetGracefulShutdown` (called below) does
+			// NOT stop the ingress CaptureHook from producing new
+			// test cases — it only flips an atomic flag that
+			// downgrades connection-error severity in the proxy's
+			// own logs and stops the optional packet-capture
+			// pcap stream. The proxy keeps capturing test traffic
+			// until its ctx is cancelled (process SIGTERM). So
+			// "wait for streamCtx" is the only correct gate: it
+			// guarantees HandleIncoming has stopped reading from
+			// tcChan, and the drainer can take over without
+			// racing.
+			if streamCtx != nil {
+				select {
+				case <-streamCtx.Done():
+				case <-drainCtx.Done():
+					return
+				}
+			}
+			for {
+				select {
+				case <-drainCtx.Done():
+					return
+				case <-tc:
+					// discard — recording session is over
+				}
+			}
+		}()
+	}
+
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
