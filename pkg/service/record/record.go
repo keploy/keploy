@@ -707,22 +707,31 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 						zap.Uint64("totalForwarded", fwdCount))
 					return nil
 				}
+				// Race-safe field capture: snapshot the identifying fields
+				// into locals BEFORE the channel handoff. Once
+				// `outgoingChan <- m` completes the consumer goroutine
+				// (record.go Start.func7 → mockDB.InsertMock) takes
+				// ownership of *m and may mutate fields (db.go:588). Any
+				// post-send read of m from this goroutine would race
+				// against that write — which is exactly the race that
+				// 9c900c5c hit, breaking 33 lanes under `go test -race`.
+				// Capturing here keeps the diag visible without sharing
+				// the pointer across the synchronization edge.
+				mockKind := string(m.Kind)
+				mockName := m.Name
+				mockReqTs := m.Spec.ReqTimestampMock
 				select {
 				case <-ctx.Done():
-					// diag/stage-4-drop: ctx cancelled while forwarding to
-					// the unbuffered outgoingChan. Note the existing code
-					// still tries the send (`outgoingChan <- m`) after
-					// ctx-done — but if the consumer has already exited,
-					// THIS send will block forever (deadlock). We log the
-					// attempt first so the symptom is identifiable even
-					// when no log appears (a missing stage-4-drop pair vs
-					// stage-3-emit means a deadlock in this branch).
+					// stage-4-drop fires BEFORE the blocking send, so
+					// reading m here is still safe — but we use the
+					// captured locals for consistency with the success
+					// branch and to keep the diff uniform.
 					r.logger.Info("diag/stage-4-drop: ctx done during outgoingChan send, attempting blocking send (may deadlock)",
 						zap.String("stage", "host-forwarder"),
 						zap.String("dropReason", "ctxDoneRaceBlockingSend"),
-						zap.String("mockKind", string(m.Kind)),
-						zap.String("mockName", m.Name),
-						zap.Time("reqTimestamp", m.Spec.ReqTimestampMock),
+						zap.String("mockKind", mockKind),
+						zap.String("mockName", mockName),
+						zap.Time("reqTimestamp", mockReqTs),
 						zap.Uint64("totalForwarded", fwdCount))
 					outgoingChan <- m
 					return ctx.Err()
@@ -730,13 +739,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					fwdCount++
 					// diag/stage-4: forwarded mock from host-receiver's
 					// mockChan onto the consumer-facing outgoingChan
-					// (frames.Outgoing). The next stage is the record.go
-					// consumer loop reading this same channel.
+					// (frames.Outgoing). All fields are captured locals —
+					// no dereference of m after the send, so no race
+					// against the consumer's InsertMock.
 					r.logger.Info("diag/stage-4: GetTestAndMockChans forwarded mock to outgoingChan",
 						zap.String("stage", "host-forwarder"),
-						zap.String("mockKind", string(m.Kind)),
-						zap.String("mockName", m.Name),
-						zap.Time("reqTimestamp", m.Spec.ReqTimestampMock))
+						zap.String("mockKind", mockKind),
+						zap.String("mockName", mockName),
+						zap.Time("reqTimestamp", mockReqTs))
 				}
 			}
 		}
