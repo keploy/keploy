@@ -92,7 +92,7 @@ type Agent struct {
 	// subsequent reconnect's HandleIncoming of test cases).
 	//
 	// Guarded by drainMu so SetGracefulShutdown and StartIncomingProxy
-	// can'\''t race on the cancel.
+	// can't race on the cancel.
 	drainCancel context.CancelFunc
 	drainMu     sync.Mutex
 

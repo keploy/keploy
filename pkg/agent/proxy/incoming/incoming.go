@@ -70,8 +70,9 @@ type IngressProxyManager struct {
 	// /agent/incoming stream while the agent process keeps running)
 	// don't leak additional watcher goroutines that all consume from
 	// the same eventChan. The IncomingOptions on subsequent calls
-	// still take effect — incomingOpts is updated unconditionally
-	// under mu — so callers that intentionally reconnect with
+	// still take effect — Start always atomic-swaps incomingOpts via
+	// atomic.Pointer.Store regardless of whether the watcher actually
+	// (re)spawns — so callers that intentionally reconnect with
 	// different filtering get the new behavior immediately on the
 	// next captured request.
 	startOnce sync.Once
