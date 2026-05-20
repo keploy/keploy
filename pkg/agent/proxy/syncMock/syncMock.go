@@ -348,23 +348,6 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		return
 	case bound && !m.firstReqSeen:
 		m.mu.Unlock()
-		// Per-mock diagnostic on the direct-forward path: mocks captured
-		// before firstReqSeen is signalled (i.e., the entire run when
-		// sync=false) bypass the buffer and go straight to outChan. This
-		// log marks the moment AddMock hands the mock to sendToOutChan,
-		// which is the next likely drop point if outChan is full and the
-		// 200 ms sendBudget expires. Pairing this with the existing
-		// "outChan overflow" Error inside sendToOutChan lets us tell
-		// "AddMock dropped it" from "outChan dropped it" at debug time.
-		if logger := m.dropLogger(); logger != nil && mock != nil {
-			logger.Info("diag/AddMock: forwarding mock to outChan (firstReqSeen=false direct path)",
-				zap.String("mock_kind", string(mock.Kind)),
-				zap.String("mock_name", mock.Name),
-				zap.String("connID", mock.ConnectionID),
-				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
-				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
-			)
-		}
 		m.sendToOutChan(mock)
 		return
 	default:
