@@ -435,6 +435,31 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	}
 }
 
+// IsHTTPTCInPressureWindow reports whether the HTTP round-trip [reqTime,
+// resTime] overlapped any recorded memory-pressure burst (completed or
+// active). Called from Capture() before forwarding an HTTP TC to the agent
+// channel: the entry-time IsRecordingPaused() check in Capture can pass and
+// then the memory guard can fire while we're processing the body (io.ReadAll
+// can take 10–100 ms for 1 MB+ payloads). When that happens the buffer is
+// cleared by SetMemoryPressure(true), the outgoing DB mocks for this TC's
+// window are lost, and committing the TC anyway produces an orphaned
+// recording that fails at replay with "socket was unexpectedly closed: EOF".
+// Mirrors the same check AddMock applies to HTTP-kind outgoing mocks, but
+// from the TC-capture side.
+func (m *SyncMockManager) IsHTTPTCInPressureWindow(reqTime, resTime time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, w := range m.pressureWindows {
+		if w.start.Before(resTime) && w.end.After(reqTime) {
+			return true
+		}
+	}
+	return !m.currentPressureStart.IsZero() && m.currentPressureStart.Before(resTime)
+}
+
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a
