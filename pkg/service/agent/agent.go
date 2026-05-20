@@ -76,6 +76,18 @@ type Agent struct {
 	// (including kubelet probes) blocks at the channel send.
 	tcChan    chan *models.TestCase
 	drainOnce sync.Once
+
+	// streamCtx is the request ctx of the latest /agent/incoming stream
+	// passed into StartIncomingProxy. The drainer in SetGracefulShutdown
+	// waits on its cancellation BEFORE consuming from tcChan — otherwise
+	// the drainer races with the still-active HandleIncoming for-loop
+	// over the same channel and steals tail-end test cases that the
+	// recorder hasn't picked up yet. The /agent/graceful-shutdown call
+	// from the recorder precedes its stream close by however long it
+	// takes the recorder to drain its own client-side queue and tear
+	// the connection down; we must not start consuming during that
+	// window.
+	streamCtx context.Context
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -170,15 +182,18 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 }
 
-func (a *Agent) StartIncomingProxy(_ context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
-	// Intentionally ignore the caller's ctx (it's the /agent/incoming HTTP
-	// request's ctx, which dies when the recorder closes the stream on
-	// /record/stop). Use the agent's Setup-scoped ctx instead so the
+func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
+	// IncomingProxy.Start is given the agent's Setup-scoped ctx so the
 	// ingress proxy's :8080 listener and the WatchBindEvents goroutine
-	// outlive the recording session — the listener must keep serving
-	// kubelet probes and forwarding application traffic right up until
-	// the agent process itself receives SIGTERM. See incident notes
-	// 2026-05 (CrashLoopBackOff on /record/stop).
+	// outlive any single /agent/incoming HTTP stream — the listener must
+	// keep serving kubelet probes and forwarding application traffic
+	// right up until the agent process itself receives SIGTERM. See
+	// incident notes 2026-05 (CrashLoopBackOff on /record/stop).
+	//
+	// The CALLER's ctx (the /agent/incoming request) is captured into
+	// a.streamCtx so SetGracefulShutdown's drainer can wait for it to
+	// cancel — that's the signal the recorder has finished consuming
+	// tcChan and the drainer can safely take over without racing.
 	//
 	// Defensive guard: in the normal CLI boot path, Setup() runs in a
 	// goroutine and assigns a.setupCtx before sending the agent port on
@@ -191,6 +206,7 @@ func (a *Agent) StartIncomingProxy(_ context.Context, opts models.IncomingOption
 	if a.setupCtx == nil {
 		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
 	}
+	a.streamCtx = ctx
 	tc := a.IncomingProxy.Start(a.setupCtx, opts)
 	a.tcChan = tc
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
@@ -201,6 +217,14 @@ func (a *Agent) StartIncomingProxy(_ context.Context, opts models.IncomingOption
 // When this flag is set, connection errors will be logged as debug instead of error.
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
+
+	// Defensive: same misuse case as StartIncomingProxy — a manually-wired
+	// Agent that skipped Setup would crash inside the drainer goroutine on
+	// `<-a.setupCtx.Done()`. Surface as an error so HandleGracefulShutdown
+	// can return 500, matching the no-Warn convention in AGENTS.md.
+	if a.setupCtx == nil {
+		return errors.New("agent setupCtx is not initialized; ensure Setup() was called before SetGracefulShutdown")
+	}
 
 	// The recorder (k8s-proxy / keploy CLI) closes its /agent/incoming
 	// streaming connection right after this call, which means no one
@@ -216,16 +240,28 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 		if tc == nil {
 			return
 		}
-		// Defensive: skip the drainer when setupCtx is nil. Same misuse
-		// case as StartIncomingProxy — a manually-wired Agent that
-		// skipped Setup. Without this guard the goroutine below would
-		// nil-panic on `<-a.setupCtx.Done()` the first time tcChan is
-		// non-readable.
-		if a.setupCtx == nil {
-			a.logger.Warn("setupCtx is nil; skipping tcChan drainer. SetGracefulShutdown was called before Setup() — graceful-shutdown is degenerate in this configuration and the proxy's tcChan may fill up")
-			return
-		}
+		// Snapshot streamCtx — nil-safe: nil means SetGracefulShutdown
+		// was called before any /agent/incoming stream attached (legal
+		// in degenerate setups; just skip the wait).
+		streamCtx := a.streamCtx
 		go func() {
+			// Wait for the recorder's /agent/incoming stream to close
+			// before consuming. Otherwise this drainer races with the
+			// HandleIncoming for-loop over the same tc channel and
+			// steals tail-end test cases the recorder hasn't picked
+			// up yet — manifests as test cases silently disappearing
+			// from the last few seconds of a recording. The flag set
+			// on the proxy above already tells the proxy to stop
+			// generating *new* test cases, but anything in-flight on
+			// tcChan when graceful-shutdown fires must still reach the
+			// active stream consumer.
+			if streamCtx != nil {
+				select {
+				case <-streamCtx.Done():
+				case <-a.setupCtx.Done():
+					return
+				}
+			}
 			for {
 				select {
 				case <-a.setupCtx.Done():
