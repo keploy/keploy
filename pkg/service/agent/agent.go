@@ -77,9 +77,24 @@ type Agent struct {
 	//
 	// Reads + writes must hold incomingMu — StartIncomingProxy (HTTP
 	// /agent/incoming handler) writes, SetGracefulShutdown (a different
-	// HTTP handler goroutine) reads via the drainOnce closure.
-	tcChan    chan *models.TestCase
-	drainOnce sync.Once
+	// HTTP handler goroutine) reads when spawning the drainer.
+	tcChan chan *models.TestCase
+
+	// drainCancel cancels the currently-active tcChan drainer (if any).
+	// SetGracefulShutdown stashes the cancel func of the drainer it
+	// spawned; StartIncomingProxy calls it when a new /agent/incoming
+	// stream attaches, so a new recording session takes over the channel
+	// without competing against the previous session's drainer. A new
+	// SetGracefulShutdown after a fresh StartIncomingProxy spawns a
+	// fresh drainer — this gives proper session-aware lifecycle (vs the
+	// original sync.Once design which left a permanent drainer running
+	// after the first /agent/graceful-shutdown and starved any
+	// subsequent reconnect's HandleIncoming of test cases).
+	//
+	// Guarded by drainMu so SetGracefulShutdown and StartIncomingProxy
+	// can'\''t race on the cancel.
+	drainCancel context.CancelFunc
+	drainMu     sync.Mutex
 
 	// streamCtx is the request ctx of the latest /agent/incoming stream
 	// passed into StartIncomingProxy. The drainer in SetGracefulShutdown
@@ -240,6 +255,21 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	a.streamCtx = ctx
 	a.tcChan = tc
 	a.incomingMu.Unlock()
+
+	// Cancel any drainer left over from a previous session — without
+	// this, a recorder reconnecting after /agent/graceful-shutdown
+	// would find the previous session's drainer still consuming
+	// tcChan and the new HandleIncoming for-loop would race for /
+	// lose test cases. Cancelling here gives the new session
+	// uncontested ownership of the channel until its own
+	// /agent/graceful-shutdown (which will spawn a fresh drainer).
+	a.drainMu.Lock()
+	if a.drainCancel != nil {
+		a.drainCancel()
+		a.drainCancel = nil
+	}
+	a.drainMu.Unlock()
+
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
 }
@@ -264,22 +294,29 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	// through the proxy — and every captured test case still gets sent
 	// onto tcChan. Without an explicit drainer the 100-slot buffer
 	// fills within a few probe cycles, and subsequent ingress traffic
-	// blocks at the channel send. Spin up a background drainer once,
-	// scoped to the agent process lifetime.
-	a.drainOnce.Do(func() {
-		// Snapshot tcChan and streamCtx under the same mutex
-		// StartIncomingProxy uses to write them — otherwise the read
-		// here races with the write there and the Go race detector
-		// flags it. nil streamCtx is legal here: it means
-		// SetGracefulShutdown was called before any /agent/incoming
-		// stream attached (degenerate setup); we skip the wait below.
-		a.incomingMu.Lock()
-		tc := a.tcChan
-		streamCtx := a.streamCtx
-		a.incomingMu.Unlock()
-		if tc == nil {
-			return
+	// blocks at the channel send.
+	//
+	// Spin up a SESSION-AWARE drainer: it lives only until either the
+	// agent process exits OR the next /agent/incoming stream attaches
+	// (StartIncomingProxy cancels us via drainCancel so the new session
+	// gets uncontested ownership of tcChan).
+	a.incomingMu.Lock()
+	tc := a.tcChan
+	streamCtx := a.streamCtx
+	a.incomingMu.Unlock()
+	if tc != nil {
+		a.drainMu.Lock()
+		// Cancel any drainer left over from a prior graceful-shutdown
+		// before installing the new one. Without this, repeated
+		// /agent/graceful-shutdown calls would leak goroutines (each
+		// waiting on streamCtx then competing on tcChan).
+		if a.drainCancel != nil {
+			a.drainCancel()
 		}
+		drainCtx, cancel := context.WithCancel(a.setupCtx)
+		a.drainCancel = cancel
+		a.drainMu.Unlock()
+
 		go func() {
 			// Wait for the recorder's /agent/incoming stream to close
 			// before consuming. Otherwise this drainer races with the
@@ -302,20 +339,20 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 			if streamCtx != nil {
 				select {
 				case <-streamCtx.Done():
-				case <-a.setupCtx.Done():
+				case <-drainCtx.Done():
 					return
 				}
 			}
 			for {
 				select {
-				case <-a.setupCtx.Done():
+				case <-drainCtx.Done():
 					return
 				case <-tc:
 					// discard — recording session is over
 				}
 			}
 		}()
-	})
+	}
 
 	return a.Proxy.SetGracefulShutdown(ctx)
 }

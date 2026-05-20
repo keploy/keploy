@@ -617,8 +617,7 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 		logger:       zap.NewNop(),
 		tcChan:       make(chan *models.TestCase, 4),
 		synchronous:  true,
-		samplingSem:  make(chan struct{}, 1),
-		incomingOpts: models.IncomingOptions{},
+		samplingSem: make(chan struct{}, 1),
 	}
 
 	// Dial the client side via a TCP pipe. handleHttp1Connection dials
@@ -771,8 +770,7 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 		logger:       zap.NewNop(),
 		tcChan:       make(chan *models.TestCase, 4),
 		synchronous:  true,
-		samplingSem:  make(chan struct{}, 1),
-		incomingOpts: models.IncomingOptions{},
+		samplingSem: make(chan struct{}, 1),
 	}
 
 	clientListener, err := net.Listen("tcp4", "127.0.0.1:0")

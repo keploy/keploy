@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -35,12 +36,22 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
-	mu           sync.Mutex
-	active       map[uint16]proxyStop
-	logger       *zap.Logger
-	hooks        agent.Hooks
-	tcChan       chan *models.TestCase
-	incomingOpts models.IncomingOptions
+	mu     sync.Mutex
+	active map[uint16]proxyStop
+	logger *zap.Logger
+	hooks  agent.Hooks
+	tcChan chan *models.TestCase
+	// incomingOpts is read by ingress capture goroutines on every
+	// captured request (CaptureHook call sites in http.go) and written
+	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
+	// atomic this was a plain struct field guarded by nothing on the
+	// read path, which is a real data race the moment a recorder
+	// reconnects with different filter/sampling settings while ingress
+	// traffic is in flight. atomic.Pointer gives a lock-free,
+	// pointer-sized swap that the readers can Load without contending.
+	// Always stored as a heap copy of the caller's value so writes
+	// don't tear the struct in-place.
+	incomingOpts atomic.Pointer[models.IncomingOptions]
 	synchronous  bool
 	// mapping mirrors !cfg.DisableMapping at construction time. Forwarded
 	// to CaptureHook so the synchronous-record path can decide whether
@@ -90,6 +101,17 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	return pm
 }
 
+// loadIncomingOpts returns the current IncomingOptions snapshot, or a
+// zero-value struct if Start has never been called. CaptureHook readers
+// in http.go call this on every captured request — the atomic.Pointer
+// Load is wait-free, so this stays cheap on the hot path.
+func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
+	if p := pm.incomingOpts.Load(); p != nil {
+		return *p
+	}
+	return models.IncomingOptions{}
+}
+
 // SetIngressHook replaces the default Go TCP forwarder with an external
 // ingress handler (e.g. enterprise sockmap proxy).
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
@@ -101,12 +123,11 @@ func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
 	// Always update incomingOpts — a reconnecting recorder may pass
 	// different filtering / sampling settings that should take effect
-	// immediately. Protected by the same mu that gates SetIngressHook
-	// reads/writes, so concurrent calls don't tear the IncomingOptions
-	// struct.
-	pm.mu.Lock()
-	pm.incomingOpts = opts
-	pm.mu.Unlock()
+	// immediately. Atomic swap of a pointer-sized field means the
+	// CaptureHook readers in http.go can Load it on every captured
+	// request without contending on a mutex.
+	optsCopy := opts
+	pm.incomingOpts.Store(&optsCopy)
 
 	// Gate the ListenForIngressEvents goroutine so subsequent Start
 	// invocations don't spawn duplicate watchers. The ctx passed in
