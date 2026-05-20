@@ -419,6 +419,20 @@ func (r *Recorder) Start(ctx context.Context) error {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// diag/record: visible signal that the recording-side
+					// mock consumer dropped a mock because the outer context
+					// was already cancelled (typically after `docker compose
+					// --abort-on-container-exit` returns). The previous
+					// silent `continue` made tail-end mock loss invisible —
+					// the only proof was "mock missing from mocks.yaml" at
+					// replay time. Logged as Info, kind+name+timestamp, so
+					// the histogram of late-arriving drops is countable
+					// without spamming during the steady-state run.
+					r.logger.Info("diag/record: dropping mock — context already cancelled when InsertMock ran (recording teardown race)",
+						zap.String("mock_kind", string(mock.GetKind())),
+						zap.String("mock_name", mock.Name),
+						zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertMockErrChan <- err
