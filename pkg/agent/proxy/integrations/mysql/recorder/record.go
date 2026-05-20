@@ -205,36 +205,12 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	if mocks != nil {
 		select {
 		case mocks <- mysqlMock:
-			// diag/stage-1: parser successfully sent the mock onto the
-			// outChan. ReqTimestampMock is the stable identifier traced
-			// through every subsequent pipeline stage (HandleOutgoing →
-			// gob encode → host gob decode → outgoingChan forward →
-			// record.go consumer → InsertMock).
-			zap.L().Info("diag/stage-1: recordMock send succeeded",
-				zap.String("stage", "parser-out"),
-				zap.String("mockKind", "MySQL"),
-				zap.String("requestOp", requestOperation),
-				zap.String("responseOp", responseOperation),
-				zap.String("mockType", mockType),
-				zap.Time("reqTimestamp", reqTimestampMock),
-				zap.Time("resTimestamp", resTimestampMock))
 		case <-ctx.Done():
-			// diag/stage-1-drop: parser's ctx cancelled while waiting on
-			// a full outChan. Silent-drop point #1; log it so we can
-			// count exactly how many mocks die here.
-			zap.L().Info("diag/stage-1-drop: recordMock ctx cancelled before outChan send",
-				zap.String("stage", "parser-out"),
-				zap.String("dropReason", "ctxDone"),
-				zap.String("mockKind", "MySQL"),
-				zap.String("requestOp", requestOperation),
-				zap.String("responseOp", responseOperation),
-				zap.String("mockType", mockType),
-				zap.Time("reqTimestamp", reqTimestampMock),
-				zap.Time("resTimestamp", resTimestampMock))
 			return
 		}
 	} else {
 		mgr := syncMock.Get()
 		mgr.AddMock(mysqlMock)
 	}
+	return
 }

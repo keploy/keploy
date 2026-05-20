@@ -464,25 +464,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
-			// diag/stage-2-exit: agent's outgoing-stream HTTP request
-			// ctx cancelled. This is the moment the agent stops draining
-			// the proxy-side outChan (the channel returned by GetOutgoing).
-			// Anything still in mockChan after this point is abandoned
-			// because no goroutine reads it once HandleOutgoing returns.
-			// Log so we can correlate this exit time with stage-1 emits:
-			// if stage-1 events keep firing after stage-2-exit, those
-			// mocks die on the agent side.
-			a.logger.Info("diag/stage-2-exit: HandleOutgoing exiting on request ctx cancel; remaining mocks in agent outChan will be abandoned",
-				zap.String("stage", "agent-forwarder"),
-				zap.String("dropReason", "ctxDone"),
-				zap.Int("mockChanLen", len(mockChan)),
-				zap.Int("mockChanCap", cap(mockChan)))
 			return
 		case m, ok := <-mockChan:
 			if !ok {
-				a.logger.Info("diag/stage-2-exit: HandleOutgoing exiting on closed mockChan",
-					zap.String("stage", "agent-forwarder"),
-					zap.String("dropReason", "chanClosed"))
 				return
 			}
 			if err := enc.Encode(m); err != nil {
@@ -526,16 +510,6 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				)
 				continue
 			}
-			// diag/stage-2: mock encoded onto the agent→host gob stream
-			// and flushed. The encode + flush completing means the bytes
-			// are now in the kernel's TCP send buffer; the next stage
-			// (stage-3) is the host's gob decoder reading them.
-			a.logger.Info("diag/stage-2: HandleOutgoing encode+flush succeeded",
-				zap.String("stage", "agent-forwarder"),
-				zap.String("mockKind", string(m.Kind)),
-				zap.String("mockName", m.Name),
-				zap.Time("reqTimestamp", m.Spec.ReqTimestampMock),
-				zap.Time("resTimestamp", m.Spec.ResTimestampMock))
 			flusher.Flush()
 		}
 	}
