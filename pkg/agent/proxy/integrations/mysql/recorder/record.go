@@ -198,47 +198,19 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			LifetimeDerived: true,
 		},
 	}
-	// Route every MySQL mock through syncMock.AddMock instead of the raw
-	// `mocks <-` send. The two destinations are physically the same channel
-	// (proxy.go binds both `session.Mocks` and the syncMock outChan to
-	// rule.MC), so this is a destination-equivalent change — no risk of
-	// the historical "double write" hazard that motivated the original
-	// if/else (that warning was for code paths that did BOTH a direct send
-	// AND an AddMock; we still only do one).
-	//
-	// Why the routing change: the prior direct-send branch used an
-	// unbounded `select { case mocks <- m: case <-ctx.Done(): return }`.
-	// Under load (k6 memory-load lanes emit 25k+ mocks in 2 minutes), the
-	// 16384-slot outChan fills before the host CLI's YAML writer can
-	// drain it. The send then blocks indefinitely. When the parser's
-	// detached `decoderCtx` is eventually cancelled by cleanup(), the
-	// select picks the `<-ctx.Done()` arm and silently drops the
-	// in-flight mock — root cause of go-memory-load-mysql's
-	// teardown-TC orphans on PR #4107 (e.g., the 24 teardown mocks
-	// emitted at 15:37:10 that never reach mocks.yaml).
-	//
-	// AddMock's send path (sendToOutChan) is bounded by a 200 ms
-	// sendBudget and emits an "outChan overflow" Error on drop, so the
-	// same load now (a) doesn't wedge the parser and (b) reports loss
-	// visibly. The `mocks` parameter is no longer consumed but is kept
-	// in the signature so call sites (including tests that pass a
-	// dedicated channel for inspection) compile unchanged; AddMock and
-	// the direct send share a destination, so test mocks still arrive
-	// on the inspected channel via the syncMock-managed outChan once
-	// SetOutputChannel has wired them together.
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.AddMock(mysqlMock)
-		return
-	}
-	// Fallback only when the package-level SyncMockManager singleton
-	// hasn't been initialised (unit tests that exercise recordMock in
-	// isolation without bootstrapping the proxy). Preserves the original
-	// unbounded send semantics those tests rely on.
+	// Send to the mocks channel for YAML output. Use either the direct
+	// mocks channel or syncMock.AddMock, but NOT both — AddMock also sends
+	// to outChan (which is the same channel in the sockmap proxy path),
+	// causing every mock to be written to YAML twice.
 	if mocks != nil {
 		select {
 		case mocks <- mysqlMock:
 		case <-ctx.Done():
 			return
 		}
+	} else {
+		mgr := syncMock.Get()
+		mgr.AddMock(mysqlMock)
 	}
+	return
 }
