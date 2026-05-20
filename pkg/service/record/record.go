@@ -404,7 +404,19 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
+		var insertedOK, insertedDropOnCancel uint64
 		for mock := range frames.Outgoing {
+			// diag/stage-5-recv: consumer goroutine received a mock from
+			// frames.Outgoing. Pairs with stage-4 (forwarder send) — if
+			// stage-4 fires for a reqTimestamp but stage-5-recv does not,
+			// the mock died at the outgoingChan boundary (unbuffered
+			// channel; forwarder send + consumer recv must rendezvous).
+			r.logger.Info("diag/stage-5-recv: record consumer received mock from frames.Outgoing",
+				zap.String("stage", "host-consumer"),
+				zap.String("mockKind", string(mock.Kind)),
+				zap.String("mockName", mock.Name),
+				zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock))
+
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -419,10 +431,37 @@ func (r *Recorder) Start(ctx context.Context) error {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// diag/stage-5-drop: InsertMock failed because ctx
+					// was already cancelled. This is the documented
+					// silent-drop point that earlier diag (now reverted)
+					// detected. Restored here so we can correlate it with
+					// stage-4 forwards: a stage-5-recv + stage-5-drop pair
+					// means the consumer SAW the mock but couldn't persist
+					// it because shutdown was already in flight.
+					r.logger.Info("diag/stage-5-drop: InsertMock dropped due to ctx.Canceled",
+						zap.String("stage", "host-consumer"),
+						zap.String("dropReason", "ctxCanceledAtInsert"),
+						zap.String("mockKind", string(mock.GetKind())),
+						zap.String("mockName", mock.Name),
+						zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+						zap.Uint64("insertedOK", insertedOK),
+						zap.Uint64("droppedSoFar", insertedDropOnCancel+1))
+					insertedDropOnCancel++
 					continue
 				}
 				insertMockErrChan <- err
 			} else {
+				// diag/stage-5: mock successfully written to disk via
+				// InsertMock. End of the pipeline; if we see a stage-1
+				// emit for a reqTimestamp followed by a stage-5 here, the
+				// mock survived the full path.
+				r.logger.Info("diag/stage-5: InsertMock succeeded",
+					zap.String("stage", "host-consumer"),
+					zap.String("mockKind", string(mock.GetKind())),
+					zap.String("mockName", mock.Name),
+					zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+					zap.Uint64("insertedOK", insertedOK+1))
+				insertedOK++
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
 				}); hookErr != nil {
@@ -647,19 +686,57 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			cancel()
 		}()
 
+		var fwdCount uint64
 		for {
 			select {
 			case <-ctx.Done():
+				// diag/stage-4-exit: forwarder loop exiting due to ctx.
+				// Any mocks still sitting in outgoingStream (host-side
+				// mockChan from AgentClient) will be lost when its goroutine
+				// closes it on the same ctx-done signal.
+				r.logger.Info("diag/stage-4-exit: GetTestAndMockChans forwarder exiting on ctx.Done",
+					zap.String("stage", "host-forwarder"),
+					zap.String("dropReason", "ctxDone"),
+					zap.Uint64("totalForwarded", fwdCount))
 				return ctx.Err()
 			case m, ok := <-outgoingStream:
 				if !ok {
+					r.logger.Info("diag/stage-4-exit: GetTestAndMockChans forwarder exiting on closed outgoingStream",
+						zap.String("stage", "host-forwarder"),
+						zap.String("dropReason", "chanClosed"),
+						zap.Uint64("totalForwarded", fwdCount))
 					return nil
 				}
 				select {
 				case <-ctx.Done():
+					// diag/stage-4-drop: ctx cancelled while forwarding to
+					// the unbuffered outgoingChan. Note the existing code
+					// still tries the send (`outgoingChan <- m`) after
+					// ctx-done — but if the consumer has already exited,
+					// THIS send will block forever (deadlock). We log the
+					// attempt first so the symptom is identifiable even
+					// when no log appears (a missing stage-4-drop pair vs
+					// stage-3-emit means a deadlock in this branch).
+					r.logger.Info("diag/stage-4-drop: ctx done during outgoingChan send, attempting blocking send (may deadlock)",
+						zap.String("stage", "host-forwarder"),
+						zap.String("dropReason", "ctxDoneRaceBlockingSend"),
+						zap.String("mockKind", string(m.Kind)),
+						zap.String("mockName", m.Name),
+						zap.Time("reqTimestamp", m.Spec.ReqTimestampMock),
+						zap.Uint64("totalForwarded", fwdCount))
 					outgoingChan <- m
 					return ctx.Err()
 				case outgoingChan <- m:
+					fwdCount++
+					// diag/stage-4: forwarded mock from host-receiver's
+					// mockChan onto the consumer-facing outgoingChan
+					// (frames.Outgoing). The next stage is the record.go
+					// consumer loop reading this same channel.
+					r.logger.Info("diag/stage-4: GetTestAndMockChans forwarded mock to outgoingChan",
+						zap.String("stage", "host-forwarder"),
+						zap.String("mockKind", string(m.Kind)),
+						zap.String("mockName", m.Name),
+						zap.Time("reqTimestamp", m.Spec.ReqTimestampMock))
 				}
 			}
 		}
