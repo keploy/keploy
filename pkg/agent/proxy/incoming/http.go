@@ -924,7 +924,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.incomingOpts, pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -1581,7 +1581,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(ctx, logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.incomingOpts, pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(ctx, logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
 
@@ -1739,7 +1739,7 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		}
 		go func(req *http.Request, resp *http.Response, reqTs, respTs time.Time) {
 			defer func() { <-captureHookSem }()
-			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTs, respTs, pm.incomingOpts, pm.synchronous, pm.mapping, appPort)
+			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTs, respTs, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, appPort)
 		}(req, resp, reqTimestamp, respTimestamp)
 	}
 }
