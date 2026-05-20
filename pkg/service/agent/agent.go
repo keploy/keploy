@@ -48,6 +48,26 @@ type Agent struct {
 	// still find a hit; they just don't get swamped by one line per
 	// test on large suites.
 	strictLogOnce sync.Once
+
+	// setupCtx is the process-lifetime context captured during Setup().
+	// It cancels only when the agent process itself shuts down (SIGTERM),
+	// NOT when an /agent/incoming HTTP stream closes. StartIncomingProxy
+	// uses this — not the request ctx — so the ingress proxy's :8080
+	// listener survives the recorder closing the stream on /record/stop.
+	// Without this, k8s-proxy's stop sequence (HTTP graceful-shutdown
+	// notification + stream close) collapses the listener while the
+	// agent + app are still running, kubelet probes get connection
+	// refused, and the pod enters CrashLoopBackOff.
+	setupCtx context.Context
+
+	// tcChan is the test case channel returned by IncomingProxy.Start.
+	// We hold a reference so SetGracefulShutdown can spawn a drainer:
+	// the recorder closes its consuming HTTP stream on /record/stop and
+	// nothing else reads tcChan after that. Without draining, the 100-
+	// slot buffer fills within seconds and subsequent ingress traffic
+	// (including kubelet probes) blocks at the channel send.
+	tcChan      chan *models.TestCase
+	drainOnce   sync.Once
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -93,6 +113,11 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
+	// Capture the process-lifetime ctx (with errgroup attached) so
+	// StartIncomingProxy can keep the ingress listener alive across
+	// /agent/incoming HTTP stream closes.
+	a.setupCtx = ctx
+
 	passPortsUint := a.config.Agent.PassThroughPorts
 
 	rules := make([]models.BypassRule, len(a.config.Agent.PassThroughPorts))
@@ -137,8 +162,17 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 }
 
-func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
-	tc := a.IncomingProxy.Start(ctx, opts)
+func (a *Agent) StartIncomingProxy(_ context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
+	// Intentionally ignore the caller's ctx (it's the /agent/incoming HTTP
+	// request's ctx, which dies when the recorder closes the stream on
+	// /record/stop). Use the agent's process-lifetime ctx instead so the
+	// ingress proxy's :8080 listener and the WatchBindEvents goroutine
+	// outlive the recording session — the listener must keep serving
+	// kubelet probes and forwarding application traffic right up until
+	// the agent process itself receives SIGTERM. See incident notes
+	// 2026-05 (CrashLoopBackOff on /record/stop).
+	tc := a.IncomingProxy.Start(a.setupCtx, opts)
+	a.tcChan = tc
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
 }
@@ -147,6 +181,33 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 // When this flag is set, connection errors will be logged as debug instead of error.
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
+
+	// The recorder (k8s-proxy / keploy CLI) closes its /agent/incoming
+	// streaming connection right after this call, which means no one
+	// drains tcChan anymore. With the listener now decoupled from the
+	// request ctx (StartIncomingProxy fix above), traffic keeps flowing
+	// through the proxy — and every captured test case still gets sent
+	// onto tcChan. Without an explicit drainer the 100-slot buffer
+	// fills within a few probe cycles, and subsequent ingress traffic
+	// blocks at the channel send. Spin up a background drainer once,
+	// scoped to the agent process lifetime.
+	a.drainOnce.Do(func() {
+		tc := a.tcChan
+		if tc == nil {
+			return
+		}
+		go func() {
+			for {
+				select {
+				case <-a.setupCtx.Done():
+					return
+				case <-tc:
+					// discard — recording session is over
+				}
+			}
+		}()
+	})
+
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
