@@ -161,7 +161,17 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 			default:
+				logger.Info("MySQL client packet dropped: decoder channel full at send",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
+		} else if memoryguard.IsRecordingPaused() {
+			logger.Info("MySQL client packet dropped: memory pressure active",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()))
+		} else {
+			logger.Info("MySQL client packet dropped: decoder channel full (pre-check)",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()),
+				zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 		}
 	}
 	forwardDest := func(buf []byte) {
@@ -175,7 +185,17 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 			default:
+				logger.Info("MySQL dest packet dropped: decoder channel full at send",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
+		} else if memoryguard.IsRecordingPaused() {
+			logger.Info("MySQL dest packet dropped: memory pressure active",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()))
+		} else {
+			logger.Info("MySQL dest packet dropped: decoder channel full (pre-check)",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()),
+				zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 		}
 	}
 
@@ -298,7 +318,17 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
 				default:
+					logger.Info("MySQL client packet dropped in main loop: channel full at send",
+						zap.String("clientAddr", clientConn.RemoteAddr().String()),
+						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
+			} else if memoryguard.IsRecordingPaused() {
+				logger.Info("MySQL client packet dropped in main loop: memory pressure active",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()))
+			} else {
+				logger.Info("MySQL client packet dropped in main loop: channel full (pre-check)",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
 
 		case buffer, ok := <-destBuffChan:
@@ -325,7 +355,17 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
 				default:
+					logger.Info("MySQL dest packet dropped in main loop: channel full at send",
+						zap.String("clientAddr", clientConn.RemoteAddr().String()),
+						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
+			} else if memoryguard.IsRecordingPaused() {
+				logger.Info("MySQL dest packet dropped in main loop: memory pressure active",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()))
+			} else {
+				logger.Info("MySQL dest packet dropped in main loop: channel full (pre-check)",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
 
 		case err, ok := <-errChan:
@@ -443,6 +483,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
 			mockType = "connection"
 		}
+		logger.Info("MySQL mock recorded",
+			zap.String("requestOp", pendingCommand.Header.Type),
+			zap.String("responseOp", respOp),
+			zap.String("mockType", mockType),
+			zap.Time("reqTimestamp", reqTimestamp))
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil

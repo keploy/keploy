@@ -340,7 +340,18 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
+		bufLen := len(m.buffer)
 		m.mu.Unlock()
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/AddMock: mock buffered",
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("mock_name", mock.Name),
+				zap.String("connID", mock.ConnectionID),
+				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+				zap.Int("buffer_len", bufLen),
+			)
+		}
 	}
 }
 
@@ -607,21 +618,32 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// Per-resolve diagnostic: surface buffer-state transitions per
 	// test-window resolve so a CI log can show when a per-test cohort
 	// flushed zero mocks or when stale-buffer cutoff started reaping.
-	// Sampled via dropLogger which is the standard observability sink
-	// for buffer-flow events on this manager. Only logged when there
-	// was actual state change to avoid log noise on idle resolves.
-	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
-		logger.Info("diag/ResolveRange: buffer transition",
-			zap.String("test_name", testName),
-			zap.Time("window_start", start),
-			zap.Time("window_end", end),
-			zap.Int("buffer_len_before", bufferLenBefore),
-			zap.Int("buffer_len_after", bufferLenAfter),
-			zap.Int("mocks_flushed", mocksToSendLen),
-			zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
-			zap.Bool("outChan_bound", outChanBound),
-			zap.Bool("mapping_enabled", mapping),
-		)
+	if logger := m.dropLogger(); logger != nil {
+		if bufferLenBefore != bufferLenAfter || mocksToSendLen > 0 {
+			logger.Info("diag/ResolveRange: buffer transition",
+				zap.String("test_name", testName),
+				zap.Time("window_start", start),
+				zap.Time("window_end", end),
+				zap.Int("buffer_len_before", bufferLenBefore),
+				zap.Int("buffer_len_after", bufferLenAfter),
+				zap.Int("mocks_flushed", mocksToSendLen),
+				zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
+				zap.Bool("outChan_bound", outChanBound),
+				zap.Bool("mapping_enabled", mapping),
+			)
+		}
+		// Warn when a TC resolves with zero per-test mocks — most likely
+		// means its DB packets were dropped (memory pressure or chan full)
+		// or the async decoder emitted the mock after the window closed.
+		if keep && mocksToSendLen == 0 {
+			logger.Info("diag/ResolveRange: TC resolved with ZERO mocks — DB packets may have been dropped or decoder was too slow",
+				zap.String("test_name", testName),
+				zap.Time("window_start", start),
+				zap.Time("window_end", end),
+				zap.Int("buffer_len_at_resolve", bufferLenBefore),
+				zap.Bool("outChan_bound", outChanBound),
+			)
+		}
 	}
 
 	// Route mock sends through sendToOutChan so the close-vs-send
