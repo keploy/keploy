@@ -49,15 +49,23 @@ type Agent struct {
 	// test on large suites.
 	strictLogOnce sync.Once
 
-	// setupCtx is the process-lifetime context captured during Setup().
-	// It cancels only when the agent process itself shuts down (SIGTERM),
-	// NOT when an /agent/incoming HTTP stream closes. StartIncomingProxy
-	// uses this — not the request ctx — so the ingress proxy's :8080
-	// listener survives the recorder closing the stream on /record/stop.
-	// Without this, k8s-proxy's stop sequence (HTTP graceful-shutdown
-	// notification + stream close) collapses the listener while the
-	// agent + app are still running, kubelet probes get connection
-	// refused, and the pod enters CrashLoopBackOff.
+	// setupCtx is the Setup-scoped context captured during Setup().
+	// It outlives any single /agent/incoming HTTP stream — which is the
+	// whole point: StartIncomingProxy uses this instead of the request ctx
+	// so the ingress proxy's :8080 listener survives the recorder closing
+	// the stream on /record/stop. Without this, k8s-proxy's stop sequence
+	// (HTTP graceful-shutdown notification + stream close) collapses the
+	// listener while the agent + app are still running, kubelet probes
+	// get connection refused, and the pod enters CrashLoopBackOff.
+	//
+	// Cancellation semantics, exactly: setupCtx is the ctx returned by
+	// `errgroup.WithContext(parentCtx)` inside Setup, so it cancels when
+	// EITHER (a) the parent ctx cancels — the process-shutdown signal
+	// path (SIGTERM via utils/ctx.go), OR (b) any goroutine added to that
+	// errgroup returns a non-nil error. (b) is the intended hook-load
+	// failure path — if hooks fail mid-flight the proxy should also stop;
+	// don't try to decouple this without first auditing what consumes
+	// `models.ErrGroupKey` downstream.
 	setupCtx context.Context
 
 	// tcChan is the test case channel returned by IncomingProxy.Start.
@@ -66,8 +74,8 @@ type Agent struct {
 	// nothing else reads tcChan after that. Without draining, the 100-
 	// slot buffer fills within seconds and subsequent ingress traffic
 	// (including kubelet probes) blocks at the channel send.
-	tcChan      chan *models.TestCase
-	drainOnce   sync.Once
+	tcChan    chan *models.TestCase
+	drainOnce sync.Once
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -165,12 +173,24 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 func (a *Agent) StartIncomingProxy(_ context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
 	// Intentionally ignore the caller's ctx (it's the /agent/incoming HTTP
 	// request's ctx, which dies when the recorder closes the stream on
-	// /record/stop). Use the agent's process-lifetime ctx instead so the
+	// /record/stop). Use the agent's Setup-scoped ctx instead so the
 	// ingress proxy's :8080 listener and the WatchBindEvents goroutine
 	// outlive the recording session — the listener must keep serving
 	// kubelet probes and forwarding application traffic right up until
 	// the agent process itself receives SIGTERM. See incident notes
 	// 2026-05 (CrashLoopBackOff on /record/stop).
+	//
+	// Defensive guard: in the normal CLI boot path, Setup() runs in a
+	// goroutine and assigns a.setupCtx before sending the agent port on
+	// startCh, so the HTTP server (and any /agent/incoming handler) can
+	// only come up after setupCtx is set. But misuse from tests or future
+	// embedders that wire this struct manually could skip Setup; passing
+	// a nil ctx into IncomingProxy.Start would later panic inside
+	// WatchBindEvents on `<-ctx.Done()`. Returning a clear error here
+	// makes the misuse diagnosable instead of crashing the agent process.
+	if a.setupCtx == nil {
+		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
+	}
 	tc := a.IncomingProxy.Start(a.setupCtx, opts)
 	a.tcChan = tc
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
@@ -194,6 +214,15 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.drainOnce.Do(func() {
 		tc := a.tcChan
 		if tc == nil {
+			return
+		}
+		// Defensive: skip the drainer when setupCtx is nil. Same misuse
+		// case as StartIncomingProxy — a manually-wired Agent that
+		// skipped Setup. Without this guard the goroutine below would
+		// nil-panic on `<-a.setupCtx.Done()` the first time tcChan is
+		// non-readable.
+		if a.setupCtx == nil {
+			a.logger.Warn("setupCtx is nil; skipping tcChan drainer. SetGracefulShutdown was called before Setup() — graceful-shutdown is degenerate in this configuration and the proxy's tcChan may fill up")
 			return
 		}
 		go func() {
