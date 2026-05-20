@@ -24,17 +24,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// recordDrainTimeout caps how long the persistence layer can spend
-// inserting a single TC/mock after the parent recording ctx has been
-// cancelled. Sized as a soft upper bound: long enough to flush a
-// realistic outChan backlog after `docker compose --abort-on-container-
-// exit` returns (observed under load: ~800 mocks queued at SIGINT,
-// ~5–10ms per InsertMock to YAML), short enough that a wedged DB write
-// doesn't pin the consumer goroutine after shutdown. If a single insert
-// genuinely takes longer than this the recording is already pathological
-// and dropping the trailing entry is correct.
-const recordDrainTimeout = 10 * time.Second
-
 type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
@@ -393,25 +382,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testCaseName", testCase.Name))
 			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-			if err != nil && ctx.Err() == context.Canceled {
-				// Mirrors the drain-with-deadline pattern in the mock
-				// consumer below: recording ctx may be cancelled by
-				// docker-compose-exit while teardown TCs are still in
-				// flight on frames.Incoming. Without this retry the TC
-				// is silently lost; with it, we get one bounded attempt
-				// on a detached context. Keep TC drain in lock-step with
-				// mock drain so we never persist a TC whose mocks were
-				// dropped (or vice versa) — atomic recording semantics.
-				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
-				err = r.testDB.InsertTestCase(drainCtx, testCase, newTestSetID, true)
-				cancelDrain()
-			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
-					r.logger.Info("diag/record: drain-attempt InsertTestCase failed during shutdown — TC lost",
-						zap.String("testCaseName", testCase.Name),
-						zap.String("testSetID", newTestSetID),
-						zap.Error(err))
 					continue
 				}
 				insertTestErrChan <- err
@@ -445,32 +417,22 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
-			if err != nil && ctx.Err() == context.Canceled {
-				// Recording ctx was cancelled (typically by docker compose
-				// --abort-on-container-exit returning when k6 finishes its
-				// teardown). The mock is already in our channel and would
-				// otherwise be silently dropped — observed under load as
-				// hundreds of teardown-phase mocks queued in outChan when
-				// SIGINT fires, producing orphaned TCs at replay (EOF). Try
-				// once more with a context detached from the parent cancel
-				// and bounded by a short deadline: long enough to drain a
-				// realistic backlog to disk, short enough that a hung DB
-				// can't pin this goroutine after shutdown.
-				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
-				err = r.mockDB.InsertMock(drainCtx, mock, newTestSetID)
-				cancelDrain()
-			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
-					// Drain attempt also failed (drainCtx timeout or real
-					// I/O error). Log so the residual loss is visible
-					// instead of being silently dropped.
-					r.logger.Info("diag/record: drain-attempt InsertMock failed during shutdown — mock lost",
+					// diag/record: visible signal that the recording-side
+					// mock consumer dropped a mock because the outer context
+					// was already cancelled (typically after `docker compose
+					// --abort-on-container-exit` returns). The previous
+					// silent `continue` made tail-end mock loss invisible —
+					// the only proof was "mock missing from mocks.yaml" at
+					// replay time. Logged as Info, kind+name+timestamp, so
+					// the histogram of late-arriving drops is countable
+					// without spamming during the steady-state run.
+					r.logger.Info("diag/record: dropping mock — context already cancelled when InsertMock ran (recording teardown race)",
 						zap.String("mock_kind", string(mock.GetKind())),
 						zap.String("mock_name", mock.Name),
 						zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
-						zap.String("testSetID", newTestSetID),
-						zap.Error(err))
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertMockErrChan <- err
