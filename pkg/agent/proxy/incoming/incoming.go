@@ -53,6 +53,17 @@ type IngressProxyManager struct {
 	samplingSem chan struct{}
 
 	ingressHook IngressHook
+
+	// startOnce gates the ListenForIngressEvents goroutine so that
+	// repeated Start() calls (a reconnecting recorder opening a new
+	// /agent/incoming stream while the agent process keeps running)
+	// don't leak additional watcher goroutines that all consume from
+	// the same eventChan. The IncomingOptions on subsequent calls
+	// still take effect — incomingOpts is updated unconditionally
+	// under mu — so callers that intentionally reconnect with
+	// different filtering get the new behavior immediately on the
+	// next captured request.
+	startOnce sync.Once
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
@@ -88,8 +99,23 @@ func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 }
 
 func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
+	// Always update incomingOpts — a reconnecting recorder may pass
+	// different filtering / sampling settings that should take effect
+	// immediately. Protected by the same mu that gates SetIngressHook
+	// reads/writes, so concurrent calls don't tear the IncomingOptions
+	// struct.
+	pm.mu.Lock()
 	pm.incomingOpts = opts
-	go pm.ListenForIngressEvents(ctx)
+	pm.mu.Unlock()
+
+	// Gate the ListenForIngressEvents goroutine so subsequent Start
+	// invocations don't spawn duplicate watchers. The ctx passed in
+	// here is now process-lifetime (see pkg/service/agent/agent.go),
+	// so the goroutine survives /agent/incoming stream teardowns;
+	// without the gate, each reconnect would leak another watcher.
+	pm.startOnce.Do(func() {
+		go pm.ListenForIngressEvents(ctx)
+	})
 	return pm.tcChan
 }
 

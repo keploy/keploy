@@ -97,15 +97,13 @@ type Agent struct {
 
 	// incomingMu protects streamCtx and tcChan against concurrent access
 	// from StartIncomingProxy and SetGracefulShutdown (different HTTP
-	// handler goroutines). incomingProxyOnce gates the underlying
-	// IncomingProxy.Start so the ListenForIngressEvents goroutine it
-	// spawns runs exactly once per agent process — without this guard a
-	// reconnecting recorder would leak a new watcher goroutine per
-	// /agent/incoming stream (the goroutines all live until SIGTERM
-	// because the ctx is process-scoped now), and we'd accumulate
-	// duplicates that all consume from the same eventChan.
-	incomingMu        sync.Mutex
-	incomingProxyOnce sync.Once
+	// handler goroutines). The single-watcher guarantee — i.e. that
+	// reconnecting recorders don't leak ListenForIngressEvents goroutines
+	// — is enforced inside IncomingProxy.Start itself (via a sync.Once
+	// on the IngressProxyManager), not here, so subsequent Start calls
+	// with different IncomingOptions still update the proxy's filtering
+	// behavior instead of being silently ignored.
+	incomingMu sync.Mutex
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -225,30 +223,24 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
 	}
 
-	// Always refresh streamCtx — a reconnecting recorder gets a new
-	// request ctx each time, and SetGracefulShutdown's drainer must
-	// wait on the LATEST one so it doesn't race with whichever
-	// HandleIncoming for-loop is currently draining the channel.
+	// IncomingProxy.Start is now idempotent (a sync.Once inside
+	// IngressProxyManager.Start gates the ListenForIngressEvents
+	// goroutine) AND it updates the proxy's IncomingOptions every call,
+	// so we can safely invoke it on each /agent/incoming reconnect to
+	// re-apply opts without leaking watchers or stomping in-flight
+	// captures. Returns the same tcChan on repeat calls.
+	tc := a.IncomingProxy.Start(a.setupCtx, opts)
+
+	// Refresh streamCtx + cache tcChan under the same mutex
+	// SetGracefulShutdown reads them under. A reconnecting recorder
+	// gets a new request ctx each time, and the drainer must wait on
+	// the LATEST one so it doesn't race with whichever HandleIncoming
+	// for-loop is currently draining the channel.
 	a.incomingMu.Lock()
 	a.streamCtx = ctx
+	a.tcChan = tc
 	a.incomingMu.Unlock()
-
-	// IncomingProxy.Start spawns a goroutine (`ListenForIngressEvents`)
-	// whose lifetime is now setupCtx-scoped (i.e. process lifetime).
-	// Gate with sync.Once so subsequent /agent/incoming streams reuse
-	// the existing watcher + tcChan instead of leaking a new goroutine
-	// every time. The published tcChan in `a.tcChan` is read under
-	// the same mutex in SetGracefulShutdown.
-	a.incomingProxyOnce.Do(func() {
-		tc := a.IncomingProxy.Start(a.setupCtx, opts)
-		a.incomingMu.Lock()
-		a.tcChan = tc
-		a.incomingMu.Unlock()
-		a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
-	})
-	a.incomingMu.Lock()
-	tc := a.tcChan
-	a.incomingMu.Unlock()
+	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
 }
 
@@ -294,11 +286,19 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 			// HandleIncoming for-loop over the same tc channel and
 			// steals tail-end test cases the recorder hasn't picked
 			// up yet — manifests as test cases silently disappearing
-			// from the last few seconds of a recording. The flag set
-			// on the proxy above already tells the proxy to stop
-			// generating *new* test cases, but anything in-flight on
-			// tcChan when graceful-shutdown fires must still reach the
-			// active stream consumer.
+			// from the last few seconds of a recording.
+			//
+			// Note: `Proxy.SetGracefulShutdown` (called below) does
+			// NOT stop the ingress CaptureHook from producing new
+			// test cases — it only flips an atomic flag that
+			// downgrades connection-error severity in the proxy's
+			// own logs and stops the optional packet-capture
+			// pcap stream. The proxy keeps capturing test traffic
+			// until its ctx is cancelled (process SIGTERM). So
+			// "wait for streamCtx" is the only correct gate: it
+			// guarantees HandleIncoming has stopped reading from
+			// tcChan, and the drainer can take over without
+			// racing.
 			if streamCtx != nil {
 				select {
 				case <-streamCtx.Done():
