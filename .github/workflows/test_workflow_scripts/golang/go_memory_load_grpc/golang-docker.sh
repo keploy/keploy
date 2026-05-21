@@ -15,8 +15,13 @@ LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
 LARGE_PAYLOAD_SIZES_MB="${LARGE_PAYLOAD_SIZES_MB:-1}"
 # gRPC is a high-throughput protocol — CI runners cap VUs and duration to keep
-# Keploy memory within the RECORD_MEMORY_LIMIT_MB bound.
-K6_VUS="${K6_VUS:-10}"
+# Keploy memory within the RECORD_MEMORY_LIMIT_MB bound. Reduced from 10 to 3
+# in line with the mysql/mongo VU reduction (see go_memory_load/golang-docker.sh):
+# the proven rate-mismatch RCA shows the recorder's mock-emit rate exceeds
+# the host's YAML-write disk throughput by ~7x at the previous load; 3 VUs
+# bring the burst rate below disk throughput while leaving headroom for
+# memory-pressure events to fire 2-3 times during the run.
+K6_VUS="${K6_VUS:-3}"
 K6_DURATION="${K6_DURATION:-45s}"
 MEMORY_MONITOR_INTERVAL_SECONDS="${MEMORY_MONITOR_INTERVAL_SECONDS:-0.5}"
 

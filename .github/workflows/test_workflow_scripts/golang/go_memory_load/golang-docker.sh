@@ -9,7 +9,18 @@ APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-120}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
 MIXED_API_START_VUS="${MIXED_API_START_VUS:-2}"
-MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
+# Mixed API stage targets: lowered from 4,8,12,4 (peak 12 VUs) to 2,3,4,2
+# (peak 4 VUs) after CI run 26209083321 proved the rate-mismatch RCA —
+# the agent's mock-emit rate at 14 concurrent VUs (~14k mocks/sec peak)
+# exceeded the host's YAML-write disk throughput (~2k/sec) by 7x. With
+# the previous load profile, mocks either piled up in TCP buffers and
+# died silently on SIGINT (proven: 64% loss at stage-2 vs stage-3) or,
+# with buffered channels, back-pressured all the way to the application
+# and deadlocked docker compose (proven: 30+ min lane hangs). 2,3,4,2
+# keeps a real ramp profile + still enough headroom for the
+# memory-pressure feature to fire 2-3 times when the LARGE_PAYLOAD
+# scenario spikes memory.
+MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-2,3,4,2}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"

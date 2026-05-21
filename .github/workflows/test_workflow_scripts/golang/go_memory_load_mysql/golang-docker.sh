@@ -13,7 +13,14 @@ MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
 # Keploy's recording captures real concurrent load while staying within CI memory
 # limits. globalNoise in keploy.yml covers variable response fields (id, timestamps,
 # etc.) so concurrent-VU FIFO mock collisions don't fail assertions.
-MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-4,8,12,4}"
+# Mixed API stage targets: lowered from 4,8,12,4 (peak 12 VUs) to 2,3,4,2
+# (peak 4 VUs). See go_memory_load/golang-docker.sh for the full RCA —
+# 14k-mock/sec emit rate at 14 concurrent VUs overran the host's
+# ~2k/sec YAML-write throughput, producing either silent TCP-buffer
+# loss or pipeline deadlock. 4-VU peak with the unchanged
+# LARGE_PAYLOAD_STAGE_TARGETS still spikes agent memory enough to
+# trigger the 2-3 pressure events this lane is designed to validate.
+MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-2,3,4,2}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
 LARGE_PAYLOAD_STAGE_TARGETS="${LARGE_PAYLOAD_STAGE_TARGETS:-1,2,1}"
