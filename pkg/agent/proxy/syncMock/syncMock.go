@@ -449,7 +449,27 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 
 	m.memoryPause = enabled
 	if enabled {
-		m.currentPressureStart = time.Now()
+		now := time.Now()
+		// ATOMICITY FIX: the buffer holds complete, valid mocks that were
+		// captured BEFORE pressure started and are awaiting ResolveRange
+		// (their HTTP TC hasn't committed yet). We're about to wipe them
+		// to release memory — but if we leave currentPressureStart at
+		// time.Now(), the AddMock HTTP-TC drop check will NOT catch their
+		// TCs (those TCs' resTime predates "now"), producing orphans
+		// that fail at replay with "socket was unexpectedly closed: EOF".
+		// Extend currentPressureStart BACKWARDS to the earliest ReqTimestamp
+		// among wiped mocks so the existing overlap check (pressureStart <
+		// TC.resTime) correctly drops every TC whose DB call we just lost.
+		earliest := now
+		for _, mock := range m.buffer {
+			if mock == nil {
+				continue
+			}
+			if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.Before(earliest) {
+				earliest = mock.Spec.ReqTimestampMock
+			}
+		}
+		m.currentPressureStart = earliest
 		for i := range m.buffer {
 			m.buffer[i] = nil
 		}

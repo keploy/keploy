@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -157,6 +158,29 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 }
 
 func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
+	// Atomic per-mock memory-pressure gate. MySQL mocks bypass
+	// syncMock.AddMock (they're sent directly to the outgoingChan via the
+	// `mocks` channel), so without this gate the memoryguard's pause has
+	// no effect on mysql — mocks keep flowing under pressure, mock objects
+	// accumulate, and the container blows past its working-set ceiling
+	// (CI run 26235237403 mysql-rbrb peaked at 261 MiB > 250 MiB watchdog).
+	// Dropping here is atomic: we discard the fully-decoded mock at a
+	// safe boundary, which keeps the wire reassembler in sync (no
+	// mid-message corruption like the 1MB→104B truncation observed when
+	// dropping raw chunks). The corresponding HTTP TC is dropped by
+	// Capture's IsHTTPTCInPressureWindow check so mock+TC stay consistent.
+	if memoryguard.IsRecordingPaused() {
+		zap.L().Info("diag/mysql-recordMock: dropping mock under memory pressure (atomic drop at post-reassembly boundary)",
+			zap.String("stage", "parser-out"),
+			zap.String("dropReason", "memoryPause"),
+			zap.String("mockKind", "MySQL"),
+			zap.String("requestOp", requestOperation),
+			zap.String("responseOp", responseOperation),
+			zap.String("mockType", mockType),
+			zap.Time("reqTimestamp", reqTimestampMock),
+			zap.Time("resTimestamp", resTimestampMock))
+		return
+	}
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
