@@ -169,7 +169,16 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	// mid-message corruption like the 1MB→104B truncation observed when
 	// dropping raw chunks). The corresponding HTTP TC is dropped by
 	// Capture's IsHTTPTCInPressureWindow check so mock+TC stay consistent.
-	if memoryguard.IsRecordingPaused() {
+	//
+	// IMPORTANT: only drop per-test mocks ("mocks"). "config" (session-
+	// scoped: COM_INIT_DB / handshake) and "connection" (connection-
+	// scoped: COM_STMT_PREPARE) mocks are NOT tied to a specific HTTP TC
+	// — they're reusable across many connections / tests at replay. If
+	// these get dropped during the first pressure burst (which typically
+	// hits early during k6 ramp), every subsequent connection at replay
+	// loses its setup → "no matching mock found" cascade (the chronic-6:
+	// get-orders-1..5 + get-analytics-top-products-1 teardown failures).
+	if memoryguard.IsRecordingPaused() && mockType == "mocks" {
 		zap.L().Info("diag/mysql-recordMock: dropping mock under memory pressure (atomic drop at post-reassembly boundary)",
 			zap.String("stage", "parser-out"),
 			zap.String("dropReason", "memoryPause"),
