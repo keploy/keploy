@@ -71,9 +71,14 @@ type TestResult struct {
 	//
 	// NOT populated by:
 	//   - The deferred streaming-test path (Phase 2 stream replay) — those
-	//     TestResults are persisted without this field. Consumers should
-	//     treat an absent value as "data not available for this run mode",
-	//     not "no mocks were consumed".
+	//     TestResults are persisted without this field.
+	//   - Standard replay loop when the per-test consumed-mock fetch
+	//     (GetConsumedMocks, in either instrument or non-instrument mode)
+	//     fails. The replayer skips emitting MockMismatches rather than
+	//     attribute stale loop-scoped data to the wrong test case.
+	//
+	// Consumers should treat an absent value as "data not available for
+	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
 }
 

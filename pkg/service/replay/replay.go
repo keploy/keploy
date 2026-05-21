@@ -1855,7 +1855,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// Populate matched/unmatched calls for failed/obsolete test cases.
+					// Per-test consumed-mock fetch + failure-diagnostic population.
+					// Two distinct outputs are computed from the per-test
+					// consumed-mock list below:
+					//   (a) MatchedCalls / UnmatchedCalls on FailureInfo —
+					//       populated only on failed/obsolete tests
+					//       (UnmatchedCalls is independent of the consumed
+					//       set; MatchedCalls gates on perTestConsumedKnown).
+					//   (b) TestResult.MockMismatches — populated on EVERY
+					//       test (pass or fail) when consumed data is known.
+					//
 					// In non-instrument mode (k8s-proxy / remote agent) the
 					// loop-scoped `consumedMocks` is only refreshed inside the
 					// `if r.instrument` branch after simulation — for non-
@@ -1865,8 +1874,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// (perTestConsumed) rather than overwriting consumedMocks,
 					// so the value doesn't leak into the next iteration's
 					// upsertActualTestMockMapping / mockNames computations.
-					// Both the failed/obsolete branch below AND the always-
-					// populated MockMismatches block share this single fetch.
+					// One fetch services both outputs (a) and (b).
 					//
 					// On fetch error we set perTestConsumedKnown=false and
 					// skip both MatchedCalls population AND MockMismatches
