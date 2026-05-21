@@ -229,6 +229,53 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
+		// EXEMPT session/connection-scoped mocks from the pressure drop.
+		// These are recorded ONCE during the connection's lifetime
+		// (mongo handshake / ismaster, mysql COM_STMT_PREPARE, postgres
+		// startup) and are then REUSED across many subsequent TCs at
+		// replay. Dropping a single session/connection mock during the
+		// first pressure burst (which typically hits early in k6 ramp)
+		// breaks every subsequent TC that needs to open a fresh
+		// connection — the chronic 6 teardown failures (get-orders-1..5,
+		// get-analytics-top-products-1) in mongo-rbrl come from exactly
+		// this: a mongo handshake mock was dropped under pressure, then
+		// at replay every new connection produces "no matching mock" /
+		// EOF because there's no handshake to serve. Per-test mocks are
+		// safe to drop (their corresponding HTTP TC will be dropped too
+		// by the IsHTTPTCInPressureWindow check below or by the
+		// extended currentPressureStart).
+		if mock != nil {
+			lt := mock.TestModeInfo.Lifetime
+			if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+				m.buffer = append(m.buffer, mock)
+				m.mu.Unlock()
+				if logger := m.dropLogger(); logger != nil {
+					logger.Info("diag/AddMock: session/connection mock buffered DESPITE pressure (not droppable)",
+						zap.String("mockKind", string(mock.Kind)),
+						zap.String("lifetime", lt.String()),
+						zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+					)
+				}
+				return
+			}
+		}
+
+		// Per-test mock under pressure → drop atomically AND extend the
+		// active pressure window backwards to cover this mock's
+		// ReqTimestamp. Late-arriving mocks (where the async decoder
+		// emitted the mock AFTER Capture has already committed the TC)
+		// can have a ReqTimestamp far before the current pause-fire
+		// time; without this extension, the corresponding HTTP TC's
+		// resTime falls BEFORE currentPressureStart and the TC drop
+		// check returns false. The extension makes the next TC
+		// consumer's IsHTTPTCInPressureWindow check (added in record.go)
+		// catch the orphan.
+		if mock != nil && !mock.Spec.ReqTimestampMock.IsZero() {
+			if m.currentPressureStart.IsZero() || mock.Spec.ReqTimestampMock.Before(m.currentPressureStart) {
+				m.currentPressureStart = mock.Spec.ReqTimestampMock
+			}
+		}
+
 		// Race-safe snapshot: capture identifying fields and pressure
 		// start under the lock. mock is local-only at this point
 		// (AddMock is the FIRST consumer of the pointer the parser just

@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 
@@ -380,6 +381,31 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			// SECOND atomicity gate: check IsHTTPTCInPressureWindow at
+			// INSERT time, not just at Capture time. Capture's check fires
+			// BEFORE ResolveRange and BEFORE the TC reaches this consumer,
+			// so it can miss two race shapes:
+			//   (a) Mock arrives at AddMock AFTER Capture committed the TC
+			//       (async-decoder lag). AddMock now extends
+			//       currentPressureStart backwards to the mock's
+			//       ReqTimestamp so the window covers the TC.
+			//   (b) Pressure fires between Capture's check and this
+			//       consumer dequeuing the TC. By the time we read here,
+			//       currentPressureStart is set and overlap is visible.
+			// Both shapes produced the chronic orphan-TC failures (mongo
+			// rbrb get-large-payloads-by-id-* truncations, rbrl chronic 6).
+			// Dropping here matches the user's "memory > recording" rule:
+			// over-drop is acceptable, orphan TCs are not.
+			if mgr := syncMock.Get(); mgr != nil && testCase.Kind == models.HTTP &&
+				mgr.IsHTTPTCInPressureWindow(testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp) {
+				r.logger.Info("diag/stage-tc-pressure-drop: TC dropped at insert — round-trip overlapped pressure window (atomic mock+TC drop)",
+					zap.String("stage", "host-tc-consumer"),
+					zap.String("dropReason", "pressureWindow"),
+					zap.String("testCaseName", testCase.Name),
+					zap.Time("req_time", testCase.HTTPReq.Timestamp),
+					zap.Time("res_time", testCase.HTTPResp.Timestamp))
+				continue
+			}
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
