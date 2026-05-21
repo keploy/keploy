@@ -1846,22 +1846,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// Populate matched/unmatched calls for failed/obsolete test cases
-					// In non-instrument mode (k8s-proxy / remote agent) `consumedMocks`
-					// is only refreshed at line ~1615 in instrument mode — for
-					// non-instrument it stays at whatever it was at initial setup,
-					// which is stale for every test except the first. Refresh it
-					// here so both the failed/obsolete branch below AND the
-					// always-populated MockMismatches block below get this test
-					// case's real consumed-mock set. One HTTP fetch covers both
-					// uses; matchedMocks below just reuses this freshened value.
+					// Populate matched/unmatched calls for failed/obsolete test cases.
+					// In non-instrument mode (k8s-proxy / remote agent) the
+					// loop-scoped `consumedMocks` is only refreshed inside the
+					// instrument branch at line ~1615 — for non-instrument it
+					// stays at whatever the initial setup set, which is stale
+					// for every test except the first. Fetch the per-test
+					// consumed-mock set into a PER-TEST LOCAL (perTestConsumed)
+					// rather than overwriting consumedMocks, so the value
+					// doesn't leak into the next iteration's
+					// upsertActualTestMockMapping / mockNames computations.
+					// Both the failed/obsolete branch below AND the always-
+					// populated MockMismatches block share this single fetch.
+					perTestConsumed := consumedMocks
 					if !r.instrument {
 						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
-							consumedMocks = fetched
+							perTestConsumed = fetched
 						}
 					}
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
-						matchedMocks := consumedMocks
+						matchedMocks := perTestConsumed
 						for _, m := range matchedMocks {
 							if m.Kind != models.DNS {
 								info := mockLookup[m.Name]
@@ -1919,20 +1923,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
 						}
 					}
-					actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
-					for _, m := range consumedMocks {
+					actualMockInfos := make([]models.MockMismatchMock, 0, len(perTestConsumed))
+					for _, m := range perTestConsumed {
 						if m.Kind != models.DNS {
 							actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
 						}
 					}
 
-					// TestResult.MockMismatches: populated for EVERY test that
-					// went through the replay loop (regardless of pass/fail or
-					// obsolescence). Mirrors the sandbox integration runner's
-					// behaviour so the test-report UI can render expected vs
-					// actual mocks for passing tests too — not just the
-					// obsolete-mismatch path. Skip only when both sides are
-					// empty so the json/yaml field stays absent via omitempty.
+					// TestResult.MockMismatches: populated for tests going
+					// through this (non-streaming) replay path — regardless of
+					// pass/fail or obsolescence. Mirrors the sandbox integration
+					// runner's behaviour so report UIs can render expected vs
+					// actual mocks for passing tests too, not just the
+					// obsolete-mismatch path. The deferred streaming-test path
+					// (Phase 2 stream replay) does NOT populate this field
+					// today — consumers should treat absence as "data not
+					// available for this run mode", not "no mocks". Skip when
+					// both sides are empty so the json/yaml field stays absent
+					// via omitempty.
 					if len(expectedMockInfos) > 0 || len(actualMockInfos) > 0 {
 						testCaseResult.MockMismatches = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,

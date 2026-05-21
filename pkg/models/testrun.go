@@ -57,12 +57,23 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
-	// MockMismatches captures expected vs actually-consumed mocks for THIS test,
-	// populated by the replayer on every run regardless of pass/fail or obsolescence.
-	// Distinct from FailureInfo.MockMismatch (which only fires on obsolete + diverged
-	// mock pool) — this field is always set when mock data is available, so passing
-	// tests can also surface their consumed mocks in the report UI. Name mirrors
-	// the sandbox integration runner's IntegrationStepResult.MockMismatches.
+	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
+	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
+	// pool diverged AND the test case is OBSOLETE) — this field is set for
+	// every test that flows through the standard replay loop (pass or fail),
+	// so passing tests can also surface their consumed mocks for the report UI.
+	// Name mirrors the sandbox integration runner's
+	// IntegrationStepResult.MockMismatches.
+	//
+	// Populated by:
+	//   - Replayer.RunTestSet's per-test result block, both instrument and
+	//     non-instrument (k8s-proxy / remote-agent) modes.
+	//
+	// NOT populated by:
+	//   - The deferred streaming-test path (Phase 2 stream replay) — those
+	//     TestResults are persisted without this field. Consumers should
+	//     treat an absent value as "data not available for this run mode",
+	//     not "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
 }
 
