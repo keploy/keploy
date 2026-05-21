@@ -155,7 +155,18 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		// Pressure-gate removed from per-packet send: dropping a chunk
+		// mid-MySQL-wire-message corrupts the downstream reassembler
+		// (the length-prefix model in mysql/wire treats subsequent
+		// chunks as continuation of the dropped message and emits a
+		// truncated or malformed mock). 38,520 such drops were observed
+		// in CI run 26232542064 mysql-rbrl, correlating with the 6
+		// chronic teardown TC failures whose mocks were either missing
+		// or truncated at replay. The memoryguard protection moves
+		// entirely to AddMock (which still drops complete mocks during
+		// memoryPause via the stage-1.5-drop path); here we keep
+		// chunks flowing so the reassembler stays in sync.
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
@@ -165,9 +176,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 					zap.String("clientAddr", clientConn.RemoteAddr().String()),
 					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
-		} else if memoryguard.IsRecordingPaused() {
-			logger.Info("MySQL client packet dropped: memory pressure active",
-				zap.String("clientAddr", clientConn.RemoteAddr().String()))
 		} else {
 			logger.Info("MySQL client packet dropped: decoder channel full (pre-check)",
 				zap.String("clientAddr", clientConn.RemoteAddr().String()),
@@ -179,7 +187,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		// See forwardClient above for the rationale on removing the
+		// pressure gate from the per-packet send.
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
@@ -189,9 +199,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 					zap.String("clientAddr", clientConn.RemoteAddr().String()),
 					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
-		} else if memoryguard.IsRecordingPaused() {
-			logger.Info("MySQL dest packet dropped: memory pressure active",
-				zap.String("clientAddr", clientConn.RemoteAddr().String()))
 		} else {
 			logger.Info("MySQL dest packet dropped: decoder channel full (pre-check)",
 				zap.String("clientAddr", clientConn.RemoteAddr().String()),
@@ -311,8 +318,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// Non-blocking send to async decode. Check channel capacity
 			// before copying to avoid allocation/GC churn when the decoder
-			// can't keep up (the copy would just be dropped).
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// can't keep up (the copy would just be dropped). Pressure
+			// gate removed — see forwardClient comment above for the
+			// reassembler-corruption rationale.
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
@@ -322,9 +331,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						zap.String("clientAddr", clientConn.RemoteAddr().String()),
 						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
-			} else if memoryguard.IsRecordingPaused() {
-				logger.Info("MySQL client packet dropped in main loop: memory pressure active",
-					zap.String("clientAddr", clientConn.RemoteAddr().String()))
 			} else {
 				logger.Info("MySQL client packet dropped in main loop: channel full (pre-check)",
 					zap.String("clientAddr", clientConn.RemoteAddr().String()),
@@ -348,8 +354,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Non-blocking send to async decode.
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// Non-blocking send to async decode. Pressure gate removed —
+			// see forwardClient comment above for the reassembler-
+			// corruption rationale.
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
@@ -359,9 +367,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 						zap.String("clientAddr", clientConn.RemoteAddr().String()),
 						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
-			} else if memoryguard.IsRecordingPaused() {
-				logger.Info("MySQL dest packet dropped in main loop: memory pressure active",
-					zap.String("clientAddr", clientConn.RemoteAddr().String()))
 			} else {
 				logger.Info("MySQL dest packet dropped in main loop: channel full (pre-check)",
 					zap.String("clientAddr", clientConn.RemoteAddr().String()),
