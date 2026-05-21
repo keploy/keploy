@@ -9,7 +9,7 @@ on:
       samples_go_ref:
         description: 'samples-go ref to check out (branch, tag, or SHA)'
         required: false
-        default: 'go-sampling'
+        default: 'main'
       sampling_limit:
         description: '--enable-sampling slot count (K)'
         required: false
@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
-          ref: ${{ github.event.inputs.samples_go_ref || 'go-sampling' }}
+          ref: ${{ github.event.inputs.samples_go_ref || 'main' }}
           path: samples-go
 
       - name: Run sampling end-to-end test
