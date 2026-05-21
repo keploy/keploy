@@ -418,17 +418,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 	errGrp.Go(func() error {
 		var insertedOK, insertedDropOnCancel uint64
 		for mock := range frames.Outgoing {
-			// diag/stage-5-recv: consumer goroutine received a mock from
-			// frames.Outgoing. Pairs with stage-4 (forwarder send) — if
-			// stage-4 fires for a reqTimestamp but stage-5-recv does not,
-			// the mock died at the outgoingChan boundary (unbuffered
-			// channel; forwarder send + consumer recv must rendezvous).
-			r.logger.Info("diag/stage-5-recv: record consumer received mock from frames.Outgoing",
-				zap.String("stage", "host-consumer"),
-				zap.String("mockKind", string(mock.Kind)),
-				zap.String("mockName", mock.Name),
-				zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock))
-
+			// stage-5-recv per-mock diag removed (high volume, choked
+			// mongo lanes in the previous CI run). The for-range entry
+			// itself is the implicit recv signal; drop diags below
+			// surface actual losses.
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -463,16 +456,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				insertMockErrChan <- err
 			} else {
-				// diag/stage-5: mock successfully written to disk via
-				// InsertMock. End of the pipeline; if we see a stage-1
-				// emit for a reqTimestamp followed by a stage-5 here, the
-				// mock survived the full path.
-				r.logger.Info("diag/stage-5: InsertMock succeeded",
-					zap.String("stage", "host-consumer"),
-					zap.String("mockKind", string(mock.GetKind())),
-					zap.String("mockName", mock.Name),
-					zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
-					zap.Uint64("insertedOK", insertedOK+1))
+				// Success path: per-mock diag removed (high volume).
+				// The stage-5-drop log fires for actual losses; this
+				// arm just increments the counter and proceeds.
 				insertedOK++
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
@@ -612,8 +598,26 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	// Create channels to receive incoming and outgoing data
-	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	// Both channels are buffered at 16384 to absorb agent→host burst
+	// rates that would otherwise overflow into kernel TCP buffers and
+	// be silently lost on SIGINT-driven connection teardown. Stage-2
+	// vs stage-3 diag in the previous CI run proved 64% of MySQL mocks
+	// (7,715 of 12,005) were lost in exactly this manner: agent
+	// encode+flush completed, host's gob decoder never saw the bytes.
+	// The decoder couldn't drain because its onward send (mockChan →
+	// here) was a synchronous rendezvous on an unbuffered chan. With
+	// both `mockChan` (host-side, in pkg/platform/http/agent.go) and
+	// `outgoingChan` here buffered at 16384, a teardown burst of
+	// ~12k mocks fits entirely on the host without back-pressuring
+	// into the agent-side TCP buffer.
+	//
+	// `incomingChan` is buffered for the same reason and for symmetry —
+	// the TC capture path has the same rendezvous shape (agent gob
+	// stream → host AgentClient.GetIncoming → forwarder → consumer).
+	// Slot cost is ~16 bytes per chan entry; 16384 × 2 = ~512 KiB
+	// resident, negligible vs the recording session's footprint.
+	incomingChan := make(chan *models.TestCase, 16384)
+	outgoingChan := make(chan *models.Mock, 16384)
 	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -749,16 +753,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					return ctx.Err()
 				case outgoingChan <- m:
 					fwdCount++
-					// diag/stage-4: forwarded mock from host-receiver's
-					// mockChan onto the consumer-facing outgoingChan
-					// (frames.Outgoing). All fields are captured locals —
-					// no dereference of m after the send, so no race
-					// against the consumer's InsertMock.
-					r.logger.Info("diag/stage-4: GetTestAndMockChans forwarded mock to outgoingChan",
-						zap.String("stage", "host-forwarder"),
-						zap.String("mockKind", mockKind),
-						zap.String("mockName", mockName),
-						zap.Time("reqTimestamp", mockReqTs))
+					// Success path: per-mock diag removed (high volume).
+					// totalForwarded count is reported in the
+					// stage-4-exit log when the forwarder loop ends.
+					// The mockKind/mockName/mockReqTs locals captured
+					// above are still consumed by the stage-4-drop arm.
 				}
 			}
 		}

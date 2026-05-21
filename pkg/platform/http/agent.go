@@ -282,7 +282,28 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	// Buffered to absorb agent→host bursts without blocking the gob
+	// decoder. The previous unbuffered channel forced every mock through
+	// a synchronous rendezvous between the decode goroutine and the
+	// downstream forwarder in GetTestAndMockChans. Under the memory-load
+	// burst rate (~14k mocks/sec peak in go-memory-load-mysql) the
+	// forwarder's onward send into the (also previously unbuffered)
+	// `outgoingChan` blocked, the decoder blocked, the TCP receive
+	// buffer filled, and the agent's encode+flush bytes piled up in the
+	// kernel TCP send buffer. When the host's ctx cancelled on SIGINT
+	// the connection was torn down and those queued bytes were silently
+	// discarded by the OS — no application-level error, no diag log,
+	// just lost. Buffering here + buffering outgoingChan in
+	// GetTestAndMockChans absorbs the burst on the host side so the
+	// agent's stream doesn't back up into kernel buffers that get
+	// dropped on shutdown.
+	//
+	// Cap chosen to match the agent-side outChan capacity
+	// (outgoingMockChanCap = 64 MiB / 4 KiB = 16384) so neither side is
+	// the bottleneck; a slot here is ~16 bytes (one pointer + tag) so
+	// 16384 slots cost ~256 KiB of resident memory per recording
+	// session — negligible vs the bursts we're absorbing.
+	mockChan := make(chan *models.Mock, 16384)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -323,17 +344,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 			decoded++
-			// diag/stage-3: mock decoded from the agent→host gob stream.
-			// If stage-2 emits a mock and this log doesn't fire for the
-			// same reqTimestamp, the byte stream was severed between
-			// flush (agent) and decode (host).
-			a.logger.Info("diag/stage-3: AgentClient.GetOutgoing decode succeeded",
-				zap.String("stage", "host-receiver"),
-				zap.String("mockKind", string(mock.Kind)),
-				zap.String("mockName", mock.Name),
-				zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
-				zap.Time("resTimestamp", mock.Spec.ResTimestampMock))
-
+			// Success path: decoder read a mock from the agent's gob
+			// stream. Per-mock diag removed (high volume) — total
+			// decoded count is reported in the stage-3-exit log when
+			// the decoder loop terminates.
 			select {
 			case <-ctx.Done():
 				// diag/stage-3-drop: ctx cancelled mid-send to the
