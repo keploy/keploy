@@ -384,6 +384,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// diag/stage-tc-drop: TC consumer dropped a captured
+					// test case because ctx was already cancelled at
+					// InsertTestCase time. Symmetric with stage-5-drop
+					// on the mock side — without this, TC loss at the
+					// docker-compose-exit-races-consumer boundary is
+					// invisible. Same goroutine as the for-range loop,
+					// so the testCase pointer read is race-safe.
+					r.logger.Info("diag/stage-tc-drop: TC consumer dropped on ctx.Canceled",
+						zap.String("stage", "host-tc-consumer"),
+						zap.String("dropReason", "ctxCanceledAtInsert"),
+						zap.String("testCaseName", testCase.Name),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertTestErrChan <- err

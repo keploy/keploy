@@ -229,7 +229,33 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
+		// Race-safe snapshot: capture identifying fields and pressure
+		// start under the lock. mock is local-only at this point
+		// (AddMock is the FIRST consumer of the pointer the parser just
+		// allocated), so reading from mock is unsynchronised vs no
+		// other goroutine — different from the stage-4 race that came
+		// from reading m AFTER a channel handoff. Logging after Unlock
+		// keeps the lock window tight.
+		pressureStart := m.currentPressureStart
+		mockKind := ""
+		mockName := ""
+		var mockReqTs time.Time
+		if mock != nil {
+			mockKind = string(mock.Kind)
+			mockName = mock.Name
+			mockReqTs = mock.Spec.ReqTimestampMock
+		}
 		m.mu.Unlock()
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/stage-1.5-drop: AddMock memoryPause silent drop",
+				zap.String("stage", "syncMock-AddMock"),
+				zap.String("dropReason", "memoryPause"),
+				zap.String("mockKind", mockKind),
+				zap.String("mockName", mockName),
+				zap.Time("reqTimestamp", mockReqTs),
+				zap.Time("pressureStart", pressureStart),
+			)
+		}
 		return
 	}
 
@@ -335,8 +361,36 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		}
 		return
 	case bound && !m.firstReqSeen:
+		// Race-safe snapshot for the diag log: capture fields BEFORE
+		// the channel handoff inside sendToOutChan, so a log read after
+		// the send can't race the agent-side HandleOutgoing's
+		// (read-only) enc.Encode either. The pattern mirrors stage-4's
+		// race-safe field capture in record.go.
+		mockKind := string(mock.Kind)
+		mockName := mock.Name
+		mockReqTs := mock.Spec.ReqTimestampMock
+		mockConnID := mock.ConnectionID
+		mockLifetime := mock.TestModeInfo.Lifetime.String()
 		m.mu.Unlock()
 		m.sendToOutChan(mock)
+		// diag/stage-1.5-fwd: AddMock chose the direct-forward path
+		// (firstReqSeen=false, outChan bound and open). The mock has
+		// been handed to sendToOutChan; whether it actually landed on
+		// outChan depends on the 200 ms sendBudget — drops fire the
+		// existing "outChan overflow" Error (sampled 1/1024). Pairing
+		// this log with stage-2 (HandleOutgoing encode) lets us see
+		// whether mocks that left AddMock actually reached the agent
+		// forwarder.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/stage-1.5-fwd: AddMock direct-forward path",
+				zap.String("stage", "syncMock-AddMock"),
+				zap.String("mockKind", mockKind),
+				zap.String("mockName", mockName),
+				zap.String("connID", mockConnID),
+				zap.String("lifetime", mockLifetime),
+				zap.Time("reqTimestamp", mockReqTs),
+			)
+		}
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
