@@ -361,16 +361,36 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		}
 		return
 	case bound && !m.firstReqSeen:
-		// Success path: hand the mock to sendToOutChan. The 200 ms
-		// sendBudget drop in sendToOutChan emits the existing
-		// "outChan overflow" Error log on actual loss, so this success
-		// arm has no diag — the per-mock Info log here fired at ~12k/s
-		// during memory-load bursts and choked mongo lanes (90+ min
-		// hangs in CI). Kept only the drop arms (memoryPause-drop,
-		// outChan-closed-drop) at Info; the success volume is
-		// implicit from the absence of drop events.
+		// Race-safe snapshot for the diag log: capture fields BEFORE
+		// the channel handoff inside sendToOutChan, so a log read after
+		// the send can't race the agent-side HandleOutgoing's
+		// (read-only) enc.Encode either. The pattern mirrors stage-4's
+		// race-safe field capture in record.go.
+		mockKind := string(mock.Kind)
+		mockName := mock.Name
+		mockReqTs := mock.Spec.ReqTimestampMock
+		mockConnID := mock.ConnectionID
+		mockLifetime := mock.TestModeInfo.Lifetime.String()
 		m.mu.Unlock()
 		m.sendToOutChan(mock)
+		// diag/stage-1.5-fwd: AddMock chose the direct-forward path
+		// (firstReqSeen=false, outChan bound and open). The mock has
+		// been handed to sendToOutChan; whether it actually landed on
+		// outChan depends on the 200 ms sendBudget — drops fire the
+		// existing "outChan overflow" Error (sampled 1/1024). Pairing
+		// this log with stage-2 (HandleOutgoing encode) lets us see
+		// whether mocks that left AddMock actually reached the agent
+		// forwarder.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/stage-1.5-fwd: AddMock direct-forward path",
+				zap.String("stage", "syncMock-AddMock"),
+				zap.String("mockKind", mockKind),
+				zap.String("mockName", mockName),
+				zap.String("connID", mockConnID),
+				zap.String("lifetime", mockLifetime),
+				zap.Time("reqTimestamp", mockReqTs),
+			)
+		}
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
