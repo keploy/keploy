@@ -1629,12 +1629,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					} else {
 						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 					}
+					// On fetch failure, consumedMocks may carry stale/partial
+					// data from the previous test. Clear it so downstream uses
+					// in this iteration (logging, mockNames, upsertActualTest-
+					// MockMapping) and the next iteration's filter params
+					// don't attribute the previous test's data to this one.
+					consumedMocks = nil
 				}
 				r.logger.Debug("consumed mocks after test case simulation",
 					zap.String("testSetID", testSetID),
 					zap.String("testCaseID", testCase.Name),
 					zap.Int("count", len(consumedMocks)),
-					zap.Any("mocks", consumedMocks))
+					zap.Any("mocks", consumedMocks),
+					zap.Bool("fetchOk", instrumentConsumedFetchErr == nil))
+				// totalConsumedMocks aggregation is implicit-gated: on fetch
+				// failure consumedMocks was nil'd above, so this loop is a
+				// no-op and stale data can't leak into the next iteration's
+				// filter params (SendMockFilterParamsToAgent).
 				for _, m := range consumedMocks {
 					totalConsumedMocks[m.Name] = m
 				}
@@ -1897,7 +1908,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							perTestConsumed = fetched
 							perTestConsumedKnown = true
 						} else {
-							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping MockMismatches for this test",
+							// Mirror the instrument-mode skip: leaves
+							// perTestConsumedKnown false so downstream skips
+							// MatchedCalls AND MockMismatches (any consumed-
+							// mock-derived field) rather than attribute stale
+							// data. UnmatchedCalls is unaffected — independent
+							// sources (mockMismatchFailures channel + GetMock-
+							// Errors) still populate for failed/obsolete tests.
+							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping all consumed-mock-derived fields (MatchedCalls + MockMismatches) for this test",
 								zap.String("testSetID", testSetID),
 								zap.String("testCaseID", testCase.Name),
 								zap.Error(fetchErr))
