@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -339,88 +340,162 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
+	//
+	// TC hold + agent-side pressure-window check. Both fix the atomicity
+	// bug where a mongo/mysql/etc mock arrives at syncMock.AddMock AFTER
+	// Capture has already committed the TC — async-decoder lag means
+	// Capture's IsHTTPTCInPressureWindow check ran BEFORE the mock-drop
+	// updated currentPressureStart. By holding the TC for ~500 ms here
+	// (in the AGENT process — same syncMock singleton as AddMock), late
+	// drops have time to update the pressure window and the re-check
+	// below catches the orphan. The CLI-side check in record.go cannot
+	// do this: it reads a different syncMock singleton with no agent-
+	// recorded data, which is why stage-tc-pressure-drop fired 0 times
+	// in CI run 26252971390. tcHold is sized to comfortably cover the
+	// 50–200 ms async-decoder lag for 1 MB+ payloads with headroom for
+	// GC pauses on oversubscribed CI runners.
+	const tcHold = 500 * time.Millisecond
+	type pendingTC struct {
+		tc    *models.TestCase
+		aged  time.Time
+	}
+	var pending []pendingTC
+
+	// emit writes a single TC to the multipart stream. Returns false on
+	// fatal error to break the outer loop.
+	emit := func(t *models.TestCase) bool {
+		// Stream each test case as JSON
+		// 1. Write metadata (JSON)
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="metadata"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			a.logger.Error("failed to create metadata part", zap.Error(err))
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(t); err != nil {
+			a.logger.Error("failed to encode metadata", zap.Error(err))
+			return false
+		}
+		return emitFiles(a, mw, t, flusher)
+	}
+
+	// drain pops aged TCs from the head, runs the pressure check, and
+	// emits or drops them. shutdown=true flushes ALL pending TCs
+	// regardless of age (last chance before connection tears down).
+	drain := func(shutdown bool) bool {
+		for len(pending) > 0 {
+			if !shutdown && time.Since(pending[0].aged) < tcHold {
+				return true
+			}
+			head := pending[0]
+			pending = pending[1:]
+			if mgr := syncMock.Get(); mgr != nil && head.tc.Kind == models.HTTP &&
+				mgr.IsHTTPTCInPressureWindow(head.tc.HTTPReq.Timestamp, head.tc.HTTPResp.Timestamp) {
+				a.logger.Info("diag/stage-tc-pressure-drop-agent: TC dropped at HandleIncoming send — round-trip overlapped pressure window (atomic mock+TC drop)",
+					zap.String("stage", "agent-tc-emit"),
+					zap.String("dropReason", "pressureWindow"),
+					zap.String("testCaseName", head.tc.Name),
+					zap.Time("req_time", head.tc.HTTPReq.Timestamp),
+					zap.Time("res_time", head.tc.HTTPResp.Timestamp))
+				continue
+			}
+			if !emit(head.tc) {
+				return false
+			}
+		}
+		return true
+	}
+
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
+			drain(true)
 			return
 		case t, ok := <-tc:
 			if !ok {
+				drain(true)
 				return
 			}
-			// Stream each test case as JSON
-			// 1. Write metadata (JSON)
-			header := textproto.MIMEHeader{}
-			header.Set("Content-Disposition", `form-data; name="metadata"`)
-			header.Set("Content-Type", "application/json")
-			part, err := mw.CreatePart(header)
-			if err != nil {
-				a.logger.Error("failed to create metadata part", zap.Error(err))
+			pending = append(pending, pendingTC{tc: t, aged: time.Now()})
+			if !drain(false) {
 				return
 			}
-			if err := json.NewEncoder(part).Encode(t); err != nil {
-				a.logger.Error("failed to encode metadata", zap.Error(err))
+			continue
+		case <-tick.C:
+			if !drain(false) {
 				return
 			}
-
-			// 2. Write file part if exists
-			if t.HasBinaryFile {
-				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
-				for _, form := range t.HTTPReq.Form {
-					for i, path := range form.Paths {
-						if path == "" {
-							continue
-						}
-
-						// Get filename from FileNames if available, or base of path
-						fileName := "binary_file"
-						if i < len(form.FileNames) {
-							fileName = form.FileNames[i]
-						} else {
-							fileName = filepath.Base(path)
-						}
-
-						fileHeader := textproto.MIMEHeader{}
-						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
-						filePart, err := mw.CreatePart(fileHeader)
-						if err != nil {
-							a.logger.Error("failed to create file part", zap.Error(err))
-							return
-						}
-
-						f, err := os.Open(path)
-						if err != nil {
-							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
-							return
-						}
-						if _, err := io.Copy(filePart, f); err != nil {
-							f.Close()
-							a.logger.Error("failed to copy file to stream", zap.Error(err))
-							return
-						}
-						f.Close()
-						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
-
-						// Cleanup temp file
-						os.Remove(path)
-					}
-				}
-			}
-
-			// 3. Write delimiter part to force closure of previous part (file)
-			// This is critical: The client reads the file part until it sees the *next* boundary.
-			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
-			// causing a deadlock if testcases are infrequent.
-			delimiterHeader := textproto.MIMEHeader{}
-			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
-			if _, err := mw.CreatePart(delimiterHeader); err != nil {
-				a.logger.Error("failed to create delimiter part", zap.Error(err))
-				return
-			}
-
-			flusher.Flush() // Immediately send data to the client
+			continue
 		}
 	}
+}
+
+// emitFiles writes the binary-file parts (if any) and the trailing
+// delimiter for a single TC. Extracted from HandleIncoming so the
+// hold/drain loop above can call it without duplicating the body.
+func emitFiles(a *Agent, mw *multipart.Writer, t *models.TestCase, flusher http.Flusher) bool {
+	// 2. Write file part if exists
+	if t.HasBinaryFile {
+		a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+		for _, form := range t.HTTPReq.Form {
+			for i, path := range form.Paths {
+				if path == "" {
+					continue
+				}
+
+				// Get filename from FileNames if available, or base of path
+				fileName := "binary_file"
+				if i < len(form.FileNames) {
+					fileName = form.FileNames[i]
+				} else {
+					fileName = filepath.Base(path)
+				}
+
+				fileHeader := textproto.MIMEHeader{}
+				fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+				filePart, err := mw.CreatePart(fileHeader)
+				if err != nil {
+					a.logger.Error("failed to create file part", zap.Error(err))
+					return false
+				}
+
+				f, err := os.Open(path)
+				if err != nil {
+					a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+					return false
+				}
+				if _, err := io.Copy(filePart, f); err != nil {
+					f.Close()
+					a.logger.Error("failed to copy file to stream", zap.Error(err))
+					return false
+				}
+				f.Close()
+				a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+
+				// Cleanup temp file
+				os.Remove(path)
+			}
+		}
+	}
+
+	// 3. Write delimiter part to force closure of previous part (file)
+	// This is critical: The client reads the file part until it sees the *next* boundary.
+	// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+	// causing a deadlock if testcases are infrequent.
+	delimiterHeader := textproto.MIMEHeader{}
+	delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+	if _, err := mw.CreatePart(delimiterHeader); err != nil {
+		a.logger.Error("failed to create delimiter part", zap.Error(err))
+		return false
+	}
+
+	flusher.Flush() // Immediately send data to the client
+	return true
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
