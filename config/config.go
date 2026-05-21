@@ -36,6 +36,7 @@ type Config struct {
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	MysqlPorts            []uint32            `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string              `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`

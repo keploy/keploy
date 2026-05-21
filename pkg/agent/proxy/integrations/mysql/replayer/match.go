@@ -733,7 +733,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		log.Debug("query structure matched",
 			zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
-		return true, matchCount
+		return false, matchCount + 6
 	}
 
 	return false, matchCount
@@ -848,6 +848,10 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
+	}
+
+	if allParamsMatched && eq == "" && aq == "" {
+		return true, matchCount
 	}
 
 	if !queryMatched || !allParamsMatched {
