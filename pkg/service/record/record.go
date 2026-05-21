@@ -24,6 +24,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// recordDrainTimeout caps how long the persistence layer can spend
+// inserting a single TC/mock after the parent recording ctx has been
+// cancelled. Sized to give the consumer goroutines time to drain the
+// buffered host channels (mockChan/outgoingChan, both cap 16384) to
+// disk after docker-compose-exit returns. Without this, the previous
+// CI run on commit 610635df showed 16,533 mocks dropped at InsertMock
+// ctx.Canceled — the buffer fix successfully moved bytes past the
+// gob stream but the consumer still loses them at the persistence
+// boundary if it can't drain within ctx's lifetime.
+//
+// 10 s is a soft upper bound per insert: long enough that a typical
+// 16k-mock drain (~5-10 ms each = 80-160 s worst case, but usually
+// faster because most inserts are < 1 ms) makes meaningful progress
+// even after parent cancel, and short enough that a genuinely hung
+// disk write can't pin the goroutine after shutdown. If a single
+// insert genuinely takes longer than this the recording is already
+// pathological and dropping the trailing entry is correct.
+const recordDrainTimeout = 10 * time.Second
+
 type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
@@ -382,20 +401,25 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testCaseName", testCase.Name))
 			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			if err != nil && ctx.Err() == context.Canceled {
+				// Drain-with-deadline mirroring the mock-consumer fix
+				// below. Without this retry, captured teardown TCs are
+				// lost in the same docker-compose-exit-races-consumer
+				// race that affects mocks. Keep TC and mock drain in
+				// lock-step so we never persist a TC whose mocks were
+				// dropped (or vice versa) — atomic recording semantics.
+				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
+				err = r.testDB.InsertTestCase(drainCtx, testCase, newTestSetID, true)
+				cancelDrain()
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
-					// diag/stage-tc-drop: TC consumer dropped a captured
-					// test case because ctx was already cancelled at
-					// InsertTestCase time. Symmetric with stage-5-drop
-					// on the mock side — without this, TC loss at the
-					// docker-compose-exit-races-consumer boundary is
-					// invisible. Same goroutine as the for-range loop,
-					// so the testCase pointer read is race-safe.
-					r.logger.Info("diag/stage-tc-drop: TC consumer dropped on ctx.Canceled",
+					r.logger.Info("diag/stage-tc-drop: InsertTestCase + drain retry both failed under ctx.Canceled",
 						zap.String("stage", "host-tc-consumer"),
-						zap.String("dropReason", "ctxCanceledAtInsert"),
+						zap.String("dropReason", "ctxCanceledAtInsertAndDrain"),
 						zap.String("testCaseName", testCase.Name),
-						zap.String("testSetID", newTestSetID))
+						zap.String("testSetID", newTestSetID),
+						zap.Error(err))
 					continue
 				}
 				insertTestErrChan <- err
@@ -434,23 +458,36 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			if err != nil && ctx.Err() == context.Canceled {
+				// Drain-with-deadline: parent ctx was cancelled (typical
+				// trigger: docker compose --abort-on-container-exit
+				// returns when k6 finishes its teardown), but the mock
+				// is already in our buffer and the previous CI run on
+				// commit 610635df showed 16,533 mocks dropped here
+				// without this retry — the buffer fix moved bytes past
+				// the gob stream but didn't help mocks that hit
+				// InsertMock during shutdown. Retry on a detached ctx
+				// with a bounded deadline so backlogged mocks land on
+				// disk instead of being lost to the docker-compose-exit
+				// race.
+				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
+				err = r.mockDB.InsertMock(drainCtx, mock, newTestSetID)
+				cancelDrain()
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
-					// diag/stage-5-drop: InsertMock failed because ctx
-					// was already cancelled. This is the documented
-					// silent-drop point that earlier diag (now reverted)
-					// detected. Restored here so we can correlate it with
-					// stage-4 forwards: a stage-5-recv + stage-5-drop pair
-					// means the consumer SAW the mock but couldn't persist
-					// it because shutdown was already in flight.
-					r.logger.Info("diag/stage-5-drop: InsertMock dropped due to ctx.Canceled",
+					// Drain attempt also failed (drainCtx timeout or
+					// real I/O error after parent cancel). Residual
+					// loss surface — log so the count is visible.
+					r.logger.Info("diag/stage-5-drop: InsertMock + drain retry both failed under ctx.Canceled",
 						zap.String("stage", "host-consumer"),
-						zap.String("dropReason", "ctxCanceledAtInsert"),
+						zap.String("dropReason", "ctxCanceledAtInsertAndDrain"),
 						zap.String("mockKind", string(mock.GetKind())),
 						zap.String("mockName", mock.Name),
 						zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
 						zap.Uint64("insertedOK", insertedOK),
-						zap.Uint64("droppedSoFar", insertedDropOnCancel+1))
+						zap.Uint64("droppedSoFar", insertedDropOnCancel+1),
+						zap.Error(err))
 					insertedDropOnCancel++
 					continue
 				}
