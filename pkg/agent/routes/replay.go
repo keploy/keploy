@@ -32,10 +32,25 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	err = a.svc.MockOutgoing(r.Context(), OutgoingReq.OutgoingOptions)
 	if err != nil {
-		mockRes.Error = err
+		// Bug fix: previously `render.JSON(w, r, err)` serialized the
+		// raw Go error interface. Numeric-typed errors (e.g.,
+		// syscall.Errno which is type Errno uintptr) marshaled as bare
+		// JSON numbers, breaking the CLI's AgentResp decoder with
+		// "cannot unmarshal number into Go value of type
+		// models.AgentResp" — masking the real error message.
+		// Always render the structured AgentResp so the CLI gets a
+		// consistent shape and can extract the underlying error
+		// string via mockRes.Error.
+		// MARK_MOCKOUTGOING_FIX_2026_05_14: this string must appear in /usr/local/bin/keploy if the OSS replace is taking effect.
+		a.logger.Info("MARK_MOCKOUTGOING_FIX_2026_05_14: MockOutgoing handler error path producing proper AgentResp",
+			zap.Error(err))
 		mockRes.IsSuccess = false
-		render.JSON(w, r, err)
+		mockRes.Error = nil // intentionally nil — error interface serializes inconsistently; surface message via a string field below
 		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]any{
+			"isSuccess": false,
+			"error":     err.Error(),
+		})
 		return
 	}
 
@@ -48,8 +63,12 @@ func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 
 	consumedMocks, err := a.svc.GetConsumedMocks(r.Context())
 	if err != nil {
-		render.JSON(w, r, err)
+		// Same bug class as MockOutgoing's old `render.JSON(w, r, err)`
+		// — raw error interface produces inconsistent JSON shapes for
+		// the caller. Return a structured error wrapper instead so the
+		// CLI gets a predictable shape.
 		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
 		return
 	}
 

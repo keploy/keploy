@@ -294,6 +294,68 @@ func (m *MockManager) IsClosed() bool {
 	return m.closed.Load()
 }
 
+// ResetForReplaySession clears connection-scoped state and per-test
+// counters so a MockManager that survives across test-set boundaries
+// (Proxy.Mock reuse, see pkg/agent/proxy/proxy.go) doesn't leak the
+// previous test-set's connection pools into the next one.
+//
+// What it clears:
+//   - connectionTrees / connectionLastTs: per-connID dedicated trees
+//     populated by AddConnectionMock from the previous test-set's
+//     LifetimeConnection mocks. SetMocksWithWindow only seeds new
+//     entries via AddConnectionMock — it never evicts prior ones, so
+//     without an explicit reset a long-lived connection's per-connID
+//     tree would accumulate test-set-N's mocks alongside test-set-
+//     N+1's, and GetConnectionMocks (which returns the cached tree
+//     without consulting the freshly swapped unfiltered tree) would
+//     keep matching stale entries.
+//   - noConnMocks: the negative cache paired with connectionTrees;
+//     stale entries from the previous test-set would suppress fallback
+//     scans for connIDs that now legitimately have connection-scoped
+//     mocks.
+//   - droppedOutOfWindow: per-test diagnostic counter that should
+//     reset at the test-set boundary so "dropped for this test-set"
+//     stays meaningful in metrics.
+//
+// What it preserves:
+//   - firstWindowStart: deliberately sticky across the whole replay
+//     run so the startup-init vs. stale-bleed classification in
+//     SetMocksWithWindow keeps the same "before any test fired"
+//     cutoff for every test-set. Resetting it would let later
+//     test-sets' pre-firstTest mocks accidentally be classified as
+//     startup-init when they're really stale bleed from the previous
+//     test-set's tail.
+//   - filtered / unfiltered / startup trees: SetMocksWithWindow swaps
+//     these atomically on the next call from the orchestrator, so
+//     clearing them here would just briefly serve an empty pool to
+//     any parser racing the reset.
+//   - sweeperStop / closed: the idle sweeper goroutine keeps running
+//     across the reset; closing it would stop the per-connection
+//     idle reaping for the rest of the replay.
+//   - hitIdx: rebuilt by SetFilteredMocks/SetUnFilteredMocks on the
+//     next mock load, so an explicit clear here is redundant.
+//
+// Safe to call concurrently with active matchers — connMu guards
+// the maps and noConnMocks is a sync.Map. Matchers holding stale
+// references to the cleared trees still observe valid (empty) trees
+// rather than panicking.
+func (m *MockManager) ResetForReplaySession() {
+	m.connMu.Lock()
+	m.connectionTrees = make(map[string]*TreeDb)
+	m.connectionLastTs = make(map[string]time.Time)
+	m.connMu.Unlock()
+	// sync.Map has no Clear()/Reset() — Range+Delete is the idiomatic
+	// reset. Concurrent readers see the same final state as if they
+	// raced a fresh-Map swap; the negative-cache contract is
+	// "absence means re-probe", which is exactly what an emptied map
+	// produces.
+	m.noConnMocks.Range(func(k, _ interface{}) bool {
+		m.noConnMocks.Delete(k)
+		return true
+	})
+	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+}
+
 // runIdleSweeper is the background loop that calls SweepIdleConnections
 // every connectionSweepInterval. Terminates when sweeperStop is
 // closed (by Close()).
@@ -1489,6 +1551,16 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
+	// DEBUG_TRACE: collect PostgresV3 mock names in the main loop only
+	// when Debug logging is enabled, so non-Debug runs don't allocate
+	// the slice or do the per-mock kind check beyond what the swap
+	// already does. The Check() call short-circuits below if the level
+	// is filtered out.
+	debugV3Trace := m.logger != nil && m.logger.Core().Enabled(zap.DebugLevel)
+	var v3Names []string
+	if debugV3Trace {
+		v3Names = make([]string, 0, 8)
+	}
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
@@ -1514,6 +1586,9 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
 		}
 		newStateless[k][key] = append(newStateless[k][key], mock)
+		if debugV3Trace && mock.Kind == models.PostgresV3 {
+			v3Names = append(v3Names, mock.Name)
+		}
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
@@ -1525,6 +1600,22 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		m.bumpRevisionKind(k)
 	}
 	m.bumpRevisionAll()
+	// DEBUG_TRACE: prove what landed in m.filtered after the swap +
+	// bump. Lists every PostgresV3 mock so we can correlate by mock name
+	// against the failing hashes the parser later misses. Gated behind
+	// logger.Check so non-Debug runs pay nothing for the fmt.Sprintf
+	// + Revision() read.
+	if debugV3Trace {
+		if ce := m.logger.Check(zap.DebugLevel, "DEBUG_TRACE SetFilteredMocks: tree swapped + revision bumped"); ce != nil {
+			ce.Write(
+				zap.String("mockManagerPtr", fmt.Sprintf("%p", m)),
+				zap.Int("inputMocks", len(mocks)),
+				zap.Int("postgresV3Mocks", len(v3Names)),
+				zap.Strings("postgresV3MockNames", v3Names),
+				zap.Uint64("newRevision", m.Revision()),
+			)
+		}
+	}
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
