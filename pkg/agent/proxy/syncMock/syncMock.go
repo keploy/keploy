@@ -497,26 +497,36 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	m.memoryPause = enabled
 	if enabled {
 		now := time.Now()
-		// ATOMICITY FIX: the buffer holds complete, valid mocks that were
-		// captured BEFORE pressure started and are awaiting ResolveRange
-		// (their HTTP TC hasn't committed yet). We're about to wipe them
-		// to release memory — but if we leave currentPressureStart at
-		// time.Now(), the AddMock HTTP-TC drop check will NOT catch their
-		// TCs (those TCs' resTime predates "now"), producing orphans
-		// that fail at replay with "socket was unexpectedly closed: EOF".
-		// Extend currentPressureStart BACKWARDS to the earliest ReqTimestamp
-		// among wiped mocks so the existing overlap check (pressureStart <
-		// TC.resTime) correctly drops every TC whose DB call we just lost.
-		earliest := now
-		for _, mock := range m.buffer {
-			if mock == nil {
-				continue
+		// CRITICAL: only initialize currentPressureStart on the FIRST
+		// pressure tick (transition from zero/unset). memoryguard calls
+		// SetMemoryPressure(true) on EVERY 500 ms tick while pressure
+		// remains active, not just on the false→true edge. Resetting
+		// currentPressureStart each call would collapse the recorded
+		// pressure window to ONLY the last tick before clear, making
+		// pressureWindows so small that IsHTTPTCInPressureWindow misses
+		// nearly every TC actually affected by pressure. This was the
+		// previously-undiagnosed root cause of every "stage-tc-pressure-
+		// drop-agent never fires" pattern across CI runs 26248766772
+		// through 26254257158: my AddMock extension widened the start
+		// backwards, but the NEXT tick wiped it out by overwriting with
+		// time.Now(). Initializing once per burst preserves both this
+		// tick's wipe-time extension AND any subsequent AddMock per-mock
+		// extensions until pressure clears.
+		if m.currentPressureStart.IsZero() {
+			// First tick of a new pressure burst. Scan the buffer for
+			// the earliest ReqTimestamp among about-to-be-wiped mocks
+			// so the pressure window covers them retroactively.
+			earliest := now
+			for _, mock := range m.buffer {
+				if mock == nil {
+					continue
+				}
+				if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.Before(earliest) {
+					earliest = mock.Spec.ReqTimestampMock
+				}
 			}
-			if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.Before(earliest) {
-				earliest = mock.Spec.ReqTimestampMock
-			}
+			m.currentPressureStart = earliest
 		}
-		m.currentPressureStart = earliest
 		for i := range m.buffer {
 			m.buffer[i] = nil
 		}
