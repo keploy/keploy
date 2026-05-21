@@ -1682,8 +1682,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			mockSetMismatch := false
-			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
+				// Filter out DNS mocks from comparison since DNS resolution
+				// order is non-deterministic. Also gate on a successful per-
+				// test GetConsumedMocks — when the fetch failed, consumedMocks
+				// was cleared to nil above, which would deterministically
+				// compute mockSetMismatch=true (empty subset of any non-empty
+				// expected set) and falsely mark the test OBSOLETE due to an
+				// unrelated transport error rather than a real mock-pool
+				// divergence.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
