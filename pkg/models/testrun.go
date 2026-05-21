@@ -78,14 +78,25 @@ type FailureInfo struct {
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
 }
 
-// MockMismatchMock identifies a mock in the expected/actual mock sets for OBSOLETE test cases.
+// MockMismatchMock identifies a mock in the expected/actual mock sets carried by
+// MockMismatchInfo. Used for both the obsolete-mismatch reporting path
+// (FailureInfo.MockMismatch) and the always-populated TestResult.MockMismatches
+// field that exposes per-test mock consumption to report consumers.
 type MockMismatchMock struct {
 	Name string `json:"name" yaml:"name"`
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 }
 
-// MockMismatchInfo records the expected vs actual mock sets when a test case becomes obsolete
-// due to mock mapping divergence (mocks were added/removed between recording and replay).
+// MockMismatchInfo records the expected (recorded) vs actual (consumed during
+// replay) mock sets for a test case. Used in two places with different
+// semantics:
+//
+//   - FailureInfo.MockMismatch — populated only when the test became OBSOLETE
+//     due to mock-pool divergence (mocks were added/removed between recording
+//     and replay).
+//   - TestResult.MockMismatches — populated for EVERY test that went through
+//     the replay loop, regardless of pass/fail or obsolescence. Lets report
+//     UIs render expected vs consumed mocks for passing tests too.
 type MockMismatchInfo struct {
 	ExpectedMocks []MockMismatchMock `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`

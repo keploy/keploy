@@ -1847,14 +1847,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
 					// Populate matched/unmatched calls for failed/obsolete test cases
-					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
-						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
-						matchedMocks := consumedMocks
-						if !r.instrument {
-							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
-								matchedMocks = fetched
-							}
+					// In non-instrument mode (k8s-proxy / remote agent) `consumedMocks`
+					// is only refreshed at line ~1615 in instrument mode — for
+					// non-instrument it stays at whatever it was at initial setup,
+					// which is stale for every test except the first. Refresh it
+					// here so both the failed/obsolete branch below AND the
+					// always-populated MockMismatches block below get this test
+					// case's real consumed-mock set. One HTTP fetch covers both
+					// uses; matchedMocks below just reuses this freshened value.
+					if !r.instrument {
+						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
+							consumedMocks = fetched
 						}
+					}
+					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+						matchedMocks := consumedMocks
 						for _, m := range matchedMocks {
 							if m.Kind != models.DNS {
 								info := mockLookup[m.Name]
@@ -1925,7 +1932,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// behaviour so the test-report UI can render expected vs
 					// actual mocks for passing tests too — not just the
 					// obsolete-mismatch path. Skip only when both sides are
-					// empty so the JSON/BSON field stays absent via omitempty.
+					// empty so the json/yaml field stays absent via omitempty.
 					if len(expectedMockInfos) > 0 || len(actualMockInfos) > 0 {
 						testCaseResult.MockMismatches = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,
