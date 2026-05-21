@@ -849,7 +849,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 			}
 		}
 	}
-	
+
 	if allParamsMatched && eq == "" && aq == "" {
 		return true, matchCount
 	}
