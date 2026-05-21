@@ -36,10 +36,6 @@ type Config struct {
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	// MysqlPorts lets users tell the proxy which destination ports speak
-	// the MySQL wire protocol (MySQL, TiDB, MariaDB, custom proxies, …).
-	// Empty defaults to [3306, 4000]. Configure when running MySQL on a
-	// non-standard port or against a wire-compatible server elsewhere.
 	MysqlPorts            []uint32            `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`

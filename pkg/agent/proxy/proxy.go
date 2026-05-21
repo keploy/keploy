@@ -78,15 +78,8 @@ func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Fi
 	logger.Info("[PROBE/proxy]", append(base, fields...)...)
 }
 
-// defaultMysqlPorts is the fallback list used by isMysqlPort when the
-// user hasn't set outgoingOpts.MysqlPorts. 3306 is MySQL's default;
-// 4000 is TiDB's default. Configure Config.MysqlPorts to override.
 var defaultMysqlPorts = []uint32{3306, 4000}
 
-// isMysqlPort reports whether the proxy should treat the destination
-// port as MySQL wire protocol — i.e. take the eager-upstream-dial
-// branch in handleConnection. Returns true if port is in configured
-// (when non-empty) or in defaultMysqlPorts (when configured is empty).
 func isMysqlPort(port uint32, configured []uint32) bool {
 	ports := configured
 	if len(ports) == 0 {
