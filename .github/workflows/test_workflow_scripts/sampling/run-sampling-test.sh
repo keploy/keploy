@@ -136,10 +136,15 @@ if [ ! -d ./keploy/test-set-0/tests ]; then
     ls -la ./keploy 2>/dev/null || true
     exit 1
 fi
-captured=$(find ./keploy/test-set-0/tests -maxdepth 1 -name 'test-*.yaml' -type f | wc -l | tr -d ' ')
-echo "captured test cases: $captured"
+# Keploy names test cases after the HTTP method + path (e.g. get-work-1.yaml).
+# Count only /work captures — the readiness probe on /health may also land in
+# the test-set and would otherwise inflate the count above the sampling budget.
+captured=$(find ./keploy/test-set-0/tests -maxdepth 1 -name 'get-work-*.yaml' -type f | wc -l | tr -d ' ')
+total_files=$(find ./keploy/test-set-0/tests -maxdepth 1 -name '*.yaml' -type f | wc -l | tr -d ' ')
+echo "captured /work test cases: $captured"
+echo "total recorded test cases (incl. /health probe): $total_files"
 echo "sampling limit (K): $SAMPLING_LIMIT"
-echo "total requests (N): $TOTAL_REQUESTS"
+echo "total /work requests (N): $TOTAL_REQUESTS"
 ls ./keploy/test-set-0/tests | sed 's/^/  /'
 endsec
 
