@@ -1890,31 +1890,54 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 					}
+					// Build the {expected, actual} mock set for THIS test case.
+					// DNS entries are filtered both sides because DNS resolution
+					// order is non-deterministic — including them produces noisy
+					// spurious mismatches downstream.
+					expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
+					for _, m := range expectedMocks {
+						isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+						if !isDNS {
+							if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+								isDNS = true
+							}
+						}
+						if !isDNS {
+							resolvedKind := m.Kind
+							if resolvedKind == "" {
+								if kind, ok := mockKindByName[m.Name]; ok {
+									resolvedKind = string(kind)
+								}
+							}
+							expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
+						}
+					}
+					actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
+					for _, m := range consumedMocks {
+						if m.Kind != models.DNS {
+							actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+						}
+					}
+
+					// TestResult.MockMismatches: populated for EVERY test that
+					// went through the replay loop (regardless of pass/fail or
+					// obsolescence). Mirrors the sandbox integration runner's
+					// behaviour so the test-report UI can render expected vs
+					// actual mocks for passing tests too — not just the
+					// obsolete-mismatch path. Skip only when both sides are
+					// empty so the JSON/BSON field stays absent via omitempty.
+					if len(expectedMockInfos) > 0 || len(actualMockInfos) > 0 {
+						testCaseResult.MockMismatches = &models.MockMismatchInfo{
+							ExpectedMocks: expectedMockInfos,
+							ActualMocks:   actualMockInfos,
+						}
+					}
+
+					// Existing FailureInfo.MockMismatch semantics preserved:
+					// only set when the test became OBSOLETE due to a real
+					// mock-pool divergence. Downstream code that branches on
+					// "is this an obsolete-mismatch?" keeps working.
 					if mockSetMismatch && testStatus == models.TestStatusObsolete {
-						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
-						for _, m := range expectedMocks {
-							isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-							if !isDNS {
-								if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-									isDNS = true
-								}
-							}
-							if !isDNS {
-								resolvedKind := m.Kind
-								if resolvedKind == "" {
-									if kind, ok := mockKindByName[m.Name]; ok {
-										resolvedKind = string(kind)
-									}
-								}
-								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
-							}
-						}
-						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
-						for _, m := range consumedMocks {
-							if m.Kind != models.DNS {
-								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
-							}
-						}
 						testCaseResult.FailureInfo.MockMismatch = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,
 							ActualMocks:   actualMockInfos,

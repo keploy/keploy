@@ -57,6 +57,13 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// MockMismatches captures expected vs actually-consumed mocks for THIS test,
+	// populated by the replayer on every run regardless of pass/fail or obsolescence.
+	// Distinct from FailureInfo.MockMismatch (which only fires on obsolete + diverged
+	// mock pool) — this field is always set when mock data is available, so passing
+	// tests can also surface their consumed mocks in the report UI. Name mirrors
+	// the sandbox integration runner's IntegrationStepResult.MockMismatches.
+	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
