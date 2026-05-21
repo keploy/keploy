@@ -730,10 +730,17 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	}
 
 	if expectedSignature == actualSignature {
+		// AST structural equivalence only — literal values may still
+		// differ (INSERT/DELETE/UPDATE with different bind values share
+		// the same AST shape). Return a high score but NOT a definitive
+		// match, so the outer matcher continues looking for a mock whose
+		// full query text matches byte-for-byte; without that, the first
+		// structurally-equivalent mock would always win and every call
+		// against the same prepared SQL would replay the same response.
 		log.Debug("query structure matched",
 			zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
-		return true, matchCount
+		return false, matchCount + 6
 	}
 
 	return false, matchCount
@@ -848,6 +855,18 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
+	}
+
+	// If we couldn't resolve the recorded/actual query (server-assigned
+	// statement IDs differ across runs, so the StmtID->Query lookups
+	// often miss), a full bind-parameter equality is still strong
+	// enough on its own: same statement type, same param count, same
+	// flags/status, and every parameter value byte-equal. Without this,
+	// the matcher falls through to score-based selection where every
+	// candidate INSERT/DELETE mock ties and the first-encountered
+	// one wins for every call.
+	if allParamsMatched && eq == "" && aq == "" {
+		return true, matchCount
 	}
 
 	if !queryMatched || !allParamsMatched {
