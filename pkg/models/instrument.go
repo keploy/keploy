@@ -83,6 +83,14 @@ type OutgoingOptions struct {
 	// Surfaced via --opportunistic-tls-intercept so the agent can
 	// pick the right per-connection branch in handleConnection.
 	OpportunisticTLSIntercept bool
+	// MysqlPorts lists destination ports that the proxy should treat as
+	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
+	// upstream eagerly on connection accept so the server's Initial
+	// Handshake Packet can be relayed. MySQL is a server-speaks-first
+	// protocol; the generic dispatch path waits to peek client bytes
+	// before dialing and deadlocks otherwise. When nil/empty, the
+	// proxy falls back to the built-in defaults [3306, 4000].
+	MysqlPorts []uint32
 }
 
 type ConditionalDstCfg struct {
