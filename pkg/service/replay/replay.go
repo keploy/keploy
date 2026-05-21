@@ -1089,6 +1089,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1275,6 +1276,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {

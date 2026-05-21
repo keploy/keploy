@@ -660,6 +660,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		TLSPrivateKey:             tlsPrivateKey,
 		CapturePackets:            r.config.Record.CapturePackets,
 		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
+		MysqlPorts:                r.config.MysqlPorts,
 	})
 	if err != nil {
 
