@@ -1849,22 +1849,35 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// Populate matched/unmatched calls for failed/obsolete test cases.
 					// In non-instrument mode (k8s-proxy / remote agent) the
 					// loop-scoped `consumedMocks` is only refreshed inside the
-					// instrument branch at line ~1615 — for non-instrument it
-					// stays at whatever the initial setup set, which is stale
-					// for every test except the first. Fetch the per-test
-					// consumed-mock set into a PER-TEST LOCAL (perTestConsumed)
-					// rather than overwriting consumedMocks, so the value
-					// doesn't leak into the next iteration's
+					// `if r.instrument` branch after simulation — for non-
+					// instrument it stays at whatever the initial setup set,
+					// which is stale for every test except the first. Fetch
+					// the per-test consumed-mock set into a PER-TEST LOCAL
+					// (perTestConsumed) rather than overwriting consumedMocks,
+					// so the value doesn't leak into the next iteration's
 					// upsertActualTestMockMapping / mockNames computations.
 					// Both the failed/obsolete branch below AND the always-
 					// populated MockMismatches block share this single fetch.
+					//
+					// On fetch error we set perTestConsumedKnown=false and
+					// skip both MatchedCalls population AND MockMismatches
+					// for this test (rather than falling back to the stale
+					// loop-scoped consumedMocks, which would emit misleading
+					// data attributed to the wrong test case).
 					perTestConsumed := consumedMocks
+					perTestConsumedKnown := r.instrument
 					if !r.instrument {
 						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
 							perTestConsumed = fetched
+							perTestConsumedKnown = true
+						} else {
+							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping MockMismatches for this test",
+								zap.String("testSetID", testSetID),
+								zap.String("testCaseID", testCase.Name),
+								zap.Error(fetchErr))
 						}
 					}
-					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
+					if (testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete) && perTestConsumedKnown {
 						matchedMocks := perTestConsumed
 						for _, m := range matchedMocks {
 							if m.Kind != models.DNS {
@@ -1923,10 +1936,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
 						}
 					}
+					// Only walk perTestConsumed if it actually reflects THIS test's
+					// consumption. When perTestConsumedKnown is false (non-instrument
+					// fetch failed) we leave actualMockInfos empty so the consumer
+					// downstream (MockMismatches block + FailureInfo population) is
+					// gated by the same signal and doesn't emit stale data.
 					actualMockInfos := make([]models.MockMismatchMock, 0, len(perTestConsumed))
-					for _, m := range perTestConsumed {
-						if m.Kind != models.DNS {
-							actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+					if perTestConsumedKnown {
+						for _, m := range perTestConsumed {
+							if m.Kind != models.DNS {
+								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+							}
 						}
 					}
 
@@ -1940,8 +1960,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// today — consumers should treat absence as "data not
 					// available for this run mode", not "no mocks". Skip when
 					// both sides are empty so the json/yaml field stays absent
-					// via omitempty.
-					if len(expectedMockInfos) > 0 || len(actualMockInfos) > 0 {
+					// via omitempty. Also skip when perTestConsumed is unknown
+					// (non-instrument GetConsumedMocks failed) so we don't
+					// emit ActualMocks built from stale loop-scoped data.
+					if perTestConsumedKnown && (len(expectedMockInfos) > 0 || len(actualMockInfos) > 0) {
 						testCaseResult.MockMismatches = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,
 							ActualMocks:   actualMockInfos,
