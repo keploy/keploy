@@ -323,17 +323,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 			decoded++
-			// diag/stage-3: mock decoded from the agent→host gob stream.
-			// If stage-2 emits a mock and this log doesn't fire for the
-			// same reqTimestamp, the byte stream was severed between
-			// flush (agent) and decode (host).
-			a.logger.Info("diag/stage-3: AgentClient.GetOutgoing decode succeeded",
-				zap.String("stage", "host-receiver"),
-				zap.String("mockKind", string(mock.Kind)),
-				zap.String("mockName", mock.Name),
-				zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
-				zap.Time("resTimestamp", mock.Spec.ResTimestampMock))
-
+			// Per-mock stage-3 success log removed (high volume,
+			// choked mongo lanes). totalDecoded count is reported
+			// in stage-3-exit when the decode loop terminates.
 			select {
 			case <-ctx.Done():
 				// diag/stage-3-drop: ctx cancelled mid-send to the

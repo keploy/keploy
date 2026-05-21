@@ -418,17 +418,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 	errGrp.Go(func() error {
 		var insertedOK, insertedDropOnCancel uint64
 		for mock := range frames.Outgoing {
-			// diag/stage-5-recv: consumer goroutine received a mock from
-			// frames.Outgoing. Pairs with stage-4 (forwarder send) — if
-			// stage-4 fires for a reqTimestamp but stage-5-recv does not,
-			// the mock died at the outgoingChan boundary (unbuffered
-			// channel; forwarder send + consumer recv must rendezvous).
-			r.logger.Info("diag/stage-5-recv: record consumer received mock from frames.Outgoing",
-				zap.String("stage", "host-consumer"),
-				zap.String("mockKind", string(mock.Kind)),
-				zap.String("mockName", mock.Name),
-				zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock))
-
+			// Per-mock stage-5-recv log removed (high volume, choked
+			// mongo lanes). The for-range entry is the implicit recv
+			// signal; drop diags below surface actual losses.
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -463,16 +455,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				insertMockErrChan <- err
 			} else {
-				// diag/stage-5: mock successfully written to disk via
-				// InsertMock. End of the pipeline; if we see a stage-1
-				// emit for a reqTimestamp followed by a stage-5 here, the
-				// mock survived the full path.
-				r.logger.Info("diag/stage-5: InsertMock succeeded",
-					zap.String("stage", "host-consumer"),
-					zap.String("mockKind", string(mock.GetKind())),
-					zap.String("mockName", mock.Name),
-					zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
-					zap.Uint64("insertedOK", insertedOK+1))
+				// Per-mock stage-5 success log removed (high volume,
+				// choked mongo lanes). The stage-5-drop log fires only
+				// on actual losses; this arm just increments the
+				// counter and proceeds.
 				insertedOK++
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
@@ -749,16 +735,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					return ctx.Err()
 				case outgoingChan <- m:
 					fwdCount++
-					// diag/stage-4: forwarded mock from host-receiver's
-					// mockChan onto the consumer-facing outgoingChan
-					// (frames.Outgoing). All fields are captured locals —
-					// no dereference of m after the send, so no race
-					// against the consumer's InsertMock.
-					r.logger.Info("diag/stage-4: GetTestAndMockChans forwarded mock to outgoingChan",
-						zap.String("stage", "host-forwarder"),
-						zap.String("mockKind", mockKind),
-						zap.String("mockName", mockName),
-						zap.Time("reqTimestamp", mockReqTs))
+					// Per-mock stage-4 success log removed (high volume,
+					// choked mongo lanes). totalForwarded reported in
+					// stage-4-exit. The mockKind/mockName/mockReqTs
+					// locals captured above are still consumed by the
+					// stage-4-drop arm.
 				}
 			}
 		}

@@ -526,16 +526,11 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				)
 				continue
 			}
-			// diag/stage-2: mock encoded onto the agent→host gob stream
-			// and flushed. The encode + flush completing means the bytes
-			// are now in the kernel's TCP send buffer; the next stage
-			// (stage-3) is the host's gob decoder reading them.
-			a.logger.Info("diag/stage-2: HandleOutgoing encode+flush succeeded",
-				zap.String("stage", "agent-forwarder"),
-				zap.String("mockKind", string(m.Kind)),
-				zap.String("mockName", m.Name),
-				zap.Time("reqTimestamp", m.Spec.ReqTimestampMock),
-				zap.Time("resTimestamp", m.Spec.ResTimestampMock))
+			// Per-mock stage-2 success log removed: fired ~12k+ times
+			// per run and choked mongo lanes (30+ min hangs across
+			// multiple CI runs). The drop arms (stage-2-exit on
+			// ctxDone/closed mockChan, the existing gob encode error
+			// path) keep their logs so actual losses remain visible.
 			flusher.Flush()
 		}
 	}
