@@ -3,6 +3,8 @@ package mysql
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -126,14 +128,29 @@ func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.Record
 	return m.recordLegacy(ctx, session)
 }
 
-// recordLegacy is the byte-for-byte preserved pre-V2 record path. It
-// is invoked when the session is not running under the supervisor +
-// relay architecture (RecordSession.V2 == nil). Do not edit this body
-// without a matching change in recordV2.
+// recordLegacy is the pre-V2 record path. Semantics are preserved
+// against the historical implementation (consume RecordSession
+// Ingress / Egress / Mocks / TLSUpgrader, record via recorder.Record);
+// the only intentional change in this PR is that conn lookups go
+// through session.IngressConn() / EgressConn() and surface a
+// wrapped error instead of nil-deref panicking. Do not change the
+// recording semantics without a matching update in recordV2.
 func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
+	if session == nil {
+		return errors.New("mysql: record session is nil; ensure RecordOutgoing is called with a valid session")
+	}
 	logger := session.Logger
 
-	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader)
+	ingress, err := session.IngressConn()
+	if err != nil {
+		return fmt.Errorf("mysql: %w", err)
+	}
+	egress, err := session.EgressConn()
+	if err != nil {
+		return fmt.Errorf("mysql: %w", err)
+	}
+
+	err = recorder.Record(ctx, logger, ingress, egress, session.Mocks, session.Opts, session.TLSUpgrader)
 
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
