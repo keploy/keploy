@@ -17,8 +17,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
-	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -356,8 +356,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// GC pauses on oversubscribed CI runners.
 	const tcHold = 500 * time.Millisecond
 	type pendingTC struct {
-		tc    *models.TestCase
-		aged  time.Time
+		tc   *models.TestCase
+		aged time.Time
 	}
 	var pending []pendingTC
 
