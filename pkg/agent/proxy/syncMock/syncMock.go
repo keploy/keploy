@@ -57,6 +57,19 @@ type SyncMockManager struct {
 	pressureWindows      []struct{ start, end time.Time }
 	currentPressureStart time.Time
 
+	// lastMongoMockResTime is the ResTimestampMock of the most recent
+	// Mongo-kind mock that successfully reached AddMock. Used by the
+	// agent's HandleIncoming HTTP-TC commit path to detect "orphan" TCs
+	// captured AFTER the mongo async decoder fell behind / stopped
+	// emitting — the chronic-6 pattern (get-orders-1..5 +
+	// get-analytics-top-products-1 in go-memory-load-mongo): under
+	// memory-limited recording the async pipeline can lag HTTP capture
+	// by 20+ seconds at shutdown, leaving HTTP TCs whose underlying
+	// mongo find/aggregate mocks were never decoded → replay-time EOF.
+	// Stored as a single Time (not a slice) because we only need the
+	// most recent observed timestamp; reads are atomic via m.mu.
+	lastMongoMockResTime time.Time
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -228,6 +241,20 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		mock.DeriveLifetime()
 	}
 	m.mu.Lock()
+	// Track most-recent Mongo-mock ResTimestamp so HandleIncoming can
+	// detect orphan HTTP TCs (req-time newer than the youngest decoded
+	// mongo mock by more than a tolerance window). Update BEFORE the
+	// memoryPause early-return so dropped mongo mocks still advance the
+	// clock — otherwise a pressure burst that drops mongo mocks would
+	// make every subsequent HTTP TC look "newer than mongo silence" and
+	// get dropped too. Only Mongo because go-memory-load-mongo is the
+	// only protocol exhibiting the async-decoder lag we're guarding
+	// against; other protocols write mocks synchronously.
+	if mock != nil && mock.Kind == models.Mongo && !mock.Spec.ResTimestampMock.IsZero() {
+		if mock.Spec.ResTimestampMock.After(m.lastMongoMockResTime) {
+			m.lastMongoMockResTime = mock.Spec.ResTimestampMock
+		}
+	}
 	if m.memoryPause {
 		// EXEMPT session/connection-scoped mocks from the pressure drop.
 		// These are recorded ONCE during the connection's lifetime
@@ -567,6 +594,24 @@ func (m *SyncMockManager) IsHTTPTCInPressureWindow(reqTime, resTime time.Time) b
 		}
 	}
 	return !m.currentPressureStart.IsZero() && m.currentPressureStart.Before(resTime)
+}
+
+// LastMongoMockResTime returns the ResTimestampMock of the most recent
+// Mongo-kind mock observed at AddMock, or the zero Time if no mongo
+// mock has been seen yet. Used by HandleIncoming to detect orphan HTTP
+// TCs (HTTP req-time newer than the youngest decoded mongo mock by
+// more than a tolerance window) so they can be dropped before commit.
+// Zero return MUST be interpreted as "mongo is not in use OR no decoded
+// mock yet" — callers must NOT drop a TC when this returns zero,
+// otherwise pre-warm HTTP TCs in mongo-using apps would be dropped
+// before the first mongo handshake completes its decode.
+func (m *SyncMockManager) LastMongoMockResTime() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastMongoMockResTime
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {

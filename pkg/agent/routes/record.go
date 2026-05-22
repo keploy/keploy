@@ -384,6 +384,16 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// drain pops aged TCs from the head, runs the pressure check, and
 	// emits or drops them. shutdown=true flushes ALL pending TCs
 	// regardless of age (last chance before connection tears down).
+	// mongoSilenceTolerance is how long the mongo async decoder may
+	// fall behind HTTP capture before a fresh HTTP TC is treated as an
+	// orphan. Sized at 5 s based on empirical CI evidence (run
+	// 26277486420 mongo-rbrb): chronic-6 orphan TCs in
+	// go-memory-load-mongo fired ~21 s after the youngest mongo mock
+	// reached AddMock; under normal load the decoder lag is ~50–200 ms.
+	// 5 s comfortably catches the shutdown-time orphan window without
+	// dropping legitimate "mongo briefly idle" testcases.
+	const mongoSilenceTolerance = 5 * time.Second
+
 	drain := func(shutdown bool) bool {
 		for len(pending) > 0 {
 			if !shutdown && time.Since(pending[0].aged) < tcHold {
@@ -400,6 +410,30 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Time("req_time", head.tc.HTTPReq.Timestamp),
 					zap.Time("res_time", head.tc.HTTPResp.Timestamp))
 				continue
+			}
+			// Orphan-TC drop based on mongo decoder silence. Only fires
+			// when mongo has been seen at all in this session (LastMongo
+			// non-zero) — otherwise pre-mongo-handshake HTTP TCs would
+			// be dropped wrongly. A TC whose request fired more than
+			// tolerance AFTER the youngest decoded mongo mock means the
+			// async decoder couldn't catch up before recording shutdown,
+			// so this TC's underlying mongo queries were lost and replay
+			// will fail with "socket was unexpectedly closed: EOF". Drop
+			// here to preserve mock+TC atomicity (the "no partial mocks"
+			// invariant the user requires).
+			if mgr := syncMock.Get(); mgr != nil && head.tc.Kind == models.HTTP {
+				if lastMongo := mgr.LastMongoMockResTime(); !lastMongo.IsZero() {
+					if head.tc.HTTPReq.Timestamp.After(lastMongo.Add(mongoSilenceTolerance)) {
+						a.logger.Info("diag/stage-tc-mongo-silence-drop: TC dropped — req-time newer than youngest mongo mock by > tolerance (orphan TC; mongo async decoder fell behind)",
+							zap.String("stage", "agent-tc-emit"),
+							zap.String("dropReason", "mongoSilenceOrphan"),
+							zap.String("testCaseName", head.tc.Name),
+							zap.Time("req_time", head.tc.HTTPReq.Timestamp),
+							zap.Time("last_mongo_mock_res", lastMongo),
+							zap.Duration("gap", head.tc.HTTPReq.Timestamp.Sub(lastMongo)))
+						continue
+					}
+				}
 			}
 			if !emit(head.tc) {
 				return false
