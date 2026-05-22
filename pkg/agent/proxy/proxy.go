@@ -78,6 +78,21 @@ func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Fi
 	logger.Info("[PROBE/proxy]", append(base, fields...)...)
 }
 
+var defaultMysqlPorts = []uint32{3306, 4000}
+
+func isMysqlPort(port uint32, configured []uint32) bool {
+	ports := configured
+	if len(ports) == 0 {
+		ports = defaultMysqlPorts
+	}
+	for _, p := range ports {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
 // probeDial emits a [PROBE/dial] log for upstream dial timing.
 func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durNs int64, fields ...zap.Field) {
 	if !probeOn() {
@@ -1309,8 +1324,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	// MySQL wire-protocol ports (MySQL, TiDB, MariaDB, custom proxies).
+	// Configurable via outgoingOpts.MysqlPorts (Config.MysqlPorts in
+	// keploy.yml); defaults to [3306, 4000] when unset.
+	if isMysqlPort(uint32(destInfo.Port), outgoingOpts.MysqlPorts) {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {

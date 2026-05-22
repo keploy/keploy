@@ -1,0 +1,77 @@
+name: Sampling Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      samples_go_ref:
+        description: 'samples-go ref to check out (branch, tag, or SHA)'
+        required: false
+        default: 'main'
+      sampling_limit:
+        description: '--enable-sampling slot count (K)'
+        required: false
+        default: '5'
+      total_requests:
+        description: 'Total concurrent curl requests (N)'
+        required: false
+        default: '20'
+
+concurrency:
+  group: sampling-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sampling-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout keploy
+        uses: actions/checkout@v4
+        with:
+          path: keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: keploy/go.mod
+          cache: true
+          cache-dependency-path: keploy/go.sum
+
+      - name: Build keploy
+        working-directory: keploy
+        run: |
+          go build -o keploy main.go
+          chmod +x keploy
+          ls -lh keploy
+
+      - name: Checkout samples-go
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          ref: ${{ github.event.inputs.samples_go_ref || 'main' }}
+          path: samples-go
+
+      - name: Run sampling end-to-end test
+        env:
+          KEPLOY_BIN: ${{ github.workspace }}/keploy/keploy
+          SAMPLE_DIR: ${{ github.workspace }}/samples-go/sampling-test
+          SAMPLING_LIMIT: ${{ github.event.inputs.sampling_limit || '5' }}
+          TOTAL_REQUESTS: ${{ github.event.inputs.total_requests || '20' }}
+        run: |
+          chmod +x keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
+          keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sampling-test-artifacts-${{ github.run_number }}
+          path: |
+            samples-go/sampling-test/record.log
+            samples-go/sampling-test/keploy/
+            samples-go/sampling-test/curl-results/
+          retention-days: 7
+          if-no-files-found: ignore

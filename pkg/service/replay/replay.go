@@ -1089,6 +1089,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1275,6 +1276,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1611,8 +1613,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
+			// instrumentConsumedFetchErr captures whether THIS test's per-test
+			// consumed-mock fetch in instrument mode succeeded. Read later by
+			// the per-test perTestConsumedKnown signal so a failed instrument
+			// fetch is treated the same as a failed non-instrument fetch
+			// (skip MockMismatches / MatchedCalls rather than emit stale data).
+			var instrumentConsumedFetchErr error
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				instrumentConsumedFetchErr = err
 				if err != nil {
 					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 						testSetStatus = resolvedStatus
@@ -1620,12 +1629,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					} else {
 						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 					}
+					// On fetch failure, consumedMocks may carry stale/partial
+					// data from the previous test. Clear it so downstream uses
+					// in this iteration (logging, mockNames, upsertActualTest-
+					// MockMapping) and the next iteration's filter params
+					// don't attribute the previous test's data to this one.
+					consumedMocks = nil
 				}
 				r.logger.Debug("consumed mocks after test case simulation",
 					zap.String("testSetID", testSetID),
 					zap.String("testCaseID", testCase.Name),
 					zap.Int("count", len(consumedMocks)),
-					zap.Any("mocks", consumedMocks))
+					zap.Any("mocks", consumedMocks),
+					zap.Bool("fetchOk", instrumentConsumedFetchErr == nil))
+				// totalConsumedMocks aggregation is implicit-gated: on fetch
+				// failure consumedMocks was nil'd above, so this loop is a
+				// no-op and stale data can't leak into the next iteration's
+				// filter params (SendMockFilterParamsToAgent).
 				for _, m := range consumedMocks {
 					totalConsumedMocks[m.Name] = m
 				}
@@ -1662,8 +1682,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			mockSetMismatch := false
-			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
+				// Filter out DNS mocks from comparison since DNS resolution
+				// order is non-deterministic. Also gate on a successful per-
+				// test GetConsumedMocks — when the fetch failed, consumedMocks
+				// was cleared to nil above, which would deterministically
+				// compute mockSetMismatch=true (empty subset of any non-empty
+				// expected set) and falsely mark the test OBSOLETE due to an
+				// unrelated transport error rather than a real mock-pool
+				// divergence.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
@@ -1846,30 +1873,89 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// Populate matched/unmatched calls for failed/obsolete test cases
+					// Per-test consumed-mock fetch + failure-diagnostic population.
+					// Two distinct outputs are computed from the per-test
+					// consumed-mock list below:
+					//   (a) MatchedCalls / UnmatchedCalls on FailureInfo —
+					//       populated only on failed/obsolete tests
+					//       (UnmatchedCalls is independent of the consumed
+					//       set; MatchedCalls gates on perTestConsumedKnown).
+					//   (b) TestResult.MockMismatches — populated on EVERY
+					//       test (pass or fail) when consumed data is known.
+					//
+					// In non-instrument mode (k8s-proxy / remote agent) the
+					// loop-scoped `consumedMocks` is only refreshed inside the
+					// `if r.instrument` branch after simulation — for non-
+					// instrument it stays at whatever the initial setup set,
+					// which is stale for every test except the first. Fetch
+					// the per-test consumed-mock set into a PER-TEST LOCAL
+					// (perTestConsumed) rather than overwriting consumedMocks,
+					// so the value doesn't leak into the next iteration's
+					// upsertActualTestMockMapping / mockNames computations.
+					// One fetch services both outputs (a) and (b).
+					//
+					// On fetch error we set perTestConsumedKnown=false and
+					// skip both MatchedCalls population AND MockMismatches
+					// for this test (rather than falling back to the stale
+					// loop-scoped consumedMocks, which would emit misleading
+					// data attributed to the wrong test case).
+					// perTestConsumedKnown tracks whether consumed-mock data for
+					// THIS test is reliable. Instrument mode: only when the
+					// per-test fetch upstream (in the `if r.instrument` branch
+					// after simulation) succeeded — a failed instrument fetch
+					// leaves consumedMocks at stale/partial state, same as
+					// non-instrument's stale loop-scope problem. Non-instrument
+					// mode: only when this block's per-test fetch succeeds.
+					// MatchedCalls / MockMismatches gate on this signal so
+					// stale data isn't attributed to the wrong test case.
+					perTestConsumed := consumedMocks
+					perTestConsumedKnown := r.instrument && instrumentConsumedFetchErr == nil
+					if !r.instrument {
+						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
+							perTestConsumed = fetched
+							perTestConsumedKnown = true
+						} else {
+							// Mirror the instrument-mode skip: leaves
+							// perTestConsumedKnown false so downstream skips
+							// MatchedCalls AND MockMismatches (any consumed-
+							// mock-derived field) rather than attribute stale
+							// data. UnmatchedCalls is unaffected — independent
+							// sources (mockMismatchFailures channel + GetMock-
+							// Errors) still populate for failed/obsolete tests.
+							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping all consumed-mock-derived fields (MatchedCalls + MockMismatches) for this test",
+								zap.String("testSetID", testSetID),
+								zap.String("testCaseID", testCase.Name),
+								zap.Error(fetchErr))
+						}
+					}
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
-						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
-						matchedMocks := consumedMocks
-						if !r.instrument {
-							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
-								matchedMocks = fetched
-							}
-						}
-						for _, m := range matchedMocks {
-							if m.Kind != models.DNS {
-								info := mockLookup[m.Name]
-								protocol := info.protocol
-								if protocol == "" {
-									protocol = string(m.Kind)
+						// MatchedCalls is built from perTestConsumed and is
+						// only meaningful when that data is known for THIS
+						// test. Skip if not — stale data would attribute the
+						// previous test's matched mocks to this one.
+						if perTestConsumedKnown {
+							for _, m := range perTestConsumed {
+								if m.Kind != models.DNS {
+									info := mockLookup[m.Name]
+									protocol := info.protocol
+									if protocol == "" {
+										protocol = string(m.Kind)
+									}
+									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
+										MockName: m.Name,
+										Protocol: protocol,
+										Summary:  info.summary,
+									})
 								}
-								testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
-									MockName: m.Name,
-									Protocol: protocol,
-									Summary:  info.summary,
-								})
 							}
 						}
-						// Populate unmatched calls from mock errors (channel-based for in-process)
+						// UnmatchedCalls comes from independent sources
+						// (mockMismatchFailures channel for in-process,
+						// GetMockErrors for remote/k8s-proxy) — neither
+						// depends on the consumed-mock list, so populate
+						// regardless of perTestConsumedKnown so failed/
+						// obsolete tests still surface their mock errors
+						// even when the consumed-mock fetch failed.
 						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
 							if f.MismatchReport != nil {
 								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
@@ -1881,7 +1967,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 								})
 							}
 						}
-						// Fetch mock errors via HTTP API (for remote agent / k8s-proxy mode only)
 						if !r.instrument {
 							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
 								for _, me := range mockErrors {
@@ -1890,31 +1975,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 					}
+					// Build the {expected, actual} mock set for THIS test case.
+					// See buildExpectedMockInfos / buildActualMockInfos at the
+					// bottom of this file for DNS-filter + perTestConsumed-known
+					// semantics. Both extracted as helpers for unit testability.
+					expectedMockInfos := buildExpectedMockInfos(expectedMocks, mockKindByName)
+					actualMockInfos := buildActualMockInfos(perTestConsumed, perTestConsumedKnown)
+
+					// TestResult.MockMismatches: populated for tests going
+					// through this (non-streaming) replay path — regardless of
+					// pass/fail or obsolescence. Mirrors the sandbox integration
+					// runner's behaviour so report UIs can render expected vs
+					// actual mocks for passing tests too, not just the
+					// obsolete-mismatch path. The deferred streaming-test path
+					// (Phase 2 stream replay) does NOT populate this field
+					// today — consumers should treat absence as "data not
+					// available for this run mode", not "no mocks". Skip when
+					// both sides are empty so the json/yaml field stays absent
+					// via omitempty. Also skip when perTestConsumed is unknown
+					// (non-instrument GetConsumedMocks failed) so we don't
+					// emit ActualMocks built from stale loop-scoped data.
+					if perTestConsumedKnown && (len(expectedMockInfos) > 0 || len(actualMockInfos) > 0) {
+						testCaseResult.MockMismatches = &models.MockMismatchInfo{
+							ExpectedMocks: expectedMockInfos,
+							ActualMocks:   actualMockInfos,
+						}
+					}
+
+					// Existing FailureInfo.MockMismatch semantics preserved:
+					// only set when the test became OBSOLETE due to a real
+					// mock-pool divergence. Downstream code that branches on
+					// "is this an obsolete-mismatch?" keeps working.
 					if mockSetMismatch && testStatus == models.TestStatusObsolete {
-						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
-						for _, m := range expectedMocks {
-							isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-							if !isDNS {
-								if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-									isDNS = true
-								}
-							}
-							if !isDNS {
-								resolvedKind := m.Kind
-								if resolvedKind == "" {
-									if kind, ok := mockKindByName[m.Name]; ok {
-										resolvedKind = string(kind)
-									}
-								}
-								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
-							}
-						}
-						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
-						for _, m := range consumedMocks {
-							if m.Kind != models.DNS {
-								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
-							}
-						}
 						testCaseResult.FailureInfo.MockMismatch = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,
 							ActualMocks:   actualMockInfos,
@@ -3621,4 +3713,57 @@ func isMockSubset(actual []string, expected []string) bool {
 		}
 	}
 	return true
+}
+
+// buildExpectedMockInfos converts the per-test expected mock list (from the
+// recorded mappings) into the MockMismatchInfo.ExpectedMocks shape. DNS
+// entries are filtered out both at the entry level (m.Kind == "DNS") and via
+// the mockKindByName lookup, because DNS resolution order is non-deterministic
+// and including it produces noisy spurious mismatches downstream. Resolves an
+// empty Kind by looking up mockKindByName so the consumer always gets a kind
+// label when one is available.
+//
+// Extracted from RunTestSet for unit-testability.
+func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map[string]models.Kind) []models.MockMismatchMock {
+	out := make([]models.MockMismatchMock, 0, len(expectedMocks))
+	for _, m := range expectedMocks {
+		isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+		if !isDNS {
+			if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+				isDNS = true
+			}
+		}
+		if isDNS {
+			continue
+		}
+		resolvedKind := m.Kind
+		if resolvedKind == "" {
+			if kind, ok := mockKindByName[m.Name]; ok {
+				resolvedKind = string(kind)
+			}
+		}
+		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
+	}
+	return out
+}
+
+// buildActualMockInfos converts the per-test consumed mock list (from the
+// instrumentation/agent) into the MockMismatchInfo.ActualMocks shape.
+// `known` gates the build: when false (e.g. GetConsumedMocks failed for THIS
+// test in non-instrument mode) we return an empty slice rather than walking
+// stale data attributed to the wrong test case. DNS entries are filtered.
+//
+// Extracted from RunTestSet for unit-testability.
+func buildActualMockInfos(consumed []models.MockState, known bool) []models.MockMismatchMock {
+	out := make([]models.MockMismatchMock, 0, len(consumed))
+	if !known {
+		return out
+	}
+	for _, m := range consumed {
+		if m.Kind == models.DNS {
+			continue
+		}
+		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+	}
+	return out
 }
