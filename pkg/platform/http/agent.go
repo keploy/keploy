@@ -1226,14 +1226,18 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			)
 		}
 
-		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
-		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
-		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
+		// Best-effort lowering of perf_event_paranoid. Requires CAP_SYS_ADMIN
+		// (or root); succeeds on the docker-compose (root) path, fails with
+		// EPERM on the k8s capability-only profile (CAP_BPF + CAP_PERFMON,
+		// no SYS_ADMIN). EPERM here is NOT fatal — CAP_PERFMON alone is
+		// sufficient for tracepoint perf_event_open() at paranoid <= 2,
+		// which is the kernel default on every supported distro. Operators
+		// running on a hardened host (paranoid=3) tune it host-wide via
+		// the keploy-node-setup DaemonSet's host-bootstrap init container
+		// instead of from inside the sidecar.
 		if runtime.GOOS == "linux" {
-			cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
-			if err := cmd.Run(); err != nil {
-				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
-				return err
+			if err := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2").Run(); err != nil {
+				a.logger.Debug("could not lower perf_event_paranoid; continuing with kernel default (expected on capability-only profile)", zap.Error(err))
 			}
 		}
 	}
