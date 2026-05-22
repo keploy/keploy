@@ -1,9 +1,7 @@
 package manager
 
 import (
-	"fmt"
 	"math/rand"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -389,20 +387,9 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	// ResolveRange still saves session/connection mocks from the
 	// stale-cutoff drop that bit gin-mongo Windows on #4122.
 	bound, closed := m.outChanStatus()
-	// TRACE-ADDMOCK-IN: prove every mock that reaches AddMock — log BEFORE
-	// the routing switch so we can correlate against TRACE-MONGO-EMIT.
-	// Includes Lifetime + bound/closed + firstReqSeen so we know which
-	// branch will be taken.
-	mockReqTsStr := ""
-	if mock != nil {
-		mockReqTsStr = mock.Spec.ReqTimestampMock.UTC().Format(time.RFC3339Nano)
-	}
-	fmt.Fprintf(os.Stderr, "TRACE-ADDMOCK-IN kind=%v reqTs=%s lifetime=%d firstReqSeen=%v bound=%v closed=%v\n",
-		mock.Kind, mockReqTsStr, mock.TestModeInfo.Lifetime, m.firstReqSeen, bound, closed)
 	switch {
 	case closed:
 		m.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "TRACE-ADDMOCK-DROP-CLOSED kind=%v reqTs=%s\n", mock.Kind, mockReqTsStr)
 		// Per-mock diagnostic: visible signal when AddMock drops a
 		// mock because the outChan has already been closed by
 		// CloseOutChan. This usually only fires during shutdown but
@@ -428,14 +415,12 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// Error sampled 1/1024 from sendToOutChan, outChan-closed
 		// drop) keep their logs so actual losses remain visible.
 		m.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "TRACE-ADDMOCK-FORWARD-PREFIRST kind=%v reqTs=%s\n", mock.Kind, mockReqTsStr)
 		m.sendToOutChan(mock)
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
 		bufLen := len(m.buffer)
 		m.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "TRACE-ADDMOCK-BUFFER kind=%v reqTs=%s bufLen=%d\n", mock.Kind, mockReqTsStr, bufLen)
 		if logger := m.dropLogger(); logger != nil {
 			logger.Info("diag/AddMock: mock buffered",
 				zap.String("mock_kind", string(mock.Kind)),
@@ -711,13 +696,6 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// lifetime carve-out at the top of the loop and never reach
 		// this branch.)
 		if mockTime.Before(cutoffTime) {
-			// TRACE-RESOLVE-STALECUT: print every mock that gets dropped
-			// for the chronic-6 RCA. If find:orders mocks are being killed
-			// here, this proves the stale-cutoff is the cause.
-			fmt.Fprintf(os.Stderr, "TRACE-RESOLVE-STALECUT kind=%v reqTs=%s lifetime=%d testName=%s cutoff=%s\n",
-				mock.Kind, mockTime.UTC().Format(time.RFC3339Nano),
-				mock.TestModeInfo.Lifetime, testName,
-				cutoffTime.UTC().Format(time.RFC3339Nano))
 			// Per-mock diagnostic: a per-test mock that fell off the
 			// stale-buffer cutoff almost always means the recorder
 			// kept emitting after the dedup queue had advanced past
@@ -770,14 +748,6 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	mocksToSendLen := len(mocksToSend)
 
 	m.mu.Unlock()
-
-	// TRACE-RESOLVE: prove every ResolveRange call so we can correlate
-	// chronic-6 TC commits with the buffered mock state. Pair with
-	// TRACE-MONGO-EMIT / TRACE-ADDMOCK-* to follow the chronic-6 mocks.
-	fmt.Fprintf(os.Stderr, "TRACE-RESOLVE test=%s ws=%s we=%s bufBefore=%d bufAfter=%d flushed=%d droppedStale=%d outChanBound=%v\n",
-		testName, start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano),
-		bufferLenBefore, bufferLenAfter, mocksToSendLen,
-		bufferLenBefore-bufferLenAfter-mocksToSendLen, outChanBound)
 
 	// Per-resolve diagnostic: surface buffer-state transitions per
 	// test-window resolve so a CI log can show when a per-test cohort
