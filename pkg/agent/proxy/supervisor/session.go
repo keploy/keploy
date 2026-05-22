@@ -2,9 +2,7 @@ package supervisor
 
 import (
 	"context"
-	"fmt"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -394,20 +392,6 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 			if !shutdown {
 				if ctx := s.Ctx; ctx != nil {
 					if err := ctx.Err(); err != nil {
-						// TRACE-EMITMOCK-CTXDONE-DROP: silent drop site
-						// for the chronic-6 orphan TC RCA. EmitMock
-						// returns ctx.Err() here BEFORE AddMock is
-						// called, so the mock never reaches syncMock
-						// and never appears in mocks.yaml. Suspected
-						// cause: sess.Ctx cancelled during shutdown
-						// while the mongo decoder is still flushing
-						// the chronic-6 teardown bytes.
-						reqTs := ""
-						if m != nil {
-							reqTs = m.Spec.ReqTimestampMock.UTC().Format(time.RFC3339Nano)
-						}
-						fmt.Fprintf(os.Stderr, "TRACE-EMITMOCK-CTXDONE-DROP kind=%v reqTs=%s err=%v shutdown=%v\n",
-							m.Kind, reqTs, err, shutdown)
 						return err
 					}
 				}
