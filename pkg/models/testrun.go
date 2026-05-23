@@ -57,6 +57,29 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
+	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
+	// pool diverged AND the test case is OBSOLETE) — this field is set for
+	// every test that flows through the standard replay loop (pass or fail),
+	// so passing tests can also surface their consumed mocks for the report UI.
+	// Name mirrors the sandbox integration runner's
+	// IntegrationStepResult.MockMismatches.
+	//
+	// Populated by:
+	//   - Replayer.RunTestSet's per-test result block, both instrument and
+	//     non-instrument (k8s-proxy / remote-agent) modes.
+	//
+	// NOT populated by:
+	//   - The deferred streaming-test path (Phase 2 stream replay) — those
+	//     TestResults are persisted without this field.
+	//   - Standard replay loop when the per-test consumed-mock fetch
+	//     (GetConsumedMocks, in either instrument or non-instrument mode)
+	//     fails. The replayer skips emitting MockMismatches rather than
+	//     attribute stale loop-scoped data to the wrong test case.
+	//
+	// Consumers should treat an absent value as "data not available for
+	// this test / run mode", NOT "no mocks were consumed".
+	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
@@ -71,14 +94,25 @@ type FailureInfo struct {
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
 }
 
-// MockMismatchMock identifies a mock in the expected/actual mock sets for OBSOLETE test cases.
+// MockMismatchMock identifies a mock in the expected/actual mock sets carried by
+// MockMismatchInfo. Used for both the obsolete-mismatch reporting path
+// (FailureInfo.MockMismatch) and the always-populated TestResult.MockMismatches
+// field that exposes per-test mock consumption to report consumers.
 type MockMismatchMock struct {
 	Name string `json:"name" yaml:"name"`
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 }
 
-// MockMismatchInfo records the expected vs actual mock sets when a test case becomes obsolete
-// due to mock mapping divergence (mocks were added/removed between recording and replay).
+// MockMismatchInfo records the expected (recorded) vs actual (consumed during
+// replay) mock sets for a test case. Used in two places with different
+// semantics:
+//
+//   - FailureInfo.MockMismatch — populated only when the test became OBSOLETE
+//     due to mock-pool divergence (mocks were added/removed between recording
+//     and replay).
+//   - TestResult.MockMismatches — populated for EVERY test that went through
+//     the replay loop, regardless of pass/fail or obsolescence. Lets report
+//     UIs render expected vs consumed mocks for passing tests too.
 type MockMismatchInfo struct {
 	ExpectedMocks []MockMismatchMock `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
 	ActualMocks   []MockMismatchMock `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`
