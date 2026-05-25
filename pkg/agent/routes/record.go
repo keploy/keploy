@@ -358,6 +358,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	type pendingTC struct {
 		tc   *models.TestCase
 		aged time.Time
+		// lastMongoAtArrival snapshots syncMock.LastMongoMockResTime()
+		// at the moment the TC arrived at HandleIncoming, BEFORE the
+		// tcHold delay. The orphan-drop check (see drain()) compares
+		// the TC's req-time against this frozen value, not against the
+		// live value at drain-time. Without this snapshot, late mongo
+		// mocks for OTHER tests that arrive within the tcHold window
+		// refresh syncMock's live timestamp and mask the orphan: a TC
+		// whose own mongo decoder fell behind would look "in sync"
+		// just because some unrelated test's mock raced past it.
+		// (Confirmed on run 26281482736 mongo-rbrl post-large-payloads-8:
+		// gap was 6.6 s at TC-arrival but only 22 ms by drain-time,
+		// orphan check didn't fire, TC committed without its mock.)
+		lastMongoAtArrival time.Time
 	}
 	var pending []pendingTC
 
@@ -421,18 +434,22 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// will fail with "socket was unexpectedly closed: EOF". Drop
 			// here to preserve mock+TC atomicity (the "no partial mocks"
 			// invariant the user requires).
-			if mgr := syncMock.Get(); mgr != nil && head.tc.Kind == models.HTTP {
-				if lastMongo := mgr.LastMongoMockResTime(); !lastMongo.IsZero() {
-					if head.tc.HTTPReq.Timestamp.After(lastMongo.Add(mongoSilenceTolerance)) {
-						a.logger.Info("diag/stage-tc-mongo-silence-drop: TC dropped — req-time newer than youngest mongo mock by > tolerance (orphan TC; mongo async decoder fell behind)",
-							zap.String("stage", "agent-tc-emit"),
-							zap.String("dropReason", "mongoSilenceOrphan"),
-							zap.String("testCaseName", head.tc.Name),
-							zap.Time("req_time", head.tc.HTTPReq.Timestamp),
-							zap.Time("last_mongo_mock_res", lastMongo),
-							zap.Duration("gap", head.tc.HTTPReq.Timestamp.Sub(lastMongo)))
-						continue
-					}
+			// Use the AT-ARRIVAL snapshot of LastMongoMockResTime, not
+			// the live value at drain-time. The 500 ms tcHold lets
+			// late mongo mocks for OTHER tests refresh the live value,
+			// which would mask this TC's orphan condition (see the
+			// pendingTC.lastMongoAtArrival doc comment for the rbrl
+			// post-large-payloads-8 evidence).
+			if head.tc.Kind == models.HTTP && !head.lastMongoAtArrival.IsZero() {
+				if head.tc.HTTPReq.Timestamp.After(head.lastMongoAtArrival.Add(mongoSilenceTolerance)) {
+					a.logger.Info("diag/stage-tc-mongo-silence-drop: TC dropped — req-time newer than youngest mongo mock AT TC ARRIVAL by > tolerance (orphan TC; mongo async decoder fell behind)",
+						zap.String("stage", "agent-tc-emit"),
+						zap.String("dropReason", "mongoSilenceOrphan"),
+						zap.String("testCaseName", head.tc.Name),
+						zap.Time("req_time", head.tc.HTTPReq.Timestamp),
+						zap.Time("last_mongo_at_arrival", head.lastMongoAtArrival),
+						zap.Duration("gap", head.tc.HTTPReq.Timestamp.Sub(head.lastMongoAtArrival)))
+					continue
 				}
 			}
 			if !emit(head.tc) {
@@ -455,7 +472,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				drain(true)
 				return
 			}
-			pending = append(pending, pendingTC{tc: t, aged: time.Now()})
+			// Snapshot syncMock.LastMongoMockResTime() RIGHT NOW (at
+			// TC arrival). The drain orphan-check compares against
+			// THIS value, not the value at drain-time — see the
+			// pendingTC doc comment for the race this fixes.
+			var lastMongoAtArrival time.Time
+			if mgr := syncMock.Get(); mgr != nil {
+				lastMongoAtArrival = mgr.LastMongoMockResTime()
+			}
+			pending = append(pending, pendingTC{tc: t, aged: time.Now(), lastMongoAtArrival: lastMongoAtArrival})
 			if !drain(false) {
 				return
 			}
