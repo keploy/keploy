@@ -136,7 +136,10 @@ do
     fi
 done
 
-if [ "$all_passed" != true ]; then
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed (baseline run, no --keep-app-alive)"
+else
     cat "${test_container}.txt"
     exit 1
 fi
@@ -159,4 +162,79 @@ if json_pass_supported; then
 else
     echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi
+
+# ── --keep-app-alive regression coverage (docker-compose cmdType) ───────────
+# See gin_mongo/golang-linux.sh for the full rationale. Same shape:
+#   - second replay with --keep-app-alive scoped to a single test-set
+#     so cross-test-set state bleed (postgres rows recorded during
+#     test-set-0 would otherwise leak into test-set-1's expected
+#     "before" state when the app survives the boundary) can't trip
+#     the assertion
+#   - capture the replay exit code AND verify a new test-run-* dir
+#     was created — guards against the binary rejecting the flag and
+#     re-using the baseline's report dir
+#   - same script for all three matrix variants — keploy-latest's
+#     missing flag causes a non-zero exit and no new test-run-* dir,
+#     so the leg goes red as designed
+echo "===== --keep-app-alive regression run ====="
+# Wipe any leftover compose state from the baseline run before the
+# second one — docker compose up will reuse stopped containers
+# otherwise and the new run won't be a clean lifecycle test.
+docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+
+prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+
+# Reuse the baseline's container name. --containerName in docker-compose
+# mode must match a SERVICE name in docker-compose.yml (it isn't a
+# rename — keploy looks up the service to attach eBPF to it), so a
+# custom name like "echoApp_keep_app_alive" produces a "container not
+# found in any of the provided docker-compose files" error before the
+# replay even starts.
+ka_log="echoApp_keep_app_alive.txt"
+$REPLAY_BIN test -c "docker compose up" \
+    --containerName "$test_container" \
+    --apiTimeout 60 \
+    --delay 15 \
+    --keep-app-alive \
+    --test-sets test-set-0 \
+    --generate-github-actions=false &> "$ka_log"
+replay_status=$?
+
+if [ "$replay_status" -ne 0 ]; then
+    echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
+    cat "$ka_log"
+    exit "$replay_status"
+fi
+
+if grep "WARNING: DATA RACE" "$ka_log"; then
+    echo "Race condition detected in --keep-app-alive replay, stopping pipeline..."
+    cat "$ka_log"
+    exit 1
+fi
+
+new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+if [ "$new_report_count" -le "$prev_report_count" ]; then
+    echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
+    cat "$ka_log"
+    exit 1
+fi
+
+latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)"
+echo "--keep-app-alive report dir: $latest_report_dir"
+
+report_file="$latest_report_dir/test-set-0-report.yaml"
+if [ ! -f "$report_file" ]; then
+    echo "::error::Missing $report_file"
+    cat "$ka_log"
+    exit 1
+fi
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+echo "[--keep-app-alive] Test status for test-set-0: $test_status"
+if [ "$test_status" != "PASSED" ]; then
+    echo "[--keep-app-alive] Test-set-0 did not pass."
+    cat "$ka_log"
+    exit 1
+fi
+
+echo "All tests passed (--keep-app-alive run)"
 exit 0

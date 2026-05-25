@@ -72,6 +72,12 @@ type BeforeTestRunReq struct {
 
 type BeforeTestSetCompose struct {
 	TestRunID string `json:"testRunID"`
+	// TestSetID is the test set boundary identifier used by the agent
+	// to drive per-test-set side effects — currently debug-file
+	// rotation, which used to piggyback on BeforeSimulate (per test
+	// case) and consequently never produced a per-set log file for
+	// test sets that resolved to NO_TESTS_TO_RUN.
+	TestSetID string `json:"testSetID"`
 }
 
 type AfterTestRunReq struct {

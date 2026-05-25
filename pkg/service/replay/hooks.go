@@ -3,6 +3,7 @@ package replay
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"go.keploy.io/server/v3/config"
@@ -15,6 +16,17 @@ type Hooks struct {
 	logger          *zap.Logger
 	cfg             *config.Config
 	instrumentation Instrumentation
+	// tlsConfig, when non-nil, is forwarded to pkg.SimulationConfig.TLSConfig
+	// so the replay HTTP transport pins a specific cert (e.g. cluster-mode
+	// replay against a short-lived pod with a self-signed keystore).
+	tlsConfig *tls.Config
+}
+
+// SetReplayTLSConfig installs a *tls.Config that the replay HTTP client
+// uses for HTTPS test cases. Call before SimulateRequest. nil resets to
+// stdlib system-pool default.
+func (h *Hooks) SetReplayTLSConfig(c *tls.Config) {
+	h.tlsConfig = c
 }
 
 func NewHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrumentation) TestHooks {
@@ -55,6 +67,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+			TLSConfig:       h.tlsConfig,
 		}
 
 		// Check if this is a streaming test case
@@ -191,10 +204,15 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	return nil
 }
 
-func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
-	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID))
+func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
+	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID), zap.String("testSetID", testSetID))
 
-	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, firstRun); err != nil {
+	// Deliberately no log.RotateDebugFileForTestSet here. The CLI's
+	// debug log stays at a single <cfg.Path>/cloud-debug.log for the
+	// whole run; only the agent's debug log rotates per test set
+	// (handled by HandleBeforeTestSetCompose in the agent process).
+
+	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
 		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
 	}
 

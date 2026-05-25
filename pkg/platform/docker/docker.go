@@ -544,6 +544,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 
+	// When the operator's keploy folder is resolved, bind-mount it into
+	// the agent container at /keploy-host and point KEPLOY_DEBUG_FILE at
+	// a file inside it. The agent process honors that env var (see
+	// main.maybeAttachDebugFileSink) and tees its debug-level log
+	// records into the file. Because the file lives inside the host
+	// keploy folder, downstream tooling — most importantly the
+	// `keploy cloud replay` support-bundle pipeline that walks
+	// cfg.Path — picks it up automatically without any extra plumbing.
+	keployHostPath := strings.TrimSpace(idc.conf.Path)
+
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
@@ -558,6 +568,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
+
+	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE so the
+	// agent's debug-level log lands on the host. Skip when the host
+	// path is empty (e.g. very early bootstrap before Validate runs)
+	// or relative (Docker rejects relative bind-source paths).
+	const agentDebugMount = "/keploy-host"
+	if keployHostPath != "" && filepath.IsAbs(keployHostPath) {
+		volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
+		envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+	}
 
 	clientPid := int(os.Getpid())
 	// Build command arguments

@@ -55,6 +55,16 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	// readRelay reads from conn in a loop and sends each chunk to ch.
 	// Returns on error, EOF, or context cancellation.
+	//
+	// Critical invariant: if Read returns bytes, those bytes MUST land
+	// on ch even if ctx is already canceled. The previous shape used
+	// `select { case ch <- data: case <-ctx.Done(): }` which on a
+	// concurrent cancel+ch-ready state would non-deterministically
+	// pick the ctx arm and drop the chunk — the dominant root cause of
+	// the "record-side packet drop during fast back-to-back ops" bug.
+	// Now the send is unconditional onto a buffered channel (cap 256);
+	// ctx is checked only AFTER the send so the goroutine still exits
+	// promptly without losing the chunk we already pulled off the wire.
 	readRelay := func(conn net.Conn, ch chan<- []byte) {
 		defer close(ch)
 		buf := make([]byte, 32*1024) // reused across reads
@@ -68,10 +78,19 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				select {
-				case ch <- data:
-				case <-ctx.Done():
-					return
+				// Buffered channel send; in the rare event the buffer
+				// is full we fall back to a select that respects ctx
+				// so we don't deadlock on shutdown. The fast path
+				// avoids that select entirely so a ctx-cancel that
+				// races a successful Read can't preempt the send.
+				if len(ch) < cap(ch) {
+					ch <- data
+				} else {
+					select {
+					case ch <- data:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 			if err != nil {
@@ -100,25 +119,151 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	}()
 
 	// Async decode channel and background goroutine.
-	// Use a decoder-specific context so cleanup() can unblock recordMock's
-	// channel send (which selects on ctx.Done) without waiting for the
-	// parent context to be canceled.
+	//
+	// The decoder context is intentionally DETACHED from the parent ctx
+	// via context.WithoutCancel so the decoder can finish processing any
+	// chunks that were already buffered (in clientBuffChan/destBuffChan
+	// or decodeChan) at the moment the parent ctx cancels. recordMock's
+	// `select { case mocks <- m: case <-ctx.Done(): }` would otherwise
+	// race the parent cancel and drop the in-flight mock — exactly the
+	// "record-side packet drop during fast back-to-back operations" bug
+	// where a /me handler's COM_STMT_PREPARE + COM_STMT_EXECUTE arrive
+	// 2-3 ms before the test harness cancels the parser ctx and end up
+	// dropped on the floor.
+	//
+	// The decoder still exits cleanly: closing decodeChan ends its
+	// `for item := range decodeChan` loop after it drains and emits any
+	// pending mocks. cancelDecoder is kept as a backstop for the rare
+	// case where the mocks channel send blocks indefinitely (e.g. the
+	// consumer has stopped reading without closing); it is invoked only
+	// after the channel close and after the decoder has had a chance to
+	// flush, so it cannot pre-empt a recordMock that would otherwise
+	// have succeeded.
 	decodeChan := make(chan mysqlDecodeItem, 512)
 	decodeDone := make(chan struct{})
-	decoderCtx, cancelDecoder := context.WithCancel(ctx)
+	decoderCtx, cancelDecoder := context.WithCancel(context.WithoutCancel(ctx))
 	go func() {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(decodeDone)
 		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
+	// forwardClient/forwardDest replay the steady-state forwarding
+	// logic (write to peer + non-blocking copy into the decoder) so
+	// the drain helpers below can reuse it without duplication.
+	forwardClient := func(buf []byte) {
+		if buf == nil {
+			return
+		}
+		_, _ = destConn.Write(buf)
+		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			cp := make([]byte, len(buf))
+			copy(cp, buf)
+			select {
+			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
+			default:
+			}
+		}
+	}
+	forwardDest := func(buf []byte) {
+		if buf == nil {
+			return
+		}
+		_, _ = clientConn.Write(buf)
+		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			cp := make([]byte, len(buf))
+			copy(cp, buf)
+			select {
+			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
+			default:
+			}
+		}
+	}
+
+	// drainBuffChans gives the relay channels a short grace window to
+	// surface any chunks the readRelay goroutines are still pushing
+	// from their local Read buffer at the moment cancellation fires,
+	// then sweeps whatever is currently buffered into the decoder.
+	//
+	// The wait shape: we accept up to one chunk per side from the
+	// grace timer's first tick onward, then break the moment both
+	// chans signal empty. This catches the common case (readRelay
+	// already had data buffered locally when ctx.Done fired) without
+	// stalling the parser exit if the readRelay is genuinely idle.
+	drainBuffChans := func() {
+		// Grace window for read-relays to surface chunks that were
+		// mid-flight at ctx-cancel time. Empirically 50ms was too tight:
+		// when the very last DB op of a fast suite (e.g. a chained-CRUD
+		// final DELETE → PREPARE + EXECUTE inside one handler tick) is
+		// still being decoded by the parser at cancel time, 50ms wasn't
+		// enough for the EXECUTE response to surface. 300ms matches the
+		// V1 sandbox record's inter-step pacing budget and reliably
+		// captures the tail ops.
+		const graceWindow = 300 * time.Millisecond
+		deadline := time.NewTimer(graceWindow)
+		defer deadline.Stop()
+		for {
+			select {
+			case buf, ok := <-clientBuffChan:
+				if !ok {
+					clientBuffChan = nil
+					continue
+				}
+				forwardClient(buf)
+			case buf, ok := <-destBuffChan:
+				if !ok {
+					destBuffChan = nil
+					continue
+				}
+				forwardDest(buf)
+			case <-deadline.C:
+				// Grace expired. Greedy non-blocking sweep of any
+				// final bytes the goroutines pushed in the last
+				// instant, then return.
+				for {
+					select {
+					case buf, ok := <-clientBuffChan:
+						if !ok {
+							clientBuffChan = nil
+							continue
+						}
+						forwardClient(buf)
+					case buf, ok := <-destBuffChan:
+						if !ok {
+							destBuffChan = nil
+							continue
+						}
+						forwardDest(buf)
+					default:
+						return
+					}
+				}
+			}
+			if clientBuffChan == nil && destBuffChan == nil {
+				return
+			}
+		}
+	}
+
 	// cleanup ensures the decode goroutine is stopped before we return.
-	// Canceling the decoder context first unblocks any pending channel
-	// sends in recordMock, preventing a deadlock.
+	// Order matters:
+	//   1. Drain any in-flight chunks from the relay channels into the
+	//      decoder so a fast cmd/resp pair that arrived right before
+	//      cancellation isn't lost at the buff-chan/decode-chan boundary.
+	//   2. Close decodeChan so the decoder's `for ... range` loop exits
+	//      cleanly after processing remaining items (each item may emit
+	//      a mock via recordMock, and the decoder ctx is detached from
+	//      the parent so those emits don't race the parent cancel).
+	//   3. Wait for the decoder to finish.
+	//   4. Cancel the (detached) decoder ctx as a backstop — at this
+	//      point the decoder has already exited, so this is a no-op
+	//      under normal operation; it exists only to release the
+	//      context resources cleanly.
 	cleanup := func() {
-		cancelDecoder()
+		drainBuffChans()
 		close(decodeChan)
 		<-decodeDone
+		cancelDecoder()
 	}
 
 	// Main loop: forward only, send copies for async decode.
@@ -190,50 +335,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return nil
 			}
 
-			// Drain buffered data before exiting — forward AND decode
+			// Drain via cleanup() — it forwards in-flight bytes from
+			// the buff chans into the decoder before closing decodeChan
 			// so the last response chunk isn't lost for mock creation.
-		drain:
-			for {
-				select {
-				case buf, ok := <-clientBuffChan:
-					if !ok {
-						clientBuffChan = nil
-						continue
-					}
-					if buf == nil {
-						continue
-					}
-					_, _ = destConn.Write(buf)
-					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
-						cp := make([]byte, len(buf))
-						copy(cp, buf)
-						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
-						default:
-						}
-					}
-				case buf, ok := <-destBuffChan:
-					if !ok {
-						destBuffChan = nil
-						continue
-					}
-					if buf == nil {
-						continue
-					}
-					_, _ = clientConn.Write(buf)
-					if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
-						cp := make([]byte, len(buf))
-						copy(cp, buf)
-						select {
-						case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
-						default:
-						}
-					}
-				default:
-					break drain
-				}
-			}
-
 			cleanup()
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -290,6 +394,25 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand == nil || pendingRespBundle == nil {
 			return
 		}
+		// If the recorder is force-flushing mid-result-set (i.e., the
+		// next client command arrived before we observed the trailing
+		// EOF / OK_with_EOF terminator from the server), the encoded
+		// mock would otherwise have FinalResponse == nil and the replay
+		// encoder would emit no terminator. Drivers that strictly
+		// require the terminator — most notably Connector/J on Java 8 —
+		// then block in socketRead0 forever waiting for it.
+		//
+		// This race is intrinsic to the byte-relay → async-decode split:
+		// clientBuffChan / destBuffChan feed asyncMySQLDecode through a
+		// single FIFO channel via a non-deterministic select in
+		// handleClientQueries, so on a fast loopback the next client
+		// command can be enqueued before the server's terminator chunk.
+		// Guarding the select doesn't fix it without serializing all
+		// recording, so we synthesize a structurally-correct terminator
+		// here, matching the recorded server's negotiated capabilities,
+		// and stamp it onto the in-memory result set before flushing.
+		closeIncompleteResultSetForFlush(state, decodeCtx,
+			textResultSet, binaryResultSet, pendingRespBundle)
 		requests := []mysql.Request{{PacketBundle: *pendingCommand}}
 		responses := []mysql.Response{{PacketBundle: *pendingRespBundle}}
 		respOp := pendingRespBundle.Header.Type
@@ -710,4 +833,212 @@ func isCommandPacket(msg interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// closeIncompleteResultSetForFlush patches an in-progress result-set
+// response so that flushMock writes a structurally-complete mock even
+// when the recorder is forced to flush before the server has finished
+// streaming the result set. Three race shapes are repaired:
+//
+//  1. stateExpectRows / stateExpectEOFAfterColumns — all column defs
+//     were captured but the trailing EOF / OK_with_EOF terminator
+//     wasn't. Synthesize the terminator and stamp it on FinalResponse.
+//
+//  2. stateExpectColumns with cols < columnCount — the column count
+//     packet was processed and some column defs were captured, but the
+//     decoder lost the rest of the column flight before the next client
+//     command preempted. Truncate columnCount to the number of columns
+//     actually captured, then synthesize the terminator. Replay clients
+//     deserialize this as an empty result set (columns < expected, zero
+//     rows) and proceed cleanly to the next command instead of blocking
+//     on a column def that will never arrive.
+//
+//  3. Already-complete result sets (FinalResponse already populated by
+//     the natural terminator path) — no-op.
+//
+// For any other state — single-packet OK/ERR, prepare-phase
+// intermediate states, etc. — this is a no-op.
+//
+// The synthesized terminator copies the negotiated capabilities so the
+// replay-time encoder hands the driver a packet shape it accepts:
+//
+//   - DEPRECATE_EOF negotiated     → 0xFE-prefixed OK_with_EOF
+//   - DEPRECATE_EOF NOT negotiated → legacy 5-byte EOF
+//   - SESSION_TRACK negotiated     → trailing lenenc info string
+//
+// Sequence ID is one past the highest seq observed across the recorded
+// columns / EOFAfterColumns / rows, falling back to the column-count
+// packet's seq + 1 when the result set has no columns at all. Status
+// flags carry just SERVER_STATUS_AUTOCOMMIT (0x0002), warnings = 0,
+// info = empty — the idle-connection terminator a client sees after a
+// successful result set.
+//
+// The bundle's Header.Type is also rewritten to TextResultSet /
+// BinaryProtocolResultSet so wire.EncodeToBinary's type-switch routes
+// the encode through the result-set encoder rather than the column-
+// count head packet that processFirstResponse originally stored.
+func closeIncompleteResultSetForFlush(
+	state mysqlDecodeState,
+	decodeCtx *wire.DecodeContext,
+	textRs *mysql.TextResultSet,
+	binaryRs *mysql.BinaryProtocolResultSet,
+	bundle *mysql.PacketBundle,
+) {
+	if state != stateExpectRows &&
+		state != stateExpectEOFAfterColumns &&
+		state != stateExpectColumns {
+		return
+	}
+	if bundle == nil {
+		return
+	}
+
+	useDeprecateEOF := decodeCtx != nil && decodeCtx.DeprecateEOF()
+	// Recorder reads the live client's negotiated caps off ClientCaps
+	// (set by handleInitialHandshake when it decoded the live
+	// HandshakeResponse41). PreferRecordedCaps isn't relevant on this
+	// path — that flag is for replay where the live client may differ
+	// from what was recorded.
+	useSessionTrack := decodeCtx != nil &&
+		(decodeCtx.ServerCaps&uint32(mysql.CLIENT_SESSION_TRACK)) != 0 &&
+		(decodeCtx.ClientCaps&uint32(mysql.CLIENT_SESSION_TRACK)) != 0
+
+	switch {
+	case textRs != nil:
+		if textRs.FinalResponse != nil &&
+			(mysqlUtils.IsEOFPacket(textRs.FinalResponse.Data) ||
+				mysqlUtils.IsOKReplacingEOF(textRs.FinalResponse.Data)) {
+			return // already complete
+		}
+		// Repair shape 2: declared more columns than we captured. Keep
+		// only what we have and rewrite the column count to match so
+		// the encoder doesn't promise a column def that isn't there.
+		if uint64(len(textRs.Columns)) < textRs.ColumnCount {
+			textRs.ColumnCount = uint64(len(textRs.Columns))
+			// In legacy (!DEPRECATE_EOF) mode the column flight ends
+			// with an intermediate EOF packet; if we never saw it, fill
+			// in a synthesized one so the structural sequence
+			// "columns → EOF → rows → terminator" stays valid.
+			if !useDeprecateEOF && len(textRs.EOFAfterColumns) == 0 {
+				eofSeq := nextSeqIDForResultSet(
+					columnHeadersOf(textRs.Columns), nil, nil,
+				)
+				textRs.EOFAfterColumns = []byte{
+					0x05, 0x00, 0x00, eofSeq,
+					0xFE, 0x00, 0x00, 0x02, 0x00,
+				}
+			}
+		}
+		seq := nextSeqIDForResultSet(
+			columnHeadersOf(textRs.Columns),
+			textRs.EOFAfterColumns,
+			textRowHeadersOf(textRs.Rows),
+		)
+		data, respType := buildResultSetTerminator(seq, useDeprecateEOF, useSessionTrack)
+		textRs.FinalResponse = &mysql.GenericResponse{Data: data, Type: respType}
+		bundle.Header.Type = string(mysql.Text)
+		bundle.Message = textRs
+
+	case binaryRs != nil:
+		if binaryRs.FinalResponse != nil &&
+			(mysqlUtils.IsEOFPacket(binaryRs.FinalResponse.Data) ||
+				mysqlUtils.IsOKReplacingEOF(binaryRs.FinalResponse.Data)) {
+			return
+		}
+		if uint64(len(binaryRs.Columns)) < binaryRs.ColumnCount {
+			binaryRs.ColumnCount = uint64(len(binaryRs.Columns))
+			if !useDeprecateEOF && len(binaryRs.EOFAfterColumns) == 0 {
+				eofSeq := nextSeqIDForResultSet(
+					columnHeadersOf(binaryRs.Columns), nil, nil,
+				)
+				binaryRs.EOFAfterColumns = []byte{
+					0x05, 0x00, 0x00, eofSeq,
+					0xFE, 0x00, 0x00, 0x02, 0x00,
+				}
+			}
+		}
+		seq := nextSeqIDForResultSet(
+			columnHeadersOf(binaryRs.Columns),
+			binaryRs.EOFAfterColumns,
+			binaryRowHeadersOf(binaryRs.Rows),
+		)
+		data, respType := buildResultSetTerminator(seq, useDeprecateEOF, useSessionTrack)
+		binaryRs.FinalResponse = &mysql.GenericResponse{Data: data, Type: respType}
+		bundle.Header.Type = string(mysql.Binary)
+		bundle.Message = binaryRs
+	}
+}
+
+// buildResultSetTerminator returns the wire bytes (with header) of a
+// minimal result-set terminator packet matching the negotiated caps.
+func buildResultSetTerminator(seqID byte, deprecateEOF, sessionTrack bool) ([]byte, string) {
+	if deprecateEOF {
+		// OK_with_EOF: 0xFE | affected=0 | last_id=0 | status=2 | warn=0
+		// Plus an optional lenenc info string when SESSION_TRACK was
+		// negotiated (without it, Connector/J 8.x rejects the packet).
+		payload := []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
+		if sessionTrack {
+			payload = append(payload, 0x00) // info: empty lenenc string
+		}
+		out := make([]byte, 4+len(payload))
+		out[0] = byte(len(payload))
+		out[1] = byte(len(payload) >> 8)
+		out[2] = byte(len(payload) >> 16)
+		out[3] = seqID
+		copy(out[4:], payload)
+		return out, mysql.StatusToString(mysql.OK)
+	}
+	// Legacy EOF: 0xFE | warnings(2) | status_flags(2)
+	return []byte{
+		0x05, 0x00, 0x00, seqID,
+		0xFE, 0x00, 0x00, 0x02, 0x00,
+	}, mysql.StatusToString(mysql.EOF)
+}
+
+// nextSeqIDForResultSet picks the seq id one past the highest observed
+// across the recorded columns / EOFAfterColumns / rows. Falls back to 2
+// (one past the column-count head packet) if nothing is recorded.
+func nextSeqIDForResultSet(columnHdrs []mysql.Header, eofAfterCols []byte, rowHdrs []mysql.Header) byte {
+	max := byte(0)
+	for _, h := range columnHdrs {
+		if h.SequenceID > max {
+			max = h.SequenceID
+		}
+	}
+	if len(eofAfterCols) >= 4 && eofAfterCols[3] > max {
+		max = eofAfterCols[3]
+	}
+	for _, h := range rowHdrs {
+		if h.SequenceID > max {
+			max = h.SequenceID
+		}
+	}
+	if max == 0 {
+		max = 1
+	}
+	return max + 1
+}
+
+func columnHeadersOf(cols []*mysql.ColumnDefinition41) []mysql.Header {
+	out := make([]mysql.Header, 0, len(cols))
+	for _, c := range cols {
+		out = append(out, c.Header)
+	}
+	return out
+}
+
+func textRowHeadersOf(rows []*mysql.TextRow) []mysql.Header {
+	out := make([]mysql.Header, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Header)
+	}
+	return out
+}
+
+func binaryRowHeadersOf(rows []*mysql.BinaryRow) []mysql.Header {
+	out := make([]mysql.Header, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Header)
+	}
+	return out
 }

@@ -22,6 +22,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -126,7 +127,22 @@ func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestRunID); err != nil {
+	// Rotate the debug-file sink (if attached via KEPLOY_DEBUG_FILE) to
+	// a per-test-set scope. This is the per-test-set boundary — fires
+	// exactly once for the test set when the agent comes up in
+	// DockerCompose mode, before any test case runs. Rotating here
+	// (rather than per test case via BeforeSimulate) means each test
+	// set gets exactly one rotation and the per-set file captures the
+	// agent's pre-simulate work (mock load, store-mocks, etc.), not
+	// just the simulate path.
+	if req.TestSetID != "" {
+		if err := log.RotateDebugFileForTestSet(req.TestSetID); err != nil {
+			a.logger.Warn("debug file rotation for test set failed; continuing without rotation",
+				zap.String("testSetID", req.TestSetID), zap.Error(err))
+		}
+	}
+
+	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestSetID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
