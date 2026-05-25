@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -157,6 +158,46 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 }
 
 func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
+	// Atomic per-mock memory-pressure gate. MySQL mocks bypass
+	// syncMock.AddMock (they're sent directly to the outgoingChan via the
+	// `mocks` channel), so without this gate the memoryguard's pause has
+	// no effect on mysql — mocks keep flowing under pressure, mock objects
+	// accumulate, and the container blows past its working-set ceiling
+	// (CI run 26235237403 mysql-rbrb peaked at 261 MiB > 250 MiB watchdog).
+	// Dropping here is atomic: we discard the fully-decoded mock at a
+	// safe boundary, which keeps the wire reassembler in sync (no
+	// mid-message corruption like the 1MB→104B truncation observed when
+	// dropping raw chunks). The corresponding HTTP TC is dropped by
+	// Capture's IsHTTPTCInPressureWindow check so mock+TC stay consistent.
+	//
+	// IMPORTANT: only drop per-test mocks ("mocks"). "config" (session-
+	// scoped: COM_INIT_DB / handshake) and "connection" (connection-
+	// scoped: COM_STMT_PREPARE) mocks are NOT tied to a specific HTTP TC
+	// — they're reusable across many connections / tests at replay. If
+	// these get dropped during the first pressure burst (which typically
+	// hits early during k6 ramp), every subsequent connection at replay
+	// loses its setup → "no matching mock found" cascade (the chronic-6:
+	// get-orders-1..5 + get-analytics-top-products-1 teardown failures).
+	if memoryguard.IsRecordingPaused() && mockType == "mocks" {
+		// Notify syncMock to extend currentPressureStart backwards so that
+		// IsHTTPTCInPressureWindow correctly drops the corresponding HTTP TC.
+		// MySQL mocks bypass AddMock's in-line extension (they're dropped here
+		// before AddMock is called), so without this call the TC-drop check
+		// would miss HTTP TCs whose mysql mocks were dropped during pressure.
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.ExtendPressureWindow(reqTimestampMock)
+		}
+		zap.L().Info("diag/mysql-recordMock: dropping mock under memory pressure (atomic drop at post-reassembly boundary)",
+			zap.String("stage", "parser-out"),
+			zap.String("dropReason", "memoryPause"),
+			zap.String("mockKind", "MySQL"),
+			zap.String("requestOp", requestOperation),
+			zap.String("responseOp", responseOperation),
+			zap.String("mockType", mockType),
+			zap.Time("reqTimestamp", reqTimestampMock),
+			zap.Time("resTimestamp", resTimestampMock))
+		return
+	}
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
@@ -205,12 +246,28 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	if mocks != nil {
 		select {
 		case mocks <- mysqlMock:
+			// Success path: no per-mock diag — the existing
+			// "MySQL mock recorded" Info log in query.go fires just
+			// before this call and serves as the parser-emit marker.
+			// The stage-1-drop arm below remains to surface ctx-done
+			// drops.
 		case <-ctx.Done():
+			// diag/stage-1-drop: parser's ctx cancelled while waiting on
+			// a full outChan. Silent-drop point #1; log it so we can
+			// count exactly how many mocks die here.
+			zap.L().Info("diag/stage-1-drop: recordMock ctx cancelled before outChan send",
+				zap.String("stage", "parser-out"),
+				zap.String("dropReason", "ctxDone"),
+				zap.String("mockKind", "MySQL"),
+				zap.String("requestOp", requestOperation),
+				zap.String("responseOp", responseOperation),
+				zap.String("mockType", mockType),
+				zap.Time("reqTimestamp", reqTimestampMock),
+				zap.Time("resTimestamp", resTimestampMock))
 			return
 		}
 	} else {
 		mgr := syncMock.Get()
 		mgr.AddMock(mysqlMock)
 	}
-	return
 }

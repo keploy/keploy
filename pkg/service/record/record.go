@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 
@@ -23,6 +24,18 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+// recordDrainTimeout caps how long the persistence layer can spend
+// inserting a single TC/mock after the parent recording ctx has been
+// cancelled. Sized as a soft upper bound: long enough that a typical
+// 5-10 ms YAML write completes after parent cancel, short enough that
+// a wedged DB write can't pin the consumer goroutine for the rest of
+// the run. Direct response to the proven RCA from CI run 26221328572
+// where mysql-rbrl logged 822 diag/stage-5-drop events while
+// mysql-rbrb in the same run had zero — flakiness from a timing race
+// between SIGINT-cancels-ctx and consumer-drains-queue. The drain
+// retry on a detached context closes that race.
+const recordDrainTimeout = 10 * time.Second
 
 type Recorder struct {
 	logger          *zap.Logger
@@ -368,6 +381,31 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			// SECOND atomicity gate: check IsHTTPTCInPressureWindow at
+			// INSERT time, not just at Capture time. Capture's check fires
+			// BEFORE ResolveRange and BEFORE the TC reaches this consumer,
+			// so it can miss two race shapes:
+			//   (a) Mock arrives at AddMock AFTER Capture committed the TC
+			//       (async-decoder lag). AddMock now extends
+			//       currentPressureStart backwards to the mock's
+			//       ReqTimestamp so the window covers the TC.
+			//   (b) Pressure fires between Capture's check and this
+			//       consumer dequeuing the TC. By the time we read here,
+			//       currentPressureStart is set and overlap is visible.
+			// Both shapes produced the chronic orphan-TC failures (mongo
+			// rbrb get-large-payloads-by-id-* truncations, rbrl chronic 6).
+			// Dropping here matches the user's "memory > recording" rule:
+			// over-drop is acceptable, orphan TCs are not.
+			if mgr := syncMock.Get(); mgr != nil && testCase.Kind == models.HTTP &&
+				mgr.IsHTTPTCInPressureWindow(testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp) {
+				r.logger.Info("diag/stage-tc-pressure-drop: TC dropped at insert — round-trip overlapped pressure window (atomic mock+TC drop)",
+					zap.String("stage", "host-tc-consumer"),
+					zap.String("dropReason", "pressureWindow"),
+					zap.String("testCaseName", testCase.Name),
+					zap.Time("req_time", testCase.HTTPReq.Timestamp),
+					zap.Time("res_time", testCase.HTTPResp.Timestamp))
+				continue
+			}
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -382,8 +420,23 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testCaseName", testCase.Name))
 			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			if err != nil && ctx.Err() == context.Canceled {
+				// Drain-with-deadline mirrors the mock consumer below.
+				// Keep TC and mock drain in lock-step so we never
+				// persist a TC whose mocks were dropped (or vice versa)
+				// — atomic recording semantics.
+				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
+				err = r.testDB.InsertTestCase(drainCtx, testCase, newTestSetID, true)
+				cancelDrain()
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					r.logger.Info("diag/stage-tc-drop: InsertTestCase + drain retry both failed under ctx.Canceled",
+						zap.String("stage", "host-tc-consumer"),
+						zap.String("dropReason", "ctxCanceledAtInsertAndDrain"),
+						zap.String("testCaseName", testCase.Name),
+						zap.String("testSetID", newTestSetID),
+						zap.Error(err))
 					continue
 				}
 				insertTestErrChan <- err
@@ -404,7 +457,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
+		var insertedOK, insertedDropOnCancel uint64
 		for mock := range frames.Outgoing {
+			// Per-mock stage-5-recv log removed (high volume, choked
+			// mongo lanes). The for-range entry is the implicit recv
+			// signal; drop diags below surface actual losses.
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -417,12 +474,45 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			if err != nil && ctx.Err() == context.Canceled {
+				// Drain-with-deadline: the parent recording ctx was
+				// cancelled by docker-compose-exit while this mock is
+				// already on our buffered for-range — without this
+				// retry it would be silently dropped (the exact 822
+				// drops observed in mysql-rbrl in CI run 26221328572
+				// while mysql-rbrb in the same run had zero, the
+				// flakiness the user has been hitting). Detached ctx
+				// keeps the persistence call alive past parent cancel;
+				// the per-call WithTimeout caps how long a wedged write
+				// can pin the goroutine after shutdown.
+				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), recordDrainTimeout)
+				err = r.mockDB.InsertMock(drainCtx, mock, newTestSetID)
+				cancelDrain()
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
+					// Drain retry also failed (drainCtx timeout or
+					// real I/O error after parent cancel). Residual
+					// loss — log so the count is visible.
+					r.logger.Info("diag/stage-5-drop: InsertMock + drain retry both failed under ctx.Canceled",
+						zap.String("stage", "host-consumer"),
+						zap.String("dropReason", "ctxCanceledAtInsertAndDrain"),
+						zap.String("mockKind", string(mock.GetKind())),
+						zap.String("mockName", mock.Name),
+						zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+						zap.Uint64("insertedOK", insertedOK),
+						zap.Uint64("droppedSoFar", insertedDropOnCancel+1),
+						zap.Error(err))
+					insertedDropOnCancel++
 					continue
 				}
 				insertMockErrChan <- err
 			} else {
+				// Per-mock stage-5 success log removed (high volume,
+				// choked mongo lanes). The stage-5-drop log fires only
+				// on actual losses; this arm just increments the
+				// counter and proceeds.
+				insertedOK++
 				if hookErr := r.hooks.AfterMockInsert(ctx, &MockContext{
 					Mock: mock, TestSetID: newTestSetID,
 				}); hookErr != nil {
@@ -648,19 +738,62 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			cancel()
 		}()
 
+		var fwdCount uint64
 		for {
 			select {
 			case <-ctx.Done():
+				// diag/stage-4-exit: forwarder loop exiting due to ctx.
+				// Any mocks still sitting in outgoingStream (host-side
+				// mockChan from AgentClient) will be lost when its goroutine
+				// closes it on the same ctx-done signal.
+				r.logger.Info("diag/stage-4-exit: GetTestAndMockChans forwarder exiting on ctx.Done",
+					zap.String("stage", "host-forwarder"),
+					zap.String("dropReason", "ctxDone"),
+					zap.Uint64("totalForwarded", fwdCount))
 				return ctx.Err()
 			case m, ok := <-outgoingStream:
 				if !ok {
+					r.logger.Info("diag/stage-4-exit: GetTestAndMockChans forwarder exiting on closed outgoingStream",
+						zap.String("stage", "host-forwarder"),
+						zap.String("dropReason", "chanClosed"),
+						zap.Uint64("totalForwarded", fwdCount))
 					return nil
 				}
+				// Race-safe field capture: snapshot the identifying fields
+				// into locals BEFORE the channel handoff. Once
+				// `outgoingChan <- m` completes the consumer goroutine
+				// (record.go Start.func7 → mockDB.InsertMock) takes
+				// ownership of *m and may mutate fields (db.go:588). Any
+				// post-send read of m from this goroutine would race
+				// against that write — which is exactly the race that
+				// 9c900c5c hit, breaking 33 lanes under `go test -race`.
+				// Capturing here keeps the diag visible without sharing
+				// the pointer across the synchronization edge.
+				mockKind := string(m.Kind)
+				mockName := m.Name
+				mockReqTs := m.Spec.ReqTimestampMock
 				select {
 				case <-ctx.Done():
+					// stage-4-drop fires BEFORE the blocking send, so
+					// reading m here is still safe — but we use the
+					// captured locals for consistency with the success
+					// branch and to keep the diff uniform.
+					r.logger.Info("diag/stage-4-drop: ctx done during outgoingChan send, attempting blocking send (may deadlock)",
+						zap.String("stage", "host-forwarder"),
+						zap.String("dropReason", "ctxDoneRaceBlockingSend"),
+						zap.String("mockKind", mockKind),
+						zap.String("mockName", mockName),
+						zap.Time("reqTimestamp", mockReqTs),
+						zap.Uint64("totalForwarded", fwdCount))
 					outgoingChan <- m
 					return ctx.Err()
 				case outgoingChan <- m:
+					fwdCount++
+					// Per-mock stage-4 success log removed (high volume,
+					// choked mongo lanes). totalForwarded reported in
+					// stage-4-exit. The mockKind/mockName/mockReqTs
+					// locals captured above are still consumed by the
+					// stage-4-drop arm.
 				}
 			}
 		}

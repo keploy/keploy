@@ -793,7 +793,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// retries
 			{Kind: yaml.ScalarNode, Value: "retries"},
-			{Kind: yaml.ScalarNode, Value: "60"},
+			{Kind: yaml.ScalarNode, Value: "120"},
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},

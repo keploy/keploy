@@ -179,6 +179,33 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// Mocks: mocks,
 	}
 
+	// Second pressure check (TOCTOU close-out). The entry guard at the top
+	// of Capture is read once, but this goroutine may have been delayed by
+	// the captureHookSem wait in handleHttp1ZeroCopy and by io.ReadAll on
+	// the request/response bodies above — for 1 MB+ payloads that's tens
+	// of milliseconds, easily long enough for the memory guard's 500 ms
+	// ticker to fire. When it does, SetMemoryPressure(true) clears the
+	// syncMock buffer and the DB mocks for this TC's window are gone;
+	// committing the TC anyway produces an orphaned recording that fails
+	// at replay with "socket was unexpectedly closed: EOF". Drop the TC
+	// instead so TC and mock capture stay consistent.
+	if memoryguard.IsRecordingPaused() {
+		logger.Info("dropping HTTP TC — memory pressure fired during capture body processing; DB mocks not captured for this window",
+			zap.Time("req_time", reqTimeTest),
+			zap.Time("res_time", resTimeTest),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		return
+	}
+	if mgr := syncMock.Get(); mgr != nil && mgr.IsHTTPTCInPressureWindow(reqTimeTest, resTimeTest) {
+		logger.Info("dropping HTTP TC — round-trip overlapped a memory-pressure burst; DB mocks not captured for this window",
+			zap.Time("req_time", reqTimeTest),
+			zap.Time("res_time", resTimeTest),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		return
+	}
+
 	if synchronous {
 		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 		testName := fmt.Sprintf("test-%d", currentID)

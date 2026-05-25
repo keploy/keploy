@@ -44,6 +44,32 @@ type SyncMockManager struct {
 	outChan       chan<- *models.Mock
 	outChanClosed bool
 
+	// pressureWindows accumulates every completed memory-pressure interval.
+	// A new entry is appended each time SetMemoryPressure(false) is called,
+	// capturing the [start, end] pair for that burst. AddMock iterates ALL
+	// entries so HTTP TCs in-flight during ANY burst are dropped — not just
+	// those overlapping the most recent burst. Without the slice, a second
+	// pressure burst overwrites pressureWindowStart, leaving TCs from the
+	// first burst unchecked; those arrive as orphaned TCs (their DB mocks
+	// were not captured) and cause replay "socket was unexpectedly closed:
+	// EOF" errors. currentPressureStart holds the start of the in-progress
+	// burst; it is zeroed when the burst ends (transferred to pressureWindows).
+	pressureWindows      []struct{ start, end time.Time }
+	currentPressureStart time.Time
+
+	// lastMongoMockResTime is the ResTimestampMock of the most recent
+	// Mongo-kind mock that successfully reached AddMock. Used by the
+	// agent's HandleIncoming HTTP-TC commit path to detect "orphan" TCs
+	// captured AFTER the mongo async decoder fell behind / stopped
+	// emitting — the chronic-6 pattern (get-orders-1..5 +
+	// get-analytics-top-products-1 in go-memory-load-mongo): under
+	// memory-limited recording the async pipeline can lag HTTP capture
+	// by 20+ seconds at shutdown, leaving HTTP TCs whose underlying
+	// mongo find/aggregate mocks were never decoded → replay-time EOF.
+	// Stored as a single Time (not a slice) because we only need the
+	// most recent observed timestamp; reads are atomic via m.mu.
+	lastMongoMockResTime time.Time
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -215,9 +241,148 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		mock.DeriveLifetime()
 	}
 	m.mu.Lock()
+	// Track most-recent Mongo-mock ResTimestamp so HandleIncoming can
+	// detect orphan HTTP TCs (req-time newer than the youngest decoded
+	// mongo mock by more than a tolerance window). Update BEFORE the
+	// memoryPause early-return so dropped mongo mocks still advance the
+	// clock — otherwise a pressure burst that drops mongo mocks would
+	// make every subsequent HTTP TC look "newer than mongo silence" and
+	// get dropped too. Only Mongo because go-memory-load-mongo is the
+	// only protocol exhibiting the async-decoder lag we're guarding
+	// against; other protocols write mocks synchronously.
+	if mock != nil && mock.Kind == models.Mongo && !mock.Spec.ResTimestampMock.IsZero() {
+		if mock.Spec.ResTimestampMock.After(m.lastMongoMockResTime) {
+			m.lastMongoMockResTime = mock.Spec.ResTimestampMock
+		}
+	}
 	if m.memoryPause {
+		// EXEMPT session/connection-scoped mocks from the pressure drop.
+		// These are recorded ONCE during the connection's lifetime
+		// (mongo handshake / ismaster, mysql COM_STMT_PREPARE, postgres
+		// startup) and are then REUSED across many subsequent TCs at
+		// replay. Dropping a single session/connection mock during the
+		// first pressure burst (which typically hits early in k6 ramp)
+		// breaks every subsequent TC that needs to open a fresh
+		// connection — the chronic 6 teardown failures (get-orders-1..5,
+		// get-analytics-top-products-1) in mongo-rbrl come from exactly
+		// this: a mongo handshake mock was dropped under pressure, then
+		// at replay every new connection produces "no matching mock" /
+		// EOF because there's no handshake to serve. Per-test mocks are
+		// safe to drop (their corresponding HTTP TC will be dropped too
+		// by the IsHTTPTCInPressureWindow check below or by the
+		// extended currentPressureStart).
+		if mock != nil {
+			lt := mock.TestModeInfo.Lifetime
+			if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+				m.buffer = append(m.buffer, mock)
+				m.mu.Unlock()
+				if logger := m.dropLogger(); logger != nil {
+					logger.Info("diag/AddMock: session/connection mock buffered DESPITE pressure (not droppable)",
+						zap.String("mockKind", string(mock.Kind)),
+						zap.String("lifetime", lt.String()),
+						zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+					)
+				}
+				return
+			}
+		}
+
+		// Per-test mock under pressure → drop atomically AND extend the
+		// active pressure window backwards to cover this mock's
+		// ReqTimestamp. Late-arriving mocks (where the async decoder
+		// emitted the mock AFTER Capture has already committed the TC)
+		// can have a ReqTimestamp far before the current pause-fire
+		// time; without this extension, the corresponding HTTP TC's
+		// resTime falls BEFORE currentPressureStart and the TC drop
+		// check returns false. The extension makes the next TC
+		// consumer's IsHTTPTCInPressureWindow check (added in record.go)
+		// catch the orphan.
+		if mock != nil && !mock.Spec.ReqTimestampMock.IsZero() {
+			if m.currentPressureStart.IsZero() || mock.Spec.ReqTimestampMock.Before(m.currentPressureStart) {
+				m.currentPressureStart = mock.Spec.ReqTimestampMock
+			}
+		}
+
+		// Race-safe snapshot: capture identifying fields and pressure
+		// start under the lock. mock is local-only at this point
+		// (AddMock is the FIRST consumer of the pointer the parser just
+		// allocated), so reading from mock is unsynchronised vs no
+		// other goroutine — different from the stage-4 race that came
+		// from reading m AFTER a channel handoff. Logging after Unlock
+		// keeps the lock window tight.
+		pressureStart := m.currentPressureStart
+		mockKind := ""
+		mockName := ""
+		var mockReqTs time.Time
+		if mock != nil {
+			mockKind = string(mock.Kind)
+			mockName = mock.Name
+			mockReqTs = mock.Spec.ReqTimestampMock
+		}
 		m.mu.Unlock()
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/stage-1.5-drop: AddMock memoryPause silent drop",
+				zap.String("stage", "syncMock-AddMock"),
+				zap.String("dropReason", "memoryPause"),
+				zap.String("mockKind", mockKind),
+				zap.String("mockName", mockName),
+				zap.Time("reqTimestamp", mockReqTs),
+				zap.Time("pressureStart", pressureStart),
+			)
+		}
 		return
+	}
+
+	// Drop HTTP TCs whose request lifetime overlapped with ANY recorded
+	// memory-pressure window. During pressure, Mongo/generic mocks are
+	// dropped at the TCP capture layer (captureTeeWriter.Write returns
+	// early) before reaching AddMock. The HTTP TC arrives here only after
+	// the full HTTP round-trip completes — which may be after pressure
+	// clears — so memoryPause is false and the TC would otherwise be
+	// committed without its DB mocks. Replay then fails with
+	// "socket was unexpectedly closed: EOF" because the mock is missing.
+	// Dropping the TC here keeps recording and mock capture consistent:
+	// either both are captured or neither is. We check all historical
+	// windows (not just the last one) because multiple pressure bursts
+	// can occur during a single recording session.
+	if mock.Kind == models.HTTP {
+		reqTime := mock.Spec.ReqTimestampMock
+		resTime := mock.Spec.ResTimestampMock
+		// Check all completed pressure windows: drop if the HTTP round-trip
+		// overlapped any burst (window started before response, ended after request).
+		for _, w := range m.pressureWindows {
+			// Overlap: pressure window started before response arrived AND
+			// ended after request started → the request was in-flight during pressure.
+			if w.start.Before(resTime) && w.end.After(reqTime) {
+				m.mu.Unlock()
+				if logger := m.dropLogger(); logger != nil {
+					logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during completed pressure window; its DB mocks were not captured",
+						zap.Time("req_time", reqTime),
+						zap.Time("res_time", resTime),
+						zap.Time("pressure_start", w.start),
+						zap.Time("pressure_end", w.end),
+					)
+				}
+				return
+			}
+		}
+		// Check the currently active (ongoing) pressure window.
+		// currentPressureStart is non-zero while pressure is in progress and
+		// has not yet been moved to pressureWindows. If pressure started before
+		// the HTTP response arrived the DB mocks for this request were already
+		// skipped by the per-packet capture guard → drop the TC now to prevent
+		// a "TC exists, mock missing" mismatch at replay time.
+		if !m.currentPressureStart.IsZero() && m.currentPressureStart.Before(resTime) {
+			m.mu.Unlock()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("diag/AddMock: HTTP TC dropped — request was in-flight during active pressure window; its DB mocks were not captured",
+					zap.Time("req_time", reqTime),
+					zap.Time("res_time", resTime),
+					zap.Time("pressure_start", m.currentPressureStart),
+				)
+			}
+			return
+		}
 	}
 
 	// Decide forward vs buffer vs drop under a single snapshot of
@@ -270,12 +435,29 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		}
 		return
 	case bound && !m.firstReqSeen:
+		// Per-mock stage-1.5-fwd success log removed (high volume:
+		// mongo's main throughput path fires this for every mock,
+		// choked mongo lanes for 30+ min in multiple CI runs). The
+		// drop arms (stage-1.5-drop on memoryPause, "outChan overflow"
+		// Error sampled 1/1024 from sendToOutChan, outChan-closed
+		// drop) keep their logs so actual losses remain visible.
 		m.mu.Unlock()
 		m.sendToOutChan(mock)
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
+		bufLen := len(m.buffer)
 		m.mu.Unlock()
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/AddMock: mock buffered",
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("mock_name", mock.Name),
+				zap.String("connID", mock.ConnectionID),
+				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+				zap.Int("buffer_len", bufLen),
+			)
+		}
 	}
 }
 
@@ -340,14 +522,132 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	defer m.mu.Unlock()
 
 	m.memoryPause = enabled
-	if !enabled {
+	if enabled {
+		now := time.Now()
+		// CRITICAL: only initialize currentPressureStart on the FIRST
+		// pressure tick (transition from zero/unset). memoryguard calls
+		// SetMemoryPressure(true) on EVERY 500 ms tick while pressure
+		// remains active, not just on the false→true edge. Resetting
+		// currentPressureStart each call would collapse the recorded
+		// pressure window to ONLY the last tick before clear, making
+		// pressureWindows so small that IsHTTPTCInPressureWindow misses
+		// nearly every TC actually affected by pressure. This was the
+		// previously-undiagnosed root cause of every "stage-tc-pressure-
+		// drop-agent never fires" pattern across CI runs 26248766772
+		// through 26254257158: my AddMock extension widened the start
+		// backwards, but the NEXT tick wiped it out by overwriting with
+		// time.Now(). Initializing once per burst preserves both this
+		// tick's wipe-time extension AND any subsequent AddMock per-mock
+		// extensions until pressure clears.
+		if m.currentPressureStart.IsZero() {
+			// First tick of a new pressure burst. Scan the buffer for
+			// the earliest ReqTimestamp among about-to-be-wiped mocks
+			// so the pressure window covers them retroactively.
+			earliest := now
+			for _, mock := range m.buffer {
+				if mock == nil {
+					continue
+				}
+				if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.Before(earliest) {
+					earliest = mock.Spec.ReqTimestampMock
+				}
+			}
+			m.currentPressureStart = earliest
+		}
+		for i := range m.buffer {
+			m.buffer[i] = nil
+		}
+		m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
 		return
 	}
-
-	for i := range m.buffer {
-		m.buffer[i] = nil
+	// Pressure cleared: record the completed window so AddMock can drop
+	// HTTP TCs whose request was in-flight during any pressure burst.
+	if !m.currentPressureStart.IsZero() {
+		m.pressureWindows = append(m.pressureWindows, struct{ start, end time.Time }{
+			start: m.currentPressureStart,
+			end:   time.Now(),
+		})
+		m.currentPressureStart = time.Time{} // reset for next burst
 	}
-	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
+}
+
+// IsHTTPTCInPressureWindow reports whether the HTTP round-trip [reqTime,
+// resTime] overlapped any recorded memory-pressure burst (completed or
+// active). Called from Capture() before forwarding an HTTP TC to the agent
+// channel: the entry-time IsRecordingPaused() check in Capture can pass and
+// then the memory guard can fire while we're processing the body (io.ReadAll
+// can take 10–100 ms for 1 MB+ payloads). When that happens the buffer is
+// cleared by SetMemoryPressure(true), the outgoing DB mocks for this TC's
+// window are lost, and committing the TC anyway produces an orphaned
+// recording that fails at replay with "socket was unexpectedly closed: EOF".
+// Mirrors the same check AddMock applies to HTTP-kind outgoing mocks, but
+// from the TC-capture side.
+func (m *SyncMockManager) IsHTTPTCInPressureWindow(reqTime, resTime time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, w := range m.pressureWindows {
+		if w.start.Before(resTime) && w.end.After(reqTime) {
+			return true
+		}
+	}
+	return !m.currentPressureStart.IsZero() && m.currentPressureStart.Before(resTime)
+}
+
+// LastMongoMockResTime returns the ResTimestampMock of the most recent
+// Mongo-kind mock observed at AddMock, or the zero Time if no mongo
+// mock has been seen yet. Used by HandleIncoming to detect orphan HTTP
+// TCs (HTTP req-time newer than the youngest decoded mongo mock by
+// more than a tolerance window) so they can be dropped before commit.
+// Zero return MUST be interpreted as "mongo is not in use OR no decoded
+// mock yet" — callers must NOT drop a TC when this returns zero,
+// otherwise pre-warm HTTP TCs in mongo-using apps would be dropped
+// before the first mongo handshake completes its decode.
+func (m *SyncMockManager) LastMongoMockResTime() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastMongoMockResTime
+}
+
+// IsMemoryPressureActive reports whether a memory-pressure burst is currently
+// in progress (i.e., SetMemoryPressure(true) has been called and not yet
+// followed by SetMemoryPressure(false)). Used by HandleIncoming to extend the
+// tcHold window for TCs that arrive during pressure, giving async decoders
+// (e.g., mongo's asyncMongoDecode goroutine) time to emit their mocks and
+// trigger the backward currentPressureStart extension before the TC is drained.
+func (m *SyncMockManager) IsMemoryPressureActive() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.memoryPause
+}
+
+// ExtendPressureWindow extends the active pressure burst's start time backwards
+// to cover reqTimestamp. Called by protocol parsers (MySQL, gRPC) that drop
+// mocks BEFORE calling AddMock — these parsers bypass AddMock's in-line
+// backward-extension, so they must explicitly notify syncMock to keep the
+// IsHTTPTCInPressureWindow check consistent. Without this call, HTTP TCs whose
+// underlying DB mocks were dropped at the parser layer (not AddMock) would not
+// be caught by the TC-drop check and would be committed to disk without mocks.
+func (m *SyncMockManager) ExtendPressureWindow(reqTimestamp time.Time) {
+	if m == nil || reqTimestamp.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.memoryPause {
+		return
+	}
+	if m.currentPressureStart.IsZero() || reqTimestamp.Before(m.currentPressureStart) {
+		m.currentPressureStart = reqTimestamp
+	}
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
@@ -533,21 +833,32 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// Per-resolve diagnostic: surface buffer-state transitions per
 	// test-window resolve so a CI log can show when a per-test cohort
 	// flushed zero mocks or when stale-buffer cutoff started reaping.
-	// Sampled via dropLogger which is the standard observability sink
-	// for buffer-flow events on this manager. Only logged when there
-	// was actual state change to avoid log noise on idle resolves.
-	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
-		logger.Info("diag/ResolveRange: buffer transition",
-			zap.String("test_name", testName),
-			zap.Time("window_start", start),
-			zap.Time("window_end", end),
-			zap.Int("buffer_len_before", bufferLenBefore),
-			zap.Int("buffer_len_after", bufferLenAfter),
-			zap.Int("mocks_flushed", mocksToSendLen),
-			zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
-			zap.Bool("outChan_bound", outChanBound),
-			zap.Bool("mapping_enabled", mapping),
-		)
+	if logger := m.dropLogger(); logger != nil {
+		if bufferLenBefore != bufferLenAfter || mocksToSendLen > 0 {
+			logger.Info("diag/ResolveRange: buffer transition",
+				zap.String("test_name", testName),
+				zap.Time("window_start", start),
+				zap.Time("window_end", end),
+				zap.Int("buffer_len_before", bufferLenBefore),
+				zap.Int("buffer_len_after", bufferLenAfter),
+				zap.Int("mocks_flushed", mocksToSendLen),
+				zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
+				zap.Bool("outChan_bound", outChanBound),
+				zap.Bool("mapping_enabled", mapping),
+			)
+		}
+		// Warn when a TC resolves with zero per-test mocks — most likely
+		// means its DB packets were dropped (memory pressure or chan full)
+		// or the async decoder emitted the mock after the window closed.
+		if keep && mocksToSendLen == 0 {
+			logger.Info("diag/ResolveRange: TC resolved with ZERO mocks — DB packets may have been dropped or decoder was too slow",
+				zap.String("test_name", testName),
+				zap.Time("window_start", start),
+				zap.Time("window_end", end),
+				zap.Int("buffer_len_at_resolve", bufferLenBefore),
+				zap.Bool("outChan_bound", outChanBound),
+			)
+		}
 	}
 
 	// Route mock sends through sendToOutChan so the close-vs-send

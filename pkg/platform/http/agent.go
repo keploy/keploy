@@ -301,20 +301,45 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 		decoder := gob.NewDecoder(res.Body)
 
+		var decoded uint64
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
 				if utils.IsShutdownError(err) {
 					// End of the stream or connection closed during shutdown
+					a.logger.Info("diag/stage-3-exit: AgentClient.GetOutgoing decode loop exiting on shutdown error",
+						zap.String("stage", "host-receiver"),
+						zap.String("dropReason", "shutdownError"),
+						zap.Uint64("totalDecoded", decoded),
+						zap.Error(err))
 					break
 				}
+				a.logger.Info("diag/stage-3-exit: AgentClient.GetOutgoing decode loop exiting on decode error",
+					zap.String("stage", "host-receiver"),
+					zap.String("dropReason", "decodeError"),
+					zap.Uint64("totalDecoded", decoded),
+					zap.Error(err))
 				utils.LogError(a.logger, err, "failed to decode mock from stream")
 				break
 			}
-
+			decoded++
+			// Per-mock stage-3 success log removed (high volume,
+			// choked mongo lanes). totalDecoded count is reported
+			// in stage-3-exit when the decode loop terminates.
 			select {
 			case <-ctx.Done():
-				// If the context is done, exit the loop
+				// diag/stage-3-drop: ctx cancelled mid-send to the
+				// unbuffered mockChan. The decoded mock is lost — the
+				// next caller (GetTestAndMockChans forwarder at
+				// record.go:654) will see this drop as a stage-3-emit
+				// without a matching stage-4-recv.
+				a.logger.Info("diag/stage-3-drop: AgentClient ctx done while sending decoded mock onto mockChan",
+					zap.String("stage", "host-receiver"),
+					zap.String("dropReason", "ctxDone"),
+					zap.String("mockKind", string(mock.Kind)),
+					zap.String("mockName", mock.Name),
+					zap.Time("reqTimestamp", mock.Spec.ReqTimestampMock),
+					zap.Uint64("totalDecoded", decoded))
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel

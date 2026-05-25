@@ -18,6 +18,15 @@ jobs:
           - name: go-memory-load
             path: go-memory-load
             script_dir: go_memory_load
+          - name: go-memory-load-mysql
+            path: go-memory-load-mysql
+            script_dir: go_memory_load_mysql
+          - name: go-memory-load-mongo
+            path: go-memory-load-mongo
+            script_dir: go_memory_load_mongo
+          - name: go-memory-load-grpc
+            path: go-memory-load-grpc
+            script_dir: go_memory_load_grpc
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
@@ -55,7 +64,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
-          ref: main
+          ref: feat/all-memory-load-apps
           path: samples-go
       - name: Run ${{ matrix.app.name }} application
         env:
@@ -71,15 +80,13 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker.sh
 
       - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
-        # Only upload for the postgres-touching variant to keep artifact
-        # storage tight. TODO(postgres-v3 RCA): broaden if other matrix
-        # apps regress on PG.
-        if: ${{ always() && matrix.app.name == 'echo-sql' }}
+        if: ${{ always() && (matrix.app.name == 'echo-sql' || matrix.app.name == 'go-memory-load-mongo' || matrix.app.name == 'go-memory-load-mysql') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
           path: |
             samples-go/${{ matrix.app.path }}/keploy/
-            samples-go/${{ matrix.app.path }}/echoApp.txt
+            samples-go/${{ matrix.app.path }}/record.txt
+            samples-go/${{ matrix.app.path }}/test.txt
           if-no-files-found: warn
           retention-days: 7

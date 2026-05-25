@@ -29,6 +29,8 @@ const (
 
 var recordingPaused atomic.Bool
 
+const stableChecksRequired = 2 // consecutive below-threshold reads before resuming
+
 type guard struct {
 	logger            *zap.Logger
 	memoryCurrentPath string
@@ -36,6 +38,7 @@ type guard struct {
 	memoryLimitMB     uint64
 	lastReclaim       time.Time
 	underPressure     bool
+	stableBelow       int // consecutive ticks below resumeThreshold while under pressure
 	readFailCount     int
 	prevMemLimit      int64
 }
@@ -160,16 +163,23 @@ func (g *guard) run(ctx context.Context) {
 			}
 
 			if currentBytes >= pauseThreshold {
+				g.stableBelow = 0
 				g.enterPressure(currentBytes, pauseThreshold)
 				continue
 			}
 
 			if g.underPressure && currentBytes <= resumeThreshold {
-				g.resetPressure()
-				g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
-					zap.Int64("memory_usage_bytes", currentBytes),
-					zap.Int64("resume_threshold_bytes", resumeThreshold),
-					zap.Int64("memory_limit_bytes", g.limitBytes))
+				g.stableBelow++
+				if g.stableBelow >= stableChecksRequired {
+					g.stableBelow = 0
+					g.resetPressure()
+					g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
+						zap.Int64("memory_usage_bytes", currentBytes),
+						zap.Int64("resume_threshold_bytes", resumeThreshold),
+						zap.Int64("memory_limit_bytes", g.limitBytes))
+				}
+			} else {
+				g.stableBelow = 0
 			}
 		}
 	}

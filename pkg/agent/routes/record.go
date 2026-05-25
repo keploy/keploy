@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
@@ -339,88 +340,255 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
+	//
+	// TC hold + agent-side pressure-window check. Both fix the atomicity
+	// bug where a mongo/mysql/etc mock arrives at syncMock.AddMock AFTER
+	// Capture has already committed the TC — async-decoder lag means
+	// Capture's IsHTTPTCInPressureWindow check ran BEFORE the mock-drop
+	// updated currentPressureStart. By holding the TC for ~500 ms here
+	// (in the AGENT process — same syncMock singleton as AddMock), late
+	// drops have time to update the pressure window and the re-check
+	// below catches the orphan. The CLI-side check in record.go cannot
+	// do this: it reads a different syncMock singleton with no agent-
+	// recorded data, which is why stage-tc-pressure-drop fired 0 times
+	// in CI run 26252971390. tcHold is sized to comfortably cover the
+	// 50–200 ms async-decoder lag for 1 MB+ payloads with headroom for
+	// GC pauses on oversubscribed CI runners.
+	const tcHold = 500 * time.Millisecond
+	// pressureHold is the maximum additional wait applied to TCs that
+	// arrive while a memory-pressure burst is active. Mongo's async decoder
+	// can lag the HTTP capture layer by seconds when large payloads (1 MB+)
+	// back up the decodeChan: by the time the decoder emits a small delete
+	// mock it had queued behind the large payload, the standard 500 ms
+	// tcHold has already expired and the TC was committed without its mock.
+	// Holding such TCs until pressure clears (or pressureHold seconds elapse)
+	// gives the decoder time to emit the mock and trigger the backward
+	// currentPressureStart extension, so IsHTTPTCInPressureWindow fires.
+	const pressureHold = 10 * time.Second
+	type pendingTC struct {
+		tc   *models.TestCase
+		aged time.Time
+		// lastMongoAtArrival snapshots syncMock.LastMongoMockResTime()
+		// at the moment the TC arrived at HandleIncoming, BEFORE the
+		// tcHold delay. The orphan-drop check (see drain()) compares
+		// the TC's req-time against this frozen value, not against the
+		// live value at drain-time. Without this snapshot, late mongo
+		// mocks for OTHER tests that arrive within the tcHold window
+		// refresh syncMock's live timestamp and mask the orphan: a TC
+		// whose own mongo decoder fell behind would look "in sync"
+		// just because some unrelated test's mock raced past it.
+		// (Confirmed on run 26281482736 mongo-rbrl post-large-payloads-8:
+		// gap was 6.6 s at TC-arrival but only 22 ms by drain-time,
+		// orphan check didn't fire, TC committed without its mock.)
+		lastMongoAtArrival time.Time
+		// arrivedDuringPressure records whether a memory-pressure burst
+		// was active when this TC arrived at HandleIncoming. When true,
+		// drain() extends the hold until pressure clears (up to pressureHold)
+		// so that async decoders (mongo decodeChan) have time to emit their
+		// mocks and update currentPressureStart before the TC is committed.
+		arrivedDuringPressure bool
+	}
+	var pending []pendingTC
+
+	// emit writes a single TC to the multipart stream. Returns false on
+	// fatal error to break the outer loop.
+	emit := func(t *models.TestCase) bool {
+		// Stream each test case as JSON
+		// 1. Write metadata (JSON)
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="metadata"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			a.logger.Error("failed to create metadata part", zap.Error(err))
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(t); err != nil {
+			a.logger.Error("failed to encode metadata", zap.Error(err))
+			return false
+		}
+		return emitFiles(a, mw, t, flusher)
+	}
+
+	// drain pops aged TCs from the head, runs the pressure check, and
+	// emits or drops them. shutdown=true flushes ALL pending TCs
+	// regardless of age (last chance before connection tears down).
+	// mongoSilenceTolerance is how long the mongo async decoder may
+	// fall behind HTTP capture before a fresh HTTP TC is treated as an
+	// orphan. Sized at 5 s based on empirical CI evidence (run
+	// 26277486420 mongo-rbrb): chronic-6 orphan TCs in
+	// go-memory-load-mongo fired ~21 s after the youngest mongo mock
+	// reached AddMock; under normal load the decoder lag is ~50–200 ms.
+	// 5 s comfortably catches the shutdown-time orphan window without
+	// dropping legitimate "mongo briefly idle" testcases.
+	const mongoSilenceTolerance = 5 * time.Second
+
+	drain := func(shutdown bool) bool {
+		for len(pending) > 0 {
+			if !shutdown && time.Since(pending[0].aged) < tcHold {
+				return true
+			}
+			// Extended hold for TCs that arrived during a pressure burst.
+			// If pressure is still active AND the TC hasn't been held for
+			// pressureHold yet, keep waiting: the async decoder (mongo
+			// decodeChan, etc.) may still be catching up. Once pressure
+			// clears the backward currentPressureStart extension has fired
+			// and IsHTTPTCInPressureWindow will correctly drop any orphan.
+			if !shutdown && pending[0].arrivedDuringPressure && time.Since(pending[0].aged) < pressureHold {
+				if mgr := syncMock.Get(); mgr != nil && mgr.IsMemoryPressureActive() {
+					return true
+				}
+			}
+			head := pending[0]
+			pending = pending[1:]
+			if mgr := syncMock.Get(); mgr != nil && head.tc.Kind == models.HTTP &&
+				mgr.IsHTTPTCInPressureWindow(head.tc.HTTPReq.Timestamp, head.tc.HTTPResp.Timestamp) {
+				a.logger.Info("diag/stage-tc-pressure-drop-agent: TC dropped at HandleIncoming send — round-trip overlapped pressure window (atomic mock+TC drop)",
+					zap.String("stage", "agent-tc-emit"),
+					zap.String("dropReason", "pressureWindow"),
+					zap.String("testCaseName", head.tc.Name),
+					zap.Time("req_time", head.tc.HTTPReq.Timestamp),
+					zap.Time("res_time", head.tc.HTTPResp.Timestamp))
+				continue
+			}
+			// Orphan-TC drop based on mongo decoder silence. Only fires
+			// when mongo has been seen at all in this session (LastMongo
+			// non-zero) — otherwise pre-mongo-handshake HTTP TCs would
+			// be dropped wrongly. A TC whose request fired more than
+			// tolerance AFTER the youngest decoded mongo mock means the
+			// async decoder couldn't catch up before recording shutdown,
+			// so this TC's underlying mongo queries were lost and replay
+			// will fail with "socket was unexpectedly closed: EOF". Drop
+			// here to preserve mock+TC atomicity (the "no partial mocks"
+			// invariant the user requires).
+			// Use the AT-ARRIVAL snapshot of LastMongoMockResTime, not
+			// the live value at drain-time. The 500 ms tcHold lets
+			// late mongo mocks for OTHER tests refresh the live value,
+			// which would mask this TC's orphan condition (see the
+			// pendingTC.lastMongoAtArrival doc comment for the rbrl
+			// post-large-payloads-8 evidence).
+			if head.tc.Kind == models.HTTP && !head.lastMongoAtArrival.IsZero() {
+				if head.tc.HTTPReq.Timestamp.After(head.lastMongoAtArrival.Add(mongoSilenceTolerance)) {
+					a.logger.Info("diag/stage-tc-mongo-silence-drop: TC dropped — req-time newer than youngest mongo mock AT TC ARRIVAL by > tolerance (orphan TC; mongo async decoder fell behind)",
+						zap.String("stage", "agent-tc-emit"),
+						zap.String("dropReason", "mongoSilenceOrphan"),
+						zap.String("testCaseName", head.tc.Name),
+						zap.Time("req_time", head.tc.HTTPReq.Timestamp),
+						zap.Time("last_mongo_at_arrival", head.lastMongoAtArrival),
+						zap.Duration("gap", head.tc.HTTPReq.Timestamp.Sub(head.lastMongoAtArrival)))
+					continue
+				}
+			}
+			if !emit(head.tc) {
+				return false
+			}
+		}
+		return true
+	}
+
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
+			drain(true)
 			return
 		case t, ok := <-tc:
 			if !ok {
+				drain(true)
 				return
 			}
-			// Stream each test case as JSON
-			// 1. Write metadata (JSON)
-			header := textproto.MIMEHeader{}
-			header.Set("Content-Disposition", `form-data; name="metadata"`)
-			header.Set("Content-Type", "application/json")
-			part, err := mw.CreatePart(header)
-			if err != nil {
-				a.logger.Error("failed to create metadata part", zap.Error(err))
+			// Snapshot syncMock state RIGHT NOW (at TC arrival).
+			// Both values are read here — not at drain-time — so that
+			// other tests' late-arriving mocks cannot refresh the live
+			// values during the tcHold window and mask orphan conditions.
+			var lastMongoAtArrival time.Time
+			var arrivedDuringPressure bool
+			if mgr := syncMock.Get(); mgr != nil {
+				lastMongoAtArrival = mgr.LastMongoMockResTime()
+				arrivedDuringPressure = mgr.IsMemoryPressureActive()
+			}
+			pending = append(pending, pendingTC{
+				tc:                    t,
+				aged:                  time.Now(),
+				lastMongoAtArrival:    lastMongoAtArrival,
+				arrivedDuringPressure: arrivedDuringPressure,
+			})
+			if !drain(false) {
 				return
 			}
-			if err := json.NewEncoder(part).Encode(t); err != nil {
-				a.logger.Error("failed to encode metadata", zap.Error(err))
+			continue
+		case <-tick.C:
+			if !drain(false) {
 				return
 			}
-
-			// 2. Write file part if exists
-			if t.HasBinaryFile {
-				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
-				for _, form := range t.HTTPReq.Form {
-					for i, path := range form.Paths {
-						if path == "" {
-							continue
-						}
-
-						// Get filename from FileNames if available, or base of path
-						fileName := "binary_file"
-						if i < len(form.FileNames) {
-							fileName = form.FileNames[i]
-						} else {
-							fileName = filepath.Base(path)
-						}
-
-						fileHeader := textproto.MIMEHeader{}
-						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
-						filePart, err := mw.CreatePart(fileHeader)
-						if err != nil {
-							a.logger.Error("failed to create file part", zap.Error(err))
-							return
-						}
-
-						f, err := os.Open(path)
-						if err != nil {
-							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
-							return
-						}
-						if _, err := io.Copy(filePart, f); err != nil {
-							f.Close()
-							a.logger.Error("failed to copy file to stream", zap.Error(err))
-							return
-						}
-						f.Close()
-						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
-
-						// Cleanup temp file
-						os.Remove(path)
-					}
-				}
-			}
-
-			// 3. Write delimiter part to force closure of previous part (file)
-			// This is critical: The client reads the file part until it sees the *next* boundary.
-			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
-			// causing a deadlock if testcases are infrequent.
-			delimiterHeader := textproto.MIMEHeader{}
-			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
-			if _, err := mw.CreatePart(delimiterHeader); err != nil {
-				a.logger.Error("failed to create delimiter part", zap.Error(err))
-				return
-			}
-
-			flusher.Flush() // Immediately send data to the client
+			continue
 		}
 	}
+}
+
+// emitFiles writes the binary-file parts (if any) and the trailing
+// delimiter for a single TC. Extracted from HandleIncoming so the
+// hold/drain loop above can call it without duplicating the body.
+func emitFiles(a *Agent, mw *multipart.Writer, t *models.TestCase, flusher http.Flusher) bool {
+	// 2. Write file part if exists
+	if t.HasBinaryFile {
+		a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+		for _, form := range t.HTTPReq.Form {
+			for i, path := range form.Paths {
+				if path == "" {
+					continue
+				}
+
+				// Get filename from FileNames if available, or base of path
+				fileName := "binary_file"
+				if i < len(form.FileNames) {
+					fileName = form.FileNames[i]
+				} else {
+					fileName = filepath.Base(path)
+				}
+
+				fileHeader := textproto.MIMEHeader{}
+				fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+				filePart, err := mw.CreatePart(fileHeader)
+				if err != nil {
+					a.logger.Error("failed to create file part", zap.Error(err))
+					return false
+				}
+
+				f, err := os.Open(path)
+				if err != nil {
+					a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+					return false
+				}
+				if _, err := io.Copy(filePart, f); err != nil {
+					f.Close()
+					a.logger.Error("failed to copy file to stream", zap.Error(err))
+					return false
+				}
+				f.Close()
+				a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+
+				// Cleanup temp file
+				os.Remove(path)
+			}
+		}
+	}
+
+	// 3. Write delimiter part to force closure of previous part (file)
+	// This is critical: The client reads the file part until it sees the *next* boundary.
+	// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+	// causing a deadlock if testcases are infrequent.
+	delimiterHeader := textproto.MIMEHeader{}
+	delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+	if _, err := mw.CreatePart(delimiterHeader); err != nil {
+		a.logger.Error("failed to create delimiter part", zap.Error(err))
+		return false
+	}
+
+	flusher.Flush() // Immediately send data to the client
+	return true
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -464,9 +632,25 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			// diag/stage-2-exit: agent's outgoing-stream HTTP request
+			// ctx cancelled. This is the moment the agent stops draining
+			// the proxy-side outChan (the channel returned by GetOutgoing).
+			// Anything still in mockChan after this point is abandoned
+			// because no goroutine reads it once HandleOutgoing returns.
+			// Log so we can correlate this exit time with stage-1 emits:
+			// if stage-1 events keep firing after stage-2-exit, those
+			// mocks die on the agent side.
+			a.logger.Info("diag/stage-2-exit: HandleOutgoing exiting on request ctx cancel; remaining mocks in agent outChan will be abandoned",
+				zap.String("stage", "agent-forwarder"),
+				zap.String("dropReason", "ctxDone"),
+				zap.Int("mockChanLen", len(mockChan)),
+				zap.Int("mockChanCap", cap(mockChan)))
 			return
 		case m, ok := <-mockChan:
 			if !ok {
+				a.logger.Info("diag/stage-2-exit: HandleOutgoing exiting on closed mockChan",
+					zap.String("stage", "agent-forwarder"),
+					zap.String("dropReason", "chanClosed"))
 				return
 			}
 			if err := enc.Encode(m); err != nil {
@@ -510,6 +694,11 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				)
 				continue
 			}
+			// Per-mock stage-2 success log removed: fired ~12k+ times
+			// per run and choked mongo lanes (30+ min hangs across
+			// multiple CI runs). The drop arms (stage-2-exit on
+			// ctxDone/closed mockChan, the existing gob encode error
+			// path) keep their logs so actual losses remain visible.
 			flusher.Flush()
 		}
 	}

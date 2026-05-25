@@ -4,22 +4,22 @@ set -Eeuo pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
-APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-api}"
+APP_CONTAINER_NAME="${APP_CONTAINER_NAME:-load-test-mongo-api}"
 APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
-RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-120}"
+RECORD_MEMORY_LIMIT_MB="${RECORD_MEMORY_LIMIT_MB:-200}"
 KEPLOY_CONTAINER_MEMORY_LIMIT="${KEPLOY_CONTAINER_MEMORY_LIMIT:-160m}"
-MIXED_API_START_VUS="${MIXED_API_START_VUS:-2}"
+MIXED_API_START_VUS="${MIXED_API_START_VUS:-1}"
+# Hill-shaped VU ramp: 4→8→12→4. Saturates the system by a small fraction so
+# Keploy's recording captures real concurrent load while staying within CI memory
+# limits. globalNoise in keploy.yml covers variable response fields (id, timestamps,
+# etc.) so concurrent-VU FIFO mock collisions don't fail assertions.
 # Mixed API stage targets: lowered from 4,8,12,4 (peak 12 VUs) to 2,3,4,2
-# (peak 4 VUs) after CI run 26209083321 proved the rate-mismatch RCA —
-# the agent's mock-emit rate at 14 concurrent VUs (~14k mocks/sec peak)
-# exceeded the host's YAML-write disk throughput (~2k/sec) by 7x. With
-# the previous load profile, mocks either piled up in TCP buffers and
-# died silently on SIGINT (proven: 64% loss at stage-2 vs stage-3) or,
-# with buffered channels, back-pressured all the way to the application
-# and deadlocked docker compose (proven: 30+ min lane hangs). 2,3,4,2
-# keeps a real ramp profile + still enough headroom for the
-# memory-pressure feature to fire 2-3 times when the LARGE_PAYLOAD
-# scenario spikes memory.
+# (peak 4 VUs). See go_memory_load/golang-docker.sh for the full RCA —
+# 14k-mock/sec emit rate at 14 concurrent VUs overran the host's
+# ~2k/sec YAML-write throughput, producing either silent TCP-buffer
+# loss or pipeline deadlock. 4-VU peak with the unchanged
+# LARGE_PAYLOAD_STAGE_TARGETS still spikes agent memory enough to
+# trigger the 2-3 pressure events this lane is designed to validate.
 MIXED_API_VU_STAGE_TARGETS="${MIXED_API_VU_STAGE_TARGETS:-2,3,4,2}"
 LARGE_PAYLOAD_PREALLOCATED_VUS="${LARGE_PAYLOAD_PREALLOCATED_VUS:-14}"
 LARGE_PAYLOAD_MAX_VUS="${LARGE_PAYLOAD_MAX_VUS:-60}"
@@ -127,7 +127,7 @@ final_cleanup() {
     fi
 
     if [ "$rc" -ne 0 ]; then
-        echo "go-memory-load workflow failed (exit code=$rc)"
+        echo "go-memory-load-mongo workflow failed (exit code=$rc)"
         dump_logs
     fi
     stop_keploy_record
@@ -379,7 +379,7 @@ check_k6_failure_rate() {
     # Extract the http_req_failed percentage, e.g. "3.26%" from:
     #   http_req_failed.................: 3.26%    ✓ 10   ✗ 296
     local fail_pct
-    fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "$k6_log" | head -1 || true)"
+    fail_pct="$(awk '/http_req_failed[.]*:/ {for(i=1;i<=NF;i++) {v=$i; if (sub(/%$/,"",v) && v ~ /^[0-9]/) {print v; exit}}}' "$k6_log" || true)"
 
     if [ -z "$fail_pct" ]; then
         echo "Could not parse http_req_failed from k6 output. Treating as pass."
@@ -440,7 +440,7 @@ section "Building sample application images"
 docker compose build
 
 section "Cleaning previous artifacts"
-sudo rm -rf keploy/
+run_with_keploy_privileges rm -rf keploy/
 rm -f record.txt test.txt docker-compose-tmp.yaml "$MEMORY_VIOLATION_FILE" "$MEMORY_USAGE_LOG"
 cleanup_compose
 
@@ -448,7 +448,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false > >(tee record.txt) 2>&1 &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
@@ -473,13 +473,13 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-# run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
-# replay_pid=$!
-# echo "Started Keploy test process with PID: $replay_pid"
-#
-# wait "$replay_pid" || true
-#
-# check_for_errors test.txt
-# check_test_report
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
+replay_pid=$!
+echo "Started Keploy test process with PID: $replay_pid"
 
-echo "go-memory-load workflow completed successfully."
+wait "$replay_pid" || true
+
+check_for_errors test.txt
+check_test_report
+
+echo "go-memory-load-mongo workflow completed successfully."

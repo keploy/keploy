@@ -32,19 +32,18 @@ type mysqlDecodeItem struct {
 // All packet reassembly, decoding, and mock creation is offloaded to a
 // background goroutine via a buffered decode channel.
 func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
-	// If recording is already paused, pure passthrough.
+	// If recording is paused at connection start, log it and continue into the
+	// normal recording path. The per-packet checks below (IsRecordingPaused
+	// guards before every decodeChan send) will skip mock capture while
+	// pressure is active and resume automatically once it clears — so any
+	// queries that complete after memory recovers are still captured.
+	// The old behaviour (full passthrough for the whole connection) caused the
+	// HTTP test-case to be recorded with no accompanying DB mock, which made
+	// replay fail with "no matching mock found" for teardown endpoints like
+	// GET /orders and GET /analytics/top-products.
 	if memoryguard.IsRecordingPaused() {
-		logger.Debug("memory pressure detected, stopping MySQL recording and falling back to passthrough")
-		done := make(chan struct{}, 2)
-		cp := func(dst, src net.Conn) {
-			_, _ = io.Copy(dst, src)
-			done <- struct{}{}
-		}
-		go cp(destConn, clientConn)
-		go cp(clientConn, destConn)
-		<-done
-		<-done
-		return nil
+		logger.Debug("memory pressure active at MySQL connection start: per-packet guards will skip mocks until pressure clears",
+			zap.String("Client ConnectionID", clientConn.RemoteAddr().String()))
 	}
 
 	// Buffered channels for raw byte relay. Each Read() result is sent
@@ -156,13 +155,31 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		// Pressure-gate removed from per-packet send: dropping a chunk
+		// mid-MySQL-wire-message corrupts the downstream reassembler
+		// (the length-prefix model in mysql/wire treats subsequent
+		// chunks as continuation of the dropped message and emits a
+		// truncated or malformed mock). 38,520 such drops were observed
+		// in CI run 26232542064 mysql-rbrl, correlating with the 6
+		// chronic teardown TC failures whose mocks were either missing
+		// or truncated at replay. The memoryguard protection moves
+		// entirely to AddMock (which still drops complete mocks during
+		// memoryPause via the stage-1.5-drop path); here we keep
+		// chunks flowing so the reassembler stays in sync.
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 			default:
+				logger.Info("MySQL client packet dropped: decoder channel full at send",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
+		} else {
+			logger.Info("MySQL client packet dropped: decoder channel full (pre-check)",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()),
+				zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 		}
 	}
 	forwardDest := func(buf []byte) {
@@ -170,13 +187,22 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		// See forwardClient above for the rationale on removing the
+		// pressure gate from the per-packet send.
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 			default:
+				logger.Info("MySQL dest packet dropped: decoder channel full at send",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
+		} else {
+			logger.Info("MySQL dest packet dropped: decoder channel full (pre-check)",
+				zap.String("clientAddr", clientConn.RemoteAddr().String()),
+				zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 		}
 	}
 
@@ -292,14 +318,23 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// Non-blocking send to async decode. Check channel capacity
 			// before copying to avoid allocation/GC churn when the decoder
-			// can't keep up (the copy would just be dropped).
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// can't keep up (the copy would just be dropped). Pressure
+			// gate removed — see forwardClient comment above for the
+			// reassembler-corruption rationale.
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
 				default:
+					logger.Info("MySQL client packet dropped in main loop: channel full at send",
+						zap.String("clientAddr", clientConn.RemoteAddr().String()),
+						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
+			} else {
+				logger.Info("MySQL client packet dropped in main loop: channel full (pre-check)",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
 
 		case buffer, ok := <-destBuffChan:
@@ -319,14 +354,23 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Non-blocking send to async decode.
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			// Non-blocking send to async decode. Pressure gate removed —
+			// see forwardClient comment above for the reassembler-
+			// corruption rationale.
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
 				default:
+					logger.Info("MySQL dest packet dropped in main loop: channel full at send",
+						zap.String("clientAddr", clientConn.RemoteAddr().String()),
+						zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 				}
+			} else {
+				logger.Info("MySQL dest packet dropped in main loop: channel full (pre-check)",
+					zap.String("clientAddr", clientConn.RemoteAddr().String()),
+					zap.Int("chanLen", len(decodeChan)), zap.Int("chanCap", cap(decodeChan)))
 			}
 
 		case err, ok := <-errChan:
@@ -444,6 +488,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
 			mockType = "connection"
 		}
+		logger.Info("MySQL mock recorded",
+			zap.String("requestOp", pendingCommand.Header.Type),
+			zap.String("responseOp", respOp),
+			zap.String("mockType", mockType),
+			zap.Time("reqTimestamp", reqTimestamp))
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil
