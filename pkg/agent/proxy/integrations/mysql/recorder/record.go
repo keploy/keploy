@@ -179,6 +179,14 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	// loses its setup → "no matching mock found" cascade (the chronic-6:
 	// get-orders-1..5 + get-analytics-top-products-1 teardown failures).
 	if memoryguard.IsRecordingPaused() && mockType == "mocks" {
+		// Notify syncMock to extend currentPressureStart backwards so that
+		// IsHTTPTCInPressureWindow correctly drops the corresponding HTTP TC.
+		// MySQL mocks bypass AddMock's in-line extension (they're dropped here
+		// before AddMock is called), so without this call the TC-drop check
+		// would miss HTTP TCs whose mysql mocks were dropped during pressure.
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.ExtendPressureWindow(reqTimestampMock)
+		}
 		zap.L().Info("diag/mysql-recordMock: dropping mock under memory pressure (atomic drop at post-reassembly boundary)",
 			zap.String("stage", "parser-out"),
 			zap.String("dropReason", "memoryPause"),

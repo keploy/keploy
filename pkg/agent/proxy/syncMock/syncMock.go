@@ -614,6 +614,42 @@ func (m *SyncMockManager) LastMongoMockResTime() time.Time {
 	return m.lastMongoMockResTime
 }
 
+// IsMemoryPressureActive reports whether a memory-pressure burst is currently
+// in progress (i.e., SetMemoryPressure(true) has been called and not yet
+// followed by SetMemoryPressure(false)). Used by HandleIncoming to extend the
+// tcHold window for TCs that arrive during pressure, giving async decoders
+// (e.g., mongo's asyncMongoDecode goroutine) time to emit their mocks and
+// trigger the backward currentPressureStart extension before the TC is drained.
+func (m *SyncMockManager) IsMemoryPressureActive() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.memoryPause
+}
+
+// ExtendPressureWindow extends the active pressure burst's start time backwards
+// to cover reqTimestamp. Called by protocol parsers (MySQL, gRPC) that drop
+// mocks BEFORE calling AddMock — these parsers bypass AddMock's in-line
+// backward-extension, so they must explicitly notify syncMock to keep the
+// IsHTTPTCInPressureWindow check consistent. Without this call, HTTP TCs whose
+// underlying DB mocks were dropped at the parser layer (not AddMock) would not
+// be caught by the TC-drop check and would be committed to disk without mocks.
+func (m *SyncMockManager) ExtendPressureWindow(reqTimestamp time.Time) {
+	if m == nil || reqTimestamp.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.memoryPause {
+		return
+	}
+	if m.currentPressureStart.IsZero() || reqTimestamp.Before(m.currentPressureStart) {
+		m.currentPressureStart = reqTimestamp
+	}
+}
+
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	// Collect mocks and mapping data under the lock, then send to the
 	// outgoing channels AFTER releasing it. Holding m.mu across a

@@ -355,6 +355,16 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// 50–200 ms async-decoder lag for 1 MB+ payloads with headroom for
 	// GC pauses on oversubscribed CI runners.
 	const tcHold = 500 * time.Millisecond
+	// pressureHold is the maximum additional wait applied to TCs that
+	// arrive while a memory-pressure burst is active. Mongo's async decoder
+	// can lag the HTTP capture layer by seconds when large payloads (1 MB+)
+	// back up the decodeChan: by the time the decoder emits a small delete
+	// mock it had queued behind the large payload, the standard 500 ms
+	// tcHold has already expired and the TC was committed without its mock.
+	// Holding such TCs until pressure clears (or pressureHold seconds elapse)
+	// gives the decoder time to emit the mock and trigger the backward
+	// currentPressureStart extension, so IsHTTPTCInPressureWindow fires.
+	const pressureHold = 10 * time.Second
 	type pendingTC struct {
 		tc   *models.TestCase
 		aged time.Time
@@ -371,6 +381,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// gap was 6.6 s at TC-arrival but only 22 ms by drain-time,
 		// orphan check didn't fire, TC committed without its mock.)
 		lastMongoAtArrival time.Time
+		// arrivedDuringPressure records whether a memory-pressure burst
+		// was active when this TC arrived at HandleIncoming. When true,
+		// drain() extends the hold until pressure clears (up to pressureHold)
+		// so that async decoders (mongo decodeChan) have time to emit their
+		// mocks and update currentPressureStart before the TC is committed.
+		arrivedDuringPressure bool
 	}
 	var pending []pendingTC
 
@@ -411,6 +427,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		for len(pending) > 0 {
 			if !shutdown && time.Since(pending[0].aged) < tcHold {
 				return true
+			}
+			// Extended hold for TCs that arrived during a pressure burst.
+			// If pressure is still active AND the TC hasn't been held for
+			// pressureHold yet, keep waiting: the async decoder (mongo
+			// decodeChan, etc.) may still be catching up. Once pressure
+			// clears the backward currentPressureStart extension has fired
+			// and IsHTTPTCInPressureWindow will correctly drop any orphan.
+			if !shutdown && pending[0].arrivedDuringPressure && time.Since(pending[0].aged) < pressureHold {
+				if mgr := syncMock.Get(); mgr != nil && mgr.IsMemoryPressureActive() {
+					return true
+				}
 			}
 			head := pending[0]
 			pending = pending[1:]
@@ -472,15 +499,22 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				drain(true)
 				return
 			}
-			// Snapshot syncMock.LastMongoMockResTime() RIGHT NOW (at
-			// TC arrival). The drain orphan-check compares against
-			// THIS value, not the value at drain-time — see the
-			// pendingTC doc comment for the race this fixes.
+			// Snapshot syncMock state RIGHT NOW (at TC arrival).
+			// Both values are read here — not at drain-time — so that
+			// other tests' late-arriving mocks cannot refresh the live
+			// values during the tcHold window and mask orphan conditions.
 			var lastMongoAtArrival time.Time
+			var arrivedDuringPressure bool
 			if mgr := syncMock.Get(); mgr != nil {
 				lastMongoAtArrival = mgr.LastMongoMockResTime()
+				arrivedDuringPressure = mgr.IsMemoryPressureActive()
 			}
-			pending = append(pending, pendingTC{tc: t, aged: time.Now(), lastMongoAtArrival: lastMongoAtArrival})
+			pending = append(pending, pendingTC{
+				tc:                    t,
+				aged:                  time.Now(),
+				lastMongoAtArrival:    lastMongoAtArrival,
+				arrivedDuringPressure: arrivedDuringPressure,
+			})
 			if !drain(false) {
 				return
 			}
