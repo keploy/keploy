@@ -37,6 +37,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"net/netip"
@@ -64,6 +65,13 @@ const (
 	jsonPgTypePolygon    = "polygon"
 	jsonPgTypeHstore     = "hstore"
 	jsonPgTypeMultirange = "multirange"
+	// jsonPgTypeFloat wraps non-finite float64/float32 cells. encoding/json
+	// errors on math.NaN()/±Inf with "json: unsupported value: NaN", so a
+	// DOUBLE PRECISION / REAL column landing on NaN or ±Infinity (Postgres
+	// accepts both) would otherwise abort the whole mock-record pipeline.
+	// Finite floats still emit as bare JSON numbers — only NaN/±Inf takes
+	// the envelope.
+	jsonPgTypeFloat = "float"
 )
 
 // MarshalJSON dispatches by the cell's logical value type, building a
@@ -134,9 +142,9 @@ func cellValueToJSON(v any) any {
 		}
 	case pgtype.Line:
 		return map[string]any{
-			"a":     x.A,
-			"b":     x.B,
-			"c":     x.C,
+			"a":     floatToJSON(x.A),
+			"b":     floatToJSON(x.B),
+			"c":     floatToJSON(x.C),
 			"valid": x.Valid,
 		}
 	case pgtype.Lseg:
@@ -166,7 +174,7 @@ func cellValueToJSON(v any) any {
 	case pgtype.Circle:
 		return map[string]any{
 			"p":     vec2ToJSON(x.P),
-			"r":     x.R,
+			"r":     floatToJSON(x.R),
 			"valid": x.Valid,
 		}
 	case pgtype.TID:
@@ -254,6 +262,10 @@ func cellValueToJSON(v any) any {
 			"format": int64(x.Format),
 			"bytes":  base64.StdEncoding.EncodeToString(x.Bytes),
 		}
+	case float64:
+		return floatToJSON(x)
+	case float32:
+		return floatToJSON(float64(x))
 	}
 	// Default: emit value as-is. Numbers, strings, bools, generic
 	// jsonb-shaped maps/slices all flow through encoding/json's
@@ -262,7 +274,7 @@ func cellValueToJSON(v any) any {
 }
 
 func vec2ToJSON(v pgtype.Vec2) map[string]any {
-	return map[string]any{"x": v.X, "y": v.Y}
+	return map[string]any{"x": floatToJSON(v.X), "y": floatToJSON(v.Y)}
 }
 
 func vec2SeqToJSON(ps []pgtype.Vec2) []any {
@@ -271,6 +283,27 @@ func vec2SeqToJSON(ps []pgtype.Vec2) []any {
 		out = append(out, vec2ToJSON(p))
 	}
 	return out
+}
+
+// floatToJSON returns a json.Marshal-safe Go value for f. Finite floats
+// pass through as-is so they emit as bare JSON numbers; NaN / ±Inf are
+// wrapped in the `$pgtype: float` envelope (encoding/json rejects them
+// with "unsupported value: NaN" / "+Inf" / "-Inf" otherwise, which would
+// abort the whole InsertMock call). Decode side: decodeJSONFloat.
+//
+// The wrapped string uses the same tokens math.NaN() and strconv print —
+// "NaN", "+Inf", "-Inf" — so it round-trips through strconv.ParseFloat
+// without bespoke parsing.
+func floatToJSON(f float64) any {
+	switch {
+	case math.IsNaN(f):
+		return map[string]any{jsonPgTypeKey: jsonPgTypeFloat, "value": "NaN"}
+	case math.IsInf(f, 1):
+		return map[string]any{jsonPgTypeKey: jsonPgTypeFloat, "value": "+Inf"}
+	case math.IsInf(f, -1):
+		return map[string]any{jsonPgTypeKey: jsonPgTypeFloat, "value": "-Inf"}
+	}
+	return f
 }
 
 // UnmarshalJSON parses the JSON form back into the cell's logical
@@ -414,8 +447,26 @@ func decodeJSONByDiscriminator(disc string, m map[string]any) (any, error) {
 		return hstoreFromJSON(m)
 	case jsonPgTypeMultirange:
 		return multirangeFromJSON(m)
+	case jsonPgTypeFloat:
+		return decodeJSONFloat(m["value"])
 	}
 	return nil, fmt.Errorf("PostgresV3Cell: unknown $pgtype %q", disc)
+}
+
+// decodeJSONFloat parses the string token produced by floatToJSON back
+// into a float64. The encoder only emits this wrapper for non-finite
+// values, so a finite literal here is a hand-edited mock or a future
+// extension — accept anything strconv accepts to stay forward-compatible.
+func decodeJSONFloat(v any) (any, error) {
+	s, ok := v.(string)
+	if !ok {
+		return nil, fmt.Errorf("PostgresV3Cell: $pgtype:float value must be a string, got %T", v)
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, fmt.Errorf("PostgresV3Cell: $pgtype:float invalid value %q: %w", s, err)
+	}
+	return f, nil
 }
 
 func keysEq(got, want []string) bool {
@@ -1096,6 +1147,18 @@ func asFloat64(v any) (float64, error) {
 		return float64(t), nil
 	case int64:
 		return float64(t), nil
+	case map[string]any:
+		// `$pgtype: float` envelope (see floatToJSON) — only emitted for
+		// non-finite floats. Recovering here keeps Vec2/Line/Circle field
+		// decoders symmetric with the encoder: a NaN/±Inf bound on a
+		// geometric pgtype round-trips back to the same Go float64.
+		if disc, ok := t[jsonPgTypeKey].(string); ok && disc == jsonPgTypeFloat {
+			f, err := decodeJSONFloat(t["value"])
+			if err != nil {
+				return 0, err
+			}
+			return f.(float64), nil
+		}
 	}
 	return 0, fmt.Errorf("expected number, got %T", v)
 }

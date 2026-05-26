@@ -3,9 +3,11 @@ package models
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"math/big"
 	"net"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -327,6 +329,83 @@ func TestPgtypeJSONRowsRoundTrip(t *testing.T) {
 	if got[1].Value != "Cat" {
 		t.Errorf("cell[1]: got %#v want \"Cat\"", got[1].Value)
 	}
+}
+
+// TestPgtypeJSONNonFiniteFloat pins the NaN / ±Inf wrapper. Postgres
+// accepts NaN and ±Infinity in DOUBLE PRECISION / REAL columns; before
+// the floatToJSON envelope, a fuzz-generated NaN row aborted the entire
+// InsertMock with `json: error calling MarshalJSON for type
+// models.PostgresV3Cell: json: unsupported value: NaN` and stopped
+// keploy mid-record. Cases:
+//
+//  1. bare float64 NaN / +Inf / -Inf (DOUBLE PRECISION column)
+//  2. bare float32 NaN (REAL column)
+//  3. NaN inside a geometric pgtype field (pgtype.Line.A) — proves the
+//     wrapper threads through nested struct decoders via asFloat64
+func TestPgtypeJSONNonFiniteFloat(t *testing.T) {
+	type tc struct {
+		name string
+		in   any
+		want any
+	}
+	cases := []tc{
+		{name: "float64_nan", in: math.NaN(), want: math.NaN()},
+		{name: "float64_pos_inf", in: math.Inf(1), want: math.Inf(1)},
+		{name: "float64_neg_inf", in: math.Inf(-1), want: math.Inf(-1)},
+		{name: "float32_nan", in: float32(math.NaN()), want: math.NaN()},
+		{name: "float64_finite", in: float64(3.14), want: float64(3.14)},
+		{
+			name: "line_with_nan_coefficient",
+			in:   pgtype.Line{A: math.NaN(), B: 2, C: 3, Valid: true},
+			want: pgtype.Line{A: math.NaN(), B: 2, C: 3, Valid: true},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cell := PostgresV3Cell{Value: c.in}
+			body, err := json.Marshal(cell)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got PostgresV3Cell
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, body)
+			}
+			if !nonFiniteFloatEqual(got.Value, c.want) {
+				t.Errorf("round-trip drift:\n got  %#v\n want %#v\n--JSON--\n%s", got.Value, c.want, body)
+			}
+		})
+	}
+}
+
+// nonFiniteFloatEqual compares values that may contain NaN. reflect.DeepEqual
+// returns false on NaN==NaN; this helper treats them as equal so the
+// round-trip assertion can succeed. Used only by the non-finite-float test.
+func nonFiniteFloatEqual(got, want any) bool {
+	switch w := want.(type) {
+	case float64:
+		g, ok := got.(float64)
+		if !ok {
+			return false
+		}
+		if math.IsNaN(w) {
+			return math.IsNaN(g)
+		}
+		return g == w
+	case pgtype.Line:
+		g, ok := got.(pgtype.Line)
+		if !ok {
+			return false
+		}
+		floatsEq := func(a, b float64) bool {
+			if math.IsNaN(a) {
+				return math.IsNaN(b)
+			}
+			return a == b
+		}
+		return g.Valid == w.Valid && floatsEq(g.A, w.A) && floatsEq(g.B, w.B) && floatsEq(g.C, w.C)
+	}
+	return reflect.DeepEqual(got, want)
 }
 
 // stringPtr is shared with the YAML test file; redefining here would
