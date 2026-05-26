@@ -677,6 +677,9 @@ jobs:
   run_node_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_linux.yml
+  run_node_binary_body:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_binary_body.yml
   run_node_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/node_docker.yml
@@ -1137,6 +1140,7 @@ jobs:
       - run_golang_wsl
       - run_java_linux
       - run_node_linux
+      - run_node_binary_body
       - run_node_docker
       - run_python_docker
       - run_python_linux
@@ -1159,6 +1163,7 @@ jobs:
             "${{ needs.run_golang_wsl.result }}" \
             "${{ needs.run_java_linux.result }}" \
             "${{ needs.run_node_linux.result }}" \
+            "${{ needs.run_node_binary_body.result }}" \
             "${{ needs.run_node_docker.result }}" \
             "${{ needs.run_python_docker.result }}" \
             "${{ needs.run_python_linux.result }}" \
