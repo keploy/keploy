@@ -78,6 +78,15 @@ done
 # Build Docker Image(s)
 docker compose build
 
+# Pre-pull and warm the compose images so the FIRST record invocation
+# doesn't pay the postgres pull on a cold macOS Docker Desktop. The
+# 60s agent-readiness timeout in keploy is shorter than a cold pull
+# of a multi-hundred-MB image on Docker-on-VM, which is the dominant
+# cause of the "keploy-agent did not become ready in time" flake on
+# this matrix entry.
+echo "Pre-pulling docker compose images..."
+docker compose pull --quiet 2>&1 | tail -5 || true
+
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
 rm ./keploy.yml >/dev/null 2>&1 || true
@@ -104,12 +113,20 @@ send_request(){
     echo "Sending requests to the application..."
     sleep 10
     app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:${APP_PORT}/health; then
+    # Bounded poll (~90s). Unbounded loops keep retrying after the
+    # foreground record has already given up, masking the real failure
+    # in CI logs and inflating job runtime.
+    for attempt in $(seq 1 30); do
+        if curl --fail --silent -X GET http://localhost:${APP_PORT}/health >/dev/null 2>&1; then
             app_started=true
+            break
         fi
         sleep 3
     done
+    if [ "$app_started" = false ]; then
+        echo "send_request: app did not start within 90s; aborting requests"
+        return 1
+    fi
     echo "App started"
     # Make curl calls to record the test cases and mocks.
     curl --request POST \
@@ -133,19 +150,51 @@ send_request(){
     echo "Requests sent successfully."
 }
 
+# Retry wrapper for record: the only flake we see on this job is the
+# transient "keploy-agent did not become ready in time" timeout caused
+# by macOS Docker Desktop cold-starting compose. One retry after a
+# clean compose-down is enough — anything else is a real failure.
+record_once() {
+    local container_name="$1"
+    local log_file="$2"
+    local max_attempts=2
+    for attempt in $(seq 1 "$max_attempts"); do
+        echo "Recording attempt ${attempt}/${max_attempts} for ${container_name}..."
+        $RECORD_BIN record -c "docker compose up" \
+            --container-name "$container_name" \
+            --generateGithubActions=false \
+            --record-timer "40s" \
+            --proxy-port="$PROXY_PORT" \
+            --dns-port="$DNS_PORT" \
+            --keploy-container "$KEPLOY_CONTAINER" \
+            2>&1 | tee "$log_file"
+
+        if grep -q "keploy-agent did not become ready in time" "$log_file" \
+            && [ "$attempt" -lt "$max_attempts" ]; then
+            echo "Agent readiness timeout on attempt ${attempt}; cleaning compose state and retrying..."
+            docker compose down --remove-orphans -v >/dev/null 2>&1 || true
+            sleep 5
+            continue
+        fi
+        return 0
+    done
+}
+
 for i in {1..2}; do
     container_name="${APP_CONTAINER}"
     log_file_name="${APP_CONTAINER}_${i}"
     send_request &
 
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${log_file_name}.txt"
+    record_once "$container_name" "${log_file_name}.txt"
 
     if grep "WARNING: DATA RACE" "${log_file_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
+        cat "${log_file_name}.txt"
         exit 1
     fi
     if grep "ERROR" "${log_file_name}.txt"; then
         echo "Error found in pipeline..."
+        cat "${log_file_name}.txt"
         exit 1
     fi
     sleep 5
@@ -166,11 +215,13 @@ $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --debu
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
+    cat "${test_container}.txt"
     exit 1
 fi
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
     exit 1
 fi
 
