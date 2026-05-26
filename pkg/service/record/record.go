@@ -323,6 +323,16 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			// VERIFY: CLI receives every TC the agent sends and writes it to
+			// YAML unconditionally. There is no pressure check here — the CLI's
+			// syncMock instance is always empty (SetMemoryPressure is never
+			// called in the CLI process), so any IsHTTPTCInPressureWindow call
+			// would always return false. This TC will be written to disk even
+			// if its paired DB mock was dropped by the agent.
+			r.logger.Info("VERIFY/cli-write-tc: CLI writing TC to YAML — CLI has no memory-pressure data, no drop possible here",
+				zap.String("tcName", testCase.Name),
+				zap.Time("reqTime", testCase.HTTPReq.Timestamp),
+			)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)

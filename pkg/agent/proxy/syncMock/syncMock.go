@@ -206,6 +206,16 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
 	if m.memoryPause {
 		m.mu.Unlock()
+		// VERIFY: agent is dropping this mock due to memory pressure.
+		// The corresponding HTTP TC will NOT be dropped — no TC-drop logic
+		// exists yet. This will produce an orphan TC on disk at replay time.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("VERIFY/agent-mock-drop: AGENT dropped mock (memoryPause=true) — paired TC will still reach CLI and be written to YAML",
+				zap.String("mockName", mock.Name),
+				zap.String("mockKind", string(mock.Kind)),
+				zap.Time("mockReqTime", mock.Spec.ReqTimestampMock),
+			)
+		}
 		return
 	}
 

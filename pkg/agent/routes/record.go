@@ -254,6 +254,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// VERIFY: agent sends every TC to CLI with zero pressure check.
+			// No pendingTC hold, no drain(), no IsHTTPTCInPressureWindow call.
+			// Even if this TC's mock was just dropped by memoryPause, the TC
+			// goes through unconditionally — the atomicity invariant is broken.
+			a.logger.Info("VERIFY/agent-send-tc: AGENT sending TC to CLI with NO pressure check — mock may already be dropped",
+				zap.String("tcName", t.Name),
+				zap.Time("reqTime", t.HTTPReq.Timestamp),
+				zap.Time("resTime", t.HTTPResp.Timestamp),
+			)
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
