@@ -56,14 +56,14 @@ func TestNextIndexForPrefix_IgnoresNonMatching(t *testing.T) {
 	writeTestFile(t, dir, "post-users-99.yaml")
 	// same-prefix but non-numeric suffix
 	writeTestFile(t, dir, "get-users-abc.yaml")
-	// wrong extension
-	writeTestFile(t, dir, "get-users-3.json")
 	// no separator
 	writeTestFile(t, dir, "get-users.yaml")
 	// matching
 	writeTestFile(t, dir, "get-users-2.yaml")
 	// substring collision that must not match
 	writeTestFile(t, dir, "get-users-ext-4.yaml")
+	// neither .yaml nor .json — must be skipped
+	writeTestFile(t, dir, "get-users-7.txt")
 
 	got, err := NextIndexForPrefix(dir, "get-users")
 	if err != nil {
@@ -71,6 +71,27 @@ func TestNextIndexForPrefix_IgnoresNonMatching(t *testing.T) {
 	}
 	if got != 3 {
 		t.Fatalf("got=%d want=3 (only get-users-2.yaml should count)", got)
+	}
+}
+
+// .yaml and .json siblings share an index space — a json-format recorder
+// on a directory that already contains a yaml-format slug must allocate
+// the next index, not collide on the existing one. Locks in the fix for
+// the "claimName 256-attempt loop" bug surfaced when the descriptive
+// naming feature first ran end-to-end against a JSON record pass.
+func TestNextIndexForPrefix_CountsBothFormats(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "get-users-1.yaml")
+	writeTestFile(t, dir, "get-users-2.json")
+	writeTestFile(t, dir, "get-users-4.yaml")
+	writeTestFile(t, dir, "get-users-3.json")
+
+	got, err := NextIndexForPrefix(dir, "get-users")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got != 5 {
+		t.Fatalf("got=%d want=5 (max across yaml+json siblings is 4)", got)
 	}
 }
 
