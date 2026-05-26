@@ -361,6 +361,78 @@ func TestEncodeBinaryRow_RealWorldExample(t *testing.T) {
 	t.Logf("✓ Successfully encoded real-world example with NULL date_of_birth field: %d bytes", len(result))
 }
 
+// TestEncodeBinaryRow_FewerValuesThanColumns guards the bounds check at
+// binaryProtocolRowPacket.go:209. Before the fix, a BinaryRow whose Values
+// slice was shorter than its column list panicked the agent goroutine with
+// "index out of range" inside EncodeBinaryRow when the null bitmap declared
+// the missing column non-null. We now return an error so the recovery path
+// closes the connection cleanly.
+func TestEncodeBinaryRow_FewerValuesThanColumns(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	columns := []*mysql.ColumnDefinition41{
+		{Name: "a", Type: byte(mysql.FieldTypeVarString)},
+		{Name: "b", Type: byte(mysql.FieldTypeVarString)},
+		{Name: "c", Type: byte(mysql.FieldTypeVarString)},
+	}
+
+	row := &mysql.BinaryRow{
+		Header: mysql.Header{SequenceID: 1},
+		Values: []mysql.ColumnEntry{
+			{Type: mysql.FieldTypeVarString, Name: "a", Value: "x"},
+		},
+		// Bitmap claims columns b and c are non-null even though the row
+		// only carries a value for column a — exactly the malformed-mock
+		// shape that crashed the encoder.
+		RowNullBuffer: []byte{0x00},
+		OkAfterRow:    true,
+	}
+
+	if _, err := EncodeBinaryRow(ctx, logger, row, columns); err == nil {
+		t.Fatal("expected error, got nil — encoder accepted a row with fewer values than non-null columns")
+	}
+}
+
+// TestEncodeBinaryRow_ShortNullBitmap guards the bitmap-length check at
+// EncodeBinaryRow's entry. A 10-column result set requires a 2-byte null
+// bitmap (ceil((10+2)/8)). A row with an empty or 1-byte RowNullBuffer
+// previously panicked in isNull(), the second variant of the MySQL
+// Fuzzer "post-run-1" crash.
+func TestEncodeBinaryRow_ShortNullBitmap(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	columns := make([]*mysql.ColumnDefinition41, 10)
+	for i := range columns {
+		columns[i] = &mysql.ColumnDefinition41{
+			Type: byte(mysql.FieldTypeVarString),
+			Name: "c",
+		}
+	}
+
+	cases := []struct {
+		name   string
+		bitmap []byte
+	}{
+		{"empty bitmap", nil},
+		{"one-byte bitmap (need two)", []byte{0x00}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := &mysql.BinaryRow{
+				Header:        mysql.Header{SequenceID: 1},
+				RowNullBuffer: tc.bitmap,
+				OkAfterRow:    true,
+			}
+			if _, err := EncodeBinaryRow(ctx, logger, row, columns); err == nil {
+				t.Fatal("expected error, got nil — encoder accepted a short null bitmap")
+			}
+		})
+	}
+}
+
 // TestCoerceToString tests the coerceToString helper function
 func TestCoerceToString(t *testing.T) {
 	tests := []struct {

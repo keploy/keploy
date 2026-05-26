@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -206,20 +207,85 @@ func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string)
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
-		match := IsTime(j)
-		if match {
-			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
-			header[i] = []string{j}
-			continue
-		}
-		header[i] = strings.Split(j, ",")
+		// Emit one wire header per YAML key. The recorded value is kept
+		// intact even when it contains commas — this is the canonical
+		// comma-folded form for RFC 7230 list-valued headers (Accept,
+		// Accept-Encoding, Baggage, Forwarded, Via, ...) and is what
+		// most HTTP clients (axios, requests, fetch) actually emit on
+		// the wire. Splitting on "," and sending one wire header per
+		// element fans out into multiple same-name headers; that breaks
+		// strict-mapping server middlewares such as
+		// `Response(headers=dict(**request.headers), ...)` which raise
+		// `TypeError: dict() got multiple values for keyword argument
+		// 'accept'` on duplicate field names — a known FastAPI /
+		// Starlette failure mode reproducible during replay even when
+		// the original client sent exactly one Accept header.
+		//
+		// Trade-off: a recording whose on-wire request actually used
+		// repeated same-name headers (rare on the request side; common
+		// only for Set-Cookie which is a response header and never
+		// built by this helper) replays as a single comma-folded
+		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
+		// semantically equivalent for list-valued headers, so this
+		// folding is wire-safe for the headers that actually matter.
+		header[i] = []string{j}
 	}
 	return header
 }
 
+// looksLikeTime is a fast-path byte-prefix check that rejects strings which
+// cannot possibly match any of the date/time formats we try below. Avoiding
+// the time.Parse loop on the 99%+ of strings that obviously aren't times
+// saves an enormous amount of allocations (each failed time.Parse allocates
+// a *time.parseError + a copied error message).
+//
+// We accept a string as a candidate iff its first non-whitespace byte is:
+//   - a digit (most ISO/RFC formats start with year or day)
+//   - one of Mon/Tue/Wed/Thu/Fri/Sat/Sun (RFC1123, RFC850 weekday prefixes)
+//   - one of Jan/Feb/Mar/Apr/May/Jun/Jul/Aug/Sep/Oct/Nov/Dec (ANSIC,
+//     UnixDate, RubyDate, time.Stamp* prefixes)
+//   - one of '0'..'9' for the time.Kitchen "3:04PM" format (digit handled above)
+//
+// Anything else (random hex blobs, JSON keys, "true"/"false"/"null",
+// payload values) returns false immediately, skipping 20 failed time.Parse
+// calls — each of which would allocate ~120 bytes.
+func looksLikeTime(s string) bool {
+	// strip leading whitespace cheaply
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return false
+	}
+	c := s[i]
+	if c >= '0' && c <= '9' {
+		return true
+	}
+	// Check 3-letter prefix against weekday/month abbreviations.
+	if len(s)-i < 3 {
+		return false
+	}
+	switch s[i : i+3] {
+	case "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+		"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec":
+		return true
+	}
+	return false
+}
+
 // IsTime verifies whether a given string represents a valid date or not.
+//
+// Hot-path optimisation: a fast-path looksLikeTime check rules out 99%+ of
+// non-time strings before the 20-format time.Parse loop. Without this, every
+// non-time string allocates ~20 *time.parseError objects (~2.4 KB) — when
+// called millions of times during a load test, that's GBs of GC pressure.
 func IsTime(stringDate string) bool {
 	date := strings.TrimSpace(stringDate)
+	if date == "" {
+		return false
+	}
 	if secondsFloat, err := strconv.ParseFloat(date, 64); err == nil {
 		seconds := int64(secondsFloat / 1e9)
 		nanoseconds := int64(secondsFloat) % 1e9
@@ -228,6 +294,11 @@ func IsTime(stringDate string) bool {
 		if currentTime.Sub(expectedTime) < 24*time.Hour && currentTime.Sub(expectedTime) > -24*time.Hour {
 			return true
 		}
+	}
+	// Cheap byte-prefix gate to avoid the 20-format time.Parse loop on
+	// obvious non-time inputs.
+	if !looksLikeTime(date) {
+		return false
 	}
 	for _, dateFormat := range dateFormats {
 		_, err := time.Parse(dateFormat, date)
@@ -246,6 +317,12 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TLSConfig, when non-nil, is applied to the http.Transport used by
+	// the replay client. Lets callers pin a specific cert (e.g. for
+	// short-lived replay pods serving a self-signed cert) without
+	// relaxing TLS verification globally. Default nil preserves the
+	// stdlib system-pool behaviour.
+	TLSConfig *tls.Config
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -490,6 +567,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			},
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -502,6 +580,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	} else {
@@ -515,6 +594,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  false,
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
+				TLSClientConfig:    cfg.TLSConfig,
 			},
 		}
 	}

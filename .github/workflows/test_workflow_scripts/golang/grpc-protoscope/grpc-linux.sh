@@ -123,24 +123,34 @@ kill_keploy_process() {
 rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 
+do_record() {
+    local extra_flags="${1:-}"
+    local label="${extra_flags:+_json}"
+    local log="record${label}.log"
+    local client_log="client${label}.log"
+    # shellcheck disable=SC2086
+    "$RECORD_BIN" record $extra_flags -c "./grpc-server" --generateGithubActions=false 2>&1 | tee "$log" &
+    wait_for_port 50051
+    sleep 3
+    ./grpc-client &> "$client_log"
+    echo "Client finished sending gRPC request${label:+ (json)}."
+    sleep 10
+    kill_keploy_process
+    sleep 5
+    check_for_errors "$log"
+}
+
 # Record: Keploy wraps the server to capture incoming gRPC calls.
 echo "🧪 Recording gRPC server with Keploy..."
-"$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record.log &
-wait_for_port 50051
+do_record
 
-sleep 3
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
 
-# The client sends one Search RPC and exits.
-./grpc-client &> client.log
-echo "Client finished sending gRPC request."
-
-sleep 10
-
-kill_keploy_process
-
-sleep 5
-
-check_for_errors record.log
+if json_pass_supported; then
+    echo "🧪 Recording gRPC server with Keploy (json)..."
+    do_record "--storage-format json"
+fi
 
 # Replay: Keploy replays the captured gRPC calls against the server.
 echo "🧪 Replaying recorded tests..."
@@ -152,4 +162,16 @@ if ! check_test_report; then
     cat test.log
     exit 1
 fi
-echo "✅ grpc-protoscope tests passed."
+
+if json_pass_supported; then
+    echo "🧪 Replaying recorded tests (json)..."
+    "$REPLAY_BIN" test --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee test_json.log || true
+    check_for_errors test_json.log
+    if ! json_scan_reports; then
+        cat test_json.log
+        exit 1
+    fi
+    echo "✅ grpc-protoscope tests passed (yaml + json)."
+else
+    echo "✅ grpc-protoscope tests passed (yaml only)."
+fi

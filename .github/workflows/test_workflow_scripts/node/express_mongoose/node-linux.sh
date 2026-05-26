@@ -101,40 +101,40 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
-for i in 1 2; do
-  section "Record iteration $i"
-  app_name="nodeApp_${i}"
+do_record_iteration() {
+  local i="$1"
+  local extra_flags="${2:-}"
+  local label="${extra_flags:+_json}"
+  local app_name="nodeApp_${i}${label}"
+  section "Record iteration $i${label:+ (json)}"
 
-  # Start keploy recording in background, capture PID
-  "$RECORD_BIN" record -c 'npm start' \
+  # shellcheck disable=SC2086
+  "$RECORD_BIN" record $extra_flags -c 'npm start' \
     > "${app_name}.txt" 2>&1 &
-  KEPLOY_PID=$!
+  local KEPLOY_PID=$!
 
-  # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
 
   cat "${app_name}.txt"
 
-  # Wait + capture rc
   set +e
   wait "$KEPLOY_PID"
-  rc=$?
+  local rc=$?
   set -e
   echo "Record exit code: $rc"
 
-  # Fail hard like the reference script
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
     cat "${app_name}.txt"
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
-    echo "::error::Error found during recording (iteration $i)"
+    echo "::error::Error found during recording (iteration $i${label:+ json})"
     cat "${app_name}.txt"
     exit 1
   fi
   if [[ $rc -ne 0 ]]; then
-    echo "::error::Keploy record exited non-zero (iteration $i)"
+    echo "::error::Keploy record exited non-zero (iteration $i${label:+ json})"
     cat "${app_name}.txt" || true
     exit "$rc"
   fi
@@ -152,8 +152,21 @@ for i in 1 2; do
   fi
 
   endsec
-  echo "Recorded test case and mocks for iteration ${i}"
+  echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+for i in 1 2; do
+  do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+  for i in 1 2; do
+    do_record_iteration "$i" "--storage-format json"
+  done
+fi
 
 # Tweak the testcase whose recorded body contains "page":1, flipping it
 # to "page":4. Located by content rather than filename so this works
@@ -288,6 +301,33 @@ else
 fi
 
 run_replay 3 "--apiTimeout 30"
+
+if json_pass_supported; then
+  section "Replay (json)"
+  set +e
+  "$REPLAY_BIN" test --storage-format json -c 'npm start' --delay 10 \
+    > test_logs_json.txt 2>&1
+  rc=$?
+  set -e
+  echo "json replay exit code: $rc"
+  cat test_logs_json.txt || true
+  if grep -q "WARNING: DATA RACE" "test_logs_json.txt"; then
+    echo "::error::Data race detected in json replay"
+    exit 1
+  fi
+  if grep -q "ERROR" "test_logs_json.txt"; then
+    echo "::error::Error found in json replay"
+    exit 1
+  fi
+  if ! json_scan_reports; then
+    cat test_logs_json.txt
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    exit "$rc"
+  fi
+  endsec
+fi
 
 echo "All replays completed and PASSED."
 exit 0

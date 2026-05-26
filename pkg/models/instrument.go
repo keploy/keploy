@@ -65,6 +65,32 @@ type OutgoingOptions struct {
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// CapturePackets toggles raw packet capture on the agent's proxy ports
+	// for the duration of a Record() session. The recorder flips this via
+	// --capture-packets; the agent then stages traffic.pcap + sslkeys.log
+	// under its own scratch dir (typically os.TempDir()) — the recorder
+	// MUST NOT pass a path here because agent and recorder usually live
+	// in different filesystems (separate containers, separate pods,
+	// separate hosts). The recorder pulls the bytes back at session end
+	// via the agent's /agent/pcap/{traffic,keylog} endpoints and writes
+	// them into the local test-set directory itself. Replay (Mock)
+	// sessions ignore this flag.
+	CapturePackets bool
+	// OpportunisticTLSIntercept turns on the sniff-and-hijack
+	// passthrough variant: the proxy lets app and upstream relay
+	// bytes verbatim while peeking for a TLS ClientHello, and
+	// hijacks both halves into a MITM the moment one appears.
+	// Surfaced via --opportunistic-tls-intercept so the agent can
+	// pick the right per-connection branch in handleConnection.
+	OpportunisticTLSIntercept bool
+	// MysqlPorts lists destination ports that the proxy should treat as
+	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
+	// upstream eagerly on connection accept so the server's Initial
+	// Handshake Packet can be relayed. MySQL is a server-speaks-first
+	// protocol; the generic dispatch path waits to peek client bytes
+	// before dialing and deadlocks otherwise. When nil/empty, the
+	// proxy falls back to the built-in defaults [3306, 4000].
+	MysqlPorts []uint32
 }
 
 type ConditionalDstCfg struct {
@@ -85,25 +111,38 @@ type SetupOptions struct {
 	DockerDelay     uint64
 	Synchronous     bool
 	// Cmd               string
-	AgentURI          string
-	IsDocker          bool
-	CommandType       string
-	EnableTesting     bool
-	ProxyPort         uint32
-	IncomingProxyPort uint16
-	DnsPort           uint32
-	Mode              Mode
-	GlobalPassthrough bool
-	AgentPort         uint32
-	AppPorts          []string
-	AppNetworks       []string
-	NetworkAliases    map[string][]string
-	BuildDelay        uint64
-	PassThroughPorts  []uint
-	MemoryLimit       uint64
-	ConfigPath        string
-	ExtraArgs         []string
-	EnableSampling    int
+	AgentURI                  string
+	IsDocker                  bool
+	CommandType               string
+	EnableTesting             bool
+	ProxyPort                 uint32
+	IncomingProxyPort         uint16
+	DnsPort                   uint32
+	Mode                      Mode
+	GlobalPassthrough         bool
+	CapturePackets            bool
+	OpportunisticTLSIntercept bool
+	AgentPort                 uint32
+	AppPorts                  []string
+	AppNetworks               []string
+	NetworkAliases            map[string][]string
+	BuildDelay                uint64
+	PassThroughPorts          []uint
+	MemoryLimit               uint64
+	ConfigPath                string
+	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
+	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
+	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
+	// the host's keploy.yml, so this is the propagation channel. Zero falls
+	// through to the relay package's default. Users override via the
+	// orchestrator's --max-memory-per-conn flag, KEPLOY_RECORD_MAX_MEMORY_PER_CONN
+	// env, or keploy.yml record.recordBuffer.maxMemoryPerConnection.
+	RecordBufferMaxMemoryPerConn uint64
+	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
+	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
+	RecordBufferQueueSize int
+	ExtraArgs             []string
+	EnableSampling        int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF

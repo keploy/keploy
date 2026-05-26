@@ -17,6 +17,7 @@ import (
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
 	"go.keploy.io/server/v3/utils"
@@ -55,7 +56,7 @@ func (t *Tools) Export(ctx context.Context) error {
 }
 
 func (t *Tools) Import(ctx context.Context, path, basePath string) error {
-	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
+	postmanImport := postmanimport.NewPostmanImporterWithFormat(ctx, t.logger, yaml.ParseFormat(t.config.StorageFormat))
 	return postmanImport.Import(path, basePath)
 }
 

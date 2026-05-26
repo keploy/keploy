@@ -871,11 +871,35 @@ func TestToHTTPHeader_WithTimeValue_909(t *testing.T) {
 	// Act
 	httpHeader := ToHTTPHeader(mockHeader)
 
-	// Assert
+	// Assert: every YAML key replays as exactly one wire header. The
+	// recorded value is kept intact (commas included) so axios-style
+	// `Accept: a, b, c` does not fan out into three duplicate-name
+	// wire headers — see ToHTTPHeader's comment for why fan-out
+	// breaks `dict(**request.headers)`-style server middlewares.
 	require.NotNil(t, httpHeader)
 	assert.Equal(t, []string{"Tue, 17 Jan 2023 16:34:58 IST"}, httpHeader["Date"])
-	assert.Equal(t, []string{"value1", "value2"}, httpHeader["X-Custom-Header"])
+	assert.Equal(t, []string{"value1,value2"}, httpHeader["X-Custom-Header"])
 	assert.Equal(t, []string{"application/json"}, httpHeader["Content-Type"])
+}
+
+// TestToHTTPHeader_AcceptListValue_FoldedSingleHeader pins the wire
+// behaviour that the duplicate-Accept TypeError fix depends on: an
+// axios-style `Accept: application/json, text/plain, */*` mock must
+// replay as ONE wire header so server middlewares using
+// `dict(**request.headers)` do not see duplicate `accept` keys.
+func TestToHTTPHeader_AcceptListValue_FoldedSingleHeader(t *testing.T) {
+	mockHeader := map[string]string{
+		"Accept":          "application/json, text/plain, */*",
+		"Accept-Encoding": "gzip, compress, deflate, br",
+		"Baggage":         "trace-id=abc,user-key=def,env=test",
+	}
+	httpHeader := ToHTTPHeader(mockHeader)
+	require.Len(t, httpHeader["Accept"], 1, "Accept must replay as one wire header")
+	require.Len(t, httpHeader["Accept-Encoding"], 1, "Accept-Encoding must replay as one wire header")
+	require.Len(t, httpHeader["Baggage"], 1, "Baggage must replay as one wire header")
+	assert.Equal(t, "application/json, text/plain, */*", httpHeader["Accept"][0])
+	assert.Equal(t, "gzip, compress, deflate, br", httpHeader["Accept-Encoding"][0])
+	assert.Equal(t, "trace-id=abc,user-key=def,env=test", httpHeader["Baggage"][0])
 }
 
 // TestParseHTTPRequest_And_Response_111 contains sub-tests for ParseHTTPRequest and

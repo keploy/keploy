@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 
@@ -52,6 +53,28 @@ type Proxy interface {
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
 	GetSession() *Session
 	SetAuxiliaryHook(h AuxiliaryProxyHook)
+}
+
+// PcapStreamer is the optional extension implemented by proxies
+// that broadcast captured packets to dynamic subscribers. Callers
+// MUST type-assert from Proxy and gracefully fall back when the
+// assertion fails — this keeps third-party Proxy implementations
+// compiling without forcing them to implement packet capture.
+//
+// SubscribePcap registers w to receive every captured frame as a
+// pcap byte stream (file header followed by one record per frame).
+// flush, when non-nil, is invoked after each frame so chunked
+// transports (HTTP) can push bytes immediately. The unsubscribe
+// func MUST be called when the consumer is done — typically on the
+// HTTP request context's cancellation.
+//
+// Why streaming, not pulling: the cluster live-recording use case
+// has no defined "stop" — the recorder is always connected. A
+// fetch-on-stop model would never deliver any bytes. Subscribers
+// always receive a fresh pcap header and frames from then on, so
+// disconnects do not corrupt the stream of any other consumer.
+type PcapStreamer interface {
+	SubscribePcap(w io.Writer, flush func()) (func(), error)
 }
 
 // WindowedProxy is the optional extension implemented by proxies that

@@ -101,6 +101,26 @@ type Relay struct {
 	// single-shot; subsequent Run calls return this cached error via
 	// ErrRelayAlreadyRun.
 	runErr atomic.Pointer[error]
+
+	// preDispatchActive is true between [Relay.Run]'s pre-spawn
+	// [installPreDispatchPause] call (gated on
+	// [Config.PreDispatchPause]) and the
+	// [directive.KindResumePreDispatch] handler. While set, the
+	// forward loop:
+	//
+	//   - SKIPS the pre-Read park (so the first Read on each direction
+	//     proceeds and produces a chunk for the parser to inspect via
+	//     its FakeConn), and
+	//   - on the post-Read pause check, TEES the chunk in addition to
+	//     stashing — exposing the bytes to the parser even though they
+	//     have not yet been written to the real peer.
+	//
+	// The parser ends the window by sending KindResumePreDispatch
+	// (drain stash to real peer, clear flag, endPause) or by sending
+	// KindUpgradeTLS (the existing TLS upgrade handler consumes the
+	// stash via takeStashedPrefix; it then clears the flag on its own
+	// endPause path).
+	preDispatchActive atomic.Bool
 }
 
 // ErrRelayAlreadyRun is returned from a second [Relay.Run] call.
@@ -283,10 +303,51 @@ func (r *Relay) run(ctx context.Context) error {
 		r.processDirectives(ctx, stopping)
 	}()
 
+	// Pre-dispatch pause: install the pause barrier BEFORE spawning
+	// forwarder goroutines so the very first byte each direction
+	// produces lands in the post-Read pause path (where the
+	// preDispatchActive flag below makes the forwarder tee AND stash
+	// instead of writing). This closes the postgres SSL preamble
+	// race (keploy/enterprise#2012) — without it, by the time the
+	// parser sees SSLRequest on its FakeConn the server may already
+	// have replied with 'S' and the client may already have written
+	// TLS bytes that the C2D forwarder forwarded as plaintext.
+	//
+	// installPreDispatchPause is the no-deadline-kick variant of
+	// beginPause: there are no in-flight Reads yet (forwarders are
+	// not running), so the deadline kick beginPause uses to wake a
+	// blocked Read would just leave the read deadlines stuck in the
+	// past — making the forwarder Read return EAGAIN forever in a
+	// tight loop until endPause clears it. The pause channel and the
+	// parker tracking are set up identically.
+	if r.cfg.PreDispatchPause {
+		r.installPreDispatchPause()
+		r.preDispatchActive.Store(true)
+	}
+
+	// When one forwarder exits, signal the other to exit too via the
+	// existing stopping/nudgeDeadline machinery. Without this signalling,
+	// if e.g. the upstream sends FIN → FromDest reads EOF and exits, the
+	// FromClient forwarder is still parked in src.Read(client) with no
+	// event to wake it; wgForward.Wait() blocks until the application's
+	// HTTP client times out on its own (~60s for botocore default
+	// read_timeout). The recipe used here mirrors what cancelNudge does
+	// for ctx.Done(): close stopping (idempotent via sync.Once so the
+	// late close below stays safe) AND nudge the peer's read deadline so
+	// its in-flight Read returns Timeout(); the forwarder's existing
+	// timeout-loop branch re-checks the top-of-loop select, observes
+	// stopping closed, and exits cleanly. Crucially, the relay still
+	// does NOT close the real sockets — that ownership stays with
+	// proxy.go::handleConnection per the contract in doc.go.
+	var stopOnce sync.Once
+	closeStopping := func() { stopOnce.Do(func() { close(stopping) }) }
+
 	// Forwarder src → dst (Dir=FromClient).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
+		defer closeStopping()
+		defer r.nudgeDeadline(r.dst.Load())
 		recordErr(r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D))
 	}()
 
@@ -294,6 +355,8 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
+		defer closeStopping()
+		defer r.nudgeDeadline(r.src.Load())
 		recordErr(r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C))
 	}()
 
@@ -312,8 +375,11 @@ func (r *Relay) run(ctx context.Context) error {
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
-	// Signal the directive processor to exit and wait for it.
-	close(stopping)
+	// Signal the directive processor to exit and wait for it. Use the
+	// idempotent closer because either forwarder's defer may have
+	// already closed stopping during its own exit (see closeStopping
+	// above) — closing a closed channel panics.
+	closeStopping()
 	wgDirective.Wait()
 
 	// After the processor has returned, no one else can send on acks:
@@ -365,7 +431,18 @@ func (r *Relay) forward(
 		// Respect the pause barrier if the directive processor is
 		// mid-TLS-upgrade. The barrier is a chan that closes when
 		// resumed.
-		if pc := r.currentPauseCh(); pc != nil {
+		//
+		// Pre-dispatch pause is the exception: the pause channel is
+		// already open at first entry (installed by run() before
+		// spawning forwarders), but we must NOT park here — the
+		// parser needs the first Read on each direction to produce a
+		// chunk it can inspect via its FakeConn. The forwarder reads,
+		// hits the post-Read recheck below, and parks there with the
+		// chunk both teed (so the parser sees it) and stashed (so the
+		// real-peer Write is deferred). The flag is cleared by
+		// KindResumePreDispatch (or by the TLS upgrade handler's
+		// endPause), so subsequent iterations behave as today.
+		if pc := r.currentPauseCh(); pc != nil && !r.preDispatchActive.Load() {
 			r.markForwarderParked(dir)
 			select {
 			case <-pc:
@@ -412,7 +489,37 @@ func (r *Relay) forward(
 					log.Debug("relay: stashing in-flight bytes across pause boundary",
 						zap.String("dir", dir.String()),
 						zap.Int("stashed_bytes", n),
+						zap.Bool("pre_dispatch", r.preDispatchActive.Load()),
 					)
+				}
+				// In pre-dispatch mode the parser needs to SEE the
+				// client's first message via its FakeConn — that's
+				// how it inspects e.g. postgres SSLRequest before
+				// deciding between ResumePreDispatch (plain) and
+				// UpgradeTLS (SSL). The TLS-upgrade handler consumes
+				// the server's preamble reply (the SSLResponse byte)
+				// from the stash directly via takeStashedPrefix on
+				// the FromDest direction, so a D2C tee during pre-
+				// dispatch would leave that byte sitting in the
+				// DestStream FakeConn buffer — where the post-
+				// handshake captureSessionV2 would read it AS IF it
+				// were the first post-auth message, mis-parse it,
+				// and corrupt the session mock. Restrict the tee to
+				// FromClient so the parser sees what it asked for
+				// (the client's first chunk) and nothing it didn't
+				// (the server's preamble reply belongs to the
+				// directive handler, not the parser).
+				if r.preDispatchActive.Load() && dir == fakeconn.FromClient {
+					chunk := fakeconn.Chunk{
+						Dir:    dir,
+						Bytes:  stash,
+						ReadAt: readAt,
+						SeqNo:  seq.Add(1),
+					}
+					teed := t.push(chunk)
+					if teed && r.cfg.OnClientChunkTeed != nil {
+						r.cfg.OnClientChunkTeed()
+					}
 				}
 				n = 0
 			}
@@ -563,17 +670,8 @@ func (r *Relay) currentPauseCh() chan struct{} {
 // "loop and re-check pause" rather than "tear down the relay".
 func (r *Relay) beginPause() chan struct{} {
 	r.pauseMu.Lock()
-	defer r.pauseMu.Unlock()
-	if r.pauseCh == nil {
-		r.pauseCh = make(chan struct{})
-	}
-	if r.parkedC2D == nil {
-		r.parkedC2D = make(chan struct{})
-	}
-	if r.parkedD2C == nil {
-		r.parkedD2C = make(chan struct{})
-	}
-	pc := r.pauseCh
+	pc := r.installPauseChLocked()
+	r.pauseMu.Unlock()
 	// Nudge both sockets out of any blocking Read. A past timestamp
 	// fires immediately; the forwarder Read returns with a deadline
 	// error which the post-Read pause recheck handles (returns to
@@ -583,6 +681,36 @@ func (r *Relay) beginPause() chan struct{} {
 	r.nudgeDeadline(r.dst.Load())
 	r.nudgeDeadline(r.src.Load())
 	return pc
+}
+
+// installPreDispatchPause installs the pause channel + parker
+// tracking WITHOUT touching the live sockets' read deadlines. Use
+// before any forwarder has started reading — the deadline-kick the
+// regular beginPause does would otherwise leave the sockets in a
+// permanent timeout state until endPause cleared it, starving the
+// forwarders out of their pause-aware Read loop. Acquires pauseMu
+// internally; callers must NOT already hold it.
+func (r *Relay) installPreDispatchPause() {
+	r.pauseMu.Lock()
+	defer r.pauseMu.Unlock()
+	r.installPauseChLocked()
+}
+
+// installPauseChLocked is the shared body of beginPause and
+// installPreDispatchPause. Returns the active pause channel and
+// guarantees the per-direction park signals are armed. Caller must
+// hold pauseMu.
+func (r *Relay) installPauseChLocked() chan struct{} {
+	if r.pauseCh == nil {
+		r.pauseCh = make(chan struct{})
+	}
+	if r.parkedC2D == nil {
+		r.parkedC2D = make(chan struct{})
+	}
+	if r.parkedD2C == nil {
+		r.parkedD2C = make(chan struct{})
+	}
+	return r.pauseCh
 }
 
 // waitForwardersParked blocks until both forwarders have observed the
@@ -698,6 +826,17 @@ func (r *Relay) endPause() {
 	r.stashedC2D = nil
 	r.stashedD2C = nil
 	r.stashMu.Unlock()
+	// Always clear the pre-dispatch flag when a pause window ends.
+	// This covers both ResumePreDispatch (the explicit no-TLS resume
+	// path, which also clears it directly before calling endPause as
+	// defence-in-depth) and the TLS-upgrade path (handleUpgradeTLS
+	// transitions from pre-dispatch into its own pause + upgrade and
+	// then calls endPause; without this clear the flag would leak
+	// past the TLS upgrade and corrupt the semantics of any future
+	// pause on the connection — pre-Read park would stay skipped
+	// and post-Read pauses would tee into the parser FakeConn even
+	// when they shouldn't).
+	r.preDispatchActive.Store(false)
 }
 
 // clearDeadline drops any read deadline previously installed on the

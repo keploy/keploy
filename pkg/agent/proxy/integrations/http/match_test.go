@@ -578,6 +578,252 @@ func TestExactBodyMatch_FullyNoisyBody(t *testing.T) {
 	}
 }
 
+// TestExactBodyMatch_FormEncodedKeyNoise covers the IRSA-shaped case: a
+// form-encoded STS AssumeRoleWithWebIdentity request whose WebIdentityToken
+// rotates every replay. Recording-side obfuscation has marked the
+// WebIdentityToken key as noise via ^WebIdentityToken=[^&]+$; the matcher
+// must skip that segment and exact-match the rest.
+func TestExactBodyMatch_FormEncodedKeyNoise(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&Version=2011-06-15" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+						"&RoleSessionName=botocore-session-1" +
+						"&WebIdentityToken=long-recorded-jwt-bytes-here",
+				},
+			},
+		},
+	}
+	// Live request differs only in the WebIdentityToken value (placeholder
+	// from materializeProjectedVolume) — every other field is identical.
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&Version=2011-06-15" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+		"&RoleSessionName=botocore-session-1" +
+		"&WebIdentityToken=placeholder-service-account-token")
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected form-body noise-aware match to succeed")
+	}
+	if match.Name != "mock-sts" {
+		t.Errorf("expected mock-sts, got %s", match.Name)
+	}
+}
+
+// TestExactBodyMatch_FormEncodedMismatchOnNonNoisyField guards against the
+// matcher relaxing too much: a divergent NON-noisy field (here RoleArn)
+// must still cause the match to fail.
+func TestExactBodyMatch_FormEncodedMismatchOnNonNoisyField(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fexample" +
+						"&WebIdentityToken=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fdifferent" +
+		"&WebIdentityToken=B")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when a non-noisy field (RoleArn) differs")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedExtraKeyOnRequest covers the symmetric
+// failure: live request carries a non-noisy key the mock doesn't declare.
+// The matcher must reject — otherwise SNS PublishBatch (with its many
+// .member.N keys) could absorb arbitrary unrelated requests.
+func TestExactBodyMatch_FormEncodedExtraKeyOnRequest(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity&WebIdentityToken=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity&WebIdentityToken=B&UnknownKey=value")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match when request carries an extra non-noisy key")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedPerOccurrenceNoise guards against a
+// regression flagged in PR review: if formBodiesMatchModuloNoise wildcards a
+// whole key whenever *any* of its occurrences is noisy, a mismatch on a
+// non-noisy sibling occurrence would silently pass. The fix evaluates noise
+// per "key=value" segment and requires the non-noisy occurrences to match
+// in order.
+func TestExactBodyMatch_FormEncodedPerOccurrenceNoise(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-multi",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^a=NOISY$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "a=NOISY&a=2",
+				},
+			},
+		},
+	}
+	// First occurrence of 'a' is wildcarded; second occurrence differs.
+	reqBody := []byte("a=NOISY&a=DIFF")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match — the second 'a' occurrence differs and is not noisy")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedNoisyAcrossPositions covers the symmetric
+// case where the noisy occurrences sit at different positions on the two
+// sides — the surviving non-noisy values should still compare equal.
+func TestExactBodyMatch_FormEncodedNoisyAcrossPositions(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-multi",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^a=NOISY$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "a=NOISY&a=2",
+				},
+			},
+		},
+	}
+	// Both sides have one 'a=NOISY' (wildcarded) and one non-noisy 'a=2'.
+	// Positions of the noisy occurrence differ between mock and request.
+	reqBody := []byte("a=2&a=NOISY")
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected match — non-noisy values are equal regardless of where noisy slots sit")
+	}
+	if match.Name != "mock-multi" {
+		t.Errorf("expected mock-multi, got %s", match.Name)
+	}
+}
+
+// TestExactBodyMatch_FormEncodedUnixTimestampAutoWildcard covers the
+// botocore IRSA RoleSessionName case: the recorder marks WebIdentityToken
+// as noise but doesn't tag RoleSessionName=botocore-session-<unix-ts>,
+// which rotates every replay. The form-segment matcher must auto-wildcard
+// any segment whose value embeds a modern unix-second/millisecond
+// timestamp so exact match still wins without a recorder change.
+func TestExactBodyMatch_FormEncodedUnixTimestampAutoWildcard(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A308798440167%3Arole%2Fexample" +
+						"&RoleSessionName=botocore-session-1778513757" +
+						"&WebIdentityToken=recorded-jwt",
+				},
+			},
+		},
+	}
+	// Replay-time request differs in RoleSessionName's embedded unix-ts
+	// AND the (already-noisy) WebIdentityToken. AWS account ID
+	// (308798440167, 12 digits) is preserved on both sides — must NOT be
+	// wildcarded.
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A308798440167%3Arole%2Fexample" +
+		"&RoleSessionName=botocore-session-1778513766" +
+		"&WebIdentityToken=replay-jwt")
+	ok, match := h.ExactBodyMatch(reqBody, mocks)
+	if !ok {
+		t.Fatal("expected unix-ts-bearing segment to be auto-wildcarded; got no match")
+	}
+	if match.Name != "mock-sts" {
+		t.Errorf("expected mock-sts, got %s", match.Name)
+	}
+}
+
+// TestExactBodyMatch_FormEncodedAccountIDNotWildcarded guards the
+// false-positive direction: a 12-digit AWS account ID is NOT a unix
+// timestamp in either seconds or milliseconds. If the only difference
+// between bodies is the account ID, the matcher must reject — otherwise
+// cross-account mocks could absorb one another.
+func TestExactBodyMatch_FormEncodedAccountIDNotWildcarded(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-sts",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^WebIdentityToken=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					Body: "Action=AssumeRoleWithWebIdentity" +
+						"&RoleArn=arn%3Aaws%3Aiam%3A%3A308798440167%3Arole%2Fexample" +
+						"&WebIdentityToken=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("Action=AssumeRoleWithWebIdentity" +
+		"&RoleArn=arn%3Aaws%3Aiam%3A%3A999999999999%3Arole%2Fexample" +
+		"&WebIdentityToken=B")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match: 12-digit account ID must not be treated as a unix timestamp")
+	}
+}
+
+// TestExactBodyMatch_FormEncodedOutOfRangeDigitsNotWildcarded covers the
+// "10 digits but not plausibly a unix ts" branch: the run-length is right
+// but the value is outside [1.5e9, 2.5e9], so it must be preserved as a
+// non-noisy comparison.
+func TestExactBodyMatch_FormEncodedOutOfRangeDigitsNotWildcarded(t *testing.T) {
+	h := newHTTP()
+	mocks := []*models.Mock{
+		{
+			Name:  "mock-form",
+			Kind:  models.Kind(models.HTTP),
+			Noise: []string{"^Token=[^&]+$"},
+			Spec: models.MockSpec{
+				HTTPReq: &models.HTTPReq{
+					// 0123456789 is 10 digits but well below 1.5e9 →
+					// not a unix ts.
+					Body: "UserId=0123456789&Token=A",
+				},
+			},
+		},
+	}
+	reqBody := []byte("UserId=9876543210&Token=B")
+	ok, _ := h.ExactBodyMatch(reqBody, mocks)
+	if ok {
+		t.Error("expected no match: 10-digit value outside modern unix range must not be wildcarded")
+	}
+}
+
 func TestExactBodyMatch_NoNoisePatterns(t *testing.T) {
 	h := newHTTP()
 	// Mock has no Noise patterns — second pass should skip it

@@ -52,12 +52,26 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 
 // rowscols/textRowPacket.go
 
-func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+func EncodeTextRow(_ context.Context, logger *zap.Logger, row *mysql.TextRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
 	body := new(bytes.Buffer)
 
 	// Write each column's value into the body
-	for i := range columns {
-		v := row.Values[i].Value
+	for i, col := range columns {
+		// Guard against rows whose Values slice is shorter than the column
+		// list (e.g. malformed mock fixture, or matched mock from a query
+		// that returned a different number of columns). Treat the missing
+		// entry as SQL NULL so the wire packet stays well-formed and the
+		// proxy connection isn't torn down by a recovered panic.
+		var v interface{}
+		if i < len(row.Values) {
+			v = row.Values[i].Value
+		} else {
+			logger.Warn("text row has fewer values than columns; padding with NULL",
+				zap.String("column", col.Name),
+				zap.Int("column_index", i),
+				zap.Int("row_values", len(row.Values)),
+				zap.Int("columns", len(columns)))
+		}
 		switch x := v.(type) {
 		case nil:
 			// NULL is 0xfb
