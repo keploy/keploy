@@ -1,6 +1,9 @@
 package models
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type AppError struct {
 	AppErrorType AppErrorType
@@ -76,4 +79,40 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 		return err
 	}
 	return &mockMismatchError{err: err, report: report}
+}
+
+// ReportMockMismatchOnChannel publishes an ErrMockNotFound ParserError
+// onto the proxy error channel that the caller passed in via context
+// under ProxyErrChannelKey. Used by long-lived parsers (Pulsar today,
+// Kafka tomorrow) that multiplex many logical streams over a single
+// connection and therefore cannot signal a mock miss by returning
+// from MockOutgoing — doing so would tear down every other stream
+// sharing the connection. The function is a no-op when the context
+// carries no channel (e.g. during unit tests that exercise the parser
+// without the proxy harness) so call sites stay branch-free.
+//
+// The returned bool tells the caller whether the event was actually
+// published. A non-blocking send is used; if the buffered channel is
+// full the event is dropped (matches Proxy.SendError behavior — better
+// to lose a single mismatch event than to wedge the parser goroutine
+// when the consumer is slow).
+func ReportMockMismatchOnChannel(ctx context.Context, baseErr error, report *MockMismatchReport) bool {
+	if ctx == nil || report == nil {
+		return false
+	}
+	ch, ok := ctx.Value(ProxyErrChannelKey).(chan<- error)
+	if !ok || ch == nil {
+		return false
+	}
+	parserErr := ParserError{
+		ParserErrorType: ErrMockNotFound,
+		Err:             baseErr,
+		MismatchReport:  report,
+	}
+	select {
+	case ch <- parserErr:
+		return true
+	default:
+		return false
+	}
 }

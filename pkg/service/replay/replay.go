@@ -1793,6 +1793,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// failOnUnmatchedOutbound: even when the response oracle would
+			// otherwise pass, flip the verdict to FAILED if any outbound
+			// dependency mock-mismatch was reported during this test.
+			// Catches false positives where a constant response body
+			// (e.g. {"status":"ok"}) masks broken async/fire-and-forget
+			// downstream interactions whose mismatch would otherwise only
+			// surface as a debug log. Only consults the in-process
+			// mock-mismatch failure store; non-instrument (k8s-proxy /
+			// remote agent) routing of mismatches is handled by the
+			// existing GetMockErrors path further down and falls under
+			// follow-up work.
+			if testPass && r.config.Test.FailOnUnmatchedOutbound {
+				unmatchedCount := 0
+				for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
+					if f.MismatchReport != nil {
+						unmatchedCount++
+					}
+				}
+				if unmatchedCount > 0 {
+					r.logger.Warn("failOnUnmatchedOutbound: flipping test verdict from PASS to FAIL due to unmatched outbound dependency calls",
+						zap.String("testcase", testCase.Name),
+						zap.String("testset", testSetID),
+						zap.Int("unmatchedOutboundCount", unmatchedCount))
+					testPass = false
+				}
+			}
+
 			if !testPass {
 				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
 			} else {

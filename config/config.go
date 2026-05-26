@@ -199,6 +199,7 @@ type Test struct {
 	DisableLineCoverage         bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
 	UpdateTemplate              bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 	MustPass                    bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
+	FailOnUnmatchedOutbound     bool                `json:"failOnUnmatchedOutbound" yaml:"failOnUnmatchedOutbound" mapstructure:"failOnUnmatchedOutbound"` // When true, a test is marked FAILED if any outbound dependency call went unmatched during its execution, even if the response oracle would otherwise pass. Prevents false positives where a constant response body (e.g. {"status":"ok"}) masks broken downstream interactions like async Pulsar/Kafka publishes.
 	MaxFailAttempts             uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
 	MaxFlakyChecks              uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
 	ProtoFile                   string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`

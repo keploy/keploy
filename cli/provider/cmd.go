@@ -383,6 +383,15 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
+		// fail-on-unmatched-outbound flips a test from PASS to FAIL when
+		// any outbound dependency call could not be matched against a
+		// recorded mock during that test, regardless of whether the
+		// response-oracle comparison succeeded. This catches false
+		// positives where a constant response body (e.g. {"status":"ok"})
+		// hides a broken async downstream interaction (Pulsar/Kafka
+		// publish, fire-and-forget outbox) whose mismatch would otherwise
+		// only surface as a debug log line.
+		cmd.Flags().Bool("fail-on-unmatched-outbound", c.cfg.Test.FailOnUnmatchedOutbound, "Mark a test as FAILED if any outbound dependency call (Pulsar, Kafka, gRPC, generic TCP, etc.) went unmatched during its execution, even if the response oracle would otherwise pass. Default false.")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
@@ -467,6 +476,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
 		"keepAppAlive":              "keep-app-alive",
+		"failOnUnmatchedOutbound":   "fail-on-unmatched-outbound",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {

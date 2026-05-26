@@ -2060,7 +2060,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
+			// Inject the proxy's central error channel into the context so
+			// long-lived parsers (Pulsar today; Kafka in the future) that
+			// multiplex many logical streams over a single TCP connection
+			// can publish mid-stream mock-mismatch events via
+			// models.ReportMockMismatchOnChannel without having to return
+			// from MockOutgoing. Returning would tear down every stream
+			// sharing the connection — fine for HTTP, catastrophic for
+			// Pulsar where ~15 partition producers ride the same socket.
+			// Cast to a send-only channel; parsers must not read from it.
+			mockOutgoingCtx := context.WithValue(parserCtx, models.ProxyErrChannelKey, (chan<- error)(p.errChannel))
+			err := matchedParser.MockOutgoing(mockOutgoingCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring

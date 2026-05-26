@@ -66,6 +66,15 @@ test:
   disableLineCoverage: false
   updateTemplate: false
   mustPass: false
+  # failOnUnmatchedOutbound flips a test from PASS to FAIL when any
+  # outbound dependency call (Pulsar, Kafka, gRPC, generic TCP, etc.)
+  # could not be matched against a recorded mock during the test,
+  # regardless of the HTTP/response oracle result. Default false to
+  # preserve historical behaviour. Turn on for services where the
+  # response body is a constant ack and the real assertion lives in
+  # what the service published downstream (async outbox patterns,
+  # fire-and-forget messaging).
+  failOnUnmatchedOutbound: false
   maxFailAttempts: 5
   maxFlakyChecks: 1
   protoFile: ""

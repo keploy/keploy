@@ -185,6 +185,23 @@ type contextKey string
 
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
+
+// ProxyErrChannelKey holds a chan<- error that integration parsers can
+// use to publish mid-stream events (e.g. unmatched-mock mismatches) to
+// the proxy's central error channel without ending the MockOutgoing
+// call. Today, the only way a parser can report a mock mismatch is by
+// returning the error from MockOutgoing — which terminates the
+// connection. That's fine for HTTP (one request/response per
+// connection) but unworkable for long-lived multi-stream protocols
+// like Pulsar where a single connection multiplexes many partition
+// producers; killing the connection on the first miss cascades into
+// dozens of dependent failures and masks the original signal. Parsers
+// pull the channel from this context key and use models.ReportMock-
+// MismatchOnChannel to publish a ParserError{ErrMockNotFound, ...}
+// without disturbing the stream. monitorProxyErrors in
+// pkg/service/replay/replay.go consumes the same channel and attributes
+// each event to the currently-running test case.
+const ProxyErrChannelKey contextKey = "proxyErrChannel"
 const DestConnectionIDKey contextKey = "destConnectionId"
 const PostTLSModeKey contextKey = "postTLSMode"
 const TLSHandshakeStoreKey contextKey = "tlsHandshakeStore"
