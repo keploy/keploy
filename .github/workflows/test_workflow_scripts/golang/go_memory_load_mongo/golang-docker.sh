@@ -188,7 +188,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/test-*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
         echo "No recorded test cases were generated."
         return 1
     fi

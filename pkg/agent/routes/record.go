@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -339,6 +340,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
+	var tcsSentSoFar int // counts TCs sent to CLI in this session (single goroutine, no atomic needed)
 	for {
 		select {
 		case <-r.Context().Done():
@@ -348,14 +350,29 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			tcsSentSoFar++
 			// VERIFY: agent sends every TC to CLI with zero pressure check.
 			// No pendingTC hold, no drain(), no IsHTTPTCInPressureWindow call.
 			// Even if this TC's mock was just dropped by memoryPause, the TC
 			// goes through unconditionally — the atomicity invariant is broken.
-			a.logger.Info("VERIFY/agent-send-tc: AGENT sending TC to CLI with NO pressure check — mock may already be dropped",
-				zap.String("tcName", t.Name),
-				zap.Time("reqTime", t.HTTPReq.Timestamp),
-				zap.Time("resTime", t.HTTPResp.Timestamp),
+			agentPressure, agentDropped, agentAdded, agentBufSize := syncmgr.Get().GetDropStats()
+			a.logger.Info("VERIFY/agent-send-tc: *** AGENT sending TC to CLI — NO pressure check exists here ***",
+				// --- TC identity ---
+				zap.String("tc_name", t.Name),
+				zap.Time("tc_req_time", t.HTTPReq.Timestamp),
+				zap.Time("tc_resp_time", t.HTTPResp.Timestamp),
+				zap.Int("tc_sequence_num_sent", tcsSentSoFar),
+				// --- Agent's syncMock state RIGHT NOW ---
+				zap.Bool("AGENT_pressure_active_right_now", agentPressure),
+				zap.Int64("AGENT_mocks_DROPPED_by_pressure_total", agentDropped),
+				zap.Int64("AGENT_mocks_ADDED_successfully_total", agentAdded),
+				zap.Int("AGENT_mock_buffer_size_right_now", agentBufSize),
+				// --- CLI's syncMock state (always empty — THE ROOT CAUSE) ---
+				zap.String("CLI_pressure_active", "ALWAYS_FALSE — SetMemoryPressure() is NEVER called in CLI process"),
+				zap.String("CLI_mocks_dropped", "ALWAYS_ZERO — CLI never drops any mocks"),
+				zap.String("CLI_will_do", "write this TC to tests/*.yaml regardless of Agent's pressure state"),
+				// --- Risk flag ---
+				zap.Bool("TC_at_risk_of_EOF_at_replay", agentDropped > 0),
 			)
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)

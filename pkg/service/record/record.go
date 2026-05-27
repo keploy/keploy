@@ -367,16 +367,28 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
+		tcsWrittenSoFar := 0 // counts TCs written to YAML in this session (single goroutine, no atomic needed)
 		for testCase := range frames.Incoming {
+			tcsWrittenSoFar++
 			// VERIFY: CLI receives every TC the agent sends and writes it to
 			// YAML unconditionally. There is no pressure check here — the CLI's
 			// syncMock instance is always empty (SetMemoryPressure is never
 			// called in the CLI process), so any IsHTTPTCInPressureWindow call
 			// would always return false. This TC will be written to disk even
 			// if its paired DB mock was dropped by the agent.
-			r.logger.Info("VERIFY/cli-write-tc: CLI writing TC to YAML — CLI has no memory-pressure data, no drop possible here",
-				zap.String("tcName", testCase.Name),
-				zap.Time("reqTime", testCase.HTTPReq.Timestamp),
+			r.logger.Info("VERIFY/cli-write-tc: *** CLI writing TC to YAML — COMPLETELY BLIND to Agent's memory pressure ***",
+				// --- TC identity ---
+				zap.String("tc_name", testCase.Name), // name assigned by InsertTestCase below
+				zap.Time("tc_req_time", testCase.HTTPReq.Timestamp),
+				zap.Int("tc_sequence_num_written", tcsWrittenSoFar),
+				// --- CLI's own syncMock state (always zero — proof of the bug) ---
+				zap.Bool("CLI_pressure_active", false),              // HARDCODED FALSE — SetMemoryPressure() never called in CLI
+				zap.Int("CLI_mocks_dropped_by_pressure", 0),         // HARDCODED ZERO  — CLI never drops mocks
+				zap.Int("CLI_mock_buffer_size", 0),                  // HARDCODED ZERO  — CLI syncMock always empty
+				// --- Why CLI is blind ---
+				zap.String("WHY_CLI_is_blind", "Agent and CLI are separate OS processes — each has its OWN copy of syncMock singleton — CLI's copy is NEVER updated"),
+				// --- What will happen at replay ---
+				zap.String("REPLAY_RISK", "If Agent dropped the Mongo/MySQL mock for this TC, replay will fail: app calls DB → keploy has no mock → socket EOF → ALL subsequent TCs also fail (cascade)"),
 			)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
