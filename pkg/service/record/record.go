@@ -382,9 +382,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 				zap.Time("tc_req_time", testCase.HTTPReq.Timestamp),
 				zap.Int("tc_sequence_num_written", tcsWrittenSoFar),
 				// --- CLI's own syncMock state (always zero — proof of the bug) ---
-				zap.Bool("CLI_pressure_active", false),              // HARDCODED FALSE — SetMemoryPressure() never called in CLI
-				zap.Int("CLI_mocks_dropped_by_pressure", 0),         // HARDCODED ZERO  — CLI never drops mocks
-				zap.Int("CLI_mock_buffer_size", 0),                  // HARDCODED ZERO  — CLI syncMock always empty
+				zap.Bool("CLI_pressure_active", false),      // HARDCODED FALSE — SetMemoryPressure() never called in CLI
+				zap.Int("CLI_mocks_dropped_by_pressure", 0), // HARDCODED ZERO  — CLI never drops mocks
+				zap.Int("CLI_mock_buffer_size", 0),          // HARDCODED ZERO  — CLI syncMock always empty
 				// --- Why CLI is blind ---
 				zap.String("WHY_CLI_is_blind", "Agent and CLI are separate OS processes — each has its OWN copy of syncMock singleton — CLI's copy is NEVER updated"),
 				// --- What will happen at replay ---

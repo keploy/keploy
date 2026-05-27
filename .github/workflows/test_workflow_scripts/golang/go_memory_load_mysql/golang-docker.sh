@@ -199,6 +199,7 @@ check_recorded_tests() {
 check_test_report() {
     local latest_report_dir
     local all_passed=true
+    local found_reports=false
     local report_file
 
     echo "Checking test reports..."
@@ -214,17 +215,21 @@ check_test_report() {
         return 1
     fi
 
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+    # Match both YAML (default) and JSON (--storage-format json) report files.
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml "$latest_report_dir"/test-set-*-report.json; do
+        [ -e "$report_file" ] || continue
+        found_reports=true
+
         local test_set_name
         local test_status
 
-        [ -e "$report_file" ] || {
-            echo "No report files found in $latest_report_dir"
-            return 1
-        }
-
-        test_set_name="$(basename "$report_file" -report.yaml)"
-        test_status="$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')"
+        test_set_name="$(basename "$report_file")"
+        test_set_name="${test_set_name%-report.*}"
+        # grep -m 1 stops after first match — avoids SIGPIPE when the report has
+        # many per-test status fields and the result is piped to head.
+        # gsub strips JSON double-quotes so both `status: PASSED` (YAML) and
+        # `"status": "PASSED"` (JSON) map to the plain string PASSED.
+        test_status="$(grep -m 1 'status:' "$report_file" | awk '{gsub(/"/, ""); print $2}')"
 
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
@@ -232,6 +237,11 @@ check_test_report() {
             echo "${test_set_name} did not pass."
         fi
     done
+
+    if [ "$found_reports" = false ]; then
+        echo "No report files found in $latest_report_dir"
+        return 1
+    fi
 
     if [ "$all_passed" = false ]; then
         return 1
@@ -437,7 +447,7 @@ section "Generating Keploy config"
 "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --generate-github-actions=false 2>&1 | tee record.txt &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
