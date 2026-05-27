@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 
@@ -367,7 +368,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
-		tcsWrittenSoFar := 0 // counts TCs written to YAML in this session (single goroutine, no atomic needed)
+		tcsWrittenSoFar := 0 // counts TCs written to YAML in this session
 		for testCase := range frames.Incoming {
 			tcsWrittenSoFar++
 			// VERIFY: CLI receives every TC the agent sends and writes it to
@@ -376,19 +377,25 @@ func (r *Recorder) Start(ctx context.Context) error {
 			// called in the CLI process), so any IsHTTPTCInPressureWindow call
 			// would always return false. This TC will be written to disk even
 			// if its paired DB mock was dropped by the agent.
+			cliPressure, cliDropped, cliAdded, cliBufSize := syncmgr.Get().GetDropStats()
 			r.logger.Info("VERIFY/cli-write-tc: *** CLI writing TC to YAML — COMPLETELY BLIND to Agent's memory pressure ***",
 				// --- TC identity ---
-				zap.String("tc_name", testCase.Name), // name assigned by InsertTestCase below
+				zap.String("tc_name", testCase.Name),
 				zap.Time("tc_req_time", testCase.HTTPReq.Timestamp),
 				zap.Int("tc_sequence_num_written", tcsWrittenSoFar),
-				// --- CLI's own syncMock state (always zero — proof of the bug) ---
-				zap.Bool("CLI_pressure_active", false),      // HARDCODED FALSE — SetMemoryPressure() never called in CLI
-				zap.Int("CLI_mocks_dropped_by_pressure", 0), // HARDCODED ZERO  — CLI never drops mocks
-				zap.Int("CLI_mock_buffer_size", 0),          // HARDCODED ZERO  — CLI syncMock always empty
+				// --- CLI's OWN syncMock singleton (real values, not hardcoded) ---
+				// These will ALWAYS be 0/false because SetMemoryPressure() is
+				// NEVER called in the CLI process. Cross-reference with the
+				// Agent's VERIFY/agent-send-tc log to see the divergence:
+				// Agent's dropped count grows while CLI's stays at 0 forever.
+				zap.Bool("CLI_pressure_active", cliPressure),
+				zap.Int64("CLI_mocks_dropped_total", cliDropped),
+				zap.Int64("CLI_mocks_added_total", cliAdded),
+				zap.Int("CLI_mock_buffer_size", cliBufSize),
 				// --- Why CLI is blind ---
-				zap.String("WHY_CLI_is_blind", "Agent and CLI are separate OS processes — each has its OWN copy of syncMock singleton — CLI's copy is NEVER updated"),
+				zap.String("WHY_CLI_is_blind", "CLI and Agent are separate OS processes — each has its OWN syncMock singleton — CLI's copy is NEVER touched by Agent's SetMemoryPressure"),
 				// --- What will happen at replay ---
-				zap.String("REPLAY_RISK", "If Agent dropped the Mongo/MySQL mock for this TC, replay will fail: app calls DB → keploy has no mock → socket EOF → ALL subsequent TCs also fail (cascade)"),
+				zap.String("REPLAY_RISK", "If Agent dropped the DB mock for this TC, replay fails: app calls DB → keploy has no mock → socket EOF → ALL subsequent TCs cascade-fail"),
 			)
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
@@ -422,6 +429,19 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 			}
 		}
+		// Session over — all TCs received from agent.
+		// CLI's syncMock is always zero; the agent's session-summary log
+		// (VERIFY/agent-session-summary) holds the orphan-TC count.
+		cliP, cliD, cliA, cliB := syncmgr.Get().GetDropStats()
+		r.logger.Info("VERIFY/cli-session-summary: *** CLI DONE WRITING TCs — CROSS-CHECK WITH AGENT SESSION SUMMARY ***",
+			zap.Int("total_TCs_written_to_YAML", tcsWrittenSoFar),
+			// CLI's own syncMock — always zero; proves CLI is isolated from Agent's pressure
+			zap.Bool("CLI_pressure_ever_active", cliP),
+			zap.Int64("CLI_mocks_dropped_total", cliD),
+			zap.Int64("CLI_mocks_added_total", cliA),
+			zap.Int("CLI_mock_buffer_final_size", cliB),
+			zap.String("HOW_TO_READ", "Find VERIFY/agent-session-summary in the agent (Docker) log to see orphan_TCs_TC_written_mock_dropped — that number tells you how many of these TCs will EOF at replay"),
+		)
 		return nil
 	})
 
