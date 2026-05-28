@@ -340,9 +340,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
-	var tcsSentSoFar int  // TCs sent to CLI this session
-	var orphanTCsSent int // TCs sent while ≥1 mock was dropped for them
-	var prevDropped int64 // pressureDropped snapshot at the time of the previous TC
+	var tcsSentSoFar int       // TCs sent to CLI this session
+	var tcsSuppressedSoFar int // TCs suppressed by Bug 0 fix (mock dropped in TC's window)
 	for {
 		select {
 		case <-r.Context().Done():
@@ -351,49 +350,40 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		case t, ok := <-tc:
 			if !ok {
 				// Channel closed = recording session over.
-				// Log a final summary so the TC-drop vs mock-drop gap is visible
-				// in one place at the bottom of the log.
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				a.logger.Info("VERIFY/agent-session-summary: *** RECORDING COMPLETE — FINAL BUG-0 ACCOUNTING ***",
-					zap.Int("total_TCs_sent_to_CLI", tcsSentSoFar),
-					zap.Int64("total_mocks_DROPPED_by_pressure", finalDropped),
-					zap.Int64("total_mocks_ADDED_successfully", finalAdded),
-					zap.Int("orphan_TCs_TC_written_mock_dropped", orphanTCsSent),
-					zap.String("BUG_0_VERDICT", fmt.Sprintf(
-						"%d TCs on disk have no paired DB mock — replay will EOF on each one and cascade-fail all subsequent TCs",
-						orphanTCsSent,
-					)),
+				a.logger.Info("agent: recording complete",
+					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+					zap.Int("tcs_suppressed_no_mock", tcsSuppressedSoFar),
+					zap.Int64("mocks_dropped_by_pressure", finalDropped),
+					zap.Int64("mocks_added_successfully", finalAdded),
 				)
 				return
 			}
-			tcsSentSoFar++
-			// VERIFY: agent sends every TC to CLI with zero pressure check.
-			// No pendingTC hold, no drain(), no IsHTTPTCInPressureWindow call.
-			// Even if this TC's mock was just dropped by memoryPause, the TC
-			// goes through unconditionally — the atomicity invariant is broken.
-			agentPressure, agentDropped, agentAdded, agentBufSize := syncmgr.Get().GetDropStats()
-			droppedThisTC := agentDropped - prevDropped // mocks dropped since the PREVIOUS TC
-			prevDropped = agentDropped
-			if droppedThisTC > 0 {
-				orphanTCsSent++
+
+			// Bug 0 fix: check if any pressure-dropped mock falls within this
+			// TC's [HTTPReq.Timestamp, HTTPResp.Timestamp] window.
+			// Atomicity: AddMock appends the dropped timestamp while holding mu,
+			// BEFORE releasing mu. HasDroppedMockInWindow reads under the same mu.
+			// The TC arrives on this channel only AFTER the HTTP response, which
+			// comes only AFTER all DB calls complete — so all timestamps for this
+			// TC's DB calls are already in droppedMockTimestamps when we check here.
+			tcRespTime := t.HTTPResp.Timestamp
+			if tcRespTime.IsZero() {
+				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
-			a.logger.Info("VERIFY/agent-send-tc: *** AGENT sending TC to CLI — NO pressure check exists here ***",
-				// --- TC identity ---
-				zap.String("tc_name", t.Name),
-				zap.Time("tc_req_time", t.HTTPReq.Timestamp),
-				zap.Int("tc_sequence_num_sent", tcsSentSoFar),
-				// --- Per-TC drop count (real, from Agent's syncMock singleton) ---
-				// droppedThisTC > 0 → a mock was dropped between the PREVIOUS TC and
-				// this one. That mock was this TC's DB call. At replay: socket EOF.
-				zap.Int64("AGENT_mocks_DROPPED_for_THIS_TC", droppedThisTC),
-				zap.Bool("THIS_TC_at_risk_of_EOF_at_replay", droppedThisTC > 0),
-				zap.Int("AGENT_orphan_TC_count_so_far", orphanTCsSent),
-				// --- Session totals (real values from Agent's syncMock singleton) ---
-				zap.Bool("AGENT_pressure_active_right_now", agentPressure),
-				zap.Int64("AGENT_mocks_DROPPED_total_session", agentDropped),
-				zap.Int64("AGENT_mocks_ADDED_total_session", agentAdded),
-				zap.Int("AGENT_mock_buffer_size_right_now", agentBufSize),
-			)
+			if hasDropped, droppedCount := syncmgr.Get().HasDroppedMockInWindow(t.HTTPReq.Timestamp, tcRespTime); hasDropped {
+				tcsSuppressedSoFar++
+				a.logger.Info("agent: TC suppressed — mock dropped in window, not sent to CLI",
+					zap.String("tc_name", t.Name),
+					zap.Time("tc_req_time", t.HTTPReq.Timestamp),
+					zap.Time("tc_resp_time", tcRespTime),
+					zap.Int("mocks_dropped_in_window", droppedCount),
+					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+				)
+				continue
+			}
+
+			tcsSentSoFar++
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}

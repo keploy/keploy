@@ -52,16 +52,16 @@ type SyncMockManager struct {
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
 
-	// VERIFY counters — track how many mocks were dropped due to memory
-	// pressure vs how many made it through. Used in VERIFY diagnostic logs
-	// to show the Agent/CLI split clearly. Both are atomic so they can be
-	// read from any goroutine without holding m.mu.
-	//
-	// pressureDropped: incremented in AddMock when m.memoryPause is true.
-	// totalAdded:      incremented in AddMock when the mock passes the
-	//                  pressure gate (whether it later gets buffered or forwarded).
+	// pressureDropped / totalAdded track mocks dropped vs added under memory
+	// pressure. Both are atomic so they can be read without holding m.mu.
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
+
+	// droppedMockTimestamps records the ReqTimestampMock of every mock dropped
+	// by memory pressure. Guarded by mu. Appended in AddMock BEFORE mu.Unlock()
+	// so HasDroppedMockInWindow (which also reads under mu) always sees a
+	// consistent view — atomicity guarantee for the TC-suppression fix.
+	droppedMockTimestamps []time.Time
 
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
@@ -227,23 +227,24 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
+		// Bug 0 fix: record the dropped mock's timestamp BEFORE releasing mu.
+		// HasDroppedMockInWindow reads droppedMockTimestamps under the same mu,
+		// so the append here and the check there are atomic w.r.t. each other:
+		// no TC-send goroutine can observe a partial state where the mock is
+		// dropped but its timestamp is not yet visible in the slice.
+		if !mock.Spec.ReqTimestampMock.IsZero() {
+			m.droppedMockTimestamps = append(m.droppedMockTimestamps, mock.Spec.ReqTimestampMock)
+		}
 		m.mu.Unlock()
-		// VERIFY: agent is dropping this mock due to memory pressure.
-		// The corresponding HTTP TC will NOT be dropped — no TC-drop logic
-		// exists yet. This will produce an orphan TC on disk at replay time.
 		totalDropped := m.pressureDropped.Add(1)
 		totalAdded := m.totalAdded.Load()
 		if logger := m.dropLogger(); logger != nil {
-			logger.Info("VERIFY/agent-mock-drop: *** MOCK DROPPED BY AGENT (memory pressure) — its paired TC will still reach CLI and be written to YAML ***",
-				// --- What was dropped ---
+			logger.Info("agent: mock dropped by memory pressure",
 				zap.String("mock_name", mock.Name),
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
-				// --- Running counts (Agent process only) ---
-				zap.Int64("agent_mocks_DROPPED_pressure_total", totalDropped),
-				zap.Int64("agent_mocks_ADDED_successfully_total", totalAdded),
-				// --- The bug in plain English ---
-				zap.String("BUG", "TC for this mock is already in CLI queue → will be written to tests/*.yaml → at replay: app calls DB → keploy has NO mock → socket EOF → all subsequent TCs also fail"),
+				zap.Int64("mocks_dropped_total", totalDropped),
+				zap.Int64("mocks_added_total", totalAdded),
 			)
 		}
 		return
@@ -362,10 +363,7 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	return m.firstReqSeen
 }
 
-// GetDropStats returns a snapshot of the Agent's current pressure state and
-// VERIFY counters. Called from VERIFY diagnostic logs to show exactly what
-// the Agent knows — compare to the CLI which always returns all zeros because
-// SetMemoryPressure() is never called in the CLI process.
+// GetDropStats returns a snapshot of the current pressure state and drop counters.
 func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped int64, totalAdded int64, bufferSize int) {
 	m.mu.Lock()
 	pressureActive = m.memoryPause
@@ -374,6 +372,27 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 	pressureDropped = m.pressureDropped.Load()
 	totalAdded = m.totalAdded.Load()
 	return
+}
+
+// HasDroppedMockInWindow returns (true, count) if at least one mock was
+// pressure-dropped whose ReqTimestampMock falls in [start, end].
+// Called by the TC-send path in routes/record.go immediately before
+// forwarding a TC to the CLI — if this returns true, the TC is suppressed
+// (not sent) so no orphan TC lands on disk. Reading under mu guarantees
+// atomicity with the append in AddMock's pressure-drop path.
+func (m *SyncMockManager) HasDroppedMockInWindow(start, end time.Time) (bool, int) {
+	if m == nil {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, ts := range m.droppedMockTimestamps {
+		if !ts.Before(start) && !ts.After(end) {
+			count++
+		}
+	}
+	return count > 0, count
 }
 
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
@@ -399,20 +418,15 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if logger := m.dropLogger(); logger != nil {
 		if enabled && !wasEnabled {
 			// Pressure just turned ON (false→true transition)
-			logger.Info("VERIFY/pressure-start: *** MEMORY PRESSURE ACTIVATED IN AGENT — mock buffer is being cleared right now ***",
-				// --- What is being lost ---
-				zap.Int("mocks_cleared_from_buffer_RIGHT_NOW", bufSizeBeforeClear),
-				// --- Session totals BEFORE this burst ---
-				zap.Int64("session_mocks_dropped_before_this_burst", m.pressureDropped.Load()),
-				zap.Int64("session_mocks_added_before_this_burst", m.totalAdded.Load()),
-				// --- What happens to TCs ---
-				zap.String("TC_impact", "Any TC already sent to CLI that depended on these cleared mocks will FAIL at replay with EOF"),
+			logger.Info("agent: memory pressure activated — mock buffer cleared",
+				zap.Int("mocks_cleared_from_buffer", bufSizeBeforeClear),
+				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
 			)
 		} else if !enabled && wasEnabled {
-			// Pressure just turned OFF (true→false transition)
-			logger.Info("VERIFY/pressure-clear: Memory pressure cleared in Agent",
-				zap.Int64("total_mocks_DROPPED_by_pressure_this_session", m.pressureDropped.Load()),
-				zap.Int64("total_mocks_ADDED_successfully_this_session", m.totalAdded.Load()),
+			logger.Info("agent: memory pressure cleared",
+				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_total", m.totalAdded.Load()),
 			)
 		}
 	}
