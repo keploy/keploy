@@ -142,8 +142,8 @@ type MockSpec struct {
 	// HTTP/2
 	HTTP2Req         *HTTP2Req  `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
 	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
-	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	ReqTimestampMock time.Time  `json:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time  `json:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.

@@ -2,26 +2,34 @@ package mapdb
 
 import (
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 // EncodeMapping encodes a mapping structure into a YAML document
 func EncodeMapping(mapping *models.Mapping, logger *zap.Logger) ([]byte, error) {
-	yamlData, err := yamlLib.Marshal(mapping)
+	return EncodeMappingF(mapping, logger, yaml.FormatYAML)
+}
+
+func EncodeMappingF(mapping *models.Mapping, logger *zap.Logger, format yaml.Format) ([]byte, error) {
+	data, err := yaml.MarshalGeneric(format, mapping)
 	if err != nil {
-		logger.Error("failed to marshal mapping to yaml", zap.Error(err))
+		logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
 	}
-	return yamlData, nil
+	return data, nil
 }
 
 // DecodeMapping decodes YAML data into a mapping structure
 func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error) {
+	return DecodeMappingF(yamlData, logger, yaml.FormatYAML)
+}
+
+func DecodeMappingF(data []byte, logger *zap.Logger, format yaml.Format) (*models.Mapping, error) {
 	var mapping models.Mapping
-	err := yamlLib.Unmarshal(yamlData, &mapping)
+	err := yaml.UnmarshalGeneric(format, data, &mapping)
 	if err != nil {
-		logger.Error("failed to unmarshal yaml to mapping", zap.Error(err))
+		logger.Error("failed to unmarshal mapping data", zap.Error(err))
 		return nil, err
 	}
 	return &mapping, nil

@@ -19,6 +19,110 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
+// plus performs the noisy-field detection that mutates tc.Noise. This is the
+// "meaningful work" shared between the YAML and JSON encode paths; it does
+// not touch any yaml.Node or produce any serialized bytes.
+func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
+	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+	if err != nil {
+		utils.LogError(logger, err, "error in flattening http response")
+	}
+	noise := tc.Noise
+	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
+
+	httpSchema := models.HTTPSchema{
+		Request:  tc.HTTPReq,
+		Response: tc.HTTPResp,
+		Created:  tc.Created,
+		AppPort:  tc.AppPort,
+		Assertions: func() map[models.AssertionType]interface{} {
+			a := map[models.AssertionType]interface{}{}
+			for k, v := range tc.Assertions {
+				a[k] = v
+			}
+			if len(noise) > 0 {
+				a[models.NoiseAssertion] = noise
+			}
+			return a
+		}(),
+	}
+	if tc.Description != "" {
+		httpSchema.Metadata = map[string]string{"description": tc.Description}
+	}
+	return httpSchema
+}
+
+// buildGrpcSpec is the JSON-path counterpart of the gRPC branch in EncodeTestcase.
+func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
+	noise := tc.Noise
+	return models.GrpcSpec{
+		GrpcReq:  tc.GrpcReq,
+		GrpcResp: tc.GrpcResp,
+		Created:  tc.Created,
+		AppPort:  tc.AppPort,
+		Assertions: func() map[models.AssertionType]interface{} {
+			a := map[models.AssertionType]interface{}{}
+			if len(noise) > 0 {
+				a[models.NoiseAssertion] = noise
+			}
+			return a
+		}(),
+	}
+}
+
+// EncodeTestcaseJSON builds a NetworkTrafficDocJSON directly from a TestCase,
+// skipping the expensive yaml.Node intermediate that EncodeTestcase goes
+// through. Use this on the JSON storage path so the full
+//
+//	HTTPSchema → yaml bytes → parse → yaml.Node → decode → map[string]any → JSON bytes
+//
+// chain collapses to:
+//
+//	HTTPSchema → JSON bytes
+//
+// which eliminates ~90% of the allocations previously dominated by
+// yaml_emitter_emit under load.
+func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDocJSON, error) {
+	doc := &yaml.NetworkTrafficDocJSON{
+		Version:     tc.Version,
+		Kind:        tc.Kind,
+		Name:        tc.Name,
+		LastUpdated: tc.LastUpdated,
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		doc.Curl = tc.Curl
+		specBytes, err := json.Marshal(buildHTTPSchema(tc, logger))
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal HTTPSchema to JSON")
+			return nil, err
+		}
+		doc.Spec = specBytes
+	case models.GRPC_EXPORT:
+		specBytes, err := json.Marshal(buildGrpcSpec(tc))
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal GrpcSpec to JSON")
+			return nil, err
+		}
+		doc.Spec = specBytes
+	default:
+		utils.LogError(logger, nil, "invalid testcase kind for JSON encoding")
+		return nil, errors.New("type of testcases is invalid")
+	}
+	return doc, nil
+}
+
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	logger.Debug("Starting test case encoding",
 		zap.String("kind", string(tc.Kind)),
@@ -385,4 +489,92 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 	}
 
 	return tc, nil
+}
+
+// DecodeJSON is the JSON-native companion to Decode: it unmarshals a
+// NetworkTrafficDocJSON whose Spec is a json.RawMessage directly into a
+// TestCase, without going through yaml.Node.Decode.
+//
+// It reproduces the noise-assertion expansion that Decode does on the YAML
+// path so tc.Noise stays populated identically regardless of format.
+func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.TestCase, error) {
+	tc := &models.TestCase{
+		Version:     doc.Version,
+		Kind:        doc.Kind,
+		Name:        doc.Name,
+		Curl:        doc.Curl,
+		LastUpdated: doc.LastUpdated,
+		Noise:       make(map[string][]string),
+		Assertions:  make(map[models.AssertionType]interface{}),
+	}
+
+	switch tc.Kind {
+	case models.HTTP:
+		var httpSpec models.HTTPSchema
+		if err := json.Unmarshal(doc.Spec, &httpSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode HTTP JSON spec")
+			return nil, err
+		}
+		tc.Created = httpSpec.Created
+		tc.HTTPReq = httpSpec.Request
+		tc.HTTPResp = httpSpec.Response
+		tc.Description = httpSpec.Metadata["description"]
+		tc.AppPort = httpSpec.AppPort
+		expandAssertionsJSON(tc, httpSpec.Assertions)
+
+	case models.GRPC_EXPORT:
+		var grpcSpec models.GrpcSpec
+		if err := json.Unmarshal(doc.Spec, &grpcSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode gRPC JSON spec")
+			return nil, err
+		}
+		tc.Created = grpcSpec.Created
+		tc.GrpcReq = grpcSpec.GrpcReq
+		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.AppPort = grpcSpec.AppPort
+		expandAssertionsJSON(tc, grpcSpec.Assertions)
+
+	default:
+		utils.LogError(logger, nil, "invalid testcase kind", zap.String("kind", string(tc.Kind)))
+		return nil, errors.New("invalid testcase kind")
+	}
+
+	return tc, nil
+}
+
+// expandAssertionsJSON mirrors the nested-noise-map flattening that Decode
+// performs on the YAML path, but without relying on yaml.Node decoding.
+// The noise assertion on the JSON wire arrives as map[string]interface{}
+// (because encoding/json keys are always strings) rather than
+// map[models.AssertionType]interface{}; we handle both shapes.
+func expandAssertionsJSON(tc *models.TestCase, assertions map[models.AssertionType]interface{}) {
+	for key, raw := range assertions {
+		tc.Assertions[key] = raw
+		if key != models.NoiseAssertion {
+			continue
+		}
+		// Walk whichever map shape the unmarshaler produced.
+		walk := func(field string, inner interface{}) {
+			tc.Noise[field] = []string{}
+			arr, ok := inner.([]interface{})
+			if !ok {
+				return
+			}
+			for _, item := range arr {
+				if s, ok2 := item.(string); ok2 && s != "" {
+					tc.Noise[field] = append(tc.Noise[field], s)
+				}
+			}
+		}
+		switch noiseMap := raw.(type) {
+		case map[models.AssertionType]interface{}:
+			for kt, inner := range noiseMap {
+				walk(string(kt), inner)
+			}
+		case map[string]interface{}:
+			for kt, inner := range noiseMap {
+				walk(kt, inner)
+			}
+		}
+	}
 }

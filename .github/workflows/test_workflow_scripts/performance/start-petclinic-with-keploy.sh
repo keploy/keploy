@@ -18,8 +18,16 @@ PETCLINIC_JAR="${jars[0]}"
 
 echo "📦 Using JAR: $PETCLINIC_JAR"
 
+# Optional storage format override. The perf workflow may run twice — once
+# for yaml (default) and once for json — to measure keploy's overhead in
+# both serialization paths. Driven by KEPLOY_STORAGE_FORMAT.
+storage_flag=()
+if [ -n "${KEPLOY_STORAGE_FORMAT:-}" ]; then
+  storage_flag=(--storage-format "$KEPLOY_STORAGE_FORMAT")
+fi
+
 # Start Keploy wrapping PetClinic application
-sudo -E env PATH=$PATH ./keploy record \
+sudo -E env PATH=$PATH ./keploy record "${storage_flag[@]}" \
   -c "java -Dspring.profiles.active=mysql -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" \
   --path=./keploy-tests \
   --config-path=/tmp/keploy-no-config &

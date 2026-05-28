@@ -195,6 +195,46 @@ for record_iteration in {1..2}; do
     echo "Recorded test case and mocks for iteration ${record_iteration}"
 done
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    # Additional record pass with --storage-format json. The new test-sets
+    # land alongside the yaml ones in the same keploy/ tree
+    # (FindLastIndexAny picks the next free index across both extensions),
+    # so the subsequent default-format replay exercises the read-side
+    # auto-detect path over a directory that mixes yaml and json fixtures.
+    for record_iteration in {1..2}; do
+        app_name="ginMongo_json_${record_iteration}"
+        "$RECORD_BIN" record --storage-format json -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
+
+        KEPLOY_PID=$!
+
+        if ! send_request "$KEPLOY_PID"; then
+            echo "::error::Failed to drive gin-mongo traffic for json record iteration ${record_iteration}"
+            cat "${app_name}.txt" || true
+            exit 1
+        fi
+
+        if unexpected_errors="$(has_unexpected_errors "${app_name}.txt")"; then
+            echo "Error found in pipeline..."
+            printf '%s\n' "$unexpected_errors"
+            cat "${app_name}.txt"
+            exit 1
+        fi
+        if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+          echo "Race condition detected in json recording, stopping pipeline..."
+          cat "${app_name}.txt"
+          exit 1
+        fi
+        sleep 5
+        wait
+        echo "Recorded json test case and mocks for iteration ${record_iteration}"
+    done
+else
+    echo "Skipping --storage-format json record pass: at least one binary is the released keploy (no json support)."
+fi
+
 # Keep MongoDB running during test replay. Keploy will serve mocks for
 # matched requests; unmatched requests fall through to the real database
 # which returns the same data recorded earlier, preventing flaky failures
@@ -249,31 +289,149 @@ fi
 all_passed=true
 
 
-# Get the test results from the testReport file.
-for test_set in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$test_set-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$test_set: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$test_set did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
-
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+# Default-format (yaml) report scan. Glob picks up reports for every
+# test-set in test-run-0 — including the json-recorded ones, since the
+# default replay above wrote yaml reports for the entire directory.
+shopt -s nullglob
+yaml_reports=( ./keploy/reports/test-run-0/test-set-*-report.yaml )
+shopt -u nullglob
+if [ ${#yaml_reports[@]} -eq 0 ]; then
+    echo "::error::No yaml test-set reports found under ./keploy/reports/test-run-0/"
     cat "test_logs.txt"
     exit 1
 fi
+for report_file in "${yaml_reports[@]}"; do
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    echo "yaml report $(basename "$report_file"): $test_status"
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "$(basename "$report_file") did not pass."
+        break
+    fi
+done
+
+if json_pass_supported; then
+    # Second replay pass with --storage-format json — exercises the json
+    # write path AND, because the keploy/ tree holds both yaml- and
+    # json-recorded test-sets, validates that a json-mode replay reads
+    # the yaml fixtures via the read-side auto-detect path.
+    "$REPLAY_BIN" test --storage-format json -c "./ginApp" --delay 7 2>&1 | tee test_logs_json.txt
+    replay_status_json=${PIPESTATUS[0]}
+
+    if [ "$replay_status_json" -ne 0 ]; then
+        echo "::error::Keploy json replay failed with exit code ${replay_status_json}"
+        cat test_logs_json.txt
+        exit "$replay_status_json"
+    fi
+
+    if unexpected_errors="$(has_unexpected_errors "test_logs_json.txt")"; then
+        echo "Error found in pipeline (json replay)..."
+        printf '%s\n' "$unexpected_errors"
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+
+    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+        echo "Race condition detected in json test, stopping pipeline..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+
+    if ! json_scan_reports; then
+        all_passed=false
+        cat "test_logs_json.txt"
+    fi
+fi
+
+# Baseline gate: fail fast before the --keep-app-alive regression run if the
+# default-format (and json, when supported) reports didn't all pass.
+if [ "$all_passed" = true ]; then
+    if json_pass_supported; then
+        echo "All tests passed (yaml + json baseline)"
+    else
+        echo "All tests passed (yaml only baseline — json pass skipped for compat-matrix cell)"
+    fi
+else
+    cat "test_logs.txt"
+    cat "test_logs_json.txt" 2>/dev/null || true
+    exit 1
+fi
+
+# ── --keep-app-alive regression coverage ────────────────────────────────────
+# Second replay run with --keep-app-alive. The flag starts the user app
+# ONCE for the whole replay run instead of restarting it per test-set,
+# so the wiring exercised here is:
+#   - one-shot RunApplication spawn in Start()
+#   - serveTest=true plumbed into RunTestSet (skips per-test-set restart)
+#   - waitForAppReady skipped on post-first test-sets
+#
+# The replay is scoped to ONE test-set on purpose. With the flag set the
+# user app survives across the test-set boundary; some samples (gin-mongo
+# included — MongoDB rows recorded during test-set-0 leak into test-set-1's
+# expected "before" state) would then exhibit cross-test-set state bleed.
+# That's the bug --keep-app-alive is designed to surface in real
+# autoreplay scenarios, but for THIS regression gate we just want to
+# prove the flag itself is wired and produces a valid PASSED report —
+# nothing more. Scoping to a single test-set keeps the assertion robust
+# across samples that have varying state-isolation properties.
+#
+# Three matrix variants in this PR's CI share this script:
+#   record_build_replay_build   — REPLAY_BIN has the flag → run succeeds
+#   record_latest_replay_build  — REPLAY_BIN has the flag → run succeeds
+#   record_build_replay_latest  — REPLAY_BIN is keploy-latest, NO flag →
+#                                 binary exits "unknown flag" / non-zero
+#                                 → replay_status catches it
+#                                 → new-report-dir guard catches the
+#                                   case where keploy-latest exits so
+#                                   fast it never produces a report dir
+#                                 → leg goes red (expected red until the
+#                                   next keploy release ships the flag)
+echo "===== --keep-app-alive regression run ====="
+prev_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+
+"$REPLAY_BIN" test -c "./ginApp" --delay 7 --keep-app-alive --test-sets test-set-0 2>&1 | tee test_logs_keep_app_alive.txt
+replay_status=${PIPESTATUS[0]}
+
+if [ "$replay_status" -ne 0 ]; then
+  echo "::error::--keep-app-alive replay failed with exit code ${replay_status}"
+  cat test_logs_keep_app_alive.txt
+  exit "$replay_status"
+fi
+
+if grep "WARNING: DATA RACE" "test_logs_keep_app_alive.txt"; then
+    echo "Race condition detected in --keep-app-alive replay, stopping pipeline..."
+    cat "test_logs_keep_app_alive.txt"
+    exit 1
+fi
+
+# Verify a NEW test-run-* directory was created. Catches the silent-pass
+# we hit on first iteration: keploy-latest rejecting --keep-app-alive
+# exited before producing a report dir, but `ls -td test-run-*` still
+# returned the BASELINE's test-run-0 and we wrongly reported PASSED on
+# the stale report.
+new_report_count=$(ls -d ./keploy/reports/test-run-* 2>/dev/null | wc -l)
+if [ "$new_report_count" -le "$prev_report_count" ]; then
+    echo "::error::--keep-app-alive replay did not produce a new test-run-* directory (prev=${prev_report_count}, new=${new_report_count}). Most likely the binary rejected the --keep-app-alive flag."
+    cat "test_logs_keep_app_alive.txt"
+    exit 1
+fi
+
+latest_report_dir="$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)"
+echo "--keep-app-alive report dir: $latest_report_dir"
+
+report_file="$latest_report_dir/test-set-0-report.yaml"
+if [ ! -f "$report_file" ]; then
+    echo "::error::Missing $report_file"
+    cat "test_logs_keep_app_alive.txt"
+    exit 1
+fi
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+echo "[--keep-app-alive] Test status for test-set-0: $test_status"
+if [ "$test_status" != "PASSED" ]; then
+    echo "[--keep-app-alive] Test-set-0 did not pass."
+    cat "test_logs_keep_app_alive.txt"
+    exit 1
+fi
+
+echo "All tests passed (--keep-app-alive run)"
+exit 0
