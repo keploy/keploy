@@ -57,10 +57,11 @@ type SyncMockManager struct {
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
 
-	// droppedMockTimestamps records the ReqTimestampMock of every mock dropped
-	// by memory pressure. Guarded by mu. Appended in AddMock BEFORE mu.Unlock()
-	// so HasDroppedMockInWindow (which also reads under mu) always sees a
-	// consistent view — atomicity guarantee for the TC-suppression fix.
+	// droppedMockTimestamps records a timestamp for every mock dropped by memory
+	// pressure: ReqTimestampMock when available, time.Now() at drop time as
+	// fallback (Mongo mocks have a zero ReqTimestampMock). Guarded by mu.
+	// Appended in AddMock BEFORE mu.Unlock() so HasDroppedMockInWindow (which
+	// also reads under mu) always sees a consistent view.
 	droppedMockTimestamps []time.Time
 
 	// loggerMu guards logger so SetLogger and the drop path can run
@@ -232,9 +233,14 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// so the append here and the check there are atomic w.r.t. each other:
 		// no TC-send goroutine can observe a partial state where the mock is
 		// dropped but its timestamp is not yet visible in the slice.
-		if !mock.Spec.ReqTimestampMock.IsZero() {
-			m.droppedMockTimestamps = append(m.droppedMockTimestamps, mock.Spec.ReqTimestampMock)
+		// Use ReqTimestampMock when set; fall back to time.Now() because
+		// AddMock is called on the proxy goroutine right after the DB response
+		// arrives, so time.Now() at drop time is always within the HTTP window.
+		ts := mock.Spec.ReqTimestampMock
+		if ts.IsZero() {
+			ts = time.Now()
 		}
+		m.droppedMockTimestamps = append(m.droppedMockTimestamps, ts)
 		m.mu.Unlock()
 		totalDropped := m.pressureDropped.Add(1)
 		totalAdded := m.totalAdded.Load()
