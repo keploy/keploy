@@ -250,12 +250,32 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
-			p.logger.Debug("DNS mock miss resolved via upstream forward",
+			// Only accept the upstream answer when it actually resolved
+			// the name (RcodeSuccess with at least one Answer RR).  A
+			// negative answer — NXDOMAIN (Rcode=3), SERVFAIL (Rcode=2),
+			// or a success with an empty Answer section — must NOT be
+			// relayed to the app.  In test mode any unknown name is
+			// expected to resolve to the proxy IP so that eBPF can
+			// intercept the resulting TCP connection and match it against
+			// the recorded mocks.  Relaying NXDOMAIN bypasses that
+			// fallback and crashes apps that rely on bare service names
+			// (e.g. "localstack", "postgres") — this was issue #2006.
+			if fwdResp.Rcode == dns.RcodeSuccess && len(fwdResp.Answer) > 0 {
+				p.logger.Debug("DNS mock miss resolved via upstream forward",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]),
+					zap.Int("rcode", fwdResp.Rcode),
+					zap.Int("answers", len(fwdResp.Answer)))
+				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+			}
+			// Upstream returned a negative or empty answer (NXDOMAIN,
+			// SERVFAIL, or success with no RRs).  Fall through to
+			// defaultDNSResponse so the app always gets a resolvable IP.
+			p.logger.Debug("DNS mock miss: upstream returned negative/empty answer; falling back to synthetic proxy-IP response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Int("rcode", fwdResp.Rcode),
 				zap.Int("answers", len(fwdResp.Answer)))
-			return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 		} else if fwdErr != nil {
 			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
 				zap.String("query", question.Name),
