@@ -15,7 +15,7 @@
 ---
 
 <p align="center">
-<a href="https://join.slack.com/t/keploy/shared_invite/zt-3yxf6lxky-Y1OdbFoJsvQt0P0ncoFQaw"><img src="https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white" alt="Slack" /></a>
+<a href="https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA"><img src="https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white" alt="Slack" /></a>
   <a href="https://www.linkedin.com/company/keploy/"><img src="https://img.shields.io/badge/LinkedIn-%230077B5.svg?style=flat&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
   <a href="https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg"><img src="https://img.shields.io/badge/YouTube-%23FF0000.svg?style=flat&logo=YouTube&logoColor=white" alt="YouTube" /></a>
   <a href="https://x.com/Keployio"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X&logoColor=white" alt="X" /></a>
@@ -189,7 +189,7 @@ Want a guided walkthrough, dedicated support, or help planning enterprise rollou
     <img src="https://img.shields.io/badge/Request%20a%20Demo-Email-2ea44f?logo=gmail" />
   </a>
   &nbsp;
-  <a href="https://join.slack.com/t/keploy/shared_invite/zt-3yxf6lxky-Y1OdbFoJsvQt0P0ncoFQaw">
+  <a href="https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA">
     <img src="https://img.shields.io/badge/Chat%20with%20Us-Slack-4A154B?logo=slack&amp;logoColor=white" />
   </a>
   <!-- Optional: replace with your scheduling link (Cal.com/Calendly) -->
@@ -203,7 +203,7 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 ## Documentation & Community
 
 - 📘 [Documentation](https://keploy.io/docs/) — Explore the full docs
-- 💬 [Slack Community](https://join.slack.com/t/keploy/shared_invite/zt-3yxf6lxky-Y1OdbFoJsvQt0P0ncoFQaw) — Join the conversation
+- 💬 [Slack Community](https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA) — Join the conversation
 - 📜 [Contribution Guidelines](https://keploy.io/docs/keploy-explained/contribution-guide/)
 - ❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
 - 📢 [Blog](https://keploy.io/blog/) — Read articles and updates

@@ -2,7 +2,7 @@
 
 Thank you for your interest in Keploy and for taking the time to contribute to this project. 🙌 Keploy is a project by developers for developers and there are a lot of ways you can contribute.
 
-If you don't know where to start contributing, ask us on our [Slack channel](https://join.slack.com/t/keploy/shared_invite/zt-3yxf6lxky-Y1OdbFoJsvQt0P0ncoFQaw).
+If you don't know where to start contributing, ask us on our [Slack channel](https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA).
 
 ## Code of conduct
 
@@ -119,4 +119,4 @@ Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/
 
 # Contact
 
-Feel free to join [slack](https://join.slack.com/t/keploy/shared_invite/zt-3yxf6lxky-Y1OdbFoJsvQt0P0ncoFQaw) to start a conversation with us.
+Feel free to join [slack](https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA) to start a conversation with us.
