@@ -89,6 +89,12 @@ send_request() {
   echo "=== Query both again (second round) ==="
   curl -sS http://localhost:8080/api/query-both || true
 
+  # Exercises the COM_STMT_RESET synthetic-OK fallback (keploy#4217).
+  # Re-executes a server-prepared statement 5 times on the same JDBC
+  # connection; Connector/J 8.x emits COM_STMT_RESET between executions.
+  echo "=== /api/oms/stmt-reset/5 (trigger COM_STMT_RESET) ==="
+  curl -sS http://localhost:8080/api/oms/stmt-reset/5 || true
+
   # Let keploy persist, then gracefully stop it
   sleep 10
   echo "$kp_pid Keploy PID"
