@@ -386,6 +386,18 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 // forwarding a TC to the CLI — if this returns true, the TC is suppressed
 // (not sent) so no orphan TC lands on disk. Reading under mu guarantees
 // atomicity with the append in AddMock's pressure-drop path.
+// GetDroppedTimestamps returns a copy of the dropped mock timestamps for diagnostics.
+func (m *SyncMockManager) GetDroppedTimestamps() []time.Time {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]time.Time, len(m.droppedMockTimestamps))
+	copy(out, m.droppedMockTimestamps)
+	return out
+}
+
 func (m *SyncMockManager) HasDroppedMockInWindow(start, end time.Time) (bool, int) {
 	if m == nil {
 		return false, 0

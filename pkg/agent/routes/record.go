@@ -371,6 +371,25 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if tcRespTime.IsZero() {
 				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
+			// DIAG: log the first window check after any mock has been dropped,
+			// showing TC timestamps vs every dropped mock timestamp.
+			_, totalDropped, _, _ := syncmgr.Get().GetDropStats()
+			if totalDropped > 0 {
+				droppedTs := syncmgr.Get().GetDroppedTimestamps()
+				fields := []zap.Field{
+					zap.String("tc_name", t.Name),
+					zap.Time("tc_req_time", t.HTTPReq.Timestamp),
+					zap.Time("tc_resp_time", tcRespTime),
+					zap.Bool("req_is_zero", t.HTTPReq.Timestamp.IsZero()),
+					zap.Bool("resp_is_zero", t.HTTPResp.Timestamp.IsZero()),
+					zap.Int64("total_mocks_dropped", totalDropped),
+					zap.Int("dropped_ts_slice_len", len(droppedTs)),
+				}
+				for i, dts := range droppedTs {
+					fields = append(fields, zap.Time(fmt.Sprintf("dropped_ts_%d", i), dts))
+				}
+				a.logger.Info("DIAG/window-check", fields...)
+			}
 			if hasDropped, droppedCount := syncmgr.Get().HasDroppedMockInWindow(t.HTTPReq.Timestamp, tcRespTime); hasDropped {
 				tcsSuppressedSoFar++
 				a.logger.Info("agent: TC suppressed — mock dropped in window, not sent to CLI",
