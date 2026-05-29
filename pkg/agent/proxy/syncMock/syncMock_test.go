@@ -1019,3 +1019,225 @@ func drainChan(t *testing.T, ch chan *models.Mock, max int) {
 		}
 	}
 }
+
+// TestWasPressureActiveInWindow exercises the join-key for the Bug 0
+// TC-suppression fix. Every case is constructed by hand-setting
+// pressureRanges so the test does not depend on real wall-clock timing.
+func TestWasPressureActiveInWindow(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	at := func(offsetMs int) time.Time { return base.Add(time.Duration(offsetMs) * time.Millisecond) }
+
+	cases := []struct {
+		name        string
+		ranges      []pressureRange
+		windowStart time.Time
+		windowEnd   time.Time
+		wantOverlap bool
+		wantCount   int
+	}{
+		{
+			name:        "no ranges → no overlap",
+			ranges:      nil,
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure ended before window started → no overlap",
+			ranges:      []pressureRange{{start: at(0), end: at(50)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure starts after window ends → no overlap",
+			ranges:      []pressureRange{{start: at(300), end: at(400)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure fully inside window → overlap",
+			ranges:      []pressureRange{{start: at(120), end: at(180)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "window fully inside pressure → overlap",
+			ranges:      []pressureRange{{start: at(0), end: at(500)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure overlaps left edge → overlap",
+			ranges:      []pressureRange{{start: at(50), end: at(150)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure overlaps right edge → overlap",
+			ranges:      []pressureRange{{start: at(150), end: at(250)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure ends exactly at window start → overlap (touching counts)",
+			ranges:      []pressureRange{{start: at(0), end: at(100)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure starts exactly at window end → overlap (touching counts)",
+			ranges:      []pressureRange{{start: at(200), end: at(300)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name: "two ranges, one overlaps → count 1",
+			ranges: []pressureRange{
+				{start: at(0), end: at(50)},      // before
+				{start: at(150), end: at(160)},   // inside
+				{start: at(300), end: at(400)},   // after
+			},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name: "two ranges, both overlap → count 2",
+			ranges: []pressureRange{
+				{start: at(120), end: at(140)},
+				{start: at(150), end: at(180)},
+			},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 2,
+		},
+		{
+			name:        "open range (still active) → end treated as now → overlap if start <= windowEnd",
+			ranges:      []pressureRange{{start: at(150), end: time.Time{}}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &SyncMockManager{pressureRanges: tc.ranges}
+			gotOverlap, gotCount := mgr.WasPressureActiveInWindow(tc.windowStart, tc.windowEnd)
+			if gotOverlap != tc.wantOverlap || gotCount != tc.wantCount {
+				t.Fatalf("WasPressureActiveInWindow = (%v, %d), want (%v, %d)",
+					gotOverlap, gotCount, tc.wantOverlap, tc.wantCount)
+			}
+		})
+	}
+}
+
+// TestWasPressureActiveInWindowRejectsZeroInputs verifies the defensive
+// guard: a zero start or end produces no claim (false, 0). Caller falls
+// back to "send the TC" rather than over-suppress on garbage input.
+func TestWasPressureActiveInWindowRejectsZeroInputs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	mgr := &SyncMockManager{pressureRanges: []pressureRange{{start: now.Add(-time.Second), end: now}}}
+
+	if ok, c := mgr.WasPressureActiveInWindow(time.Time{}, now); ok || c != 0 {
+		t.Fatalf("zero start: got (%v, %d), want (false, 0)", ok, c)
+	}
+	if ok, c := mgr.WasPressureActiveInWindow(now, time.Time{}); ok || c != 0 {
+		t.Fatalf("zero end: got (%v, %d), want (false, 0)", ok, c)
+	}
+}
+
+// TestWasPressureActiveInWindowNilReceiver verifies the nil-receiver guard
+// — calling on a nil *SyncMockManager must not panic.
+func TestWasPressureActiveInWindowNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var mgr *SyncMockManager
+	if ok, c := mgr.WasPressureActiveInWindow(time.Now(), time.Now().Add(time.Second)); ok || c != 0 {
+		t.Fatalf("nil receiver: got (%v, %d), want (false, 0)", ok, c)
+	}
+}
+
+// TestSetMemoryPressureRecordsRanges verifies that the false→true transition
+// opens a new range, the true→false transition closes it, and repeated calls
+// in the same state are no-ops for range tracking (no spam on every tick).
+func TestSetMemoryPressureRecordsRanges(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+
+	// Initially no ranges
+	if got := mgr.PressureRangeCount(); got != 0 {
+		t.Fatalf("initial range count: got %d, want 0", got)
+	}
+
+	// First false→true: opens one range
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after first true: got %d ranges, want 1", got)
+	}
+	if !mgr.pressureRanges[0].end.IsZero() {
+		t.Fatalf("first range should be open (end zero), got end=%v", mgr.pressureRanges[0].end)
+	}
+
+	// Redundant true call while already active: no-op for range tracking
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after redundant true: got %d ranges, want still 1", got)
+	}
+
+	// true→false: closes the open range
+	mgr.SetMemoryPressure(false)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after false: got %d ranges, want still 1", got)
+	}
+	if mgr.pressureRanges[0].end.IsZero() {
+		t.Fatalf("first range should be closed after false call, end still zero")
+	}
+
+	// Redundant false: no-op
+	mgr.SetMemoryPressure(false)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after redundant false: got %d ranges, want still 1", got)
+	}
+
+	// Second cycle: opens a new range
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 2 {
+		t.Fatalf("after second true: got %d ranges, want 2", got)
+	}
+}
+
+// TestSetMemoryPressureRaceWithTC documents the core happens-before claim
+// behind the Bug 0 fix:
+//
+//  1. SetMemoryPressure(true) records the pressure-range start under mu.
+//  2. A separate goroutine reads the range via WasPressureActiveInWindow,
+//     also under mu.
+//  3. The reader is guaranteed to see the range as long as it ran AFTER
+//     the writer's mu.Unlock() — which is enforced here by a sync.WaitGroup.
+//
+// This is what makes the fix race-free: the TC handler's
+// WasPressureActiveInWindow call happens-after the SetMemoryPressure write
+// that caused the mock to be dropped, even if AddMock itself is still in
+// flight on a third goroutine.
+func TestSetMemoryPressureRaceWithTC(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	tcStart := time.Now()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		mgr.SetMemoryPressure(true)
+	}()
+	wg.Wait()
+
+	tcEnd := time.Now().Add(time.Second) // ensure the open range falls inside
+	ok, count := mgr.WasPressureActiveInWindow(tcStart, tcEnd)
+	if !ok || count != 1 {
+		t.Fatalf("expected overlap with open range: got (%v, %d), want (true, 1)", ok, count)
+	}
+}

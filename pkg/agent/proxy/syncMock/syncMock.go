@@ -57,18 +57,31 @@ type SyncMockManager struct {
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
 
-	// droppedMockTimestamps records a timestamp for every mock dropped by memory
-	// pressure: ReqTimestampMock when available, time.Now() at drop time as
-	// fallback (Mongo mocks have a zero ReqTimestampMock). Guarded by mu.
-	// Appended in AddMock BEFORE mu.Unlock() so HasDroppedMockInWindow (which
-	// also reads under mu) always sees a consistent view.
-	droppedMockTimestamps []time.Time
+	// pressureRanges records every [start, end] interval during which memory
+	// pressure was active. Appended on the false→true transition in
+	// SetMemoryPressure, closed on the true→false transition. The most recent
+	// entry has end == zero while pressure is still active. Guarded by mu.
+	//
+	// This is the join key for the Bug 0 TC-suppression fix:
+	// WasPressureActiveInWindow checks whether any range overlaps a TC's
+	// [HTTPReq.Timestamp, HTTPResp.Timestamp] window. Using pressure ranges
+	// instead of per-mock drop timestamps is RACE-FREE — memoryguard records
+	// the start the instant it flips memoryPause, BEFORE any mock-parser
+	// goroutine sees the result; so even if the paired AddMock fires AFTER
+	// the TC has reached routes/record.go, the overlap is already visible.
+	pressureRanges []pressureRange
 
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+}
+
+// pressureRange is one [start, end] interval during which memory pressure was
+// active. end is zero while the interval is still open (pressure not cleared yet).
+type pressureRange struct {
+	start, end time.Time
 }
 
 // Global instance is initialized at package load time
@@ -228,19 +241,6 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
-		// Bug 0 fix: record the dropped mock's timestamp BEFORE releasing mu.
-		// HasDroppedMockInWindow reads droppedMockTimestamps under the same mu,
-		// so the append here and the check there are atomic w.r.t. each other:
-		// no TC-send goroutine can observe a partial state where the mock is
-		// dropped but its timestamp is not yet visible in the slice.
-		// Use ReqTimestampMock when set; fall back to time.Now() because
-		// AddMock is called on the proxy goroutine right after the DB response
-		// arrives, so time.Now() at drop time is always within the HTTP window.
-		ts := mock.Spec.ReqTimestampMock
-		if ts.IsZero() {
-			ts = time.Now()
-		}
-		m.droppedMockTimestamps = append(m.droppedMockTimestamps, ts)
 		m.mu.Unlock()
 		totalDropped := m.pressureDropped.Add(1)
 		totalAdded := m.totalAdded.Load()
@@ -380,43 +380,73 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 	return
 }
 
-// HasDroppedMockInWindow returns (true, count) if at least one mock was
-// pressure-dropped whose ReqTimestampMock falls in [start, end].
-// Called by the TC-send path in routes/record.go immediately before
-// forwarding a TC to the CLI — if this returns true, the TC is suppressed
-// (not sent) so no orphan TC lands on disk. Reading under mu guarantees
-// atomicity with the append in AddMock's pressure-drop path.
-// GetDroppedTimestamps returns a copy of the dropped mock timestamps for diagnostics.
-func (m *SyncMockManager) GetDroppedTimestamps() []time.Time {
+// WasPressureActiveInWindow returns (true, overlapCount) if memory pressure
+// was active at any moment during [start, end].
+//
+// Called by the TC-send path in routes/record.go right before forwarding a
+// TC to the CLI: if it returns true, the TC is suppressed and never reaches
+// disk, so replay cannot encounter a missing-mock EOF for it.
+//
+// Why this is race-free unlike a per-mock-drop ledger:
+//   - memoryguard calls SetMemoryPressure(true) and the range is appended
+//     under mu in the SAME critical section that flips m.memoryPause = true.
+//   - Any mock-parser goroutine that subsequently sees memoryPause==true
+//     (and therefore drops its mock) does so BECAUSE the range was already
+//     committed. The "open" event happens-before any drop it causes.
+//   - The TC's HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp] is
+//     bounded by wall-clock time; if any pressure range overlaps that
+//     window, the TC was at risk of losing a mock to pressure regardless
+//     of when AddMock actually fires for that mock.
+//
+// Two intervals [a, b] and [c, d] overlap iff a <= d AND c <= b. An open
+// (still-active) range's end is treated as time.Now().
+func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool, int) {
 	if m == nil {
-		return nil
+		return false, 0
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]time.Time, len(m.droppedMockTimestamps))
-	copy(out, m.droppedMockTimestamps)
-	return out
-}
-
-func (m *SyncMockManager) HasDroppedMockInWindow(start, end time.Time) (bool, int) {
-	if m == nil {
+	// Defensive: a zero start or end would either match every range or none
+	// depending on direction. Refuse to make a claim on degenerate inputs —
+	// the caller should fall back to "send the TC" rather than over-suppress.
+	if start.IsZero() || end.IsZero() {
 		return false, 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
-	for _, ts := range m.droppedMockTimestamps {
-		if !ts.Before(start) && !ts.After(end) {
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		rEnd := r.end
+		if rEnd.IsZero() {
+			rEnd = now
+		}
+		// Standard interval-overlap test: [r.start, rEnd] vs [start, end]
+		if !r.start.After(end) && !rEnd.Before(start) {
 			count++
 		}
 	}
 	return count > 0, count
 }
 
+// PressureRangeCount returns the total number of pressure intervals recorded
+// so far. Exposed for the session-summary log in routes/record.go.
+func (m *SyncMockManager) PressureRangeCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pressureRanges)
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
 	}
+
+	// time.Now() OUTSIDE the lock: cheap, and avoids holding mu across the
+	// syscall. Reused for both the new-range open AND the close, so the two
+	// transitions can never produce a range with end < start due to clock skew.
+	now := time.Now()
 
 	m.mu.Lock()
 	wasEnabled := m.memoryPause
@@ -428,6 +458,22 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			m.buffer[i] = nil
 		}
 		m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
+		if !wasEnabled {
+			// false→true transition: open a new pressure interval.
+			// memoryguard fires SetMemoryPressure(true) once per 500ms tick,
+			// but only the first call (when wasEnabled is false) is a real
+			// transition; subsequent ticks while pressure is held are no-ops
+			// for range tracking — they would otherwise spam the slice.
+			m.pressureRanges = append(m.pressureRanges, pressureRange{start: now})
+		}
+	} else if wasEnabled {
+		// true→false transition: close the most recent open interval.
+		// The defensive len check covers the degenerate case where
+		// SetMemoryPressure(false) is somehow called without a prior (true),
+		// e.g. a partial state restore in tests.
+		if n := len(m.pressureRanges); n > 0 && m.pressureRanges[n-1].end.IsZero() {
+			m.pressureRanges[n-1].end = now
+		}
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
 

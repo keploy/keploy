@@ -341,7 +341,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed by Bug 0 fix (mock dropped in TC's window)
+	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
 	for {
 		select {
 		case <-r.Context().Done():
@@ -353,54 +353,38 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 				a.logger.Info("agent: recording complete",
 					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
-					zap.Int("tcs_suppressed_no_mock", tcsSuppressedSoFar),
+					zap.Int("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar),
+					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
 				)
 				return
 			}
 
-			// Bug 0 fix: check if any pressure-dropped mock falls within this
-			// TC's [HTTPReq.Timestamp, HTTPResp.Timestamp] window.
-			// Atomicity: AddMock appends the dropped timestamp while holding mu,
-			// BEFORE releasing mu. HasDroppedMockInWindow reads under the same mu.
-			// The TC arrives on this channel only AFTER the HTTP response, which
-			// comes only AFTER all DB calls complete — so all timestamps for this
-			// TC's DB calls are already in droppedMockTimestamps when we check here.
+			// Bug 0 fix: suppress this TC if memory pressure was active at any
+			// moment during its HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp].
+			// We use pressure-range overlap (not per-mock-drop timestamps) because
+			// the Mongo-mock goroutine and the HTTP-TC goroutine race: a paired
+			// mock can be dropped AFTER the TC has already reached this handler,
+			// in which case a per-mock ledger would still be empty. Pressure
+			// ranges, however, are recorded the instant SetMemoryPressure(true)
+			// flips memoryPause — happens-before any mock drop it causes — so an
+			// overlap check is race-free.
 			tcRespTime := t.HTTPResp.Timestamp
 			if tcRespTime.IsZero() {
+				// Defensive: HTTPResp.Timestamp is normally set by the proxy
+				// hook before the TC enters this channel. If it's missing for
+				// some reason, widen the window with a 30s ceiling so we still
+				// catch most concurrent pressure events without going unbounded.
 				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
-			// DIAG: log in Unix milliseconds (plain int64) so the Docker log
-			// renderer can't garble values like it does with zap.Time fields.
-			// Each dropped mock also logs its delta-from-req in ms — a negative
-			// delta means the mock was dropped BEFORE this TC's window opened.
-			_, totalDropped, _, _ := syncmgr.Get().GetDropStats()
-			if totalDropped > 0 {
-				droppedTs := syncmgr.Get().GetDroppedTimestamps()
-				fields := []zap.Field{
-					zap.String("tc_name", t.Name),
-					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-					zap.Int64("tc_window_ms", tcRespTime.Sub(t.HTTPReq.Timestamp).Milliseconds()),
-					zap.Int64("total_mocks_dropped", totalDropped),
-					zap.Int("dropped_slice_len", len(droppedTs)),
-				}
-				for i, dts := range droppedTs {
-					fields = append(fields,
-						zap.Int64(fmt.Sprintf("drop_%d_ms", i), dts.UnixMilli()),
-						zap.Int64(fmt.Sprintf("drop_%d_delta_ms", i), dts.Sub(t.HTTPReq.Timestamp).Milliseconds()),
-					)
-				}
-				a.logger.Info("DIAG/window-check", fields...)
-			}
-			if hasDropped, droppedCount := syncmgr.Get().HasDroppedMockInWindow(t.HTTPReq.Timestamp, tcRespTime); hasDropped {
+			if hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime); hasOverlap {
 				tcsSuppressedSoFar++
-				a.logger.Info("agent: TC suppressed — mock dropped in window, not sent to CLI",
+				a.logger.Info("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Time("tc_req_time", t.HTTPReq.Timestamp),
 					zap.Time("tc_resp_time", tcRespTime),
-					zap.Int("mocks_dropped_in_window", droppedCount),
+					zap.Int("pressure_overlaps", overlapCount),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)
 				continue
