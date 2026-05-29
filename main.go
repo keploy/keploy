@@ -136,6 +136,15 @@ func start(ctx context.Context) {
 		return
 	}
 
+	// Nudge OSS users toward Keploy Community Edition. Placed AFTER the
+	// sudo re-exec gate (mirroring where the logo prints via the cobra
+	// PreRunE in cli/provider/cmd.go) so the original process is already
+	// replaced by syscall.Exec before this runs — guarantees the banner
+	// prints exactly once across the docker/cloud-replay re-exec path.
+	// Same-binary-only: lives in this main package, the enterprise
+	// binary has its own main.go and doesn't compile this in.
+	printEnterpriseUpgradeBanner()
+
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
