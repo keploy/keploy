@@ -371,22 +371,26 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if tcRespTime.IsZero() {
 				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
-			// DIAG: log the first window check after any mock has been dropped,
-			// showing TC timestamps vs every dropped mock timestamp.
+			// DIAG: log in Unix milliseconds (plain int64) so the Docker log
+			// renderer can't garble values like it does with zap.Time fields.
+			// Each dropped mock also logs its delta-from-req in ms — a negative
+			// delta means the mock was dropped BEFORE this TC's window opened.
 			_, totalDropped, _, _ := syncmgr.Get().GetDropStats()
 			if totalDropped > 0 {
 				droppedTs := syncmgr.Get().GetDroppedTimestamps()
 				fields := []zap.Field{
 					zap.String("tc_name", t.Name),
-					zap.Time("tc_req_time", t.HTTPReq.Timestamp),
-					zap.Time("tc_resp_time", tcRespTime),
-					zap.Bool("req_is_zero", t.HTTPReq.Timestamp.IsZero()),
-					zap.Bool("resp_is_zero", t.HTTPResp.Timestamp.IsZero()),
+					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+					zap.Int64("tc_window_ms", tcRespTime.Sub(t.HTTPReq.Timestamp).Milliseconds()),
 					zap.Int64("total_mocks_dropped", totalDropped),
-					zap.Int("dropped_ts_slice_len", len(droppedTs)),
+					zap.Int("dropped_slice_len", len(droppedTs)),
 				}
 				for i, dts := range droppedTs {
-					fields = append(fields, zap.Time(fmt.Sprintf("dropped_ts_%d", i), dts))
+					fields = append(fields,
+						zap.Int64(fmt.Sprintf("drop_%d_ms", i), dts.UnixMilli()),
+						zap.Int64(fmt.Sprintf("drop_%d_delta_ms", i), dts.Sub(t.HTTPReq.Timestamp).Milliseconds()),
+					)
 				}
 				a.logger.Info("DIAG/window-check", fields...)
 			}
