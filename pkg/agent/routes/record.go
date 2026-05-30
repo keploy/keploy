@@ -342,6 +342,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
+	var diagRangesDumped bool  // DIAG: ensure the pressure-ranges snapshot is logged only once
 	for {
 		select {
 		case <-r.Context().Done():
@@ -378,12 +379,41 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				// catch most concurrent pressure events without going unbounded.
 				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
-			if hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime); hasOverlap {
+			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+
+			// DIAG (temporary): once any pressure range exists, log every TC's
+			// window check in plain Unix-ms integers (the Docker log renderer
+			// garbles zap.Time but not int64). On the FIRST such TC, also dump
+			// every recorded pressure range so overlap can be verified by hand.
+			if rangeCount := syncmgr.Get().PressureRangeCount(); rangeCount > 0 {
+				if !diagRangesDumped {
+					diagRangesDumped = true
+					ranges := syncmgr.Get().PressureRangesUnixMilli()
+					rf := make([]zap.Field, 0, len(ranges)+1)
+					rf = append(rf, zap.Int("range_count", len(ranges)))
+					for i, r := range ranges {
+						rf = append(rf, zap.Int64s(fmt.Sprintf("range_%d_start_end_ms", i), []int64{r[0], r[1]}))
+					}
+					a.logger.Info("DIAG/pressure-ranges-snapshot", rf...)
+				}
+				a.logger.Info("DIAG/window-check",
+					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+					zap.Int64("tc_window_ms", tcRespTime.Sub(t.HTTPReq.Timestamp).Milliseconds()),
+					zap.Bool("req_is_zero", t.HTTPReq.Timestamp.IsZero()),
+					zap.Bool("resp_is_zero", t.HTTPResp.Timestamp.IsZero()),
+					zap.Int("range_count", rangeCount),
+					zap.Int("overlap_count", overlapCount),
+					zap.Bool("would_suppress", hasOverlap),
+				)
+			}
+
+			if hasOverlap {
 				tcsSuppressedSoFar++
 				a.logger.Info("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
 					zap.String("tc_name", t.Name),
-					zap.Time("tc_req_time", t.HTTPReq.Timestamp),
-					zap.Time("tc_resp_time", tcRespTime),
+					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 					zap.Int("pressure_overlaps", overlapCount),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)

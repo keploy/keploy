@@ -438,6 +438,27 @@ func (m *SyncMockManager) PressureRangeCount() int {
 	return len(m.pressureRanges)
 }
 
+// PressureRangesUnixMilli returns every recorded range as a [startMs, endMs]
+// pair in Unix milliseconds. A still-open range reports endMs = -1.
+// Diagnostics only — used to dump the actual ranges to the log so overlap
+// math can be verified by hand against a TC window.
+func (m *SyncMockManager) PressureRangesUnixMilli() [][2]int64 {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][2]int64, 0, len(m.pressureRanges))
+	for _, r := range m.pressureRanges {
+		endMs := int64(-1)
+		if !r.end.IsZero() {
+			endMs = r.end.UnixMilli()
+		}
+		out = append(out, [2]int64{r.start.UnixMilli(), endMs})
+	}
+	return out
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
