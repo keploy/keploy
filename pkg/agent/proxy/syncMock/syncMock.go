@@ -545,9 +545,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	if len(m.recentWindows) > 0 {
 		kept := m.recentWindows[:0]
 		for _, w := range m.recentWindows {
-			// if !w.end.Before(cutoffTime) {
 			kept = append(kept, w)
-			// }
 		}
 		m.recentWindows = kept
 	}

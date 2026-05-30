@@ -1080,11 +1080,15 @@ func TestResolveRangeRetroactivelyBinsLateMock(t *testing.T) {
 	}
 }
 
-// TestResolveRangeStaleWindowDoesNotResurrectAncientMock guards the
-// bound: a mock that belongs only to a window already pruned past the
-// 7 s staleness horizon must still be dropped, so the ring can't defeat
-// the buffer-growth cap or resurrect unrecoverable mocks.
-func TestResolveRangeStaleWindowDoesNotResurrectAncientMock(t *testing.T) {
+// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan documents the
+// deliberate design choice: recentWindows is intentionally NOT age-pruned,
+// because a mock whose ReqTimestampMock falls inside a recorded window
+// belongs to that test and must be recorded even if its decode landed
+// late and the window is now old — losing it would be the very data-loss
+// bug this change exists to fix. The buffer-growth bound is preserved
+// instead by (a) the stale-cutoff, which still reaps a mock that falls
+// inside NO recorded window, and (b) the maxRecentWindows cap on the ring.
+func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 8)
@@ -1092,27 +1096,46 @@ func TestResolveRangeStaleWindowDoesNotResurrectAncientMock(t *testing.T) {
 	mgr.SetOutputChannel(ch)
 	mgr.SetFirstRequestSignaled()
 
-	// Ancient window + mock, both well past the 7 s cutoff.
+	// An old window, well past the 7 s cutoff.
 	old := time.Now().Add(-30 * time.Second)
 	mgr.ResolveRange(old, old.Add(5*time.Millisecond), "old-test", true, false)
 
+	inWindowTs := old.Add(2 * time.Millisecond)   // inside old-test's window → recorded
+	orphanTs := time.Now().Add(-20 * time.Second) // inside no window, ancient → dropped
+
 	mgr.AddMock(&models.Mock{
 		Kind: models.Mongo,
-		Spec: models.MockSpec{ReqTimestampMock: old.Add(2 * time.Millisecond)},
+		Spec: models.MockSpec{ReqTimestampMock: inWindowTs},
+	})
+	mgr.AddMock(&models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: orphanTs},
 	})
 
-	// A fresh resolve prunes the ancient window and reaps the ancient
-	// mock via the stale cutoff.
+	// A fresh resolve drains the buffer: the in-window mock is retroactively
+	// binned to old-test (and flushed) even though old-test is ancient; the
+	// orphan, owning no window, is reaped by the stale cutoff.
 	now := time.Now()
 	mgr.ResolveRange(now, now.Add(5*time.Millisecond), "new-test", true, false)
 
 	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected ancient mock to be dropped, buffer=%d", len(mgr.buffer))
+		t.Fatalf("expected buffer drained, buffer=%d", len(mgr.buffer))
 	}
-	select {
-	case got := <-ch:
-		t.Fatalf("ancient mock must not be flushed; got one with ts %v", got.Spec.ReqTimestampMock)
-	default:
+
+	var sent []*models.Mock
+	for drained := false; !drained; {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			drained = true
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected exactly the in-window mock flushed, got %d", len(sent))
+	}
+	if !sent[0].Spec.ReqTimestampMock.Equal(inWindowTs) {
+		t.Fatalf("expected the in-window mock flushed; got ts %v (orphan must be dropped)", sent[0].Spec.ReqTimestampMock)
 	}
 }
 
