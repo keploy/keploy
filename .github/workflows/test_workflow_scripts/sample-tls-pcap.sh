@@ -239,10 +239,25 @@ if ! wait_for_http "http://localhost:8080/" 120; then
   false
 fi
 
-# HTTP routes — outbound TLS to public APIs
-curl -fsS http://localhost:8080/quote >/dev/null
-curl -fsS "http://localhost:8080/echo?msg=ci-${MODE_NAME}-1" >/dev/null
-curl -fsS "http://localhost:8080/echo?msg=ci-${MODE_NAME}-2" >/dev/null
+# HTTP routes — outbound TLS to public APIs.
+#
+# /quote and /echo proxy to live public services (api.github.com and
+# httpbin.org). httpbin in particular is frequently overloaded and
+# returns a transient 5xx, which the sample app forwards verbatim
+# (/echo mirrors the upstream status code) — turning an unrelated
+# upstream blip into a spurious e2e failure that has nothing to do
+# with keploy's TLS capture. Retry the transient codes: `curl --retry`
+# covers timeouts and 408/429/5xx responses, bounded by
+# --retry-max-time. A genuine keploy-side break (the proxy dropping
+# the outbound TLS connection → the app returns 502) still surfaces
+# once the retry budget is exhausted.
+retry_curl() {
+  curl -fsS --retry 5 --retry-delay 3 --retry-max-time 60 --retry-all-errors "$@"
+}
+
+retry_curl http://localhost:8080/quote >/dev/null
+retry_curl "http://localhost:8080/echo?msg=ci-${MODE_NAME}-1" >/dev/null
+retry_curl "http://localhost:8080/echo?msg=ci-${MODE_NAME}-2" >/dev/null
 echo "good! HTTP routes returned"
 
 # MySQL — POST insert then GET read
