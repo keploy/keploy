@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -26,6 +27,16 @@ type mysqlDecodeItem struct {
 	data       []byte
 	ts         time.Time
 }
+
+// TRACE (temporary, Bug-1 investigation): count/sample MySQL recording-copy
+// skips at the decode-feed gate caused by memory pressure. The real bytes are
+// still forwarded to the peer; only the recorded copy is skipped, so a mock
+// may end up missing or mid-stream-truncated. Sampled power-of-2 to stay
+// flood-safe in the hot forwarding path.
+var (
+	traceMySQLPressureSkipReq  atomic.Int64
+	traceMySQLPressureSkipResp atomic.Int64
+)
 
 // handleClientQueries handles the MySQL command phase with non-blocking
 // forwarding. Raw bytes are relayed at wire speed in the main select loop.
@@ -163,6 +174,14 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 			default:
 			}
+		} else if memoryguard.IsRecordingPaused() {
+			if n := traceMySQLPressureSkipReq.Add(1); n&(n-1) == 0 {
+				logger.Info("TRACE/mysql-mock-skip: PRESSURE — client/request bytes NOT fed to decoder (mock will be missing or mid-stream truncated)",
+					zap.Int("bytes", len(buf)),
+					zap.Int64("ts_ms", models.CapturedReqTime(ctx).UnixMilli()),
+					zap.Int64("total_req_pressure_skips", n),
+				)
+			}
 		}
 	}
 	forwardDest := func(buf []byte) {
@@ -176,6 +195,14 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 			default:
+			}
+		} else if memoryguard.IsRecordingPaused() {
+			if n := traceMySQLPressureSkipResp.Add(1); n&(n-1) == 0 {
+				logger.Info("TRACE/mysql-mock-skip: PRESSURE — server/response bytes NOT fed to decoder (mock will be missing or mid-stream truncated)",
+					zap.Int("bytes", len(buf)),
+					zap.Int64("ts_ms", models.CapturedRespTime(ctx).UnixMilli()),
+					zap.Int64("total_resp_pressure_skips", n),
+				)
 			}
 		}
 	}

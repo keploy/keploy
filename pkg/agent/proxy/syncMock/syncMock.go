@@ -286,6 +286,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 				zap.String("mock_name", mock.Name),
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
+				zap.Int64("ts_ms", time.Now().UnixMilli()), // TRACE: explicit drop time (mock_req_time is zero for mongo)
 				zap.Int64("mocks_dropped_total", totalDropped),
 				zap.Int64("mocks_added_total", totalAdded),
 			)
