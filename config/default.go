@@ -26,6 +26,7 @@ dnsPort: 26789
 debug: false
 disableANSI: false
 disableTele: false
+inDocker: false
 generateGithubActions: false
 containerName: ""
 networkName: ""
@@ -54,6 +55,7 @@ test:
     grpc:
       port: 0
   apiTimeout: 5
+  coverage: false
   skipCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
