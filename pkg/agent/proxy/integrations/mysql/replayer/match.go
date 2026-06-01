@@ -567,36 +567,15 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			return generic, true, "", "", nil
 		}
 
-		// Unmocked COM_STMT_PREPARE: synthesize a PREPARE_OK with a fresh
-		// statement ID and placeholder ParamDefs. This covers the TiDB +
-		// JDBC `useServerPrepStmts=true&cachePrepStmts=true` case where
-		// statement IDs were allocated by the server BEFORE the recording
-		// began — the driver's client-side cache then reuses them and
-		// never re-issues PREPARE during record, leaving the trace with
-		// EXECUTE mocks whose PREPARE counterparts don't exist. On replay
-		// the driver DOES issue PREPARE (its cache is cold), so without
-		// this fallback the connection drops with "no matching mock". By
-		// synthesizing PREPARE_OK we let the subsequent EXECUTE attempt
-		// to match by params (see eq=="" branch in
-		// matchStmtExecutePacketQueryAware) against the orphaned EXECUTE
-		// mock. The synthesized statement ID + query are stashed in
-		// decodeCtx so the EXECUTE matcher can resolve actualQuery.
 		if req.Header.Type == sCOM_STMT_PREP {
 			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
 				numParams := uint16(strings.Count(sp.Query, "?"))
 				newStmtID := decodeCtx.NextStmtID
 				decodeCtx.NextStmtID++
 
-				// One placeholder ColumnDefinition41 per "?".
-				// Type 252 (MYSQL_TYPE_BLOB) is the wire convention for
-				// "type unknown" parameter placeholders — drivers do not
-				// rely on this for binding; they send their own type
-				// bytes in COM_STMT_EXECUTE. FixedLength 0x0c is the
-				// standard length of the fixed-length subfield.
 				var paramDefs []*mysql.ColumnDefinition41
 				if numParams > 0 {
 					paramDefs = make([]*mysql.ColumnDefinition41, 0, numParams)
-					// PREPARE_OK consumes seq=1; ParamDef packets follow at 2..numParams+1
 					for i := uint16(0); i < numParams; i++ {
 						paramDefs = append(paramDefs, &mysql.ColumnDefinition41{
 							Header: mysql.Header{
@@ -636,10 +615,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				synthetic := &mysql.Response{
 					PacketBundle: mysql.PacketBundle{
 						Header: &mysql.PacketInfo{
-							// PayloadLength = size of the PREPARE_OK body (the
-							// composite-message branch in encode.go uses this for
-							// the first sub-packet; ParamDef packets carry their
-							// own headers).
 							Header: &mysql.Header{PayloadLength: 12, SequenceID: seq},
 							Type:   mysql.COM_STMT_PREPARE_OK,
 						},
@@ -993,19 +968,6 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		return true, matchCount
 	}
 
-	// Mock has no recorded PREPARE for its statement_id (eq=="") — accept
-	// the EXECUTE on params alone. This is the orphaned-EXECUTE case
-	// produced when the recording driver had cachePrepStmts=true and
-	// reused server-allocated statement IDs that pre-date the record
-	// window: the recorder captured the EXECUTE frame but never its
-	// PREPARE, so buildRecordedPrepIndex returned no entry. aq may now
-	// be non-empty (replay synthesized the PREPARE upstream and
-	// populated decodeCtx.StmtIDToQuery), but with no recorded query
-	// to compare to, parameter signature is the strongest disambiguator
-	// available. Per-test mocks are consumed on match, so subsequent
-	// EXECUTEs with the same param signature pick up later mocks in
-	// recorded order — protecting against signature collisions across
-	// different SQLs.
 	if allParamsMatched && eq == "" {
 		logger.Debug("EXECUTE matched on params alone (mock has no recorded PREPARE)",
 			zap.String("mock-name", mockName),
