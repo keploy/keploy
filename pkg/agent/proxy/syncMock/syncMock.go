@@ -1,7 +1,9 @@
 package manager
 
 import (
+	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,6 +11,110 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// mockSummary returns a short human-readable description of the mock's
+// operation, used in pressure-drop and teardown logs so you can identify
+// which SQL query / mongo operation was lost without reading a full YAML.
+//
+//	MySQL  → "MySQL/mocks COM_QUERY: SELECT * FROM orders LIMIT 10"
+//	Mongo  → "Mongo/mocks kind=Mongo ts=18:43:16.357"
+//	Other  → "Http/mock-42"
+func mockSummary(mock *models.Mock) string {
+	if mock == nil {
+		return "<nil>"
+	}
+	kind := string(mock.Kind)
+	name := mock.Name
+	switch mock.Kind {
+	case models.MySQL:
+		if len(mock.Spec.MySQLRequests) > 0 {
+			req := mock.Spec.MySQLRequests[0]
+			// PacketBundle.Header is *PacketInfo; PacketInfo.Type is the packet type string.
+			hdrType := ""
+			if req.Header != nil {
+				hdrType = req.Header.Type
+			}
+			// Extract query text from the Message field (COM_QUERY, COM_STMT_PREPARE)
+			queryStr := ""
+			if m, ok := req.Message.(map[string]interface{}); ok {
+				if q, ok := m["query"].(string); ok && q != "" {
+					queryStr = q
+				}
+			}
+			if queryStr == "" {
+				queryStr = mock.Spec.Metadata["requestOperation"]
+			}
+			if len(queryStr) > 120 {
+				queryStr = queryStr[:120] + "…"
+			}
+			if queryStr != "" {
+				return fmt.Sprintf("MySQL/%s %s: %s", name, hdrType, queryStr)
+			}
+			return fmt.Sprintf("MySQL/%s %s", name, hdrType)
+		}
+		return fmt.Sprintf("MySQL/%s", name)
+	case models.Mongo:
+		// Mongo mocks come from the external integrations module; the Spec
+		// carries MongoRequests but the operation is buried in BSON payload.
+		// Log the connection ID and timestamp so the drop can be correlated
+		// to a TC by timestamp even without decoding the BSON.
+		ts := ""
+		if !mock.Spec.ReqTimestampMock.IsZero() {
+			ts = mock.Spec.ReqTimestampMock.UTC().Format("15:04:05.000")
+		}
+		conn := mock.ConnectionID
+		if ts != "" && conn != "" {
+			return fmt.Sprintf("Mongo/%s conn=%s req_ts=%s", name, conn, ts)
+		}
+		if ts != "" {
+			return fmt.Sprintf("Mongo/%s req_ts=%s", name, ts)
+		}
+		return fmt.Sprintf("Mongo/%s", name)
+	default:
+		return fmt.Sprintf("%s/%s", kind, name)
+	}
+}
+
+// pressureDropSummary builds the one-line log for a pressure-drop event.
+// It includes the mock summary plus the running counters so you can see
+// exactly what was lost and how bad the pressure situation is.
+func pressureDropSummary(mock *models.Mock, dropped, added int64) string {
+	return fmt.Sprintf("[DROP #%d/%d] %s", dropped, added, mockSummary(mock))
+}
+
+// tcCorrHint returns a short string suggesting which TC(s) the dropped
+// mock is likely associated with. Since we don't track TC→mock mapping at
+// AddMock time, we use req_ts of the mock relative to the current clock to
+// give the log reader a timestamp anchor for cross-referencing the TC yaml.
+func tcCorrHint(mock *models.Mock) string {
+	if mock == nil {
+		return ""
+	}
+	if !mock.Spec.ReqTimestampMock.IsZero() {
+		return fmt.Sprintf("TC correlation: check mappings.yaml for TCs whose req_ts ≈ %s",
+			mock.Spec.ReqTimestampMock.UTC().Format("15:04:05.000"))
+	}
+	return fmt.Sprintf("TC correlation: check mappings.yaml for TCs around now (ts_ms=%d)",
+		time.Now().UnixMilli())
+}
+
+// mockKindSlice counts mocks by kind in a slice (used for teardown snapshots).
+func mockKindSlice(buf []*models.Mock) string {
+	if len(buf) == 0 {
+		return "none"
+	}
+	counts := map[string]int{}
+	for _, m := range buf {
+		if m != nil {
+			counts[string(m.Kind)]++
+		}
+	}
+	parts := make([]string, 0, len(counts))
+	for k, v := range counts {
+		parts = append(parts, fmt.Sprintf("%s×%d", k, v))
+	}
+	return strings.Join(parts, " ")
+}
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
@@ -283,10 +389,11 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		totalAdded := m.totalAdded.Load()
 		if logger := m.dropLogger(); logger != nil {
 			logger.Info("agent: mock dropped by memory pressure",
-				zap.String("mock_name", mock.Name),
+				zap.String("dropped_mock", pressureDropSummary(mock, totalDropped, totalAdded)),
+				zap.String("tc_correlation", tcCorrHint(mock)),
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
-				zap.Int64("ts_ms", time.Now().UnixMilli()), // TRACE: explicit drop time (mock_req_time is zero for mongo)
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
 				zap.Int64("mocks_dropped_total", totalDropped),
 				zap.Int64("mocks_added_total", totalAdded),
 			)
@@ -395,14 +502,25 @@ func (m *SyncMockManager) CloseOutChan() {
 	m.mu.Lock()
 	bufferedPending := len(m.buffer)
 	recentWin := len(m.recentWindows)
+	bufSnapshot := make([]*models.Mock, len(m.buffer))
+	copy(bufSnapshot, m.buffer)
 	m.mu.Unlock()
 	if logger := m.dropLogger(); logger != nil {
+		kindBreakdown := mockKindSlice(bufSnapshot)
 		logger.Info("TRACE/syncmock-shutdown: outChan closing — buffered (un-forwarded) mocks at shutdown",
 			zap.Int("buffered_pending", bufferedPending),
+			zap.String("buffered_kinds", kindBreakdown),
 			zap.Int("recent_windows", recentWin),
 			zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
 			zap.Int64("added_total", m.totalAdded.Load()),
 		)
+		for i, mock := range bufSnapshot {
+			logger.Info("TRACE/syncmock-shutdown: pending mock (not yet forwarded — will be lost)",
+				zap.Int("index", i),
+				zap.String("mock", mockSummary(mock)),
+				zap.String("tc_correlation", tcCorrHint(mock)),
+			)
+		}
 	}
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()

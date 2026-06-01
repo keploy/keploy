@@ -164,6 +164,45 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
+	// Periodic decode-pipeline heartbeat: log decodeChan fill level every 5 s.
+	// This fires WHILE the container is alive, so Docker captures it even when
+	// the final cleanup() snapshot races the container shutdown.
+	// A rising fill % through the teardown phase confirms the decoder is falling
+	// behind and mocks will be lost — the last heartbeat before recording stops
+	// is the key line to search for: "TRACE/mysql-pipeline-hb".
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// One final snapshot right when ctx cancels (recording stops).
+				// This races Docker shutdown but is worth trying; the periodic
+				// logs above are the reliable alternative.
+				logger.Info("TRACE/mysql-shutdown: recording ctx cancelled — final decode pipeline snapshot",
+					zap.Int("decodeChan_pending", len(decodeChan)),
+					zap.Int("decodeChan_cap", cap(decodeChan)),
+					zap.Int64("total_pressure_skips", traceMySQLPressureSkipReq.Load()+traceMySQLPressureSkipResp.Load()),
+					zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
+					zap.Int64("ts_ms", time.Now().UnixMilli()),
+				)
+				return
+			case <-ticker.C:
+				pending := len(decodeChan)
+				capChan := cap(decodeChan)
+				pctFull := (pending * 100) / capChan
+				logger.Info("TRACE/mysql-pipeline-hb: decode pipeline heartbeat",
+					zap.Int("decodeChan_pending", pending),
+					zap.Int("decodeChan_cap", capChan),
+					zap.Int("fill_pct", pctFull),
+					zap.Int64("pressure_skips", traceMySQLPressureSkipReq.Load()+traceMySQLPressureSkipResp.Load()),
+					zap.Int64("chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
+					zap.Int64("ts_ms", time.Now().UnixMilli()),
+				)
+			}
+		}
+	}()
+
 	// forwardClient/forwardDest replay the steady-state forwarding
 	// logic (write to peer + non-blocking copy into the decoder) so
 	// the drain helpers below can reuse it without duplication.
@@ -292,19 +331,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	//      under normal operation; it exists only to release the
 	//      context resources cleanly.
 	cleanup := func() {
-		// TRACE (Bug-0 shutdown-loss proof): snapshot the decode pipeline the
-		// instant recording stops, BEFORE drain/close. decodeChan_pending > 0
-		// means mocks were still in flight at ctx-cancel; chanfull_drops > 0
-		// means the decoder fell behind during the run and recording copies
-		// were dropped (→ truncated/lost mocks for the teardown TCs). ts_ms
-		// ties this snapshot to the SIGINT moment.
-		logger.Info("TRACE/mysql-shutdown: recording stopping — decode pipeline snapshot",
-			zap.Int("decodeChan_pending", len(decodeChan)),
-			zap.Int("decodeChan_cap", cap(decodeChan)),
-			zap.Int64("total_pressure_skips", traceMySQLPressureSkipReq.Load()+traceMySQLPressureSkipResp.Load()),
-			zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-		)
+		// The periodic TRACE/mysql-pipeline-hb goroutine already logged the
+		// decode pipeline state every 5 s. Its ctx.Done arm also fires a
+		// final snapshot at this exact moment. cleanup() itself just needs
+		// to drain + close + wait so no ordering is lost.
 		drainBuffChans()
 		close(decodeChan)
 		<-decodeDone
