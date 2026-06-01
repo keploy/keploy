@@ -135,6 +135,14 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e CARGO_HTTP_CAINFO=%s ", certPath)
+	// Channel-binding LD_PRELOAD shim: loaded by libpq-based apps to
+	// make SCRAM-SHA-256-PLUS auth verify across keploy's TLS MITM.
+	// Safe to inject globally — the shim is a no-op for any X509_digest
+	// call whose computed hash isn't in /tmp/keploy-tls/cbmap.txt. Apps
+	// that don't reach OpenSSL (Java JSSE, Go-native, .NET) never invoke
+	// X509_digest. The shim file is written by keploy-agent's
+	// setupSharedVolume into the same volume the cert paths come from.
+	tlsFlags += fmt.Sprintf("-e LD_PRELOAD=%s/cbshim.so ", keployTLSMountPath)
 	// For Java, we append to existing options if possible, or just set it.
 	// In CLI args, setting it blindly is usually safe as it overrides or adds.
 	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:

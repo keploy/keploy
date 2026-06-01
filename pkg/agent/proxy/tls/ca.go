@@ -250,12 +250,26 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 // bundle; that split is the whole reason the shared-volume path exists
 // and cannot be replicated by any sequence of SetEnvForPath calls.
 func SetEnvForPath(logger *zap.Logger, path string) error {
-	return setEnvVars(logger, map[string]string{
+	envs := map[string]string{
 		"NODE_EXTRA_CA_CERTS": path,
 		"REQUESTS_CA_BUNDLE":  path,
 		"SSL_CERT_FILE":       path,
 		"CARGO_HTTP_CAINFO":   path,
-	})
+	}
+	// Channel-binding shim: stage cbshim.so next to the CA cert in
+	// /tmp so app processes launched as children of keploy can pick
+	// it up via LD_PRELOAD. The child inherits these env vars from
+	// keploy's process env (this function is also invoked on the
+	// native install path before app exec). Best-effort: a write
+	// failure leaves LD_PRELOAD unset and the shim never loads —
+	// SCRAM-PLUS clients then continue to fail under MITM as today.
+	if shimPath, err := extractCBShimToTemp(); err == nil {
+		envs["LD_PRELOAD"] = shimPath
+	} else {
+		logger.Debug("failed to stage cbshim.so for native LD_PRELOAD; channel-binding shim disabled for this process tree",
+			zap.Error(err))
+	}
+	return setEnvVars(logger, envs)
 }
 
 // setEnvForSharedVolume wires the language-runtime trust-store env vars for the
@@ -774,6 +788,30 @@ func extractCertToTemp() (string, error) {
 	}
 
 	return tempFile.Name(), nil
+}
+
+// extractCBShimToTemp writes the embedded channel-binding LD_PRELOAD
+// shim to a stable, world-readable+executable path under /tmp. Used by
+// native-mode SetEnvForPath to populate LD_PRELOAD on apps that keploy
+// launches as child processes (docker / docker-compose / k8s paths
+// have their own staging via setupSharedVolume + the corresponding
+// webhook / compose / run-command injectors).
+//
+// Returns the path to the staged shim. The file is idempotently
+// rewritten on each call: same path, fresh contents — guards against
+// stale bytes if a previous keploy run shipped an older shim build.
+func extractCBShimToTemp() (string, error) {
+	if len(cbshimSO) == 0 {
+		return "", fmt.Errorf("cbshim.so asset is empty — channel-binding shim unavailable in this build")
+	}
+	// Stable path so repeated native runs reuse the same file rather
+	// than littering /tmp with one cbshim-XXX per run. 0755 mirrors
+	// the executable bit os.WriteFile needs honoured.
+	path := filepath.Join(os.TempDir(), "keploy-cbshim.so")
+	if err := os.WriteFile(path, cbshimSO, 0o755); err != nil {
+		return "", fmt.Errorf("write cbshim.so to %s: %w", path, err)
+	}
+	return path, nil
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block

@@ -1034,6 +1034,14 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)
+			// Channel-binding LD_PRELOAD shim. Loaded by libpq-based apps
+			// to make SCRAM-SHA-256-PLUS auth verify across keploy's TLS
+			// MITM. Safe to inject globally — the shim is a no-op for
+			// any X509_digest call whose computed hash isn't in
+			// /tmp/keploy-tls/cbmap.txt. Apps that don't reach OpenSSL
+			// (Java JSSE, Go-native, .NET) never invoke X509_digest.
+			cbshimPath := fmt.Sprintf("%s/cbshim.so", KeployTLSMountPath)
+			idc.addServiceEnvVar(serviceContentNode, "LD_PRELOAD", cbshimPath)
 
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)
