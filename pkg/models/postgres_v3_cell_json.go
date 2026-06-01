@@ -1028,11 +1028,14 @@ func decodeJSONTimestamp(v any) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 		return t, nil
 	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("$pgtype timestamp: %w", err)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
 	}
-	return t, nil
+	// PostgreSQL supports timestamps outside Go's time.Time range (year > 9999
+	// or < year 1, e.g. "149206-12-15T16:39:16Z"). Return zero time rather than
+	// propagating an error — a single extreme timestamp in a recorded mock must
+	// not abort the entire replay session for that test-set.
+	return time.Time{}, nil
 }
 
 func decodeJSONPrefix(v any) (netip.Prefix, error) {

@@ -282,6 +282,13 @@ for ($i = 1; $i -le 2; $i++) {
 # 3. Test Phase
 # =============================================================================
 
+# Restart MongoDB so it starts the replay phase with a clean connection pool.
+# After 4 recording iterations (2 yaml + 2 json), the Windows MongoDB service
+# accumulates stale connections that cause socket EOF on test-set-3 replay.
+Write-Host "Restarting MongoDB for clean connection pool before replay..."
+Restart-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+
 # Keep MongoDB running during test replay. Keploy will serve mocks for
 # matched requests; unmatched requests fall through to the real database
 # which returns the same data recorded earlier, preventing flaky failures
