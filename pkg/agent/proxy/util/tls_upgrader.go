@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
 	"go.uber.org/zap"
 )
 
@@ -117,11 +119,44 @@ func (u *ConnTLSUpgrader) UpgradeDestTLS(cfg *tls.Config) (net.Conn, error) {
 		return nil, err
 	}
 
+	// Register the real upstream leaf cert with cbmap so it can be
+	// paired with the MITM leaf already registered by CertForClient.
+	// This is the single chokepoint for upstream TLS in the parser-
+	// driven flow (used by every parser that calls TLSUpgrader.
+	// UpgradeDestTLS — Postgres V3, MySQL, Mongo, etc.), so wiring
+	// here covers all of them without per-parser changes. The
+	// connID is the source port of the app's connection, matching
+	// what CertForClient registered on the MITM side. See cbmap
+	// package docs for the rendezvous semantics.
+	registerRealForCBMap(*u.srcConn, tlsConn, u.logger)
+
 	// Update proxy's reference.
 	*u.dstConn = tlsConn
 
 	safe := NewSafeConn(tlsConn, u.logger)
 	return safe, nil
+}
+
+// registerRealForCBMap extracts the source-port connID from the app
+// connection and hands the real upstream peer cert to cbmap.RegisterReal.
+// Best-effort: any missing piece (nil conn, non-TCP addr, no peer cert)
+// is logged at Debug and the call is skipped.
+func registerRealForCBMap(srcConn net.Conn, upstreamTLS *tls.Conn, logger *zap.Logger) {
+	if srcConn == nil || upstreamTLS == nil {
+		return
+	}
+	tcpAddr, ok := unwrapSafe(srcConn).RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		logger.Debug("cbmap: srcConn remote is not TCP, skipping register")
+		return
+	}
+	state := upstreamTLS.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		logger.Debug("cbmap: no upstream peer certs, skipping register")
+		return
+	}
+	leaf := state.PeerCertificates[0]
+	cbmap.RegisterReal(logger, strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)
 }
 
 // unwrapSafe extracts the real net.Conn from a SafeConn wrapper. If

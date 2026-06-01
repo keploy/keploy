@@ -1,0 +1,5 @@
+# Override the repo-root .gitignore rules (`*.so`, `*.c`) for the
+# channel-binding shim: cbshim.so is the embedded LD_PRELOAD shim
+# loaded via //go:embed in ca.go, and cbshim.c is its source.
+!cbshim.c
+!cbshim.so

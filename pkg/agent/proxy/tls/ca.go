@@ -26,6 +26,7 @@ import (
 	"github.com/cloudflare/cfssl/signer/local"
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -55,6 +56,17 @@ var caPKey []byte //private key
 //
 //go:embed data/mozilla_roots.pem
 var embeddedFallbackRoots []byte
+
+// cbshimSO is the channel-binding LD_PRELOAD shim. It hooks libpq's
+// X509_digest() call so SCRAM-SHA-256-PLUS auth succeeds when keploy is
+// a TLS-MITM in front of Postgres. Compiled from
+// asset/cbshim.c for linux/amd64 + glibc + OpenSSL 3.x — the dominant
+// target combination. To support other arches/libcs, ship multiple
+// embedded variants and pick at write time. See cbmap package for the
+// peer half (the H_mitm → H_real lookup table this shim consumes).
+//
+//go:embed asset/cbshim.so
+var cbshimSO []byte
 
 //go:embed asset
 var _ embed.FS
@@ -599,6 +611,22 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 		return err
 	}
 
+	// Stage the channel-binding LD_PRELOAD shim next to the CA bundle.
+	// The shim is loaded by the app container (via LD_PRELOAD env var
+	// injected by the admission webhook) to make SCRAM-SHA-256-PLUS
+	// auth work across keploy's TLS MITM. Best-effort: a failure to
+	// write the shim only disables the channel-binding fix; the rest
+	// of the proxy keeps working for non-PLUS clients.
+	cbshimPath := filepath.Join(exportPath, "cbshim.so")
+	if err := os.WriteFile(cbshimPath, cbshimSO, 0o755); err != nil {
+		logger.Warn("failed to write cbshim.so to shared volume; SCRAM-SHA-256-PLUS clients will continue to fail under MITM",
+			zap.String("path", cbshimPath), zap.Error(err))
+	} else {
+		logger.Debug("wrote channel-binding shim to shared volume",
+			zap.String("path", cbshimPath),
+			zap.Int("bytes", len(cbshimSO)))
+	}
+
 	logger.Debug("TLS Certificates successfully exported to shared volume")
 	// Signal CA-bundle readiness to downstream consumers (e.g. the
 	// /agent/ready HTTP handler) only after the ca.crt + truststore
@@ -1127,6 +1155,7 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 	return certCache
 }
 
+
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
@@ -1169,6 +1198,14 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		if cached, ok := getCertCache().Get(dstURL); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			// Register this MITM leaf against the new connection ID
+			// (the source port). The upstream-dial side will eventually
+			// call cbmap.RegisterReal with the same connID; when both
+			// halves are in, the pair is published for the
+			// channel-binding shim to consume.
+			if cached != nil && len(cached.Certificate) > 0 {
+				cbmap.RegisterMITM(logger, connIDFromPort(sourcePort), cached.Certificate[0])
+			}
 			return cached, nil
 		}
 	}
@@ -1255,5 +1292,21 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		getCertCache().Add(dstURL, &serverTLSCert)
 	}
 
+	// Register the freshly-minted MITM leaf against this connection's
+	// source port. See cbmap.RegisterMITM doc for the rest of the
+	// rendezvous semantics with cbmap.RegisterReal.
+	if len(serverTLSCert.Certificate) > 0 {
+		cbmap.RegisterMITM(logger, connIDFromPort(sourcePort), serverTLSCert.Certificate[0])
+	}
+
 	return &serverTLSCert, nil
+}
+
+// connIDFromPort renders a TCP source port as the stable string identifier
+// used by the cbmap deferred-publish API. The port is the only identifier
+// that's available on both ends of the proxy without context plumbing:
+// CertForClient sees it via clientHello.Conn.RemoteAddr; dialPostgresSSL
+// Upstream sees it via the per-connection context the proxy carries.
+func connIDFromPort(port int) string {
+	return fmt.Sprintf("%d", port)
 }

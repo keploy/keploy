@@ -93,3 +93,15 @@ func newReadTimeReportingConn(conn net.Conn, source readTimeProvider) net.Conn {
 func (c *readTimeReportingConn) LastReadTime() time.Time {
 	return c.source.LastReadTime()
 }
+
+// Unwrap returns the embedded net.Conn so callers (e.g. cbmap's TLS-conn
+// finder) can walk through this wrapper to reach the underlying
+// *tls.Conn. The Unwrap convention matches net/http's contract for
+// interface-implementing wrappers.
+func (c *readTimeReportingConn) Unwrap() net.Conn { return c.Conn }
+
+// Unwrap on readTrackingConn so the same walker can drill through it
+// too. readTrackingConn is what wraps the raw dst before TLS upgrade;
+// after handshake the upgraded TLS conn is then wrapped by
+// readTimeReportingConn around it.
+func (c *readTrackingConn) Unwrap() net.Conn { return c.Conn }

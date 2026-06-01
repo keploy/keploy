@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -384,7 +385,12 @@ func isPostgresSSLRequestPrefix(b []byte) bool {
 // from the passed-in context so a hung upstream does not block the
 // parser goroutine indefinitely; a 10 s default kicks in when the
 // context has no deadline (typical for record/replay mode).
-func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
+// dialPostgresSSLUpstream … (existing doc above). The connID argument is
+// the app-side source-port string used by the cbmap deferred-publish API
+// to rendezvous this upstream's real cert with the MITM cert minted by
+// CertForClient for the same source port. Pass "" to disable the cbmap
+// registration (only sensible in unit tests).
+func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(10 * time.Second)
@@ -428,6 +434,16 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
 			zap.String("addr", addr),
 			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
+
+		// Register the real upstream cert with cbmap. If the MITM
+		// cert was already minted for this connID (CertForClient ran
+		// first — the parser-driven TLSUpgrader path), this triggers
+		// the deferred Publish. Otherwise the real half is stashed
+		// until CertForClient registers its MITM cert and Publish
+		// fires then. Either way the channel-binding shim sees the
+		// final (H_mitm, H_real) pair.
+		registerRealForCBMap(connID, tlsConn, logger)
+
 		return tlsConn, nil
 	case 'N':
 		_ = rawConn.Close()
@@ -436,6 +452,30 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("postgres SSL upstream %s returned unexpected byte 0x%02x as SSLRequest reply (expected 'S' or 'N'); check that the destination is actually a Postgres server and not something else listening on 5432", addr, reply[0])
 	}
+}
+
+// registerRealForCBMap captures the real upstream Postgres leaf cert
+// after the upstream TLS handshake has succeeded, and hands it to the
+// cbmap deferred-publish API. The MITM half is registered separately
+// by tls.CertForClient when the app-side handshake mints its cert;
+// once both halves arrive for the same connID, cbmap publishes the
+// (H_mitm, H_real) pair for the LD_PRELOAD shim to consume.
+//
+// Best-effort: any failure (no peer cert, empty connID) is logged at
+// Debug and swallowed — channel binding will still fail for SCRAM-PLUS
+// clients on that connection, matching pre-feature behavior.
+func registerRealForCBMap(connID string, tlsConn *tls.Conn, logger *zap.Logger) {
+	if connID == "" {
+		return
+	}
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		logger.Debug("cbmap: no upstream peer certificate, skipping register",
+			zap.String("conn_id", connID))
+		return
+	}
+	realLeaf := state.PeerCertificates[0]
+	cbmap.RegisterReal(logger, connID, realLeaf.Raw, realLeaf.SignatureAlgorithm)
 }
 
 // speculativeUpstreamTLS holds the state of an upstream TLS dial that was
@@ -1261,6 +1301,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	defer func() {
 		parserCtxCancel()
 
+		// Reap any half-arrived cbmap registration tied to this
+		// connection's source port. Without this, a connection that
+		// dies after only one of CertForClient / RegisterReal fired
+		// would leave an orphaned pending entry until the process
+		// restarts.
+		if initialSrcConn != nil {
+			if a, ok := initialSrcConn.RemoteAddr().(*net.TCPAddr); ok && a != nil {
+				cbmap.CleanupConnection(strconv.Itoa(a.Port))
+			}
+		}
+
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
@@ -1879,7 +1930,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
 					dialStart := time.Now()
-					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger)
 					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				} else if speculativeDial != nil && addr == speculativeDialAddr &&
 					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {

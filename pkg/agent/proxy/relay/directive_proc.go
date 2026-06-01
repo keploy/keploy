@@ -2,11 +2,14 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
@@ -406,6 +409,13 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			}
 		}
 		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
+
+		// V2 (supervisor/relay) parser path equivalent of
+		// util.ConnTLSUpgrader.UpgradeDestTLS's cbmap registration.
+		// Capture the real upstream cert here so SCRAM-SHA-256-PLUS
+		// can succeed across the MITM in the parser-driven flow
+		// (Postgres V3, MySQL, Mongo etc on the V2 supervisor path).
+		registerRealCBMapFromUpgraded(r, upgradedDst, log)
 	}
 
 	if params.ClientTLSConfig != nil {
@@ -752,4 +762,58 @@ func (r *Relay) teeFor(d fakeconn.Direction) *tee {
 	default:
 		return nil
 	}
+}
+
+// registerRealCBMapFromUpgraded extracts the real upstream peer cert
+// from the just-upgraded dest connection and hands it to cbmap.
+// RegisterReal, keyed by the app's source-port (matching what
+// tls.CertForClient registered as the MITM half).
+//
+// Best-effort: if the upgraded conn isn't a *tls.Conn (defensive), if
+// peer certs are empty, or if the source-port can't be resolved, we
+// silently skip — channel binding then fails as it does without this
+// feature for that connection.
+func registerRealCBMapFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
+	tlsView, ok := unwrapToTLSConn(upgraded)
+	if !ok {
+		return
+	}
+	state := tlsView.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return
+	}
+	leaf := state.PeerCertificates[0]
+
+	src := r.src.Load()
+	if src == nil || *src == nil {
+		return
+	}
+	tcpAddr, ok := (*src).RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		return
+	}
+	cbmap.RegisterReal(log, strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)
+}
+
+// unwrapToTLSConn walks a small chain of net.Conn wrappers looking for
+// the underlying *tls.Conn. Matches the helper in the v3 Postgres
+// integration but kept local to relay to avoid a dependency cycle.
+func unwrapToTLSConn(c net.Conn) (*tls.Conn, bool) {
+	type unwrapper interface{ Unwrap() net.Conn }
+	type netConner interface{ NetConn() net.Conn }
+	for i := 0; i < 8 && c != nil; i++ {
+		if tc, ok := c.(*tls.Conn); ok {
+			return tc, true
+		}
+		if u, ok := c.(unwrapper); ok {
+			c = u.Unwrap()
+			continue
+		}
+		if w, ok := c.(netConner); ok {
+			c = w.NetConn()
+			continue
+		}
+		return nil, false
+	}
+	return nil, false
 }
