@@ -87,8 +87,13 @@ static int hex2bin(const char *hex, size_t len, unsigned char *out) {
 // PoC scale (N small, called once per X509_digest invocation worst case)
 // this is plenty fast.
 static void load_table_locked(void) {
+    // Default matches keploy's cbmap.DefaultPath. The CBSHIM_HASHMAP
+    // env var overrides — keploy sets it on the app process to
+    // whatever cbmap.Path() resolves to (including the
+    // KEPLOY_CBMAP_PATH-overridden value), so the shim and keploy
+    // always agree on the file.
     const char *path = getenv("CBSHIM_HASHMAP");
-    if (!path) path = "/tmp/scram-poc-hashmap";
+    if (!path) path = "/tmp/keploy-tls/cbmap.txt";
 
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -144,14 +149,104 @@ typedef int (*real_X509_digest_t)(const X509 *, const EVP_MD *,
 static real_X509_digest_t real_X509_digest = NULL;
 static pthread_once_t resolve_once = PTHREAD_ONCE_INIT;
 
-static void do_resolve(void) {
-    real_X509_digest = (real_X509_digest_t)dlsym(RTLD_NEXT, "X509_digest");
-    if (!real_X509_digest) {
-        fprintf(stderr, "[cbshim] FATAL: cannot resolve real X509_digest: %s\n",
-                dlerror());
-    } else {
-        DLOG("real X509_digest resolved at %p", (void*)real_X509_digest);
+// Path patterns of an already-mapped libcrypto. We scan /proc/self/maps
+// to confirm the host process IS using a system libcrypto before we
+// dlopen one ourselves — if there's no libcrypto in /proc/self/maps the
+// app is using a statically-linked / bundled libcrypto and our dlopen'd
+// copy would have a different struct layout, segfaulting on the foreign
+// X509 struct. Better to fail cleanly with "could not generate peer
+// certificate hash" than crash.
+static int system_libcrypto_already_mapped(char *out_so, size_t out_so_sz) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512];
+    int hit = 0;
+    while (fgets(line, sizeof line, f)) {
+        const char *p = strstr(line, "libcrypto.so");
+        if (!p) continue;
+        // Walk to end of token (whitespace or newline).
+        const char *end = p;
+        while (*end && *end != ' ' && *end != '\n' && *end != '\t') end++;
+        // Walk back to the path start (the line is "addr-addr perm offset dev inode path").
+        const char *start = p;
+        while (start > line && start[-1] != ' ' && start[-1] != '\t') start--;
+        size_t plen = (size_t)(end - start);
+        if (plen >= out_so_sz) plen = out_so_sz - 1;
+        memcpy(out_so, start, plen);
+        out_so[plen] = '\0';
+        hit = 1;
+        break;
     }
+    fclose(f);
+    return hit;
+}
+
+static void do_resolve(void) {
+    // Fast path: RTLD_NEXT walks the dynamic-linker chain skipping the
+    // shim itself. For apps that dynamically link libcrypto with the
+    // symbols globally visible (most C apps; system libpq users), this
+    // returns the next libcrypto's X509_digest directly.
+    real_X509_digest = (real_X509_digest_t)dlsym(RTLD_NEXT, "X509_digest");
+    if (real_X509_digest) {
+        DLOG("real X509_digest resolved via RTLD_NEXT at %p",
+             (void *)real_X509_digest);
+        return;
+    }
+
+    // RTLD_NEXT failed. Two scenarios produce this:
+    //
+    //   (a) The app DOES link a system libcrypto, but a loader between
+    //       the shim and libcrypto used RTLD_LOCAL — symbols aren't in
+    //       the global namespace. Python's `import` is the canonical
+    //       case (CPython dlopen()s extension modules with RTLD_LOCAL
+    //       by default, so libpq → libcrypto pulled in via psycopg2
+    //       stays private to that import). The libcrypto IS mapped in
+    //       /proc/self/maps; we just need to dlopen it ourselves —
+    //       same library, same struct layout, safe to call.
+    //
+    //   (b) The app statically bundled libcrypto inside a wheel /
+    //       single .so (psycopg2-binary is the canonical case).
+    //       /proc/self/maps will NOT show a system libcrypto, only
+    //       the bundling .so. dlopen'ing a different libcrypto then
+    //       calling it with the bundled libcrypto's X509 segfaults
+    //       (struct layouts diverge between builds). We must NOT
+    //       attempt that — bail with a clear error.
+    char libcrypto_path[256];
+    if (system_libcrypto_already_mapped(libcrypto_path, sizeof libcrypto_path)) {
+        DLOG("found mapped libcrypto at %s — using it for X509_digest", libcrypto_path);
+        void *h = dlopen(libcrypto_path, RTLD_LAZY);
+        if (!h) {
+            fprintf(stderr,
+                    "[cbshim] libcrypto is mapped at %s but dlopen() of it failed: %s. "
+                    "channel-binding shim disabled.\n",
+                    libcrypto_path, dlerror());
+            return;
+        }
+        real_X509_digest = (real_X509_digest_t)dlsym(h, "X509_digest");
+        if (real_X509_digest) {
+            DLOG("real X509_digest resolved via dlopen(%s) at %p",
+                 libcrypto_path, (void *)real_X509_digest);
+            // Deliberately leak the handle — we need this for the
+            // lifetime of the process.
+            return;
+        }
+        dlclose(h);
+        fprintf(stderr,
+                "[cbshim] libcrypto at %s has no X509_digest symbol. "
+                "channel-binding shim disabled.\n",
+                libcrypto_path);
+        return;
+    }
+
+    fprintf(stderr,
+            "[cbshim] cannot resolve X509_digest: no libcrypto mapped in "
+            "/proc/self/maps. The app statically linked libcrypto into a "
+            "single shared object (psycopg2-binary, oracle instantclient, "
+            "some go binaries with cgo+openssl, ...). channel-binding shim "
+            "disabled for this process. Switch the app to a "
+            "dynamically-linked libcrypto (e.g. psycopg2 source dist, "
+            "system python3-psycopg2, apt-installed libpq + libssl3) to "
+            "use the shim.\n");
 }
 
 int X509_digest(const X509 *cert, const EVP_MD *type,

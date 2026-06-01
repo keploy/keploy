@@ -804,14 +804,22 @@ func extractCBShimToTemp() (string, error) {
 	if len(cbshimSO) == 0 {
 		return "", fmt.Errorf("cbshim.so asset is empty — channel-binding shim unavailable in this build")
 	}
-	// Stable path so repeated native runs reuse the same file rather
-	// than littering /tmp with one cbshim-XXX per run. 0755 mirrors
-	// the executable bit os.WriteFile needs honoured.
-	path := filepath.Join(os.TempDir(), "keploy-cbshim.so")
-	if err := os.WriteFile(path, cbshimSO, 0o755); err != nil {
-		return "", fmt.Errorf("write cbshim.so to %s: %w", path, err)
+	if err := os.WriteFile(NativeShimPath(), cbshimSO, 0o755); err != nil {
+		return "", fmt.Errorf("write cbshim.so to %s: %w", NativeShimPath(), err)
 	}
-	return path, nil
+	return NativeShimPath(), nil
+}
+
+// NativeShimPath returns the on-disk path the channel-binding LD_PRELOAD
+// shim is staged at in native (non-docker, non-k8s) mode. Stable —
+// repeated keploy runs reuse the same file — so the CLI can set
+// LD_PRELOAD to this path before launching the user app, knowing the
+// agent's extractCBShimToTemp will (or already has) written the file.
+//
+// Exported so pkg/client/app's CLI launcher can inject LD_PRELOAD into
+// the user app's env without duplicating the path string.
+func NativeShimPath() string {
+	return filepath.Join(os.TempDir(), "keploy-cbshim.so")
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block

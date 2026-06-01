@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -17,6 +18,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 
@@ -306,6 +309,43 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 }
 
 func (a *App) Run(ctx context.Context) models.AppError {
+	// Native-mode channel-binding shim wiring. Docker / Compose modes
+	// inject the env via Setup / SetupCompose's tlsFlags + compose
+	// rewrite. For native (kind != docker / docker-compose), keploy
+	// spawns the user app via os/exec — the child inherits keploy's
+	// env, so setting LD_PRELOAD here on the CLI process is sufficient
+	// to make ld.so load the shim before any libcrypto-using code in
+	// the app.
+	//
+	// The shim file at /tmp/keploy-cbshim.so is written by the
+	// agent's setupNativeForApp (see pkg/agent/proxy/tls/ca.go::
+	// extractCBShimToTemp) — by the time we reach ExecuteCommand the
+	// agent has signalled readiness so the file is on disk. We only
+	// inject the env var; we do NOT re-write the asset here.
+	a.logger.Info("App.Run: native-shim hook entered",
+		zap.String("kind", string(a.kind)),
+		zap.Bool("is_docker", utils.IsDockerCmd(a.kind)))
+	if !utils.IsDockerCmd(a.kind) {
+		shimPath := pTls.NativeShimPath()
+		if shimPath != "" {
+			if err := os.Setenv("LD_PRELOAD", shimPath); err != nil {
+				a.logger.Debug("failed to set LD_PRELOAD for native shim",
+					zap.String("shim", shimPath), zap.Error(err))
+			} else {
+				a.logger.Debug("LD_PRELOAD set for native channel-binding shim",
+					zap.String("shim", shimPath))
+			}
+		}
+		// Tell the shim WHICH cbmap file to read. Without this it falls
+		// back to its compiled-in default (/tmp/keploy-tls/cbmap.txt),
+		// which matches cbmap.DefaultPath but doesn't honour
+		// KEPLOY_CBMAP_PATH. Setting CBSHIM_HASHMAP keeps the shim and
+		// the publisher in sync no matter how the path is configured.
+		if err := os.Setenv("CBSHIM_HASHMAP", cbmap.Path()); err != nil {
+			a.logger.Debug("failed to set CBSHIM_HASHMAP env",
+				zap.String("path", cbmap.Path()), zap.Error(err))
+		}
+	}
 	return a.run(ctx)
 }
 
