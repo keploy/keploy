@@ -384,6 +384,26 @@ func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
+	// TRACE (Bug-0 shutdown-loss proof): snapshot how many mocks are still
+	// BUFFERED (decoded but not yet forwarded to the CLI) at the moment the
+	// output channel closes. buffered_pending > 0 means late-decoded mocks
+	// were still waiting at shutdown — at risk of loss. This is the shared
+	// funnel for BOTH mongo and mysql, so it covers the mongo path whose
+	// decoder lives in an external module we can't instrument directly.
+	// Read len(buffer) under mu (NOT nested inside outChanMu) to avoid a
+	// lock-order issue; log after, with no lock held.
+	m.mu.Lock()
+	bufferedPending := len(m.buffer)
+	recentWin := len(m.recentWindows)
+	m.mu.Unlock()
+	if logger := m.dropLogger(); logger != nil {
+		logger.Info("TRACE/syncmock-shutdown: outChan closing — buffered (un-forwarded) mocks at shutdown",
+			zap.Int("buffered_pending", bufferedPending),
+			zap.Int("recent_windows", recentWin),
+			zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
+			zap.Int64("added_total", m.totalAdded.Load()),
+		)
+	}
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {
