@@ -57,16 +57,38 @@ var caPKey []byte //private key
 //go:embed data/mozilla_roots.pem
 var embeddedFallbackRoots []byte
 
-// cbshimSO is the channel-binding LD_PRELOAD shim. It hooks libpq's
-// X509_digest() call so SCRAM-SHA-256-PLUS auth succeeds when keploy is
-// a TLS-MITM in front of Postgres. Compiled from
-// asset/cbshim.c for linux/amd64 + glibc + OpenSSL 3.x — the dominant
-// target combination. To support other arches/libcs, ship multiple
-// embedded variants and pick at write time. See cbmap package for the
-// peer half (the H_mitm → H_real lookup table this shim consumes).
+// cbshimAssets is the channel-binding LD_PRELOAD shim asset bundle.
+// `cbshim.c` (source) is in the tree; the per-arch `.so` files are
+// NOT committed — they're built fresh inside the enterprise Docker
+// build by the `RUN clang --target=...` clauses that
+// `.ci/scripts/prepare-dockerfile.sh` injects after `COPY . /app`.
+// Same pattern as `pkg/util/time/assets/` for time-freezing.
 //
-//go:embed asset/cbshim.so
-var cbshimSO []byte
+// OSS builds (no enterprise CI step) silently embed only the source +
+// build helpers — getCBShim() returns nil at runtime, and every caller
+// downgrades to today's "no shim, SCRAM-PLUS fails through MITM"
+// behaviour. See pkg/agent/proxy/tls/asset/README.md for the full
+// story and pkg/agent/proxy/cbmap/README.md for the runtime design.
+//
+//go:embed asset/*
+var cbshimAssets embed.FS
+
+// getCBShim returns the embedded shim variant matching the host arch,
+// or nil if no variant was staged at build time. Callers MUST handle
+// nil — it signals an OSS / unsupported-arch build path where the
+// shim is gracefully disabled.
+//
+// Variants follow the pkg/util/time/assets naming: cbshim_amd64.so /
+// cbshim_arm64.so. Additional arches/libcs can be added by extending
+// the build step and this switch without touching call sites.
+func getCBShim() []byte {
+	path := "asset/cbshim_" + runtime.GOARCH + ".so"
+	data, err := cbshimAssets.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	return data
+}
 
 //go:embed asset
 var _ embed.FS
@@ -628,17 +650,23 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	// Stage the channel-binding LD_PRELOAD shim next to the CA bundle.
 	// The shim is loaded by the app container (via LD_PRELOAD env var
 	// injected by the admission webhook) to make SCRAM-SHA-256-PLUS
-	// auth work across keploy's TLS MITM. Best-effort: a failure to
-	// write the shim only disables the channel-binding fix; the rest
-	// of the proxy keeps working for non-PLUS clients.
-	cbshimPath := filepath.Join(exportPath, "cbshim.so")
-	if err := os.WriteFile(cbshimPath, cbshimSO, 0o755); err != nil {
-		logger.Warn("failed to write cbshim.so to shared volume; SCRAM-SHA-256-PLUS clients will continue to fail under MITM",
-			zap.String("path", cbshimPath), zap.Error(err))
+	// auth work across keploy's TLS MITM. Best-effort throughout: a
+	// missing variant (OSS build / unsupported arch) or a write failure
+	// only disables the channel-binding fix; the rest of the proxy
+	// keeps working for non-PLUS clients.
+	if shim := getCBShim(); shim != nil {
+		cbshimPath := filepath.Join(exportPath, "cbshim.so")
+		if err := os.WriteFile(cbshimPath, shim, 0o755); err != nil {
+			logger.Warn("failed to write cbshim.so to shared volume; SCRAM-SHA-256-PLUS clients will continue to fail under MITM",
+				zap.String("path", cbshimPath), zap.Error(err))
+		} else {
+			logger.Debug("wrote channel-binding shim to shared volume",
+				zap.String("path", cbshimPath),
+				zap.Int("bytes", len(shim)))
+		}
 	} else {
-		logger.Debug("wrote channel-binding shim to shared volume",
-			zap.String("path", cbshimPath),
-			zap.Int("bytes", len(cbshimSO)))
+		logger.Debug("channel-binding shim not embedded in this build (OSS or unsupported arch); SCRAM-SHA-256-PLUS clients will fail under MITM",
+			zap.String("goarch", runtime.GOARCH))
 	}
 
 	logger.Debug("TLS Certificates successfully exported to shared volume")
@@ -801,11 +829,12 @@ func extractCertToTemp() (string, error) {
 // rewritten on each call: same path, fresh contents — guards against
 // stale bytes if a previous keploy run shipped an older shim build.
 func extractCBShimToTemp() (string, error) {
-	if len(cbshimSO) == 0 {
-		return "", fmt.Errorf("cbshim.so asset is empty — channel-binding shim unavailable in this build")
+	shim := getCBShim()
+	if shim == nil {
+		return "", fmt.Errorf("cbshim asset for %s not embedded — channel-binding shim unavailable in this build", runtime.GOARCH)
 	}
-	if err := os.WriteFile(NativeShimPath(), cbshimSO, 0o755); err != nil {
-		return "", fmt.Errorf("write cbshim.so to %s: %w", NativeShimPath(), err)
+	if err := os.WriteFile(NativeShimPath(), shim, 0o755); err != nil {
+		return "", fmt.Errorf("write cbshim to %s: %w", NativeShimPath(), err)
 	}
 	return NativeShimPath(), nil
 }
