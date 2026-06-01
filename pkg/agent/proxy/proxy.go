@@ -78,6 +78,21 @@ func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Fi
 	logger.Info("[PROBE/proxy]", append(base, fields...)...)
 }
 
+var defaultMysqlPorts = []uint32{3306, 4000}
+
+func isMysqlPort(port uint32, configured []uint32) bool {
+	ports := configured
+	if len(ports) == 0 {
+		ports = defaultMysqlPorts
+	}
+	for _, p := range ports {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
 // probeDial emits a [PROBE/dial] log for upstream dial timing.
 func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durNs int64, fields ...zap.Field) {
 	if !probeOn() {
@@ -1023,6 +1038,31 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
+
+	// Periodically drain attributable buffered mocks WHILE recording is
+	// live. The request-driven drains (ResolveRange / DeleteMocksStrictlyBefore)
+	// can't reach a per-test mock that lands after the final request's HTTP
+	// window closed — e.g. a multi-MB Mongo document still decoding when its
+	// response was captured. Without this, such a mock waits in the buffer
+	// until shutdown, where the cancelled recorder ctx makes the relay, the
+	// consumer, and InsertMock all drop it. Ticking here persists it through
+	// the healthy write path. Stops when clientConnCtx is cancelled (the
+	// shutdown defer's clientConnCancel), before CloseOutChan.
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-clientConnCtx.Done():
+				return
+			case <-ticker.C:
+				if mgr := syncMock.Get(); mgr != nil {
+					mgr.FlushOwnedWindows()
+				}
+			}
+		}
+	}()
+
 	defer func() {
 		clientConnCancel()
 
@@ -1309,8 +1349,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	// MySQL wire-protocol ports (MySQL, TiDB, MariaDB, custom proxies).
+	// Configurable via outgoingOpts.MysqlPorts (Config.MysqlPorts in
+	// keploy.yml); defaults to [3306, 4000] when unset.
+	if isMysqlPort(uint32(destInfo.Port), outgoingOpts.MysqlPorts) {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
@@ -2267,7 +2309,38 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	// Reuse the existing MockManager when this proxy has already been
+	// put into mock mode at least once. Replay calls Mock() per test-set
+	// (Agent.MockOutgoing → Proxy.Mock); allocating a fresh MockManager
+	// on every call strands long-lived parser goroutines on the previous
+	// instance. The postgres-v3 replayer's runLoop is the canonical
+	// case — its PerTestProvider/SessionProvider/StartupProvider capture
+	// the *MockManager handed in at MockOutgoing time and keep polling
+	// it for the connection's lifetime. With a per-test-set replacement
+	// the new manager's StoreMocks / UpdateMockParams (and the revision
+	// bumps keploy/integrations#203 relies on for revision-gated
+	// rebuilds) land on the new instance the parsers cannot see, while
+	// the parsers keep reading test-set-N-1's cohort off the orphaned
+	// manager. Production globality autoreplay exhibits exactly this
+	// pattern: one user app survives the whole replay, the asyncpg pool
+	// keeps its TCP connection to the proxy warm across test-set
+	// boundaries, the v3 runLoop survives, and PerTestProvider.Current
+	// never observes the swap. Reusing the manager keeps revision-
+	// tracking continuous; the filtered / unfiltered / startup trees
+	// still get replaced atomically by SetMocksWithWindow per test-set,
+	// and ResetForReplaySession below clears connection-scoped state
+	// (connectionTrees, noConnMocks, droppedOutOfWindow) so the
+	// previous test-set's per-connID mock pool doesn't leak into the
+	// next one — SetMocksWithWindow seeds new connection mocks via
+	// AddConnectionMock but never evicts prior entries, so without the
+	// explicit reset a long-lived connection could match
+	// LifetimeConnection mocks from the prior test-set or merge them
+	// with the current one's.
+	if mm := p.getMockManager(); mm == nil {
+		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	} else {
+		mm.ResetForReplaySession()
+	}
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")

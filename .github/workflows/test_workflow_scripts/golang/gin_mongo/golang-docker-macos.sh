@@ -149,10 +149,14 @@ send_request(){
     echo "Requests sent successfully."
 }
 
-for i in {1..2}; do
-    container_name="ginApp_${JOB_ID}_${i}"
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local container_name="ginApp_${JOB_ID}_${i}${label}"
     send_request &
-    $RECORD_BIN record \
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags \
       -c "docker run -p ${APP_PORT}:${APP_PORT} --net ${NETWORK_NAME} --rm --name $container_name ${APP_IMAGE}" \
       --container-name "$container_name" \
       --generate-github-actions=false \
@@ -173,9 +177,21 @@ for i in {1..2}; do
         exit 1
     fi
     sleep 5
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
 
-    echo "Recorded test case and mocks for iteration ${i}"
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 # Start the keploy in test mode.
 test_container="ginApp_${JOB_ID}_test"
@@ -217,10 +233,37 @@ do
     fi
 done
 
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+if [ "$all_passed" != true ]; then
     cat "${test_container}.txt"
     exit 1
 fi
+
+if json_pass_supported; then
+    test_container_json="${test_container}_json"
+    $REPLAY_BIN test --storage-format json \
+      -c "docker run --rm -p ${APP_PORT}:${APP_PORT} --net ${NETWORK_NAME} --name $test_container_json ${APP_IMAGE}" \
+      --containerName "$test_container_json" \
+      --apiTimeout 60 \
+      --delay 20 \
+      --generate-github-actions=false \
+      --proxy-port=$PROXY_PORT \
+      --dns-port=$DNS_PORT \
+      --keploy-container "$KEPLOY_CONTAINER" \
+      2>&1 | tee "${test_container_json}.txt"
+    if grep "ERROR" "${test_container_json}.txt"; then
+        cat "${test_container_json}.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${test_container_json}.txt"; then
+        cat "${test_container_json}.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat "${test_container_json}.txt"
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0

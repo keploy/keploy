@@ -133,12 +133,16 @@ send_request(){
     echo "Requests sent successfully."
 }
 
-for i in {1..2}; do
-    container_name="${APP_CONTAINER}"
-    log_file_name="${APP_CONTAINER}_${i}"
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local container_name="${APP_CONTAINER}"
+    local log_file_name="${APP_CONTAINER}_${i}${label}"
     send_request &
 
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${log_file_name}.txt"
+    # shellcheck disable=SC2086
+    $RECORD_BIN record $extra_flags -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${log_file_name}.txt"
 
     if grep "WARNING: DATA RACE" "${log_file_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -150,8 +154,21 @@ for i in {1..2}; do
     fi
     sleep 5
 
-    echo "Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+for i in {1..2}; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in {1..2}; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 
 
@@ -196,10 +213,26 @@ do
 
 done
 
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-else
+if [ "$all_passed" != true ]; then
     echo "Some tests failed"
     exit 1
+fi
+
+if json_pass_supported; then
+    $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --debug --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}_json.txt"
+    if grep "ERROR" "${test_container}_json.txt"; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${test_container}_json.txt"; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat "${test_container}_json.txt"
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
 fi

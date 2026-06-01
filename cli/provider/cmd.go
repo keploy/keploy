@@ -257,6 +257,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().String("storage-format", c.cfg.StorageFormat, "Serialization format for testcases/mocks/reports/mappings: yaml (default) or json")
 		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
@@ -388,6 +389,17 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
+		// Start the user app ONCE for the whole replay run instead of
+		// restarting it per test-set. Required to surface cross-test-set
+		// bugs that need a long-lived TCP connection (asyncpg, JDBC pool,
+		// etc.) to manifest — without it every test-set gets a fresh app
+		// process and fresh connections, so parser-side cohort-staleness
+		// bugs (see keploy/integrations#203) cannot trigger. When the
+		// flag is set, --delay is honoured only on the FIRST test-set;
+		// subsequent test-sets skip the delay because the app is already
+		// warm. Works for every cmdType that has a user application to
+		// manage (docker-compose, docker-run, docker-start, native).
+		cmd.Flags().Bool("keep-app-alive", c.cfg.Test.KeepAppAlive, "Start the user application ONCE for the whole replay run and reuse it across all test-sets (instead of restarting per test-set). --delay applies only to the first test-set. Works with all cmdTypes (docker-compose, docker-run, docker-start, native).")
 	}
 }
 
@@ -455,6 +467,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
+		"keepAppAlive":              "keep-app-alive",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -711,6 +724,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.logger.Info("Color encoding is disabled")
+	}
+
+	// Validate --storage-format flag (applies to all commands via persistent flag)
+	c.cfg.StorageFormat = strings.ToLower(strings.TrimSpace(c.cfg.StorageFormat))
+	if c.cfg.StorageFormat == "" {
+		c.cfg.StorageFormat = "yaml"
+	}
+	switch c.cfg.StorageFormat {
+	case "yaml", "json":
+		// valid
+	default:
+		return fmt.Errorf("invalid --storage-format value %q: allowed values are 'yaml' and 'json'", c.cfg.StorageFormat)
 	}
 
 	if cmd.Name() == "test" {
@@ -1572,5 +1597,6 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
+	defaultCfg.StorageFormat = c.cfg.StorageFormat
 	return defaultCfg
 }

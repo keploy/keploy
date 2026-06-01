@@ -11,7 +11,7 @@ import (
 
 type AgentHooks interface {
 	BeforeTestRun(ctx context.Context, testRunID string) error
-	BeforeTestSetCompose(ctx context.Context, testRunID string) error
+	BeforeTestSetCompose(ctx context.Context, testSetID string) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error
 	AfterSimulate(ctx context.Context, testSetID string, tcName string) error
