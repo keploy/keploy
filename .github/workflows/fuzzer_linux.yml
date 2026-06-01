@@ -371,19 +371,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-
       - name: Download and Extract Aerospike Fuzzer
         id: aerospike_fuzzer
+        env:
+          AZURE_SAS_RO: ${{ secrets.AZURE_FUZZER_SAS_RO }}
         run: |
-          set -e
+          set -euo pipefail
           KEY="releases/aerospike-fuzzer/latest/aerospike-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
+          # SAS is appended at fetch time only — never logged.
+          curl -fsSL -o aerospike-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
           tar -xzf aerospike-fuzzer-linux-amd64.tar.gz
           chmod +x ./aerospike-fuzzer
           echo "path=$(realpath ./aerospike-fuzzer)" >> $GITHUB_OUTPUT
