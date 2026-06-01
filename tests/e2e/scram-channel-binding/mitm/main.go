@@ -1,9 +1,9 @@
 // Same MITM proxy as ../mitm/main.go, but the hashmap is published via
 // keploy's actual cbmap package — proving the integration end-to-end:
 //
-//   * the mapping format matches what the shim expects
-//   * RFC 5929 hash-algo handling matches libpq's
-//   * the path/permissions match what's wired in the webhook
+//   - the mapping format matches what the shim expects
+//   - RFC 5929 hash-algo handling matches libpq's
+//   - the path/permissions match what's wired in the webhook
 //
 // Run alongside the PG containers from ../pg-tls/. Verify that the shim
 // (compiled by `make cbshim.so` in the parent dir) succeeds against this

@@ -1201,7 +1201,6 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 	return certCache
 }
 
-
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
