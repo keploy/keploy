@@ -90,6 +90,17 @@ func getCBShim() []byte {
 	return data
 }
 
+// IsCBShimEmbedded reports whether the channel-binding LD_PRELOAD shim
+// for the current host arch is baked into this build. Exported so the
+// docker / compose / native launchers can skip injecting LD_PRELOAD
+// pointing at a file that won't exist — otherwise ld.so prints
+// "object '...cbshim.so' from LD_PRELOAD cannot be preloaded" before
+// every child process the user app spawns, which is noisy in CI and
+// breaks tests that assert on clean stderr.
+func IsCBShimEmbedded() bool {
+	return getCBShim() != nil
+}
+
 //go:embed asset
 var _ embed.FS
 

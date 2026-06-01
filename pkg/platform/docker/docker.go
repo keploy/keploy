@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v3/config"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1040,8 +1041,15 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			// any X509_digest call whose computed hash isn't in
 			// /tmp/keploy-tls/cbmap.txt. Apps that don't reach OpenSSL
 			// (Java JSSE, Go-native, .NET) never invoke X509_digest.
-			cbshimPath := fmt.Sprintf("%s/cbshim.so", KeployTLSMountPath)
-			idc.addServiceEnvVar(serviceContentNode, "LD_PRELOAD", cbshimPath)
+			//
+			// Gated on IsCBShimEmbedded: in OSS builds (no .so embedded),
+			// setupSharedVolume skips writing the file into the shared
+			// volume, so injecting LD_PRELOAD here would make ld.so print
+			// "cannot be preloaded" before every process in the container.
+			if pTls.IsCBShimEmbedded() {
+				cbshimPath := fmt.Sprintf("%s/cbshim.so", KeployTLSMountPath)
+				idc.addServiceEnvVar(serviceContentNode, "LD_PRELOAD", cbshimPath)
+			}
 
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)

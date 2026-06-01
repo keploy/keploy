@@ -145,7 +145,14 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	// that don't reach OpenSSL (Java JSSE, Go-native, .NET) never invoke
 	// X509_digest. The shim file is written by keploy-agent's
 	// setupSharedVolume into the same volume the cert paths come from.
-	tlsFlags += fmt.Sprintf("-e LD_PRELOAD=%s/cbshim.so ", keployTLSMountPath)
+	//
+	// Gated on IsCBShimEmbedded: in OSS builds (no .so embedded), the
+	// agent skips writing the file into the shared volume, so injecting
+	// LD_PRELOAD here would make ld.so print "cannot be preloaded" for
+	// every process in the user container.
+	if pTls.IsCBShimEmbedded() {
+		tlsFlags += fmt.Sprintf("-e LD_PRELOAD=%s/cbshim.so ", keployTLSMountPath)
+	}
 	// For Java, we append to existing options if possible, or just set it.
 	// In CLI args, setting it blindly is usually safe as it overrides or adds.
 	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
@@ -326,8 +333,13 @@ func (a *App) Run(ctx context.Context) models.AppError {
 		zap.String("kind", string(a.kind)),
 		zap.Bool("is_docker", utils.IsDockerCmd(a.kind)))
 	if !utils.IsDockerCmd(a.kind) {
-		shimPath := pTls.NativeShimPath()
-		if shimPath != "" {
+		// Only inject LD_PRELOAD when the shim is actually embedded in
+		// this build. Without this guard, OSS builds (which embed no
+		// .so file — see pTls.getCBShim) would still set LD_PRELOAD to
+		// the non-existent /tmp/keploy-cbshim.so, causing ld.so to print
+		// "cannot be preloaded" before every spawned process.
+		if pTls.IsCBShimEmbedded() {
+			shimPath := pTls.NativeShimPath()
 			if err := os.Setenv("LD_PRELOAD", shimPath); err != nil {
 				a.logger.Debug("failed to set LD_PRELOAD for native shim",
 					zap.String("shim", shimPath), zap.Error(err))
@@ -335,6 +347,8 @@ func (a *App) Run(ctx context.Context) models.AppError {
 				a.logger.Debug("LD_PRELOAD set for native channel-binding shim",
 					zap.String("shim", shimPath))
 			}
+		} else {
+			a.logger.Debug("channel-binding shim not embedded in this build; LD_PRELOAD not set")
 		}
 		// Tell the shim WHICH cbmap file to read. Without this it falls
 		// back to its compiled-in default (/tmp/keploy-tls/cbmap.txt),
