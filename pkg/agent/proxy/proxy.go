@@ -1078,6 +1078,31 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
+
+	// Periodically drain attributable buffered mocks WHILE recording is
+	// live. The request-driven drains (ResolveRange / DeleteMocksStrictlyBefore)
+	// can't reach a per-test mock that lands after the final request's HTTP
+	// window closed — e.g. a multi-MB Mongo document still decoding when its
+	// response was captured. Without this, such a mock waits in the buffer
+	// until shutdown, where the cancelled recorder ctx makes the relay, the
+	// consumer, and InsertMock all drop it. Ticking here persists it through
+	// the healthy write path. Stops when clientConnCtx is cancelled (the
+	// shutdown defer's clientConnCancel), before CloseOutChan.
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-clientConnCtx.Done():
+				return
+			case <-ticker.C:
+				if mgr := syncMock.Get(); mgr != nil {
+					mgr.FlushOwnedWindows()
+				}
+			}
+		}
+	}()
+
 	defer func() {
 		clientConnCancel()
 

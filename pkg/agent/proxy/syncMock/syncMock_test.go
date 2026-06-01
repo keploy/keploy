@@ -1019,3 +1019,342 @@ func drainChan(t *testing.T, ch chan *models.Mock, max int) {
 		}
 	}
 }
+
+// TestResolveRangeRetroactivelyBinsLateMock is the regression for the
+// async-emit vs window-close race (the Mongo cursor getMore case): a
+// mock whose presaved ReqTimestampMock falls inside a window whose
+// ResolveRange already fired — because the parser decoded/emitted it a
+// few ms after the response was captured and the window closed — must
+// be retroactively binned into the window that owns it, not stale-
+// dropped. Before the recentWindows ring, the late mock matched no
+// current-or-future window (every future window starts later) and was
+// reaped, so replay's timestamp filter never saw it.
+func TestResolveRangeRetroactivelyBinsLateMock(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled() // so AddMock buffers (windowed path)
+
+	// Anchor recently enough that nothing trips the 7 s stale cutoff.
+	base := time.Now().Add(-2 * time.Second)
+
+	// test-1 resolves its window FIRST, while its own getMore mock has
+	// not been decoded/emitted yet — the buffer is empty for it.
+	w1Start, w1End := base, base.Add(5*time.Millisecond)
+	mgr.ResolveRange(w1Start, w1End, "test-1", true, false)
+
+	// The late getMore arrives now, after test-1's window closed. Its
+	// presaved request timestamp sits INSIDE test-1's window. Untagged
+	// Mongo mock => LifetimePerTest, so the session/connection carve-out
+	// does not apply and the retroactive-bin path is what rescues it.
+	lateTs := base.Add(2 * time.Millisecond)
+	mgr.AddMock(&models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: lateTs},
+	})
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("expected the late mock to be buffered, got %d", len(mgr.buffer))
+	}
+
+	// A later request resolves test-2's window. This pass must flush the
+	// late mock by attributing it back to test-1's (still-recent) window.
+	w2Start, w2End := base.Add(100*time.Millisecond), base.Add(105*time.Millisecond)
+	mgr.ResolveRange(w2Start, w2End, "test-2", true, false)
+
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected the late mock to be flushed (retroactively binned), buffer=%d", len(mgr.buffer))
+	}
+
+	select {
+	case got := <-ch:
+		if !got.Spec.ReqTimestampMock.Equal(lateTs) {
+			t.Fatalf("flushed mock has wrong timestamp: got %v want %v", got.Spec.ReqTimestampMock, lateTs)
+		}
+		if got.Name == "" {
+			t.Fatalf("retroactively binned mock must be named for replay correlation")
+		}
+	default:
+		t.Fatalf("expected the late mock to be flushed to outChan, got nothing")
+	}
+}
+
+// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan documents the
+// deliberate design choice: recentWindows is intentionally NOT age-pruned,
+// because a mock whose ReqTimestampMock falls inside a recorded window
+// belongs to that test and must be recorded even if its decode landed
+// late and the window is now old — losing it would be the very data-loss
+// bug this change exists to fix. The buffer-growth bound is preserved
+// instead by (a) the stale-cutoff, which still reaps a mock that falls
+// inside NO recorded window, and (b) the maxRecentWindows cap on the ring.
+func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	// An old window, well past the 7 s cutoff.
+	old := time.Now().Add(-30 * time.Second)
+	mgr.ResolveRange(old, old.Add(5*time.Millisecond), "old-test", true, false)
+
+	inWindowTs := old.Add(2 * time.Millisecond)   // inside old-test's window → recorded
+	orphanTs := time.Now().Add(-20 * time.Second) // inside no window, ancient → dropped
+
+	mgr.AddMock(&models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: inWindowTs},
+	})
+	mgr.AddMock(&models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: orphanTs},
+	})
+
+	// A fresh resolve drains the buffer: the in-window mock is retroactively
+	// binned to old-test (and flushed) even though old-test is ancient; the
+	// orphan, owning no window, is reaped by the stale cutoff.
+	now := time.Now()
+	mgr.ResolveRange(now, now.Add(5*time.Millisecond), "new-test", true, false)
+
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("expected buffer drained, buffer=%d", len(mgr.buffer))
+	}
+
+	var sent []*models.Mock
+	for drained := false; !drained; {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			drained = true
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected exactly the in-window mock flushed, got %d", len(sent))
+	}
+	if !sent[0].Spec.ReqTimestampMock.Equal(inWindowTs) {
+		t.Fatalf("expected the in-window mock flushed; got ts %v (orphan must be dropped)", sent[0].Spec.ReqTimestampMock)
+	}
+}
+
+// TestDeleteMocksStrictlyBeforeRescuesLateKeptMock is the regression for
+// the multi-cycle static-dedup data loss seen in mongo-bigmock: cycle 1
+// is kept, but its big-document mocks land in the buffer AFTER their HTTP
+// windows resolved; then cycle 2's DUPLICATE requests fire
+// DeleteMocksStrictlyBefore, which used to wipe those late kept mocks
+// before any retroactive-bin ResolveRange could rescue them. The cleanup
+// must now flush mocks that own a recent KEPT window (and session mocks)
+// while still dropping the duplicate's own debris.
+func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mapCh := make(chan models.TestMockMapping, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetMappingChannel(mapCh)
+	mgr.SetFirstRequestSignaled()
+
+	base := time.Now().Add(-1 * time.Second)
+
+	// Cycle-1 kept (non-duplicate) window for test-1, resolved while its
+	// own mock was still being decoded — buffer empty, nothing matches yet.
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", true, true)
+
+	keptTs := base.Add(2 * time.Millisecond)      // inside test-1's window → rescue
+	debrisTs := base.Add(500 * time.Millisecond)  // owns no window → the duplicate's debris → drop
+	sessionTs := base.Add(300 * time.Millisecond) // session lifetime → never reaped by per-test cleanup
+	dupHorizon := base.Add(1 * time.Second)       // the duplicate request's timestamp
+	futureTs := dupHorizon.Add(5 * time.Millisecond)
+
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer,
+		&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: keptTs}},
+		&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: debrisTs}},
+		&models.Mock{
+			Kind:         models.Mongo,
+			Name:         "sess-keep",
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+			Spec:         models.MockSpec{ReqTimestampMock: sessionTs},
+		},
+		&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: futureTs}},
+	)
+	mgr.mu.Unlock()
+
+	// A later duplicate request resolves and cleans up before its timestamp.
+	mgr.DeleteMocksStrictlyBefore(dupHorizon)
+
+	// Only the at/after-horizon mock should remain buffered.
+	if len(mgr.buffer) != 1 || !mgr.buffer[0].Spec.ReqTimestampMock.Equal(futureTs) {
+		t.Fatalf("expected only the future mock retained; buffer=%d", len(mgr.buffer))
+	}
+
+	var sent []*models.Mock
+	for drained := false; !drained; {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			drained = true
+		}
+	}
+	if len(sent) != 2 {
+		t.Fatalf("expected kept + session mocks rescued (2), got %d", len(sent))
+	}
+
+	var sawKept, sawSession bool
+	for _, m := range sent {
+		switch {
+		case m.Spec.ReqTimestampMock.Equal(keptTs):
+			sawKept = true
+			if m.Name == "" {
+				t.Fatalf("rescued per-test mock must be named for replay correlation")
+			}
+		case m.TestModeInfo.Lifetime == models.LifetimeSession:
+			sawSession = true
+			if m.Name != "sess-keep" {
+				t.Fatalf("session mock must be flushed verbatim, not renamed; got %q", m.Name)
+			}
+		default:
+			t.Fatalf("unexpected mock flushed: ts=%v name=%q (debris must be dropped)", m.Spec.ReqTimestampMock, m.Name)
+		}
+	}
+	if !sawKept || !sawSession {
+		t.Fatalf("expected both kept and session mocks rescued; kept=%v session=%v", sawKept, sawSession)
+	}
+
+	// The rescued kept mock produced a late mapping for test-1; the debris did not.
+	select {
+	case mp := <-mapCh:
+		if mp.TestName != "test-1" || len(mp.MockIDs) != 1 {
+			t.Fatalf("expected one late mapping for test-1, got %+v", mp)
+		}
+	default:
+		t.Fatalf("expected a late TestMockMapping for the rescued kept mock")
+	}
+	select {
+	case mp := <-mapCh:
+		t.Fatalf("debris/session must not produce mapping entries; got %+v", mp)
+	default:
+	}
+}
+
+// TestFlushOwnedWindowsPersistsLateMocksDuringRecording is the regression
+// for the real mongo-bigmock failure: a per-test mock that lands in the
+// buffer AFTER its HTTP window resolved (a 6 MB document still decoding)
+// must be drained WHILE recording is live — at shutdown the recorder ctx
+// is already cancelled and the write path drops everything, so the
+// periodic owned-window flush is what actually persists it. Session mocks
+// flush too; not-yet-attributable per-test mocks stay buffered for a
+// future window.
+func TestFlushOwnedWindowsPersistsLateMocksDuringRecording(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mapCh := make(chan models.TestMockMapping, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetMappingChannel(mapCh)
+	mgr.SetFirstRequestSignaled()
+
+	base := time.Now().Add(-1 * time.Second)
+	// A kept window resolved while its mock was still decoding (buffer empty).
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", true, true)
+
+	ownedTs := base.Add(2 * time.Millisecond)     // inside test-1's window → flush
+	orphanTs := base.Add(500 * time.Millisecond)  // owns no window yet → keep buffered
+	sessionTs := base.Add(300 * time.Millisecond) // session lifetime → flush verbatim
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer,
+		&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: ownedTs}},
+		&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: orphanTs}},
+		&models.Mock{
+			Kind:         models.Mongo,
+			Name:         "sess-keep",
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+			Spec:         models.MockSpec{ReqTimestampMock: sessionTs},
+		},
+	)
+	mgr.mu.Unlock()
+
+	// One periodic tick's worth of work (called directly, no real timer).
+	mgr.FlushOwnedWindows()
+
+	// Owned + session flushed; the orphan stays for a possible future window.
+	if len(mgr.buffer) != 1 || !mgr.buffer[0].Spec.ReqTimestampMock.Equal(orphanTs) {
+		t.Fatalf("expected only the unattributable orphan retained; buffer=%d", len(mgr.buffer))
+	}
+
+	var sent []*models.Mock
+	for drained := false; !drained; {
+		select {
+		case m := <-ch:
+			sent = append(sent, m)
+		default:
+			drained = true
+		}
+	}
+	if len(sent) != 2 {
+		t.Fatalf("expected owned + session flushed (2), got %d", len(sent))
+	}
+	var sawOwned, sawSession bool
+	for _, m := range sent {
+		switch {
+		case m.Spec.ReqTimestampMock.Equal(ownedTs):
+			sawOwned = true
+			if m.Name == "" {
+				t.Fatalf("flushed per-test mock must be named for replay correlation")
+			}
+		case m.TestModeInfo.Lifetime == models.LifetimeSession:
+			sawSession = true
+			if m.Name != "sess-keep" {
+				t.Fatalf("session mock must be flushed verbatim; got %q", m.Name)
+			}
+		default:
+			t.Fatalf("unexpected mock flushed: ts=%v", m.Spec.ReqTimestampMock)
+		}
+	}
+	if !sawOwned || !sawSession {
+		t.Fatalf("expected owned and session flushed; owned=%v session=%v", sawOwned, sawSession)
+	}
+
+	// The owned mock produced a late mapping for test-1.
+	select {
+	case mp := <-mapCh:
+		if mp.TestName != "test-1" || len(mp.MockIDs) != 1 {
+			t.Fatalf("expected one late mapping for test-1, got %+v", mp)
+		}
+	default:
+		t.Fatalf("expected a late TestMockMapping for the owned mock")
+	}
+}
+
+// TestFlushOwnedWindowsLeavesNothingAttributableUnsent is a focused check
+// that a second FlushOwnedWindows after everything attributable is gone
+// is a no-op (no buffer churn, no spurious sends).
+func TestFlushOwnedWindowsNoopWhenNothingOwned(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+
+	// A single buffered per-test mock that owns no recorded window.
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	mgr.mu.Unlock()
+
+	mgr.FlushOwnedWindows()
+
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("unattributable mock must stay buffered; buffer=%d", len(mgr.buffer))
+	}
+	select {
+	case m := <-ch:
+		t.Fatalf("nothing should be flushed; got ts=%v", m.Spec.ReqTimestampMock)
+	default:
+	}
+}
