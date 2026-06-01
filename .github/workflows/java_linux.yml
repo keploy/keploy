@@ -167,6 +167,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-java
+          # TEMP: pinned to fix/tidb-stmt-cache-compose-flags until
+          # keploy/samples-java#139 merges. Revert to default branch after.
+          ref: fix/tidb-stmt-cache-compose-flags
           path: samples-java
 
       - name: Set up Java
