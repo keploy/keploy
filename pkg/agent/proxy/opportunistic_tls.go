@@ -292,9 +292,25 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
 				leaf := state.PeerCertificates[0]
 				connID := strconv.Itoa(tcpAddr.Port)
+				p.logger.Info("cbshim: opportunistic-TLS RegisterReal",
+					zap.String("connID", connID),
+					zap.String("srcRemote", srcConn.RemoteAddr().String()),
+					zap.String("dstAddr", dstAddr),
+					zap.Int("peerCertCount", len(state.PeerCertificates)),
+					zap.String("sigAlgo", leaf.SignatureAlgorithm.String()))
 				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+			} else {
+				p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr",
+					zap.String("srcRemoteType", fmt.Sprintf("%T", srcConn.RemoteAddr())),
+					zap.String("srcRemote", srcConn.RemoteAddr().String()))
 			}
+		} else {
+			p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — no peer certs",
+				zap.String("dstAddr", dstAddr))
 		}
+	} else {
+		p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — p.cbshim is nil",
+			zap.String("dstAddr", dstAddr))
 	}
 
 	p.logger.Debug("opportunistic TLS intercept: hijacked, both sides MITM'd",

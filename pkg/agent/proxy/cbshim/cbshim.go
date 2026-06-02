@@ -468,6 +468,23 @@ func (c *CBShim) watchProcessTreeLoop(ctx context.Context, rootPID int, interval
 		} else {
 			consecutiveQuiet++
 		}
+
+		// Periodic counter dump — every 5 iterations (~10s at the
+		// default 2s tick) so we get a running view of probe activity
+		// without flooding the log. Crucial when the test harness
+		// kills keploy with a hard SIGKILL and Close() never runs.
+		if i%5 == 4 {
+			cnt := c.Counters()
+			c.log.Info("cbshim: counter snapshot",
+				zap.Int("iter", i),
+				zap.Uint64("total_fires", cnt.TotalFires),
+				zap.Uint64("tgid_matched", cnt.TGIDMatched),
+				zap.Uint64("libpq_fires", cnt.LibpqFires),
+				zap.Uint64("lookup_hit", cnt.LookupHit),
+				zap.Uint64("lookup_miss", cnt.LookupMiss),
+				zap.Uint64("write_ok", cnt.WriteOK),
+				zap.Uint64("write_failed", cnt.WriteFailed))
+		}
 		if afterLibs > 0 && afterPIDs > 0 && consecutiveQuiet >= 10 {
 			c.log.Debug("cbshim: rescan converged, stopping watch",
 				zap.Int("rootPID", rootPID),
