@@ -61,12 +61,9 @@ testdata
 # BPF source files (kept under source control — bpf2go compiles these
 # at `go generate` time into the *_bpfel.{go,o} pair next to them).
 # Negation must come AFTER the broad *.c rule above to take effect.
+# The per-arch vmlinux.h dumps used by cbshim.bpf.c are NOT checked in;
+# `go generate` fetches them — see pkg/agent/proxy/cbshim/doc.go.
 !pkg/agent/proxy/cbshim/cbshim.bpf.c
-# Per-arch BTF dumps used by cbshim.bpf.c — kept under source control
-# so the BPF objects can be regenerated without re-fetching them.
-!pkg/agent/proxy/cbshim/vmlinux.h
-!pkg/agent/proxy/cbshim/vmlinux_amd64.h
-!pkg/agent/proxy/cbshim/vmlinux_arm64.h
 
 # Ignore the debug_bin
 __debug_bin*
