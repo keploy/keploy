@@ -136,7 +136,7 @@ func (c *CBShim) Close() error {
 		zap.Uint64("lookup_hit", counters.LookupHit),
 		zap.Uint64("lookup_miss", counters.LookupMiss),
 		zap.Uint64("write_ok", counters.WriteOK),
-		zap.Uint64("write_fail", counters.WriteFail))
+		zap.Uint64("write_fail", counters.WriteFailed))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

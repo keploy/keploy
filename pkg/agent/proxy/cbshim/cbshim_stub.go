@@ -30,7 +30,7 @@ type Counters struct {
 	LookupHit   uint64
 	LookupMiss  uint64
 	WriteOK     uint64
-	WriteFail   uint64
+	WriteFailed uint64
 }
 
 func New(_ *zap.Logger) (*CBShim, error)                                     { return &CBShim{}, nil }
