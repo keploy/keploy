@@ -1097,9 +1097,9 @@ func TestWasPressureActiveInWindow(t *testing.T) {
 		{
 			name: "two ranges, one overlaps → count 1",
 			ranges: []pressureRange{
-				{start: at(0), end: at(50)},      // before
-				{start: at(150), end: at(160)},   // inside
-				{start: at(300), end: at(400)},   // after
+				{start: at(0), end: at(50)},    // before
+				{start: at(150), end: at(160)}, // inside
+				{start: at(300), end: at(400)}, // after
 			},
 			windowStart: at(100), windowEnd: at(200),
 			wantOverlap: true, wantCount: 1,
