@@ -1,3 +1,5 @@
+//go:build linux && (amd64 || arm64)
+
 package cbshim
 
 // exec_helpers.go — production-tested helpers for opening userspace

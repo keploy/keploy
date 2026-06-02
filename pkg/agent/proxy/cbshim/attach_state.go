@@ -1,3 +1,5 @@
+//go:build linux && (amd64 || arm64)
+
 package cbshim
 
 // attach_state.go — per-PID attach-state tracking, modeled on

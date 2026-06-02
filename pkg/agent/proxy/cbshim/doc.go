@@ -72,4 +72,4 @@
 // stock distributions; some hardened images restrict it).
 package cbshim
 
-//go:generate sh -c "GOPACKAGE=cbshim $(go env GOPATH)/bin/bpf2go -cc clang -target amd64 -type libpq_range_key -type libpq_range_val cbshim cbshim.bpf.c"
+//go:generate sh -c "GOPACKAGE=cbshim $(go env GOPATH)/bin/bpf2go -cc clang -target amd64,arm64 -type libpq_range_key -type libpq_range_val cbshim cbshim.bpf.c"
