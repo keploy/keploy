@@ -1856,21 +1856,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 
-		// Dial target is the eBPF-captured original destination
-		// (dstAddr). The SNI value (dstURL) is the logical hostname on
-		// the server's certificate (e.g. "aerospike.local") — it is
-		// used as tls.Config.ServerName above so the upstream cert
-		// validates, but it is NOT the routable network address. For
-		// non-HTTPS workloads (Aerospike-TLS, custom DB TLS), SNI is
-		// typically unresolvable from the host, and substituting it
-		// here used to fail the upstream dial with "lookup ... server
-		// misbehaving". The CONNECT-tunnel path has its own dstConn
-		// already established, so this branch only runs for the
-		// eBPF-redirected case where dstAddr is always populated and
-		// authoritative.
+		// Prefer dialing by the SNI hostname (dstURL) when it resolves,
+		// so Go's resolver can do dual-stack happy-eyeballs and fall
+		// back to IPv4 when the eBPF-captured destination is IPv6 and
+		// the host has no IPv6 route (e.g. express-mongoose → reqres.in
+		// on a GitHub Actions runner).
+		// For TLS workloads whose SNI is a logical, non-resolvable cert
+		// name (e.g. "aerospike.local" for Aerospike-over-stunnel),
+		// net.LookupHost returns an error and we keep the authoritative
+		// eBPF-captured dstAddr unchanged.
 		addr := dstAddr
-		if dstAddr == "" && dstURL != "" {
-			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
+		if dstURL != "" {
+			if _, err := net.LookupHost(dstURL); err == nil {
+				addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
+			}
 		}
 
 		if rule.Mode != models.MODE_TEST {
