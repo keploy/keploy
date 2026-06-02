@@ -78,7 +78,8 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 					return nil
 				},
-				ClientCAs: nil,
+				ClientCAs:    nil,
+				KeyLogWriter: KeyLogWriter(),
 			}, nil
 		},
 	}

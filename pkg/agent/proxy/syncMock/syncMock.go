@@ -13,6 +13,23 @@ import (
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
 
+// maxRecentWindows bounds the recently-resolved-window ring (see
+// SyncMockManager.recentWindows). The ring is also time-pruned to the
+// 7 s staleness horizon, so this cap only matters under a burst of very
+// short test windows; 256 covers far more than the ~7 s of history the
+// staleness cutoff keeps reachable, while staying O(1) memory.
+const maxRecentWindows = 256
+
+// resolvedWindow is one already-resolved per-test window retained so a
+// late-arriving mock (decoded after the window closed) can still be
+// attributed to the test that actually owns its ReqTimestampMock.
+type resolvedWindow struct {
+	start    time.Time
+	end      time.Time
+	testName string
+	mapping  bool
+}
+
 // nopLogger is the fallback when no logger has been installed via
 // SetLogger. zap.L() is NOT safe here — it returns a Nop until the
 // host process has called zap.ReplaceGlobals, and syncMock is a
@@ -29,12 +46,32 @@ func generateRandomString(n int) string {
 }
 
 type SyncMockManager struct {
-	// mu guards buffer, firstReqSeen, memoryPause, mappingChan.
+	// mu guards buffer, firstReqSeen, memoryPause, mappingChan,
+	// recentWindows.
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
+
+	// recentWindows is a bounded, time-pruned ring of the most recently
+	// RESOLVED per-test windows. It exists to close the async-emit vs
+	// window-bin race: a parser decodes/emits a mock a few ms after the
+	// real wire event (the presaved ReqTimestampMock is correct, but the
+	// mock lands in the buffer late). If that mock's ReqTimestampMock
+	// falls inside a window whose ResolveRange already fired — the
+	// classic case is a Mongo cursor getMore that the app issued WHILE
+	// producing a response, but whose decode finished after the response
+	// was captured and the window closed — the direct [start,end] match
+	// in ResolveRange misses it, and since every FUTURE window starts
+	// after the previous one ended, it can never match again and is
+	// stale-dropped. By remembering recent windows we retroactively bin
+	// such late arrivals into the window that actually owns them, so the
+	// recorder persists them with their (correct, in-window) timestamps
+	// and replay's timestamp filter picks them up for the right test.
+	// Pruned to the same staleness horizon as the buffer cutoff so it
+	// can't reattach ancient mocks or grow without bound.
+	recentWindows []resolvedWindow
 
 	// outChanMu guards outChan and outChanClosed together. Senders
 	// RLock across the whole read+send; the closer Locks across the
@@ -172,9 +209,20 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 		timer.Stop()
 	case <-timer.C:
 		n := m.dropCount.Add(1)
+		// The existing per-1024 sampled Error fires at n==1 AND every
+		// subsequent 1024th drop. Per-Copilot review on #4176, the
+		// "your recording is now lossy" wording lives on the same n==1
+		// branch rather than as a separate Warn so operators see one
+		// clear signal at the moment capture goes lossy, instead of
+		// two separate lines that may interleave with other logs.
+		// Subsequent sampled emissions stay terse to avoid drowning a
+		// stuck consumer's goroutine in its own logging.
 		if n == 1 || n%sendDropSampleRate == 0 {
-			m.dropLogger().Error(
-				"syncMock outChan overflow; mock dropped — raise consumer throughput or increase outChan capacity",
+			msg := "syncMock outChan overflow; mock dropped — consumer can't keep up with mock production"
+			if n == 1 {
+				msg = "syncMock outChan overflow on FIRST drop — mock recording is now LOSSY for this session; subsequent overflow drops are silent except for the per-1024 sampled line. Reduce concurrent test load, upgrade to a release with a larger outChan capacity, or investigate consumer-side stalls (slow disk / network to k8s-proxy) before re-running for a clean recording."
+			}
+			m.dropLogger().Error(msg,
 				zap.Uint64("dropsSoFar", n),
 				zap.Int("outChanCap", cap(m.outChan)),
 				zap.Duration("budget", sendBudget),
@@ -218,10 +266,45 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	//   bound + open    → forward via sendToOutChan, unless we're
 	//                     past firstReqSeen in which case the mock
 	//                     belongs in the dedup buffer for windowing
+	//
+	// Session- and connection-scoped mocks (mongo handshake/heartbeat,
+	// postgres v3 startup, mysql HikariCP COM_PING) follow the same
+	// branching here — they ride the buffer when firstReqSeen has
+	// fired so they keep their FIFO position relative to per-test
+	// mocks captured on the same connection. ResolveRange's lifetime
+	// carve-out drains them to outChan without subjecting them to
+	// the per-test window match (so they're not dropped by the 7 s
+	// cutoff for being out-of-window) but preserves arrival order.
+	// An earlier attempt forwarded session mocks to outChan straight
+	// from AddMock; that broke run_fuzzer_linux / Mongo Fuzzer
+	// (record_build_replay_build) because the bypass hoisted handshake
+	// mocks ahead of the per-test mocks emitted at end-of-test from
+	// the buffer. Replay's connection-keyed FIFO matcher then saw
+	// handshakes interleaved out of order with the operations they
+	// preceded and stalled on the last batch of ops. Keeping the
+	// FIFO-via-buffer route fixes Mongo Fuzzer, and the carve-out in
+	// ResolveRange still saves session/connection mocks from the
+	// stale-cutoff drop that bit gin-mongo Windows on #4122.
 	bound, closed := m.outChanStatus()
 	switch {
 	case closed:
 		m.mu.Unlock()
+		// Per-mock diagnostic: visible signal when AddMock drops a
+		// mock because the outChan has already been closed by
+		// CloseOutChan. This usually only fires during shutdown but
+		// in CI a poorly-ordered teardown can race the recorder's
+		// final emit and silently lose mocks captured in the last
+		// few milliseconds of the run. The dropLogger is the right
+		// receiver — it ALWAYS resolves to a non-nil logger and is
+		// safe under the m.mu unlock.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("diag/AddMock: outChan already closed, mock dropped",
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("connID", mock.ConnectionID),
+				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+			)
+		}
 		return
 	case bound && !m.firstReqSeen:
 		m.mu.Unlock()
@@ -273,6 +356,96 @@ func (m *SyncMockManager) CloseOutChan() {
 	m.outChanClosed = true
 }
 
+// FlushOwnedWindows forwards every buffered mock that can be attributed
+// right now — session/connection mocks (reusable, never window-bound) and
+// per-test mocks whose ReqTimestampMock falls inside an already-resolved
+// window — leaving only not-yet-attributable per-test mocks in the buffer
+// for a future window match. It is the request-independent twin of
+// ResolveRange's flush branches: the proxy calls it on a ticker for the
+// life of a recording session (see proxy.go) so a mock that lands AFTER
+// its HTTP window resolved (a multi-MB Mongo document still decoding when
+// the response was captured) is persisted WHILE recording is live. The
+// only other drains are request-driven, so after the final request such a
+// mock would otherwise wait until shutdown — by which point the recorder
+// ctx is cancelled and the relay, consumer, and InsertMock all drop it.
+// Order within the buffer is preserved for the mocks left behind.
+func (m *SyncMockManager) FlushOwnedWindows() {
+	if m == nil {
+		return
+	}
+
+	var mocksToSend []*models.Mock
+	var lateMappings map[string][]string
+
+	m.mu.Lock()
+	outChanBound, _ := m.outChanStatus()
+	if !outChanBound {
+		m.mu.Unlock()
+		return
+	}
+	mappingChan := m.mappingChan
+
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
+
+	keepIdx := 0
+	for i := 0; i < len(m.buffer); i++ {
+		mock := m.buffer[i]
+		if mock == nil {
+			continue
+		}
+		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			// Reusable across tests; flush verbatim (never renamed),
+			// matching ResolveRange's lifetime carve-out.
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+			mock.Name = "mock-" + generateRandomString(8)
+			if w.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+			}
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+		// Not attributable yet — a future (possibly out-of-order) request
+		// may still claim it. Keep it buffered in place.
+		m.buffer[keepIdx] = mock
+		keepIdx++
+	}
+	for i := keepIdx; i < len(m.buffer); i++ {
+		m.buffer[i] = nil
+	}
+	m.buffer = m.buffer[:keepIdx]
+	m.mu.Unlock()
+
+	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
+	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	for _, mock := range mocksToSend {
+		m.sendToOutChan(mock)
+	}
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
+}
+
 func (m *SyncMockManager) SetFirstRequestSignaled() {
 	m.mu.Lock()
 	m.firstReqSeen = true
@@ -314,6 +487,11 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	var mocksToSend []*models.Mock
 	var associatedMockIDs []string
 	var mappingEntry *models.TestMockMapping
+	// lateMappings accumulates mock IDs for mocks retroactively binned
+	// into a PAST (already-resolved) window, keyed by that window's test
+	// name. lateBinned counts them for the buffer-transition diagnostic.
+	var lateMappings map[string][]string
+	lateBinned := 0
 
 	m.mu.Lock()
 	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
@@ -324,22 +502,103 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
 
-	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
+	// Stale-buffer safety valve.
+	//
+	// The check exists to bound buffer growth when a stream of mocks
+	// arrives that is never closed off by a corresponding test-window
+	// resolve (e.g. a parser kept emitting after the test ended).
+	// Without it, m.buffer would grow without bound across a long
+	// recording session.
+	//
+	// CRITICAL ordering: cutoff must NOT pre-empt the window match.
+	// A long-running test (mongo fuzzer's curl /run takes ~56 s for
+	// 10 000 ops) emits per-test mocks whose ReqTimestampMock is far
+	// older than 7 s by the time ResolveRange fires at request
+	// completion — but those mocks ARE in-window and must be flushed
+	// to the recorder, not silently dropped. The pre-c53b4906 V2 path
+	// bypassed syncMock entirely so the cutoff never applied; routing
+	// through AddMock (#4122) made the previous "cutoff first" ordering
+	// drop the first ~49 s of a 56 s recording window, leaving replay
+	// without the mongo handshake mocks → connection-pool error at
+	// driver init.
+	//
+	// New ordering:
+	//   1. In-window matches are kept/forwarded regardless of age.
+	//   2. Out-of-window mocks are subject to the 7 s cutoff: kept if
+	//      recent (might match a future out-of-order request), dropped
+	//      otherwise (stale and unrecoverable).
+	//   3. Session- and connection-scoped mocks are flushed to outChan
+	//      (when bound) regardless of [start,end]; their Lifetime makes
+	//      them reusable across every test window and they intentionally
+	//      never window-match. Retained in the buffer when outChan is
+	//      unbound so a later ResolveRange with the channel wired can
+	//      drain them. AddMock now forwards these directly when outChan
+	//      is bound at ingest time, so this branch only fires for mocks
+	//      that landed in the buffer during the brief unbound startup
+	//      window before SetOutputChannel.
 	cutoffTime := time.Now().Add(-7 * time.Second)
+
+	// Prune the recently-resolved-window ring to the same staleness
+	// horizon as the buffer cutoff, so retroactive binning below can't
+	// reattach a mock to an ancient window (which would defeat the
+	// stale-cutoff's buffer-bound guarantee).
+	if len(m.recentWindows) > 0 {
+		kept := m.recentWindows[:0]
+		for _, w := range m.recentWindows {
+			kept = append(kept, w)
+		}
+		m.recentWindows = kept
+	}
+	// ownerWindow returns the recently-resolved window whose [start,end]
+	// contains t (inclusive, matching the current-window test below).
+	// Windows are non-overlapping FIFO request windows, so at most one
+	// matches.
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
+
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		mockTime := mock.Spec.ReqTimestampMock
 
-		// SAFETY VALVE: Expire old mocks
-		// If the mock is older than 7 seconds, we discard it immediately.
-		// This stops the infinite growth.
-		if mockTime.Before(cutoffTime) {
+		// LIFETIME CARVE-OUT: session- and connection-scoped mocks
+		// are reusable across every test window and never need
+		// per-test window filtering. Drain to outChan when bound so
+		// the recorder writes them to disk; retain in the buffer
+		// otherwise so a later ResolveRange (with outChan bound) can
+		// pick them up. Skipping the per-test window match is
+		// correct: session mocks aren't anchored to any test, so
+		// trying to "match" them against [start,end] would either
+		// drop them silently (out-of-window cutoff) or attribute
+		// them to whichever test happens to ResolveRange first.
+		lt := mock.TestModeInfo.Lifetime
+		if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			// Don't stamp a synthetic name on session/connection
+			// mocks — Lifetime-derived parsers depend on
+			// Spec.Metadata for routing at replay time and the
+			// recorder writes whatever Name the mock already
+			// carries. They also don't belong in the per-test
+			// associatedMockIDs mapping (which is purely about
+			// per-test matches).
+			mocksToSend = append(mocksToSend, mock)
 			continue
 		}
 
-		// MATCHING LOGIC: Process mocks in the requested window
+		// MATCHING LOGIC: Process mocks in the requested window first
+		// so a long-running test's per-test mocks aren't pre-empted by
+		// the stale-buffer cutoff.
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
 				// If output channel is not wired yet, keep matching
@@ -365,12 +624,83 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			continue
 		}
 
+		// RETROACTIVE BIN: the mock missed the CURRENT window, but a
+		// recently-resolved window may own it. This is the async-emit vs
+		// window-close race — most visibly a Mongo cursor getMore the app
+		// issued WHILE producing a response, whose decode finished only
+		// after that response was captured and its window closed. The
+		// mock's presaved ReqTimestampMock is correct and in that window,
+		// but the direct [start,end] test above already ran for it, and no
+		// FUTURE window can contain an earlier timestamp — so without this
+		// it would fall to the stale-cutoff and be lost. Attribute it to
+		// the owning window's test so it's persisted (and picked up by
+		// replay's timestamp filter) instead of dropped. Placed BEFORE the
+		// stale-cutoff so an in-window-but-old mock (long test window that
+		// straddles the 7 s horizon) is rescued rather than reaped. Mirrors
+		// the in-window branch's keep / outChanBound handling.
+		if ownerW, ok := ownerWindow(mockTime); ok {
+			if keep {
+				if !outChanBound {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
+				mock.Name = "mock-" + generateRandomString(8)
+				if ownerW.mapping {
+					if lateMappings == nil {
+						lateMappings = make(map[string][]string)
+					}
+					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+				}
+				mocksToSend = append(mocksToSend, mock)
+				lateBinned++
+			}
+			// Handled (flushed or retained); drop from the current buffer.
+			continue
+		}
+
+		// SAFETY VALVE: Expire stale OUT-OF-WINDOW mocks.
+		// A mock that didn't match the current window AND is older
+		// than 7 s is unrecoverable — no future request can have a
+		// window that includes a timestamp from before "now-7s" once
+		// we're already past the head of the dedup queue, because
+		// the queue is FIFO on ReqTimestamp. Drop to bound growth.
+		// (Session- and connection-tier mocks are handled in the
+		// lifetime carve-out at the top of the loop and never reach
+		// this branch.)
+		if mockTime.Before(cutoffTime) {
+			// Per-mock diagnostic: a per-test mock that fell off the
+			// stale-buffer cutoff almost always means the recorder
+			// kept emitting after the dedup queue had advanced past
+			// the matching test's window — log enough context for
+			// post-hoc CI analysis. Sampled via dropLogger to honour
+			// the same flood-prevention as the outChan-overflow path.
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
+					zap.String("mock_name", mock.Name),
+					zap.String("mock_kind", string(mock.Kind)),
+					zap.String("connID", mock.ConnectionID),
+					zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
+					zap.Time("mock_req_ts", mockTime),
+					zap.Time("window_start", start),
+					zap.Time("window_end", end),
+					zap.Time("cutoff", cutoffTime),
+					zap.String("test_name", testName),
+				)
+			}
+			continue
+		}
+
 		// RETENTION: Keep the mock if it's recent (within 7s) but
 		// didn't match this specific window. It might be matched
 		// by a future out-of-order request.
 		m.buffer[keepIdx] = mock
 		keepIdx++
 	}
+
+	// Snapshot pre-truncation length so the diagnostic can report
+	// "shrunk from N to M" rather than the post-truncation length.
+	bufferLenBefore := len(m.buffer)
 
 	// MEMORY CLEANUP: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {
@@ -387,7 +717,50 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		}
 	}
 
+	// Record THIS window so a later ResolveRange can retroactively bin a
+	// mock decoded after this window closed (see recentWindows). Appended
+	// AFTER the match loop, so the current window's own mocks went through
+	// the direct [start,end] path above, never the ring. Skipped for the
+	// no-keep / unbound cases is unnecessary — an empty-but-recorded
+	// window is harmless and pruned by age.
+	m.recentWindows = append(m.recentWindows, resolvedWindow{
+		start:    start,
+		end:      end,
+		testName: testName,
+		mapping:  mapping,
+	})
+	if len(m.recentWindows) > maxRecentWindows {
+		// Drop the oldest entries; copy down so the big backing array
+		// isn't retained by the reslice.
+		n := copy(m.recentWindows, m.recentWindows[len(m.recentWindows)-maxRecentWindows:])
+		m.recentWindows = m.recentWindows[:n]
+	}
+
+	bufferLenAfter := len(m.buffer)
+	mocksToSendLen := len(mocksToSend)
+
 	m.mu.Unlock()
+
+	// Per-resolve diagnostic: surface buffer-state transitions per
+	// test-window resolve so a CI log can show when a per-test cohort
+	// flushed zero mocks or when stale-buffer cutoff started reaping.
+	// Sampled via dropLogger which is the standard observability sink
+	// for buffer-flow events on this manager. Only logged when there
+	// was actual state change to avoid log noise on idle resolves.
+	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
+		logger.Info("diag/ResolveRange: buffer transition",
+			zap.String("test_name", testName),
+			zap.Time("window_start", start),
+			zap.Time("window_end", end),
+			zap.Int("buffer_len_before", bufferLenBefore),
+			zap.Int("buffer_len_after", bufferLenAfter),
+			zap.Int("mocks_flushed", mocksToSendLen),
+			zap.Int("late_binned", lateBinned),
+			zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
+			zap.Bool("outChan_bound", outChanBound),
+			zap.Bool("mapping_enabled", mapping),
+		)
+	}
 
 	// Route mock sends through sendToOutChan so the close-vs-send
 	// race is serialized the same way AddMock does it. Mapping
@@ -402,42 +775,156 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		default:
 		}
 	}
+	// Retroactive mapping entries for mocks late-binned into past windows.
+	// The recorder Upserts mappings by test name, so a second entry for an
+	// already-resolved test merges into its existing mapping rather than
+	// replacing it.
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
 }
 
+// DeleteMocksStrictlyBefore is the dedup-queue cleanup invoked when a
+// DUPLICATE request is skipped: it clears buffered mocks captured before
+// the duplicate's request timestamp so the recording doesn't accumulate
+// the skipped duplicate's debris.
+//
+// It must NOT, however, delete a mock that legitimately belongs to an
+// earlier KEPT (non-duplicate) test and merely arrived in the buffer
+// late — the exact failure that lost every per-test Mongo mock in the
+// mongo-bigmock recording: a 6 MB document decodes/emits after its
+// HTTP window already resolved (so ResolveRange never matched it), and
+// then the NEXT cycle's duplicate requests fire DeleteMocksStrictlyBefore
+// and wipe those kept-but-late mocks before any retroactive-bin
+// ResolveRange can rescue them. Duplicate cycles take this path, never
+// ResolveRange, so without the rescue here the kept mocks are gone.
+//
+// Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
+// falls inside a recently-resolved window (recentWindows only ever holds
+// NON-duplicate windows — duplicates resolve through here, not
+// ResolveRange). So a before-the-horizon mock that owns a recent window
+// is a late kept mock → flush it (rescue); one that owns none is the
+// skipped duplicate's own debris → drop it. Session/connection mocks are
+// reusable across tests and are never reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
 	}
+
+	var mocksToSend []*models.Mock
+	var lateMappings map[string][]string
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	outChanBound, _ := m.outChanStatus()
+	mappingChan := m.mappingChan
+
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
 
 	keepIdx := 0
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
-
-		if mock.Spec.ReqTimestampMock.Before(timestamp) {
+		if mock == nil {
 			continue
 		}
 
-		// Keep the mock
-		m.buffer[keepIdx] = mock
-		keepIdx++
+		// At/after the cleanup horizon: belongs to the current or a future
+		// request, not the duplicate being skipped — always retain.
+		if !mock.Spec.ReqTimestampMock.Before(timestamp) {
+			m.buffer[keepIdx] = mock
+			keepIdx++
+			continue
+		}
+
+		// Session/connection mocks outlive any single test window and must
+		// survive a per-test cleanup. Flush when we can persist them now,
+		// otherwise retain for a later drain.
+		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			if outChanBound {
+				mocksToSend = append(mocksToSend, mock)
+				continue
+			}
+			m.buffer[keepIdx] = mock
+			keepIdx++
+			continue
+		}
+
+		// RESCUE: a before-the-horizon per-test mock that owns a recent
+		// KEPT window is a legitimately-kept test's late arrival — flush
+		// it to that test instead of deleting it as duplicate debris.
+		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+			if !outChanBound {
+				// Can't deliver yet; retain so a later flush sends it.
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			if w.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+			}
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+
+		// Owns no kept window and is before the horizon → the skipped
+		// duplicate's own debris. Drop it (fall through without keeping).
 	}
 
 	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {
 		m.buffer[i] = nil
 	}
-
 	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
+	m.mu.Unlock()
+
+	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
+	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	for _, mock := range mocksToSend {
+		m.sendToOutChan(mock)
+	}
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
 }
 
 type DedupJob struct {
 	ReqTimestamp time.Time
 	ResTimestamp time.Time
-	Resolved     bool
-	IsDuplicate  bool
+	// TestName is the recorder-side test identifier anchored to this
+	// dedup bucket. Populated at ResolveJob time so the internal
+	// ResolveRange call below forwards a non-empty testName into the
+	// TestMockMapping entry when enableMapping is true. Left empty for
+	// the early-exit defer path where no test identity is established.
+	TestName    string
+	Resolved    bool
+	IsDuplicate bool
 }
 
 type DedupQueue struct {
@@ -466,13 +953,27 @@ func (dq *DedupQueue) Enqueue(reqTime time.Time) *DedupJob {
 }
 
 // ResolveJob marks a job as resolved and attempts to process the queue from the head.
-func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, enableMapping bool, mockMgr *SyncMockManager) {
+//
+// testName is the caller's anchor for this specific job: under async
+// capture.go the header-derived Keploy-Test-Name flows in so the
+// downstream ResolveRange → TestMockMapping entry is stamped with the
+// same test identity the sync branch would have synthesised. Empty
+// testName is legal (early-exit defer, no-mapping callers) — it falls
+// through to the unchanged historical behaviour and ResolveRange simply
+// emits an anonymous mapping entry (or none, when mapping is false).
+func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, testName string, enableMapping bool, mockMgr *SyncMockManager) {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()
 
 	job.IsDuplicate = isDuplicate
 	job.Resolved = true
 	job.ResTimestamp = resTimestamp
+	// Stamp the anchor onto the job itself so the head-draining loop
+	// below forwards the correct testName even when an earlier job at
+	// the head is resolved by a LATER caller (strict-FIFO drain can
+	// process several jobs under a single ResolveJob invocation, each
+	// needing its own anchor).
+	job.TestName = testName
 
 	// Always process from the head to ensure strict FIFO ordering
 	for len(dq.queue) > 0 {
@@ -487,7 +988,7 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 		if head.IsDuplicate && mockMgr != nil {
 			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
 		} else if head.IsDuplicate == false && mockMgr != nil {
-			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, "", true, enableMapping)
+			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, head.TestName, true, enableMapping)
 
 		}
 

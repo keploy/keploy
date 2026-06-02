@@ -190,7 +190,7 @@ function Test-RecordingComplete {
   $p2 = ".\keploy\test-set-$idx\tests"
   foreach ($p in @($p1,$p2)) {
     if (-not (Test-Path $p)) { continue }
-    $files = Get-ChildItem -Path $p -Filter "test-*.yaml" -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -Path $p -Filter "*.yaml" -ErrorAction SilentlyContinue
     if (-not $files) { continue }
     $valid = ($files | Where-Object { $_.Length -ge $minBytes }).Count
     if ($valid -ge $minFiles) { return $true }
@@ -399,7 +399,7 @@ if ($REC_PID -and $REC_PID -ne 0) {
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
 if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
-$testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
+$testCount = (Get-ChildItem -Path $testSetPath -Filter "*.yaml").Count
 if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
@@ -479,5 +479,49 @@ if ($status -ne 'PASSED') {
   exit 1
 }
 
-Write-Host "All tests passed successfully!"
+# Json-format replay against the yaml-recorded fixtures (read-side
+# auto-detect path; record happens via the docker workflow once and
+# this validates that both replay formats consume it identically).
+$testLogJson = "$testContainer.test.json.txt"
+$testArgsJson = @(
+  'test',
+  '--storage-format', 'json',
+  '-c', 'docker compose up',
+  '--container-name', $testContainer,
+  '--api-timeout', '60',
+  '--delay', '30',
+  '--port', "$appPort",
+  '--generate-github-actions=false'
+)
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & $env:REPLAY_BIN @testArgsJson 2>&1 | Tee-Object -FilePath $testLogJson
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+
+$reportFilesJson = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.json" -Recurse -ErrorAction SilentlyContinue
+if (-not $reportFilesJson) {
+  Write-Error "No json report files found."
+  exit 1
+}
+$anyJsonFailed = $false
+foreach ($file in $reportFilesJson) {
+  try {
+    $obj = Get-Content $file.FullName -Raw | ConvertFrom-Json
+  } catch {
+    Write-Error "Failed to parse json report $($file.Name): $_"
+    $anyJsonFailed = $true
+    continue
+  }
+  Write-Host "json report $($file.Name): $($obj.status)"
+  if ($obj.status -ne "PASSED") { $anyJsonFailed = $true }
+}
+if ($anyJsonFailed) {
+  Write-Error "Some json tests failed."
+  exit 1
+}
+
+Write-Host "All tests passed successfully (yaml + json)!"
 exit 0

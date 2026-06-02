@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,7 +33,6 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
-	globalMockCh    chan<- *models.Mock
 	hooks           RecordHooks
 
 	// cleanups is run in LIFO order from Start's defer. Downstream
@@ -45,7 +45,7 @@ type Recorder struct {
 
 // RegisterCleanup appends a shutdown callback that Recorder.Start's
 // defer will drain in LIFO order. Thread-safe. Callbacks should be
-// idempotent — Recorder may be restarted in some flows (re-record).
+// idempotent — Recorder may be restarted in some flows.
 func (r *Recorder) RegisterCleanup(fn func() error) {
 	if fn == nil {
 		return
@@ -53,12 +53,6 @@ func (r *Recorder) RegisterCleanup(fn func() error) {
 	r.cleanupMu.Lock()
 	r.cleanups = append(r.cleanups, fn)
 	r.cleanupMu.Unlock()
-}
-
-// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager.
-// Used by the orchestrator during re-record mode.
-func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
-	r.globalMockCh = mockCh
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
@@ -90,9 +84,11 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 	return r.hooks
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
+func (r *Recorder) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+
+	sessionStart := time.Now()
 
 	// Auto-register mockDB.Close if it implements io.Closer. MockYaml
 	// implements Close unconditionally: in gob mode it drains the
@@ -162,6 +158,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
 	var newTestSetID string
+	var err error
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
 	domainSet := telemetry.NewDomainSet()
@@ -172,12 +169,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecordCfg.Rerecord {
-
-				err := utils.Stop(r.logger, stopReason)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to stop recording")
-				}
+			err := utils.Stop(r.logger, stopReason)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
 
@@ -188,6 +182,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		// Pcap + keylog flow over long-lived HTTP streams started in
+		// Start() right after the agent's broadcaster came up. The
+		// streams unwind on their own when the agent closes the
+		// response or the recorder context is cancelled — there is
+		// no on-disk file on the agent and no fetch step here.
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -215,6 +214,18 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
 			})
+			totalMocks := 0
+			for _, c := range mockCountMap {
+				totalMocks += c
+			}
+			// "completed" for a clean exit / user Ctrl+C, "aborted"
+			// when an error path set stopReason. Lets dashboards split
+			// successful sessions from failures without losing either.
+			status := "completed"
+			if stopReason != "" {
+				status = "aborted"
+			}
+			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status)
 		}
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
@@ -225,26 +236,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
-	if reRecordCfg.TestSet != "" {
-		// --- TARGETING AN EXISTING TEST SET ---
-		newTestSetID = reRecordCfg.TestSet
-		r.logger.Info("Starting mocks-only refresh for existing test set.", zap.String("testSet", newTestSetID))
-
-		// Delete ONLY the old mocks.
-		err := r.mockDB.DeleteMocksForSet(ctx, newTestSetID) // We will create this new function
-		if err != nil {
-			stopReason = "failed to clear existing mocks for refresh"
-			utils.LogError(r.logger, err, stopReason)
-			return fmt.Errorf("%s", stopReason)
-		}
-	} else {
-		var err error
-		newTestSetID, err = r.GetNextTestSetID(ctx)
-		if err != nil {
-			stopReason = "failed to get new test-set id"
-			utils.LogError(r.logger, err, stopReason)
-			return fmt.Errorf("%s", stopReason)
-		}
+	newTestSetID, err = r.GetNextTestSetID(ctx)
+	if err != nil {
+		stopReason = "failed to get new test-set id"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	// Create config.yaml if metadata is provided
@@ -271,7 +267,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling})
+	err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -332,6 +328,31 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return ctx.Err()
 	}
 
+	// Kick off the pcap + keylog streams. GetTestAndMockChans above
+	// has already triggered Proxy.Record() on the agent, which
+	// installs the broadcaster — so the stream subscribes against a
+	// live capture. The goroutine ends when ctx is cancelled
+	// (recording stop) or when the agent's HTTP server closes the
+	// response. Any error is logged but never fails the recording.
+	if r.config.Record.CapturePackets {
+		destDir := filepath.Join(r.config.Path, newTestSetID)
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
+				zap.String("destDir", destDir), zap.Error(err))
+		} else {
+			errGrp, _ := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if errGrp != nil {
+				errGrp.Go(func() error {
+					if err := r.instrumentation.StreamPcapArtifacts(ctx, destDir); err != nil {
+						utils.LogError(r.logger, err, "pcap stream ended with error",
+							zap.String("destDir", destDir))
+					}
+					return nil
+				})
+			}
+		}
+	}
+
 	if r.config.CommandType == string(utils.DockerCompose) {
 
 		r.logger.Debug("Making keploy-agent ready for docker compose...")
@@ -352,35 +373,31 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
-			if reRecordCfg.TestSet == "" {
-				if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
+			if hookErr := r.hooks.BeforeTestCaseInsert(ctx, &TestCaseContext{
+				TestCase: testCase, TestSetID: newTestSetID,
+			}); hookErr != nil {
+				r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+					zap.Error(hookErr),
+					zap.String("testSetID", newTestSetID),
+					zap.String("testCaseName", testCase.Name))
+			}
+			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					continue
+				}
+				insertTestErrChan <- err
+			} else {
+				testCount++
+				r.telemetry.RecordedTestAndMocks()
+				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
 				}); hookErr != nil {
-					r.logger.Error("BeforeTestCaseInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
+					r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
 						zap.Error(hookErr),
 						zap.String("testSetID", newTestSetID),
 						zap.String("testCaseName", testCase.Name))
 				}
-				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-				if err != nil {
-					if ctx.Err() == context.Canceled {
-						continue
-					}
-					insertTestErrChan <- err
-				} else {
-					testCount++
-					r.telemetry.RecordedTestAndMocks()
-					if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
-						TestCase: testCase, TestSetID: newTestSetID,
-					}); hookErr != nil {
-						r.logger.Error("AfterTestCaseInsert hook failed; test case was recorded successfully but post-insert hook side-effects may be missing. Check your RecordHooks implementation.",
-							zap.Error(hookErr),
-							zap.String("testSetID", newTestSetID),
-							zap.String("testCaseName", testCase.Name))
-					}
-				}
-			} else {
-				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 			}
 		}
 		return nil
@@ -426,35 +443,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
-				// Forward a lightweight mock reference to the orchestrator's
-				// correlation manager after InsertMock succeeds, so mappings
-				// only reference persisted mocks. Metadata map is copied to
-				// avoid data races with concurrent goroutines.
-				if r.globalMockCh != nil {
-					var metadata map[string]string
-					if mock.Spec.Metadata != nil {
-						metadata = make(map[string]string, len(mock.Spec.Metadata))
-						for k, v := range mock.Spec.Metadata {
-							metadata[k] = v
-						}
-					}
-					ref := &models.Mock{
-						Version: mock.Version,
-						Kind:    mock.Kind,
-						Name:    mock.Name,
-						Spec: models.MockSpec{
-							Metadata:         metadata,
-							ReqTimestampMock: mock.Spec.ReqTimestampMock,
-							ResTimestampMock: mock.Spec.ResTimestampMock,
-						},
-					}
-					select {
-					case r.globalMockCh <- ref:
-					default:
-						r.logger.Debug("dropped mock reference for re-record correlation; global mock channel full",
-							zap.String("mockName", ref.Name))
-					}
-				}
 			}
 		}
 		return nil
@@ -483,9 +471,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					realMockEntries = append(realMockEntries, realEntry)
 					correlationMap.Delete(tempID)
 				} else {
-					r.logger.Warn("Failed to correlate mock mapping",
+					r.logger.Error("Failed to correlate mock mapping",
 						zap.String("test", mapping.TestName),
-						zap.String("tempMockID", tempID))
+						zap.String("tempMockID", tempID),
+						zap.String("next_step", "ensure mapping store is enabled, avoid high parallelism, or re-record if mappings are inconsistent"))
 				}
 			}
 
@@ -518,7 +507,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			timer := time.After(r.config.Record.RecordTimer)
 			select {
 			case <-timer:
-				r.logger.Warn("Time up! Stopping keploy")
+				r.logger.Info("Time up! Stopping keploy")
 				err := utils.Stop(r.logger, "Time up! Stopping keploy")
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -543,7 +532,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
 		case models.ErrAppStopped:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
-			r.logger.Warn(stopReason, zap.Error(appErr))
+			r.logger.Info(stopReason, zap.Error(appErr))
 			return nil
 		case models.ErrCtxCanceled:
 			return nil
@@ -629,9 +618,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:         r.config.BypassRules,
-		MongoPassword: r.config.Test.MongoPassword,
-		TLSPrivateKey: tlsPrivateKey,
+		Rules:                     r.config.BypassRules,
+		MongoPassword:             r.config.Test.MongoPassword,
+		TLSPrivateKey:             tlsPrivateKey,
+		CapturePackets:            r.config.Record.CapturePackets,
+		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
+		MysqlPorts:                r.config.MysqlPorts,
 	})
 	if err != nil {
 
@@ -769,7 +761,7 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	newSuffix := highestSuffix + 1
 	assignedName := fmt.Sprintf("%s-%d", requestedName, newSuffix)
 
-	r.logger.Warn(fmt.Sprintf(
+	r.logger.Info(fmt.Sprintf(
 		"Test set name '%s' already exists, using '%s' instead. You can change this name if you want.",
 		requestedName, assignedName,
 	))

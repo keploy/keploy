@@ -9,12 +9,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-type MockDownload struct {
-	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
-}
-
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
+	StorageFormat         string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
 	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
 	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
@@ -36,11 +33,11 @@ type Config struct {
 	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	MysqlPorts            []uint32            `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string              `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
@@ -54,7 +51,6 @@ type Config struct {
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
-	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
@@ -70,15 +66,19 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
-	MemoryLimit       uint64          `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
-	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	Filters     []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath    string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	// TestCaseNaming controls how default test case filenames are generated.
+	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
+	// "sequential" preserves the legacy `test-N.yaml` numbering.
+	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
+	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
@@ -87,20 +87,67 @@ type Record struct {
 	// Go-version stability contract. The env var KEPLOY_MOCK_FORMAT
 	// takes precedence over this field for ad-hoc experimentation.
 	MockFormat string `json:"mockFormat,omitempty" yaml:"mockFormat,omitempty" mapstructure:"mockFormat"`
+	// CapturePackets toggles raw network packet capture on the proxy ports
+	// during recording. When enabled, a pcap file is written into the
+	// freshly-created test-set directory under the keploy folder.
+	CapturePackets bool `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
+	// OpportunisticTLSIntercept enables a "sniff first, hijack if TLS"
+	// passthrough mode. The proxy lets the app and upstream talk to
+	// each other (relaying bytes verbatim, like GlobalPassthrough)
+	// while peeking each chunk for the start of a TLS handshake.
+	// As soon as a chunk on the client side starts with a TLS
+	// ClientHello, the proxy hijacks: it terminates TLS with the
+	// client (presenting keploy's MITM cert, with KeyLogWriter
+	// wired so the keylog file populates), opens a fresh tls.Client
+	// to the upstream, and then relays cleartext both ways without
+	// parser dispatch or mock recording. This gives a decryptable
+	// pcap for sessions that would otherwise have been pure
+	// passthrough — handy for debugging captured TLS traffic.
+	//
+	// Independent of GlobalPassthrough — the two flags are
+	// alternatives, not a hierarchy. When OpportunisticTLSIntercept
+	// is set it takes precedence; the proxy ignores
+	// GlobalPassthrough for that connection's outcome.
+	//
+	// Caveats: cert pinning breaks the same way it does for default
+	// record mode (the app must trust keploy's CA); SCRAM-*-PLUS
+	// and other channel-binding mechanisms reject the MITM cert and
+	// must be disabled client-side; MITM-incompatible workloads
+	// should stick with GlobalPassthrough.
+	OpportunisticTLSIntercept bool `json:"opportunisticTlsIntercept" yaml:"opportunisticTlsIntercept" mapstructure:"opportunisticTlsIntercept"`
+
+	// RecordBuffer tunes the per-connection record buffer. Defaults
+	// suit ~99% of workloads; only touch these if you see "mock
+	// incomplete" warnings with reason "per_conn_cap" or "channel_full"
+	// in the agent logs.
+	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
 }
 
-type ReRecord struct {
-	SelectedTests []string        `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters       []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	Host          string          `json:"host" yaml:"host" mapstructure:"host"`
-	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
-	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
-	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	SSEPort       uint32          `json:"ssePort" yaml:"ssePort" mapstructure:"ssePort"`
-	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
-	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
-	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
+// RecordBuffer tunes the per-connection recording queue used by the
+// agent's relay. The two knobs guard the same in-flight queue but in
+// different units: MaxMemoryPerConnection is a byte budget,
+// QueueSize is a slot count. Whichever fills first triggers a drop
+// and marks the in-flight mock incomplete (the forward path is
+// unaffected — user traffic always succeeds).
+//
+// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+// override the yaml/flag values when set.
+type RecordBuffer struct {
+	// MaxMemoryPerConnection caps the bytes the recorder may hold
+	// in the per-connection queue while the parser catches up.
+	// Maps to relay.Config.PerConnCap. Zero resolves to the relay's
+	// built-in default (64 MiB). Increase if you see drops with
+	// reason "per_conn_cap" — usually means responses are larger
+	// than the default budget (e.g. >10 MB query results).
+	MaxMemoryPerConnection uint64 `json:"maxMemoryPerConnection" yaml:"maxMemoryPerConnection" mapstructure:"maxMemoryPerConnection"`
+
+	// QueueSize is the number of chunk slots in the recording queue.
+	// Each slot holds one ~32 KiB chunk. Maps to
+	// relay.Config.TeeChanBuf. Zero resolves to the relay's built-in
+	// default (1024). Increase if you see drops with reason
+	// "channel_full" — usually means bursty traffic (many small
+	// messages back-to-back) that the parser can't keep up with.
+	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
 }
 
 type Contract struct {
@@ -130,6 +177,8 @@ type Test struct {
 	GlobalNoise                 Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	ReplaceWith                 ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
 	Delay                       uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	HealthURL                   string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
+	HealthPollTimeout           time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
 	Host                        string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                        uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort                    uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
@@ -149,8 +198,6 @@ type Test struct {
 	Mocking                     bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests                map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 	DisableLineCoverage         bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	DisableMockUpload           bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
-	UseLocalMock                bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
 	UpdateTemplate              bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 	MustPass                    bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 	MaxFailAttempts             uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
@@ -163,6 +210,7 @@ type Test struct {
 	UpdateTestMapping           bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise      bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"`                                    // skip auto-noise for flaky headers (e.g. AWS SigV4)
 	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
+	KeepAppAlive                bool                `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
 	CmdUsed                     string              `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 }

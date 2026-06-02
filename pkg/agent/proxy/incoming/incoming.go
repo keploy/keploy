@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -35,17 +36,46 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
-	mu           sync.Mutex
-	active       map[uint16]proxyStop
-	logger       *zap.Logger
-	hooks        agent.Hooks
-	tcChan       chan *models.TestCase
-	incomingOpts models.IncomingOptions
+	mu     sync.Mutex
+	active map[uint16]proxyStop
+	logger *zap.Logger
+	hooks  agent.Hooks
+	tcChan chan *models.TestCase
+	// incomingOpts is read by ingress capture goroutines on every
+	// captured request (CaptureHook call sites in http.go) and written
+	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
+	// atomic this was a plain struct field guarded by nothing on the
+	// read path, which is a real data race the moment a recorder
+	// reconnects with different filter/sampling settings while ingress
+	// traffic is in flight. atomic.Pointer gives a lock-free,
+	// pointer-sized swap that the readers can Load without contending.
+	// Always stored as a heap copy of the caller's value so writes
+	// don't tear the struct in-place.
+	incomingOpts atomic.Pointer[models.IncomingOptions]
 	synchronous  bool
-	sampling     bool
-	samplingSem  chan struct{}
+	// mapping mirrors !cfg.DisableMapping at construction time. Forwarded
+	// to CaptureHook so the synchronous-record path can decide whether
+	// SyncMockManager.ResolveRange should emit a TestMockMapping entry
+	// onto the agent's mappingChan. Without this plumbing the mapping
+	// arg was hardcoded false at the OSS Capture call site, which
+	// silently disabled mappings.yaml production during record (#3905).
+	mapping     bool
+	sampling    bool
+	samplingSem chan struct{}
 
 	ingressHook IngressHook
+
+	// startOnce gates the ListenForIngressEvents goroutine so that
+	// repeated Start() calls (a reconnecting recorder opening a new
+	// /agent/incoming stream while the agent process keeps running)
+	// don't leak additional watcher goroutines that all consume from
+	// the same eventChan. The IncomingOptions on subsequent calls
+	// still take effect — Start always atomic-swaps incomingOpts via
+	// atomic.Pointer.Store regardless of whether the watcher actually
+	// (re)spawns — so callers that intentionally reconnect with
+	// different filtering get the new behavior immediately on the
+	// next captured request.
+	startOnce sync.Once
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
@@ -55,6 +85,7 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		mapping:     !cfg.DisableMapping,
 		sampling:    false,
 		samplingSem: make(chan struct{}, func() int {
 			if cfg.Agent.EnableSampling > 0 {
@@ -71,6 +102,17 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	return pm
 }
 
+// loadIncomingOpts returns the current IncomingOptions snapshot, or a
+// zero-value struct if Start has never been called. CaptureHook readers
+// in http.go call this on every captured request — the atomic.Pointer
+// Load is wait-free, so this stays cheap on the hot path.
+func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
+	if p := pm.incomingOpts.Load(); p != nil {
+		return *p
+	}
+	return models.IncomingOptions{}
+}
+
 // SetIngressHook replaces the default Go TCP forwarder with an external
 // ingress handler (e.g. enterprise sockmap proxy).
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
@@ -80,8 +122,22 @@ func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 }
 
 func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
-	pm.incomingOpts = opts
-	go pm.ListenForIngressEvents(ctx)
+	// Always update incomingOpts — a reconnecting recorder may pass
+	// different filtering / sampling settings that should take effect
+	// immediately. Atomic swap of a pointer-sized field means the
+	// CaptureHook readers in http.go can Load it on every captured
+	// request without contending on a mutex.
+	optsCopy := opts
+	pm.incomingOpts.Store(&optsCopy)
+
+	// Gate the ListenForIngressEvents goroutine so subsequent Start
+	// invocations don't spawn duplicate watchers. The ctx passed in
+	// here is now process-lifetime (see pkg/service/agent/agent.go),
+	// so the goroutine survives /agent/incoming stream teardowns;
+	// without the gate, each reconnect would leak another watcher.
+	pm.startOnce.Do(func() {
+		go pm.ListenForIngressEvents(ctx)
+	})
 	return pm.tcChan
 }
 
@@ -181,6 +237,11 @@ type tcpForwarderState struct {
 	done     chan struct{} // closed when the accept loop exits
 }
 
+const (
+	ingressTargetListenTimeout = 3 * time.Second
+	ingressTargetPollInterval  = 25 * time.Millisecond
+)
+
 func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
 	return &goTCPIngressHook{
 		pm:         pm,
@@ -193,6 +254,21 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
+
+	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+		if err != nil {
+			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
+				zap.String("target", newAppAddr),
+				zap.Duration("timeout", ingressTargetListenTimeout),
+				zap.Error(err))
+		} else {
+			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
+				zap.String("target", newAppAddr))
+		}
+	} else {
+		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
+			zap.Uint16("orig_port", origPort))
+	}
 
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
@@ -246,6 +322,39 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	h.mu.Unlock()
 
 	return nil
+}
+
+func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
+	if newPort == 0 {
+		return false, nil
+	}
+	return true, waitForIngressTarget(ctx, addr, timeout)
+}
+
+func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(ingressTargetPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp4", addr, ingressTargetPollInterval)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s to listen: %w", addr, lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {

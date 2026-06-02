@@ -36,8 +36,15 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			logger.Debug("Starting new command iteration",
 				zap.Int("command_count", commandCount))
 
-			// Set a read deadline on the client connection
-			readTimeout := 2 * time.Second * time.Duration(opts.SQLDelay)
+			// Set a read deadline on the client connection.
+			// opts.SQLDelay is a time.Duration; multiplying by time.Second (the old
+			// code) either produced 0 when the caller sent SQLDelay=0 or overflowed
+			// int64 when the caller sent a real seconds-valued Duration — both cases
+			// expired the deadline immediately and hot-looped at 50ms/iter forever.
+			readTimeout := 2 * opts.SQLDelay
+			if readTimeout < time.Second {
+				readTimeout = 2 * time.Second
+			}
 			err := clientConn.SetReadDeadline(time.Now().Add(readTimeout))
 			if err != nil {
 				utils.LogError(logger, err, "failed to set read deadline on client conn")

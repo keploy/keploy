@@ -3,6 +3,7 @@ package integrations
 import (
 	"net"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -63,6 +64,17 @@ type RecordSession struct {
 	// protocol-specific metadata without teaching the OSS HTTP parser about
 	// that protocol.
 	OnMockRecorded PostRecordHook
+
+	// V2 exposes the new FakeConn-based session (see
+	// pkg/agent/proxy/supervisor.Session) when the connection is being
+	// served through the supervisor + relay architecture. A migrated
+	// parser checks for a non-nil V2 and reads from V2.ClientStream /
+	// V2.DestStream and sends directives via V2.Directives rather than
+	// touching the legacy Ingress / Egress / TLSUpgrader fields.
+	// Un-migrated parsers may ignore V2 entirely and continue using
+	// the legacy fields; the dispatcher only routes through supervisor
+	// for parsers that implement [IntegrationsV2].
+	V2 *supervisor.Session
 }
 
 // PostRecordHook is invoked after a shared parser produces a mock and before

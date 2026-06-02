@@ -15,7 +15,6 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/platform/auth"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -55,6 +54,28 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+
+	// If KEPLOY_DEBUG_FILE is set, tee debug-level log records into that
+	// file in addition to whatever sinks log.New configured. Used by
+	// `keploy cloud replay` to capture the agent container's debug
+	// stream into the user's keploy folder via a bind mount; the
+	// support-bundle pipeline picks the file up automatically since it
+	// lives under cfg.Path. Also useful as a generic "give me the full
+	// debug log without --debug printing it to my terminal" knob for
+	// any keploy invocation.
+	debugFile, debugSink := maybeAttachDebugFileSink(logger)
+	if debugFile != nil {
+		defer func() {
+			if debugSink != nil {
+				if ferr := debugSink.Flush(); ferr != nil {
+					logger.Warn("KEPLOY_DEBUG_FILE: flush failed", zap.Error(ferr))
+				}
+			}
+			if cerr := debugFile.Close(); cerr != nil {
+				logger.Warn("KEPLOY_DEBUG_FILE: close failed", zap.Error(cerr))
+			}
+		}()
+	}
 
 	// Start pprof HTTP server for live profiling if PPROF_PORT is set
 	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
@@ -114,6 +135,15 @@ func start(ctx context.Context) {
 		// is only reached if there's an error (which is handled inside ReexecWithSudo)
 		return
 	}
+
+	// Nudge OSS users toward Keploy Community Edition. Placed AFTER the
+	// sudo re-exec gate (mirroring where the logo prints via the cobra
+	// PreRunE in cli/provider/cmd.go) so the original process is already
+	// replaced by syscall.Exec before this runs — guarantees the banner
+	// prints exactly once across the docker/cloud-replay re-exec path.
+	// Same-binary-only: lives in this main package, the enterprise
+	// binary has its own main.go and doesn't compile this in.
+	printEnterpriseUpgradeBanner()
 
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
@@ -198,9 +228,8 @@ func start(ctx context.Context) {
 		utils.LogError(logger, err, errMsg)
 		os.Exit(1)
 	}
-	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, conf, auth)
+	svcProvider := provider.NewServiceProvider(logger, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
@@ -216,4 +245,118 @@ func start(ctx context.Context) {
 	if conf.Path != "" {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+
+// maybeAttachDebugFileSink reads KEPLOY_DEBUG_FILE and, if set, opens that
+// path and attaches a debug-level file sink onto logger via the same
+// in-place pointee mutation pattern the rest of the codebase uses for
+// runtime logger swaps (see ChangeLogLevel / RedirectToStderr). Returns
+// the opened file and sink handle so the caller can defer Flush + Close.
+//
+// All errors are non-fatal — if the file can't be opened (read-only mount,
+// permission, etc.), the process continues with the original logger.
+func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink) {
+	path := strings.TrimSpace(os.Getenv("KEPLOY_DEBUG_FILE"))
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		logger.Warn("KEPLOY_DEBUG_FILE set but could not be opened; continuing without debug capture",
+			zap.String("path", path), zap.Error(err))
+		return nil, nil
+	}
+	wrapped, sink := log.AddDebugFileSink(logger, f, 100<<20)
+	if wrapped == nil || sink == nil {
+		_ = f.Close()
+		return nil, nil
+	}
+	*logger = *wrapped
+	// Publish the sink so cross-package helpers (e.g. the agent's
+	// per-test-set rotation in pkg/agent/routes) can reach it without
+	// threading the sink through every constructor.
+	log.SetDebugFileSink(sink)
+	logger.Debug("KEPLOY_DEBUG_FILE attached", zap.String("path", path))
+	return f, sink
+}
+
+// printEnterpriseUpgradeBanner emits a high-visibility nudge to install
+// the Keploy Enterprise binary — entry plan is Community Edition (free)
+// which unlocks the broader protocol/dependency set + AI features that
+// the OSS binary doesn't ship.
+//
+// Lives in the OSS binary's main.go (not in cli/root.go) so the
+// enterprise binary — which has its own main.go and does not import
+// this file — naturally never prints it. Avoids cross-module flag
+// plumbing through go.keploy.io/server/v3 entirely.
+//
+// Kept in main.go (not a sibling file in the same package) because the
+// Windows CI build invokes `go build ./main.go` — a single-file build
+// that excludes sibling .go files in the same package. Splitting this
+// out broke build-windows-amd64.
+//
+// De-duplication mirrors the logo's pattern (CmdConfigurator.ValidateFlags
+// in cli/provider/cmd.go): the call site sits AFTER the sudo re-exec gate
+// in start(), so the pre-exec process is already replaced before this
+// runs (sudo / docker / cloud-replay re-exec paths print only once). On
+// top of that:
+//   - Skip when os.Args[1] == "agent" — the inner subprocess that
+//     `keploy record/test` spawns via exec.Command. Mirrors the logo's
+//     `if cmd.Name() != "agent"` skip.
+//   - Skip when KEPLOY_INDOCKER=true — the containerized agent child of
+//     an outer host invocation (existing keploy convention).
+//
+// Banner goes to stderr so it never contaminates a piped stdout
+// (e.g. `keploy --version | grep`, `keploy config | yq ...`).
+//
+// ANSI suppression honors:
+//   - NO_COLOR=<any non-empty value>  (industry-standard, see no-color.org)
+//   - --disable-ansi flag if present anywhere in os.Args (matches the
+//     cobra flag the rest of the CLI respects; checked manually here
+//     because cobra hasn't parsed yet at this point in startup).
+func printEnterpriseUpgradeBanner() {
+	// Skip for the spawned agent child (keploy record/test launches
+	// `keploy agent --port ... --proxy-port ...` via exec.Command).
+	// Same dedup signal the logo uses inside ValidateFlags.
+	if len(os.Args) >= 2 && os.Args[1] == "agent" {
+		return
+	}
+
+	// Skip when running as a containerized agent child of an outer
+	// keploy invocation. The host-side process already printed; this
+	// in-container instance shouldn't print again. KEPLOY_INDOCKER is
+	// set by the parent that spawned the container.
+	if os.Getenv("KEPLOY_INDOCKER") == "true" {
+		return
+	}
+
+	disableAnsi := os.Getenv("NO_COLOR") != ""
+	if !disableAnsi {
+		for _, arg := range os.Args[1:] {
+			if arg == "--disable-ansi" || arg == "--disable-ansi=true" {
+				disableAnsi = true
+				break
+			}
+		}
+	}
+
+	orange := "\033[38;5;208m"
+	bold := "\033[1m"
+	dim := "\033[2m"
+	reset := "\033[0m"
+	if disableAnsi {
+		orange, bold, dim, reset = "", "", "", ""
+	}
+
+	bar := "═══════════════════════════════════════════════════════════════════════════════"
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, orange+bar+reset)
+	fmt.Fprintf(os.Stderr, "  %s🚀  TRY KEPLOY COMMUNITY EDITION (FREE)%s\n", bold+orange, reset)
+	fmt.Fprintln(os.Stderr, "  You're on the open-source binary. Community Edition (free) adds:")
+	fmt.Fprintln(os.Stderr, "    • PostgreSQL, MongoDB, gRPC, HTTP/2, Kafka — on top of OSS's HTTP + MySQL")
+	fmt.Fprintln(os.Stderr, "    • AI-powered test generation, sandbox replay, MCP for AI agents")
+	fmt.Fprintln(os.Stderr, "      (Claude Code, Cursor, Copilot, Gemini, …)")
+	fmt.Fprintln(os.Stderr, "  "+dim+"Install:"+reset+"  "+bold+"curl --silent -O -L https://keploy.io/ent/install.sh && source install.sh"+reset)
+	fmt.Fprintln(os.Stderr, orange+bar+reset)
+	fmt.Fprintln(os.Stderr)
 }

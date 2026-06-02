@@ -106,7 +106,33 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return true
 }
 
+// IsV2 declares that the HTTP parser is migrated to the supervisor + relay
+// + FakeConn architecture (pkg/agent/proxy/proxy_v2.go). The dispatcher
+// type-asserts the matchedParser against integrations.IntegrationsV2 and
+// routes to recordViaSupervisor only when IsV2() returns true.
+//
+// Returning true is unconditional — the HTTP parser has no per-instance
+// configuration that could force it back to the legacy path. The rollback
+// knob is the env KEPLOY_NEW_RELAY=off handled in proxy_v2.go.
+func (h *HTTP) IsV2() bool { return true }
+
+// RecordOutgoing dispatches to the V2 path when the supervisor has
+// attached a session via RecordSession.V2, and to the legacy path
+// otherwise. Keeping both paths live lets the dispatcher / rollback
+// knob (KEPLOY_NEW_RELAY) swap between them without code changes.
 func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	if session != nil && session.V2 != nil {
+		return h.recordV2(ctx, session.V2)
+	}
+	return h.recordLegacy(ctx, session)
+}
+
+// recordLegacy is the original RecordOutgoing body preserved unchanged.
+// It consumes the legacy RecordSession fields (Ingress / Egress / Mocks)
+// and forwards bytes between the real sockets itself. The V2 path in
+// recordV2 relies on the supervisor's relay to do the forwarding and
+// only observes teed chunks via FakeConn streams.
+func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
@@ -255,6 +281,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
+		},
+		// HTTP is a request-response protocol — every exchange is per-test
+		// by construction. No handshake/session tier exists at the HTTP
+		// layer; outbound calls from an application under test are always
+		// bound to the current test window. Stamp LifetimePerTest + mark
+		// LifetimeDerived so DeriveLifetime's ingest-time classifier is a
+		// no-op (the recorder is authoritative at emit time). Leaves
+		// Metadata["type"] unchanged (legacy readers still see HTTPClient).
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
 		},
 	}
 

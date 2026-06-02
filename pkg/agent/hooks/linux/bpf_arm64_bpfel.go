@@ -61,7 +61,9 @@ type bpfProgramSpecs struct {
 	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
+	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
+	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_sendmsg"`
 	SyscallProbeEntrySocket *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
@@ -152,7 +154,9 @@ type bpfPrograms struct {
 	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
+	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
+	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.Program `ebpf:"k_udp6_sendmsg"`
 	SyscallProbeEntrySocket *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
@@ -166,7 +170,9 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername4,
 		p.K_getpeername6,
 		p.K_sockops,
+		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,
+		p.K_udp6Recvmsg,
 		p.K_udp6Sendmsg,
 		p.SyscallProbeEntrySocket,
 	)

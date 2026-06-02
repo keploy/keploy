@@ -221,6 +221,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		sCOM_DEBUG      = mysql.CommandStatusToString(mysql.COM_DEBUG)
 		sCOM_PING       = mysql.CommandStatusToString(mysql.COM_PING)
 		sCOM_RESET_CONN = mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION)
+		sCOM_STMT_RESET = mysql.CommandStatusToString(mysql.COM_STMT_RESET)
 	)
 
 	// Fast path: QUIT may have no mock
@@ -525,6 +526,119 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 		}
 
+		// COM_STMT_RESET clears the cursor / long-data state of a server
+		// prepared statement and is defined to return an OK packet on
+		// success (ERR only if the statement ID is unknown). Connector/J
+		// emits it opportunistically before re-executing a
+		// ServerPreparedStatement when it suspects lingering state — a
+		// path that the record run often does not exercise because the
+		// recorded driver is single-tenant. Without a mock we used to
+		// drop the connection here, which surfaces to the client as
+		// SQLSTATE 08S01 (CommunicationsException). Since the packet is
+		// stateless from the mock's perspective, synthesizing an OK is
+		// correct protocol behavior.
+		if req.Header.Type == sCOM_STMT_RESET {
+			stmtID := uint32(0)
+			if rp, ok := req.Message.(*mysql.StmtResetPacket); ok {
+				stmtID = rp.StatementID
+			}
+			seq := byte(1)
+			if req.PacketBundle.Header != nil && req.PacketBundle.Header.Header != nil {
+				seq = req.PacketBundle.Header.Header.SequenceID + 1
+			}
+			generic := &mysql.Response{
+				PacketBundle: mysql.PacketBundle{
+					Header: &mysql.PacketInfo{
+						Header: &mysql.Header{PayloadLength: 7, SequenceID: seq},
+						Type:   mysql.StatusToString(mysql.OK),
+					},
+					Message: &mysql.OKPacket{
+						Header:       mysql.OK,
+						AffectedRows: 0,
+						LastInsertID: 0,
+						StatusFlags:  0x0002,
+						Warnings:     0,
+						Info:         "",
+					},
+				},
+			}
+			logger.Debug("Returning synthetic OK for unmocked COM_STMT_RESET",
+				zap.Uint32("statement_id", stmtID))
+			return generic, true, "", "", nil
+		}
+
+		if req.Header.Type == sCOM_STMT_PREP {
+			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+				numParams := uint16(strings.Count(sp.Query, "?"))
+				newStmtID := decodeCtx.NextStmtID
+				decodeCtx.NextStmtID++
+
+				var paramDefs []*mysql.ColumnDefinition41
+				if numParams > 0 {
+					paramDefs = make([]*mysql.ColumnDefinition41, 0, numParams)
+					for i := uint16(0); i < numParams; i++ {
+						paramDefs = append(paramDefs, &mysql.ColumnDefinition41{
+							Header: mysql.Header{
+								PayloadLength: 22,
+								SequenceID:    byte(2 + i),
+							},
+							Catalog:      "def",
+							FixedLength:  0x0c,
+							CharacterSet: 0,
+							ColumnLength: 0,
+							Type:         252,
+							Flags:        0,
+							Decimals:     0,
+							Filler:       []byte{0x00, 0x00},
+						})
+					}
+				}
+
+				prepareOk := &mysql.StmtPrepareOkPacket{
+					Status:             0,
+					StatementID:        newStmtID,
+					NumColumns:         0,
+					NumParams:          numParams,
+					Filler:             0,
+					WarningAvailable:   true,
+					WarningCount:       0,
+					ParamDefs:          paramDefs,
+					EOFAfterParamDefs:  []byte{},
+					ColumnDefs:         nil,
+					EOFAfterColumnDefs: []byte{},
+				}
+
+				seq := byte(1)
+				if req.PacketBundle.Header != nil && req.PacketBundle.Header.Header != nil {
+					seq = req.PacketBundle.Header.Header.SequenceID + 1
+				}
+				synthetic := &mysql.Response{
+					PacketBundle: mysql.PacketBundle{
+						Header: &mysql.PacketInfo{
+							Header: &mysql.Header{PayloadLength: 12, SequenceID: seq},
+							Type:   mysql.COM_STMT_PREPARE_OK,
+						},
+						Message: prepareOk,
+					},
+				}
+
+				// Wire the synthetic stmtID into the runtime maps so
+				// the subsequent EXECUTE can be resolved by query.
+				if decodeCtx.PreparedStatements != nil {
+					decodeCtx.PreparedStatements[newStmtID] = prepareOk
+				}
+				if decodeCtx.StmtIDToQuery != nil {
+					decodeCtx.StmtIDToQuery[newStmtID] = sp.Query
+				}
+
+				logger.Info("Synthesized PREPARE_OK for unmocked statement (likely TiDB+JDBC cachePrepStmts caching pre-record stmtIDs)",
+					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
+					zap.Uint32("synthetic_stmt_id", newStmtID),
+					zap.Uint16("num_params", numParams))
+				return synthetic, true, "", "", nil
+			}
+		}
+
 		actualQuery := ""
 		if qp, qok := req.Message.(*mysql.QueryPacket); qok {
 			actualQuery = qp.Query
@@ -733,7 +847,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		log.Debug("query structure matched",
 			zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
-		return true, matchCount
+		return false, matchCount + 6
 	}
 
 	return false, matchCount
@@ -848,6 +962,17 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
+	}
+
+	if allParamsMatched && eq == "" && aq == "" {
+		return true, matchCount
+	}
+
+	if allParamsMatched && eq == "" {
+		logger.Debug("EXECUTE matched on params alone (mock has no recorded PREPARE)",
+			zap.String("mock-name", mockName),
+			zap.String("actual_query", truncate(aq, 200)))
+		return true, matchCount
 	}
 
 	if !queryMatched || !allParamsMatched {

@@ -220,7 +220,7 @@ func handleJSONDiff(validatedJSON matcher.ValidatedJSON, logDiffs matcher.DiffsP
 		if json.Valid([]byte(mockBodyStr)) {
 			patch, err := jsondiff.Compare(testBodyStr, mockBodyStr)
 			if err != nil {
-				logger.Warn("failed to compute json diff", zap.Error(err))
+				logger.Debug("failed to compute json diff", zap.Error(err))
 				return differencesCount, false, err
 			}
 			differencesCount = float64(len(patch))

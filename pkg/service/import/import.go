@@ -19,7 +19,6 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 const (
@@ -31,6 +30,7 @@ type PostmanImporter struct {
 	logger    *zap.Logger
 	ctx       context.Context
 	toCapture bool
+	Format    yaml.Format
 }
 
 func NewPostmanImporter(ctx context.Context, logger *zap.Logger) *PostmanImporter {
@@ -38,6 +38,16 @@ func NewPostmanImporter(ctx context.Context, logger *zap.Logger) *PostmanImporte
 		logger:    logger,
 		ctx:       ctx,
 		toCapture: true,
+		Format:    yaml.FormatYAML,
+	}
+}
+
+func NewPostmanImporterWithFormat(ctx context.Context, logger *zap.Logger, format yaml.Format) *PostmanImporter {
+	return &PostmanImporter{
+		logger:    logger,
+		ctx:       ctx,
+		toCapture: true,
+		Format:    format,
 	}
 }
 
@@ -65,7 +75,7 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 	if emptyResponsesExist {
 		if !pi.promptUserForCapture() {
 			pi.toCapture = false
-			pi.logger.Warn("Few test cases will be skipped as responses are missing from the collection")
+			pi.logger.Info("Few test cases will be skipped as responses are missing from the collection")
 		}
 	}
 
@@ -99,7 +109,7 @@ func (pi *PostmanImporter) parsePostmanCollection(collectionBytes []byte) (*Post
 
 func (pi *PostmanImporter) validatePostmanSchema(schema string) {
 	if schema != postmanSchemaVersion {
-		pi.logger.Warn("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
+		pi.logger.Info("Postman Collection schema mismatch", zap.String("expected", postmanSchemaVersion), zap.String("actual", schema))
 	}
 }
 
@@ -282,14 +292,14 @@ func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionSt
 	for _, item := range collection.Items.PostmanItems {
 		for _, testItem := range item.Item {
 			if len(testItem.Response) == 0 {
-				pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+				pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 				return true
 			}
 		}
 	}
 	for _, testItem := range collection.Items.TestDataItems {
 		if len(testItem.Response) == 0 {
-			pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+			pi.logger.Debug("Empty response found", zap.String("testItem", testItem.Name))
 			return true
 		}
 	}
@@ -374,12 +384,12 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 
 		testCase.Curl = pkg.MakeCurlCommand(requestSchema)
 
-		testResultBytes, err := yamlLib.Marshal(testCase)
+		testResultBytes, err := yaml.MarshalDocIndent(pi.Format, testCase)
 		if err != nil {
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFile(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false); err != nil {
+		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 

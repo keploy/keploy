@@ -126,7 +126,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		}
 	}
 	if !any {
-		r.logger.Warn("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
+		r.logger.Debug("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
 	}
 	err := r.out.Flush()
 	if err != nil {
@@ -364,7 +364,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return fmt.Errorf("failed to get latest test run ID: %w", err)
 	}
 	if latestRunID == "" {
-		r.logger.Warn("no test runs found")
+		r.logger.Debug("no test runs found")
 		return nil
 	}
 	r.logger.Debug("latest run id is", zap.String("latest_run_id", latestRunID))
@@ -378,7 +378,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			return fmt.Errorf("failed to get test sets for report: %w", err)
 		}
 		if len(testSetIDs) == 0 {
-			r.logger.Warn("No test sets found for report generation")
+			r.logger.Debug("No test sets found for report generation")
 			return nil
 		}
 	}
@@ -499,7 +499,7 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 		if len(r.config.Report.TestCaseIDs) > 0 {
 			sel := r.filterTestsByIDs(tr.Tests, r.config.Report.TestCaseIDs)
 			if len(sel) == 0 {
-				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
+				r.logger.Debug("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
 			}
 			return r.printTests(ctx, sel)
@@ -595,7 +595,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 func (r *Report) processLegacyTestCaseFiltering(ctx context.Context, tests []models.TestResult) error {
 	sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
 	if len(sel) == 0 {
-		r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
+		r.logger.Debug("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 		return nil
 	}
 	return r.printTests(ctx, sel)
@@ -664,7 +664,7 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 		}
 
 		if results == nil {
-			r.logger.Warn("no results found for test set", zap.String("test_set_id", cleanTestSetID))
+			r.logger.Debug("no results found for test set", zap.String("test_set_id", cleanTestSetID))
 			continue
 		}
 

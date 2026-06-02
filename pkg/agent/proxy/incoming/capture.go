@@ -28,6 +28,28 @@ func newCaptureBuffer(limit int) *captureBuffer {
 
 func (b *captureBuffer) Write(p []byte) (int, error) {
 	b.total += int64(len(p))
+
+	// Once the buffer has been marked truncated (size limit hit OR
+	// memoryguard pause), keep accepting writes (so the tee'd reader
+	// keeps draining for forwarding) but don't grow the captured
+	// region further.
+	if b.truncated {
+		return len(p), nil
+	}
+
+	// Memory-pressure pause: if recording is paused, abort capture
+	// IMMEDIATELY and release the captured prefix for GC. Without
+	// this the tee keeps buffering up to maxHTTPBodyCaptureBytes
+	// after the agent has nominally stopped capturing — keeps memory
+	// pressure high during the very window memoryguard is trying to
+	// drain. The caller's Truncated() check then naturally drops the
+	// in-flight test case.
+	if isIngressRecordingPaused() {
+		b.truncated = true
+		b.buf = bytes.Buffer{}
+		return len(p), nil
+	}
+
 	if b.limit <= 0 {
 		b.truncated = true
 		return len(p), nil

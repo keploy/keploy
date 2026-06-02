@@ -1,0 +1,63 @@
+# End-to-end chaos harness for tests/e2e/chaos-broken-parser.
+#
+# Goal: prove invariants I1–I3 from PLAN.md under chaos conditions — a
+# parser panicking mid-stream must NOT break the application's database
+# connection; the app's queries must continue to succeed via keploy's
+# passthrough fallback (globalPassThrough).
+#
+# This compose file ships only the dependencies the harness needs to
+# drive the test: a real Postgres 16 server seeded with a tiny probe
+# table, plus a long-running client container that has a `psql` binary
+# available for the harness to exec queries through. The harness itself
+# lives on the host, connects to `postgres` on 127.0.0.1:${PG_HOST_PORT}
+# (default 55432) through the keploy proxy it brings up in-process, and
+# orchestrates the query load + log assertions.
+#
+# Why no keploy-agent container:
+#   The supervisor + relay + fakeconn machinery under test lives in
+#   pkg/agent/proxy/{supervisor,relay,fakeconn} and is exercised in-
+#   process by the harness. Running keploy in a sibling container would
+#   require CAP_SYS_ADMIN for the eBPF hooks, which is orthogonal to
+#   the panic-recovery invariants this test guards. The in-process
+#   shape mirrors the existing pattern in
+#   tests/e2e/agent-ready-gated-on-ca/harness where the HTTP handler is
+#   mounted directly rather than booting a privileged agent.
+
+services:
+  postgres:
+    # Pinned tag from ECR Public's Docker Hub mirror so CI runs are
+    # reproducible and immune to Docker Hub unauthenticated rate limits
+    # (HTTP 429). Bumping requires editing the tag explicitly — never
+    # use `:latest`.
+    image: public.ecr.aws/docker/library/postgres:16
+    environment:
+      POSTGRES_USER: chaos
+      POSTGRES_PASSWORD: chaos
+      POSTGRES_DB: chaos
+    # Expose on a non-standard host port so a developer running this
+    # alongside a local Postgres doesn't collide on 5432. The harness
+    # reads PG_HOST_PORT from the environment and defaults to 55432.
+    ports:
+      - "${PG_HOST_PORT:-55432}:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # pg_isready returns 0 only after the postmaster has finished
+    # running the docker-entrypoint-initdb.d/*.sql scripts, so waiting
+    # on `service_healthy` downstream is equivalent to "the probe table
+    # exists and is ready to be queried".
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chaos -d chaos"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+  # Optional sidecar the harness can `docker compose exec` into to run
+  # ad-hoc psql commands without needing a psql client on the host.
+  # Kept alive via `sleep infinity`; the harness exec's per-query.
+  psql-client:
+    image: public.ecr.aws/docker/library/postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["sleep", "infinity"]

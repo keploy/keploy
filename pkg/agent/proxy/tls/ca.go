@@ -37,6 +37,25 @@ var caCrt []byte //certificate
 //go:embed asset/ca.key
 var caPKey []byte //private key
 
+// embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
+// https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
+// certdata.txt). Compiled into the binary via go:embed so the agent always
+// has a valid trust store regardless of the runtime image's filesystem
+// state. See pkg/agent/proxy/tls/data/REFRESH.md for the refresh procedure.
+//
+// This bundle is the safety net that prevents the failure mode in
+// keploy/k8s-proxy#375: even if /etc/ssl/certs/ca-certificates.crt is
+// missing or shadowed at runtime (broken image, weird volume mount,
+// SELinux policy, distroless), apps mutated by keploy still see real
+// public roots in their trust store and can validate AWS / Google /
+// Snowflake / etc. The merged bundle written to /tmp/keploy-tls/ca.crt
+// becomes (system_or_embedded_roots ∪ keploy_mitm_ca) instead of
+// (keploy_mitm_ca alone), which is what made the customer's pods fail
+// CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call.
+//
+//go:embed data/mozilla_roots.pem
+var embeddedFallbackRoots []byte
+
 //go:embed asset
 var _ embed.FS
 
@@ -152,9 +171,37 @@ func MarkCAFailed(err error) {
 // multiple goroutines and multiple times.
 func markCAReady() { caReadyOnce.Do(func() { close(caReadyCh) }) }
 
-// SetupCA setups custom certificate authority to handle TLS connections
+// SetupCA setups custom certificate authority to handle TLS connections.
+//
+// Legacy entry point — SetupCAForApp is preferred when the app PID is
+// known (native mode on Linux), because it lets the Java keystore import
+// target the app's actual JDK instead of whatever keytool happens to be
+// on PATH. This shim preserves the three-arg signature for the docker /
+// shared-volume path (which writes a JKS from pure Go and doesn't shell
+// out to keytool) and for external callers that pre-date the PID plumbing.
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
+	return SetupCAForApp(ctx, logger, isDocker, 0, "")
+}
 
+// SetupCAForApp is SetupCA plus two inputs the Java truststore install
+// uses to target the right JDK:
+//
+//   - appPID: the process ID of the application being instrumented
+//     (config.Agent.ClientNSPID). When >0 and javaHomeOverride is empty,
+//     detectJavaHomeForPID reads /proc/<pid>/environ and /proc/<pid>/exe
+//     to discover the JDK the app is actually using. 0 disables
+//     detection (and we fall back to PATH keytool).
+//
+//   - javaHomeOverride: manual override from the CLI flag
+//     --ca-java-home. When non-empty it SHORT-CIRCUITS auto-detection;
+//     operators set this when an exotic launcher masks both JAVA_HOME
+//     and the exe symlink.
+//
+// Docker / shared-volume mode ignores both inputs: the JKS written to
+// /tmp/keploy-tls/truststore.jks is built in pure Go and consumed by the
+// app via -Djavax.net.ssl.trustStore=, so the "which keytool" problem
+// doesn't apply there.
+func SetupCAForApp(ctx context.Context, logger *zap.Logger, isDocker bool, appPID int, javaHomeOverride string) error {
 	if isDocker {
 		logger.Debug("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", "/tmp/keploy-tls"))
 		return setupSharedVolume(ctx, logger, "/tmp/keploy-tls")
@@ -162,7 +209,7 @@ func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
 	// Native Mode
 	logger.Debug("Detected Native Mode. Installing to system store...")
-	return setupNative(ctx, logger)
+	return setupNativeForApp(ctx, logger, appPID, javaHomeOverride)
 }
 
 // It extracts the cert to a temp file and sets the env vars.
@@ -252,26 +299,121 @@ var systemCABundleSearchPaths = []string{
 // stub that reads from a tempdir-backed search list.
 var loadSystemCABundleFn = loadSystemCABundle
 
-// loadSystemCABundle returns the contents of the first readable, non-empty OS
-// CA bundle file from systemCABundleSearchPaths (plus the path used). On
-// failure (no readable non-empty file found) it logs at Info level and
-// returns (nil, "") — the caller should proceed with the Keploy CA alone
-// rather than erroring.
+// distroIndicatorPaths are filesystem signals that the container has a
+// "normal" Linux trust-store layout that the postinst trigger of the
+// `ca-certificates` package would have populated. If at least one of these
+// is present (as a directory or file), the absence of the expected bundle
+// file is a build/runtime regression — the image *should* have it. If none
+// of these is present, the image is almost certainly a deliberately
+// stripped distroless / scratch base, where the missing bundle is
+// expected. We use this signal to choose between ERROR (regression) and
+// INFO (intentional minimal image).
 //
-// We intentionally DO NOT return an error: the shared-volume CA file is a
-// best-effort merge. In the worst case (minimal distroless/scratch image with
-// no OS bundle) the application falls back to the prior behaviour of trusting
-// only the Keploy MITM CA — not worse than the status quo. The absence of a
-// system bundle is expected in distroless/scratch deployments, so we log at
-// Info rather than Warn to avoid alarming operators whose images intentionally
-// ship without a trust store.
-func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
-	return loadSystemCABundleFromPaths(logger, systemCABundleSearchPaths)
+// Keep this list narrow: every entry needs to be something a distroless
+// image would lack. /etc/ssl/certs/ is the canonical Debian/Ubuntu/Alpine
+// directory; /etc/pki/tls/certs/ is the RHEL/Fedora analogue. Both are
+// created by the ca-certificates package at install time.
+var distroIndicatorPaths = []string{
+	"/etc/ssl/certs",
+	"/etc/pki/tls/certs",
 }
 
-// loadSystemCABundleFromPaths is the testable core of loadSystemCABundle —
-// it scans the given ranked list instead of the production constant.
+// hasDistroTrustLayout reports whether the runtime image *appears* to have
+// the kind of base layout where the OS CA bundle would normally be
+// installed by `ca-certificates`. This is a heuristic — it can produce a
+// false-positive ERROR if an operator is intentionally running on a
+// non-distroless image without `ca-certificates` installed, and a
+// false-negative (silent INFO) if a distroless image happens to have an
+// empty /etc/ssl/certs directory. Both edge cases are rare and the
+// remediation message in both log paths is identical, so the cost of a
+// misclassification is low.
+//
+// Indirected via an fn-var so tests can stub the result without mocking
+// the filesystem.
+var hasDistroTrustLayoutFn = hasDistroTrustLayout
+
+// Treat anything OTHER than "file not present" (ENOENT) as "indicator
+// present". A permission-denied / IO-error Stat result on /etc/ssl/certs
+// is overwhelmingly more likely on a distro-shaped image where the
+// bundle directory exists but the agent process can't traverse it
+// (SELinux, container-user-namespace remap, weird overlay) than on a
+// distroless image. Treating those errors as "absent" would silently
+// downgrade ERROR → INFO and let the misconfiguration that #375 was
+// raised against slip past alert pipelines.
+func hasDistroTrustLayout() bool {
+	for _, p := range distroIndicatorPaths {
+		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
+// systemCABundleSourceEmbedded is the sentinel returned in the source-path
+// position of loadSystemCABundle when the disk search produced no readable
+// bundle and we fell back to the embeddedFallbackRoots blob. Operators see
+// this string in startup logs and in the merged-bundle source field.
+const systemCABundleSourceEmbedded = "<embedded:mozilla-roots.pem>"
+
+// severity_reason values. These are stable, enum-like strings so alert
+// rules and downstream log parsers can key off them without breaking when
+// the human-readable wording in severity_explanation is tightened. Add a
+// new constant rather than reusing one with a different meaning.
+const (
+	severityReasonDistroLayoutPresent = "distro_layout_present"
+	severityReasonNoDistroLayout      = "no_distro_layout"
+)
+
+// loadSystemCABundle returns trust-anchor PEM bytes for merging with the
+// Keploy MITM CA into the shared-volume bundle, plus a source identifier
+// for logging. Lookup order:
+//
+//  1. Disk paths in systemCABundleSearchPaths — the well-known Linux
+//     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
+//     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
+//     store. First readable, non-empty file wins.
+//  2. embeddedFallbackRoots — Mozilla NSS roots vendored from curl.se,
+//     compiled into the agent binary via go:embed. Used when every disk
+//     path was missing/empty.
+//
+// This function used to return (nil, "") on miss, leaving the merged
+// bundle to contain only the Keploy MITM CA. That state was the tail
+// half of the failure mode in keploy/k8s-proxy#375: an orphan-mutated
+// pod whose agent had no system trust store served apps a trust bundle
+// that contained only Keploy's MITM root. Combined with an inactive
+// eBPF redirect (the head half of that incident), every public-endpoint
+// HTTPS call fell back to direct-to-internet routing and validated the
+// real cert chain against keploy-only roots, producing
+// CERTIFICATE_VERIFY_FAILED. The embedded fallback closes that failure
+// class regardless of disk state, distroless vs not, weird volume
+// mounts, SELinux denials, or future regressions in image builds.
+//
+// We still log when disk search comes up empty — that's a useful signal
+// for operators to investigate WHY the disk bundle is missing — but the
+// log severity differs:
+//
+//   - Distro-shaped image (presence of /etc/ssl/certs or similar)
+//     missing its bundle is a build/runtime regression. ERROR.
+//   - Distroless / scratch image with no trust-store layout is an
+//     intentional operator choice. INFO.
+//
+// In either case the embedded fallback is now used so the app's trust
+// store still works.
+func loadSystemCABundle(logger *zap.Logger) ([]byte, string) {
+	return loadSystemCABundleFromPathsAndFallback(logger, systemCABundleSearchPaths, embeddedFallbackRoots)
+}
+
+// loadSystemCABundleFromPaths is retained as the disk-only path used by
+// existing tests. It does NOT consult the embedded fallback — those tests
+// assert disk-search behavior in isolation. Production code goes through
+// loadSystemCABundleFromPathsAndFallback.
 func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, string) {
+	return loadSystemCABundleFromPathsAndFallback(logger, paths, nil)
+}
+
+// loadSystemCABundleFromPathsAndFallback is the testable core. fallback
+// may be nil to disable the embedded path (used by disk-only tests).
+func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, fallback []byte) ([]byte, string) {
 	tried := make([]string, 0, len(paths))
 	for _, p := range paths {
 		tried = append(tried, p)
@@ -288,24 +430,89 @@ func loadSystemCABundleFromPaths(logger *zap.Logger, paths []string) ([]byte, st
 		}
 		return data, p
 	}
-	logger.Info(
-		"No system CA bundle found on any known path — the shared "+
-			"/tmp/keploy-tls/ca.crt will contain ONLY the Keploy MITM CA. "+
-			"Non-proxied HTTPS calls from the application (internal services, "+
-			"public endpoints Keploy isn't proxying, DNS-over-HTTPS) will fail "+
-			"CERTIFICATE_VERIFY_FAILED. To fix, ensure the Keploy AGENT "+
-			"container (the writer of this shared volume — not the app "+
-			"container) has access to an OS trust bundle at one of the "+
-			"searched paths: install `ca-certificates` in the agent image "+
-			"(`apt-get install -y ca-certificates` on Debian/Ubuntu, "+
-			"`apk add ca-certificates` on Alpine), mount the host's bundle "+
-			"into the agent pod, or rebuild from a base image that ships "+
-			"trust roots. Fixing this in the app image does NOT help: "+
-			"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this "+
-			"shared file, so they replace whatever the app image already "+
-			"trusts.",
+
+	// Disk search exhausted. Decide log severity based on whether the
+	// image *should* have had a disk bundle (distro-shaped) vs whether
+	// the absence was expected (distroless / scratch). When fallback is
+	// non-nil (production code path) both severities continue with the
+	// embedded Mozilla NSS roots so apps still get real public roots.
+	// When fallback is nil (the disk-only test entry point and any
+	// future caller that explicitly opts out of the embedded blob) the
+	// log message must NOT claim a fallback happened — there isn't one
+	// — so we vary the body on len(fallback) > 0.
+	//
+	// Keeping the actionable remediation guidance identical across the
+	// two severities means operators don't have to learn two variants;
+	// only the level and the leading sentence differ.
+	const remediation = " To restore the disk path, ensure the Keploy " +
+		"AGENT container (the writer of this shared volume — not the " +
+		"app container) has access to an OS trust bundle at one of the " +
+		"searched paths: install `ca-certificates` in the agent image " +
+		"(`apt-get install -y ca-certificates` on Debian/Ubuntu, " +
+		"`apk add ca-certificates` on Alpine), mount the host's bundle " +
+		"into the agent pod, or rebuild from a base image that ships " +
+		"trust roots. Fixing this in the app image does NOT help: " +
+		"REQUESTS_CA_BUNDLE / SSL_CERT_FILE etc. are wired to this " +
+		"shared file, so they replace whatever the app image already " +
+		"trusts."
+
+	var msg string
+	if len(fallback) > 0 {
+		msg = "No system CA bundle found on any known disk path — falling " +
+			"back to the agent's embedded Mozilla NSS roots. The merged " +
+			"/tmp/keploy-tls/ca.crt will contain (embedded_roots ∪ " +
+			"Keploy MITM CA), so the app's trust store is still valid for " +
+			"public endpoints." + remediation
+	} else {
+		// fallback==nil: no embedded blob is being used (the disk-only
+		// test entry point loadSystemCABundleFromPaths takes this
+		// branch). Saying we "fell back to the embedded Mozilla NSS
+		// roots" here would be misleading — the merged bundle in this
+		// shape contains only the Keploy MITM CA.
+		msg = "No system CA bundle found on any known disk path and no " +
+			"embedded fallback configured — the merged " +
+			"/tmp/keploy-tls/ca.crt will contain only the Keploy MITM " +
+			"CA, which is NOT a valid trust store for public endpoints." +
+			remediation
+	}
+
+	fields := []zap.Field{
 		zap.Strings("searched_paths", tried),
-	)
+		zap.Strings("distro_indicator_paths", distroIndicatorPaths),
+		zap.Int("embedded_fallback_bytes", len(fallback)),
+	}
+
+	// severity_explanation describes WHY this severity was chosen — it
+	// must not claim the embedded fallback was used when it wasn't.
+	// Whether the fallback is in effect is already conveyed by the
+	// `embedded_fallback_bytes` structured field and by the leading
+	// sentence of `msg`, so the explanation stays focused on the
+	// distro-shape decision.
+	if hasDistroTrustLayoutFn() {
+		// Image looks distro-shaped (Debian/Ubuntu/Alpine/RHEL family) —
+		// missing disk bundle is a real misconfiguration. ERROR so
+		// alerting catches it. We still produce a working trust store
+		// via the embedded fallback; ERROR is the operator-facing signal
+		// to investigate the agent image / volume mounts / SELinux.
+		logger.Error(msg, append(fields,
+			zap.String("severity_reason", severityReasonDistroLayoutPresent),
+			zap.String("severity_explanation", "image looks distro-shaped (stat did not return ENOENT for at least one of the distro_indicator_paths — the entry exists, or stat hit a non-not-found error such as EACCES, which still implies a distro-shaped layer) so the missing disk bundle is a regression rather than an intentional minimal-image choice"),
+		)...)
+	} else {
+		// Truly distroless — the operator deliberately stripped the trust
+		// store; raising the level here would create alert fatigue.
+		logger.Info(msg, append(fields,
+			zap.String("severity_reason", severityReasonNoDistroLayout),
+			zap.String("severity_explanation", "image has no distro trust-store layout (distroless / scratch); the missing disk bundle is expected"),
+		)...)
+	}
+
+	if len(fallback) > 0 {
+		return fallback, systemCABundleSourceEmbedded
+	}
+	// fallback==nil only happens via the disk-only test entry point.
+	// Production callers always pass embeddedFallbackRoots which is
+	// non-empty by build-time go:embed.
 	return nil, ""
 }
 
@@ -373,7 +580,7 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 	// "Wrote Keploy MITM CA only" message would be redundant noise.
 
 	if err := setEnvForSharedVolume(logger, crtPath, keployOnlyPath); err != nil {
-		logger.Warn("Failed to set internal env vars for Agent", zap.Error(err))
+		logger.Debug("Failed to set internal env vars for Agent", zap.Error(err))
 	}
 
 	// Generate Java Truststore from the MERGED bundle (system roots +
@@ -403,6 +610,22 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 }
 
 func setupNative(ctx context.Context, logger *zap.Logger) error {
+	return setupNativeForApp(ctx, logger, 0, "")
+}
+
+// setupNativeForApp is the PID-aware native-install path. appPID and
+// javaHomeOverride are passed through to the Java keystore install so
+// the Keploy MITM CA lands in the app's actual truststore (see
+// SetupCAForApp doc comment for the full rationale).
+func setupNativeForApp(ctx context.Context, logger *zap.Logger, appPID int, javaHomeOverride string) error {
+	// Resolve the target JDK's java.home once, up front. Order:
+	//   1. --ca-java-home CLI override wins (opts.Agent.CAJavaHome).
+	//   2. /proc/<appPID>/environ JAVA_HOME, then /proc/<appPID>/exe.
+	//   3. Empty — installJavaCAForHome falls back to PATH keytool.
+	// We log the chosen source at Debug so operators can see why a
+	// particular cacerts file was targeted without turning on trace.
+	resolvedJavaHome := resolveAppJavaHome(logger, appPID, javaHomeOverride)
+
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
 		// Extract certificate to a temporary file
@@ -413,7 +636,7 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 		defer func() {
 			if err := os.Remove(tempCertPath); err != nil {
-				logger.Warn("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
+				logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
 			}
 		}()
 
@@ -424,7 +647,7 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 
 		// install CA in the java keystore if java is installed
-		if err = installJavaCA(ctx, logger, tempCertPath); err != nil {
+		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
@@ -465,8 +688,10 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 		fs.Close()
 
-		// install CA in the java keystore if java is installed
-		if err := installJavaCA(ctx, logger, caPath); err != nil {
+		// install CA in the java keystore if java is installed.
+		// resolvedJavaHome may be "" — installJavaCAForHome falls back
+		// to PATH keytool in that case, preserving legacy behaviour.
+		if err := installJavaCAForHome(ctx, logger, caPath, resolvedJavaHome); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
@@ -711,7 +936,19 @@ func getCaPaths() ([]string, error) {
 }
 
 func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bool {
-	cmd := exec.CommandContext(ctx, "keytool", "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
+	return isJavaCAExistWithTool(ctx, "keytool", alias, storepass, cacertsPath)
+}
+
+// isJavaCAExistWithTool checks whether the given alias already exists in
+// cacertsPath, using a specific keytool executable.
+//
+// The split vs isJavaCAExist exists so callers with a resolved
+// $javaHome/bin/keytool (installJavaCAForHome) use the SAME keytool for
+// the existence check as for the import — otherwise a PATH keytool's
+// different default store format or cacerts layout can produce a false
+// negative and we'd re-import over and over across agent restarts.
+func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
+	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 	err := cmd.Run()
 	select {
 	case <-ctx.Done():
@@ -721,42 +958,102 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 	return err == nil
 }
 
-// installJavaCA installs the CA in the Java keystore
+// installJavaCA installs the Keploy MITM CA into the Java keystore
+// resolved from PATH (`java -XshowSettings:properties`).
+//
+// Legacy entry point — prefer installJavaCAForHome when the app PID or
+// operator override is available. On multi-JDK hosts (SDKMAN, Maven
+// wrappers, fat-jar launches with absolute JDK paths) the PATH JDK may
+// differ from the one the app actually runs with, which silently causes
+// the Keploy MITM certificate to be trusted in the wrong cacerts file
+// — TLS handshakes from the app then fail cert-verify even though this
+// function returned nil.
+//
+// Signature preserved for backward compat (external callers + tests).
 func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
-	// check if java is installed
-	if util.IsJavaInstalled() {
+	return installJavaCAForHome(ctx, logger, caPath, "")
+}
+
+// installJavaCAForHome installs the Keploy MITM CA into a specific JDK's
+// cacerts truststore.
+//
+// javaHome semantics:
+//   - "" (empty): legacy behaviour — fall back to
+//     util.GetJavaHome(ctx), which runs `java` from PATH. Used when the
+//     agent has no better signal (pre-registration boot, or the
+//     auto-detector returned empty).
+//   - non-empty: use $javaHome/bin/keytool as the executable and
+//     $javaHome/lib/security/cacerts as the target keystore, bypassing
+//     PATH. This is the path that fixes the SDKMAN/Maven-wrapper
+//     divergence described at the top of java_detect.go.
+//
+// The split matters because keytool reads and writes cacerts using its
+// own JDK's security providers; on multi-JDK hosts the PATH keytool can
+// silently write to a different file than the app's JVM reads at
+// startup, producing "unable to find valid certification path" at TLS
+// handshake time even though the import appeared to succeed.
+func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaHome string) error {
+	if javaHome == "" {
+		// Legacy path — fall back to PATH keytool after the usual
+		// "is java installed?" guard. When no PATH java exists this
+		// is a no-op (Debug-logged), which is correct on hosts that
+		// don't run Java workloads at all.
+		if !util.IsJavaInstalled() {
+			logger.Debug("Java is not installed on the system")
+			return nil
+		}
 		logger.Debug("checking java path from default java home")
-		javaHome, err := util.GetJavaHome(ctx)
+		var err error
+		javaHome, err = util.GetJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
 		}
-
-		// Assuming modern Java structure (without /jre/)
-		// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes)
-		cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
-		// You can modify these as per your requirements
-		storePass := "changeit"
-		alias := "keployCA"
-
-		logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
-
-		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
-			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
-			return nil
-		}
-
-		cmd := exec.CommandContext(ctx, "keytool", "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
-		cmdOutput, err := cmd.CombinedOutput()
-		if err != nil {
-			utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
-			return err
-		}
-		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
-	} else {
-		logger.Debug("Java is not installed on the system")
 	}
+
+	// Resolve the JDK-specific keytool binary so we write to the
+	// cacerts of THIS JDK, not whatever happens to be first on PATH.
+	// On hosts with a single JDK the two resolve to the same thing;
+	// on multi-JDK / SDKMAN hosts they diverge and the bug we're
+	// fixing shows up as a TLS handshake failure in the app despite
+	// SetupCA appearing to succeed.
+	keytoolBin := filepath.Join(javaHome, "bin", "keytool")
+	if runtime.GOOS == "windows" {
+		keytoolBin = filepath.Join(javaHome, "bin", "keytool.exe")
+	}
+	// If the expected keytool binary is absent (e.g. a JRE-only layout
+	// or a malformed javaHome path), fall back to PATH keytool so we
+	// don't regress single-JDK hosts. We still target the resolved
+	// cacerts path — that's the part that actually determines which
+	// truststore the app's JVM reads.
+	if _, statErr := os.Stat(keytoolBin); statErr != nil {
+		logger.Debug("resolved keytool binary not found in javaHome; falling back to PATH keytool",
+			zap.String("expected", keytoolBin), zap.Error(statErr))
+		keytoolBin = "keytool"
+	}
+
+	// Assuming modern Java structure (without /jre/).
+	// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes).
+	cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+	// You can modify these as per your requirements
+	storePass := "changeit"
+	alias := "keployCA"
+
+	logger.Debug("", zap.String("java_home", javaHome), zap.String("keytool", keytoolBin), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
+
+	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
+		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
+	cmdOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
+		return err
+	}
+	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return nil
 }
 
@@ -785,6 +1082,38 @@ var (
 	certCache     *expirable.LRU[string, *tls.Certificate]
 	certCacheOnce sync.Once
 )
+
+// probeCertOnce, probeCertEnabled: see pkg/agent/proxy/proxy.go probeOn
+// for the sibling toggle. Replicated here because ca.go is a dependency
+// of proxy and cannot import it. Both gates read the same env var, so
+// they flip in lockstep across a single run.
+var (
+	probeCertOnce    sync.Once
+	probeCertEnabled atomic.Bool
+)
+
+func probeCertOn() bool {
+	probeCertOnce.Do(func() {
+		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
+			probeCertEnabled.Store(true)
+		}
+	})
+	return probeCertEnabled.Load()
+}
+
+func probeCert(logger *zap.Logger, phase, sni string, durNs int64, fields ...zap.Field) {
+	if !probeCertOn() {
+		return
+	}
+	base := []zap.Field{
+		zap.String("probe", "cert"),
+		zap.String("phase", phase),
+		zap.String("sni", sni),
+		zap.Int64("dur_ns", durNs),
+		zap.Int64("ts_ns", time.Now().UnixNano()),
+	}
+	logger.Info("[PROBE/cert]", append(base, fields...)...)
+}
 
 const (
 	certCacheMaxSize = 1024
@@ -838,10 +1167,16 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Check the cert cache before generating a new certificate.
 	if dstURL != "" {
 		if cached, ok := getCertCache().Get(dstURL); ok {
+			probeCert(logger, "cache-hit", dstURL, 0)
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
 			return cached, nil
 		}
 	}
+	probeCert(logger, "mint-start", dstURL, 0)
+	mintStart := time.Now()
+	defer func() {
+		probeCert(logger, "mint-done", dstURL, time.Since(mintStart).Nanoseconds())
+	}()
 
 	serverReq := &csr.CertificateRequest{
 		CN: dstURL,

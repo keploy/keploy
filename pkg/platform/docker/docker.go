@@ -544,6 +544,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 
+	// When the operator's keploy folder is resolved, bind-mount it into
+	// the agent container at /keploy-host and point KEPLOY_DEBUG_FILE at
+	// a file inside it. The agent process honors that env var (see
+	// main.maybeAttachDebugFileSink) and tees its debug-level log
+	// records into the file. Because the file lives inside the host
+	// keploy folder, downstream tooling — most importantly the
+	// `keploy cloud replay` support-bundle pipeline that walks
+	// cfg.Path — picks it up automatically without any extra plumbing.
+	keployHostPath := strings.TrimSpace(idc.conf.Path)
+
 	// Generate ports
 	var ports []string
 	if opts.AgentPort != 0 {
@@ -558,6 +568,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
+
+	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE so the
+	// agent's debug-level log lands on the host. Skip when the host
+	// path is empty (e.g. very early bootstrap before Validate runs)
+	// or relative (Docker rejects relative bind-source paths).
+	const agentDebugMount = "/keploy-host"
+	if keployHostPath != "" && filepath.IsAbs(keployHostPath) {
+		volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
+		envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+	}
 
 	clientPid := int(os.Getpid())
 	// Build command arguments
@@ -576,6 +596,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
+	// Forward the operator's --disable-mapping (root-level config) into
+	// the agent container. The keploy.yml directory isn't bind-mounted
+	// into the agent's filesystem, so viper inside the container would
+	// otherwise default to true and disable record-side mapping
+	// production regardless of the host config.
+	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}
@@ -591,6 +617,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
+	}
+	if opts.CapturePackets {
+		command = append(command, "--capture-packets")
+	}
+	if opts.OpportunisticTLSIntercept {
+		command = append(command, "--opportunistic-tls-intercept")
 	}
 
 	if opts.BuildDelay > 0 {
@@ -839,7 +871,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				})
 			}
 		} else {
-			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
+			idc.logger.Debug("Failed to get current working directory for pprof mount", zap.Error(err))
 		}
 	}
 
@@ -945,6 +977,11 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		return fmt.Errorf("no services found in compose file")
 	}
 
+	keployServiceNode, _, err := idc.findServiceNodeAndName(compose, "keploy-agent")
+	if err != nil {
+		return fmt.Errorf("keploy-agent service not found: %w", err)
+	}
+
 	// Find the app service by container name or service name
 	for i := 0; i < len(compose.Services.Content); i += 2 {
 		if i+1 >= len(compose.Services.Content) {
@@ -973,6 +1010,17 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		}
 
 		if isTargetService {
+			// The app will share the keploy-agent network namespace, so resolver
+			// settings must move to keploy-agent. Leaving them on the app either
+			// makes Compose reject the config (dns + network_mode conflict) or
+			// causes the namespace owner to use the wrong /etc/resolv.conf.
+			for _, key := range []string{"dns", "dns_search", "dns_opt"} {
+				if valueNode := idc.getServiceProperty(serviceContentNode, key); valueNode != nil {
+					idc.setServicePropertyNode(keployServiceNode, key, cloneYAMLNode(valueNode))
+					idc.removeServiceProperty(serviceContentNode, key)
+				}
+			}
+
 			// Remove networks and ports from the app service
 			idc.removeServiceProperty(serviceContentNode, "networks")
 			idc.removeServiceProperty(serviceContentNode, "ports")
@@ -1161,6 +1209,54 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 	compose.Volumes.Content = append(compose.Volumes.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
+	)
+}
+
+func cloneYAMLNode(node *yaml.Node) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+
+	cloned := *node
+	if node.Content != nil {
+		cloned.Content = make([]*yaml.Node, len(node.Content))
+		for i, child := range node.Content {
+			cloned.Content[i] = cloneYAMLNode(child)
+		}
+	}
+
+	return &cloned
+}
+
+func (idc *Impl) getServiceProperty(serviceNode *yaml.Node, propertyName string) *yaml.Node {
+	if serviceNode == nil || serviceNode.Content == nil {
+		return nil
+	}
+
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == propertyName {
+			return serviceNode.Content[i+1]
+		}
+	}
+
+	return nil
+}
+
+func (idc *Impl) setServicePropertyNode(serviceNode *yaml.Node, key string, valueNode *yaml.Node) {
+	if serviceNode.Content == nil {
+		serviceNode.Content = make([]*yaml.Node, 0)
+	}
+
+	for i := 0; i+1 < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == key {
+			serviceNode.Content[i+1] = valueNode
+			return
+		}
+	}
+
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		valueNode,
 	)
 }
 

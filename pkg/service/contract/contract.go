@@ -246,7 +246,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 		for _, service := range services {
 			if _, exists := mappings[service]; !exists {
 				// Warn if the service is not found in the services mapping.
-				s.logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
+				s.logger.Debug("Service not found in services mapping, no contract generation", zap.String("service", service))
 			}
 		}
 	}

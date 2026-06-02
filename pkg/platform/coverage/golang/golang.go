@@ -44,12 +44,12 @@ func (g *Golang) PreProcess(_ bool) (string, error) {
 	if utils.CmdType(g.commandType) == utils.Native {
 		goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
 		if err != nil {
-			g.logger.Warn("failed to set go coverage path", zap.Error(err))
+			g.logger.Debug("failed to set go coverage path", zap.Error(err))
 			return g.cmd, err
 		}
 		err = os.Setenv("GOCOVERDIR", goCovPath)
 		if err != nil {
-			g.logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
+			g.logger.Debug("failed to set GOCOVERDIR", zap.Error(err))
 			return g.cmd, err
 		}
 	}

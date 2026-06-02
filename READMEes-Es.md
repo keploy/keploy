@@ -20,7 +20,7 @@
   <a href="https://github.com/keploy/keploy/actions" alt="Tests">
   <a href="https://goreportcard.com/report/github.com/keploy/keploy" alt="Go Report Card">
     <img src="https://goreportcard.com/badge/github.com/keploy/keploy" /></a>
-  <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg" alt="Slack">
+  <a href="https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA" alt="Slack">
     <img src=".github/slack.svg" /></a>
   <a href="https://keploy.io/docs" alt="Docs">
     <img src=".github/docs.svg" /></a>
@@ -188,7 +188,7 @@ keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --con
 ## 🤔 Preguntas?
 ¡Contáctanos! Estamos aquí para ayudarte.
 
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg)
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-3zcnuqfgl-WYK1NMhslVHsCtNcA1ULwA)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![X](https://img.shields.io/badge/X-%231DA1F2.svg?style=for-the-badge&logo=X&logoColor=white)](https://x.com/Keployio)

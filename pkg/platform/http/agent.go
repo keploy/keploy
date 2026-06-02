@@ -418,14 +418,32 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 
+	// Read the full body so we can include it in the error message when
+	// decode fails — the original `json.NewDecoder(...).Decode` consumed
+	// only the first token, which made "404 page not found\n" responses
+	// from a wrongly-prefixed AgentURI look like a "cannot unmarshal
+	// number into models.AgentResp" error and masked the real misroute.
+	rawBody, readErr := io.ReadAll(res.Body)
+	if readErr != nil {
+		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
+	}
+
 	var mockResp models.AgentResp
-	err = json.NewDecoder(res.Body).Decode(&mockResp)
-	if err != nil {
-		return fmt.Errorf("failed to decode response body for mock outgoing: %s", err.Error())
+	if err := json.Unmarshal(rawBody, &mockResp); err != nil {
+		return fmt.Errorf("failed to decode response body for mock outgoing: %s (raw body: %q, status: %d, contentType: %q, url: %s)", err.Error(), string(rawBody), res.StatusCode, res.Header.Get("Content-Type"), fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI))
 	}
 
 	if mockResp.Error != nil {
 		return mockResp.Error
+	}
+
+	// AgentResp.Error is an `error` interface — JSON cannot decode a
+	// string into it, so the server-side error message is always lost
+	// in the wire format. Treat IsSuccess=false (or a 4xx/5xx status)
+	// as the authoritative signal and surface the raw body so callers
+	// get a real message instead of a silent "success".
+	if !mockResp.IsSuccess || res.StatusCode >= 400 {
+		return fmt.Errorf("mock outgoing returned failure (status %d, body: %q)", res.StatusCode, string(rawBody))
 	}
 
 	return nil
@@ -434,7 +452,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 
 func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, tcName string) error {
 	if timestamp == nil || timestamp.IsZero() {
-		a.logger.Warn("Skipping agent hook: timestamp is zero or nil")
+		a.logger.Debug("Skipping agent hook: timestamp is zero or nil")
 		return nil
 	}
 
@@ -461,7 +479,7 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -497,7 +515,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -532,7 +550,7 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -545,10 +563,11 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 
 }
 
-func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
+func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error {
 
 	requestBody := models.BeforeTestSetCompose{
 		TestRunID: testRunID,
+		TestSetID: testSetID,
 	}
 	if a.conf.Agent.AgentURI == "" {
 		return nil
@@ -568,7 +587,7 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -606,7 +625,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
+		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
@@ -880,6 +899,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
+	// Forward the operator's --disable-mapping (root-level config) so
+	// the native agent process — even though it inherits the same
+	// keploy.yml via --config-path — sees an explicit override on
+	// invocations where the host CLI mutated the in-memory config
+	// after viper load (e.g. --disable-mapping=false on the test
+	// subcommand path that drove this agent start).
+	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
@@ -888,6 +914,12 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
+	}
+	if opts.CapturePackets {
+		args = append(args, "--capture-packets")
+	}
+	if opts.OpportunisticTLSIntercept {
+		args = append(args, "--opportunistic-tls-intercept")
 	}
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
@@ -903,6 +935,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		}
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
+	}
+	// Forward record-buffer tuning to the native agent. Only set when
+	// non-zero so the agent's own keploy.yml / env-var / default
+	// resolution still wins when the orchestrator hasn't overridden.
+	if opts.RecordBufferMaxMemoryPerConn > 0 {
+		args = append(args, "--max-memory-per-conn", strconv.FormatUint(opts.RecordBufferMaxMemoryPerConn, 10))
+	}
+	if opts.RecordBufferQueueSize > 0 {
+		args = append(args, "--queue-size", strconv.Itoa(opts.RecordBufferQueueSize))
 	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
@@ -1080,7 +1121,7 @@ func (a *AgentClient) requestAgentStop() error {
 	return nil
 }
 
-// stopAgent stops the agent process gracefully
+// stopAgent stops the agent process gracefully.
 func (a *AgentClient) stopAgent() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1098,7 +1139,7 @@ func (a *AgentClient) stopAgent() {
 	if a.agentPTY != nil {
 		// Use the utils function to gracefully stop PTY
 		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
-			a.logger.Warn("failed to stop PTY command", zap.Error(err))
+			a.logger.Debug("failed to stop PTY command", zap.Error(err))
 		}
 	}
 }
@@ -1115,7 +1156,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 		if errors.Is(agentCtx.Err(), context.Canceled) {
 			a.logger.Info("Agent was stopped intentionally")
 		} else {
-			a.logger.Warn("Agent stopped unexpectedly, client operations may be affected")
+			a.logger.Error("Agent stopped unexpectedly, client operations may be affected", zap.String("next_step", "check agent logs for panic/oom, ensure required capabilities/permissions, or rerun with --debug and verify the agent binary is compatible with the CLI"))
 		}
 	}
 }
@@ -1290,7 +1331,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
 				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
 				if output, err := stopCmd.CombinedOutput(); err != nil {
-					logger.Warn("Could not stop the docker container. It may have already stopped.",
+					logger.Debug("Could not stop the docker container. It may have already stopped.",
 						zap.String("container", containerName),
 						zap.Error(err),
 						zap.String("output", string(output)))
@@ -1298,7 +1339,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 					logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
 				}
 			} else {
-				logger.Warn("Could not stop the docker container. It may have already stopped.",
+				logger.Debug("Could not stop the docker container. It may have already stopped.",
 					zap.String("container", containerName),
 					zap.Error(err),
 					zap.String("output", string(output)))
@@ -1478,7 +1519,7 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
-			a.logger.Warn("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
 		} else {
 			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
 		}
@@ -1493,4 +1534,93 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			// retry
 		}
 	}
+}
+
+// StreamPcapArtifacts opens long-lived chunked GETs against the
+// agent's /pcap/traffic and /pcap/keylog endpoints and writes the
+// streamed bytes into destDir under traffic.pcap and sslkeys.log
+// respectively. Blocks until ctx is cancelled (recording stop) or
+// the agent's HTTP server closes the response. Best-effort: a
+// transport failure on either stream is logged via the returned
+// error but never fatal to the recording. Designed for k8s live
+// recording where the session has no defined end — bytes flow into
+// the local files continuously instead of being fetched on stop.
+func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) error {
+	if destDir == "" {
+		return errors.New("destDir is required")
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return fmt.Errorf("create dest dir %s: %w", destDir, err)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644)
+	})
+	g.Go(func() error {
+		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644)
+	})
+	return g.Wait()
+}
+
+// streamPcapArtifact holds a single GET open and copies its body
+// into dstFile until the server closes the stream or ctx is done.
+// 503 means "capture not active" — silently skipped so the recorder
+// stays a no-op for non-capture sessions. Other non-200s surface as
+// errors. Context cancellation returns nil so callers don't see
+// spurious errors at recording stop.
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode) error {
+	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build pcap stream request: %w", err)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return fmt.Errorf("dial %s: %w", url, err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
+			a.logger.Debug("failed to close pcap stream body", zap.String("url", url), zap.Error(cerr))
+		}
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusServiceUnavailable:
+		a.logger.Debug("agent reports no pcap stream available; capture likely off",
+			zap.String("url", url))
+		return nil
+	case http.StatusOK:
+		// fall through to the long copy below
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("stream %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	out, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dstFile, err)
+	}
+	defer func() {
+		if cerr := out.Close(); cerr != nil {
+			a.logger.Warn("failed to close pcap dst file",
+				zap.String("path", dstFile), zap.Error(cerr))
+		}
+	}()
+
+	a.logger.Debug("pcap stream connected",
+		zap.String("url", url), zap.String("path", dstFile))
+	written, copyErr := io.Copy(out, resp.Body)
+	a.logger.Debug("pcap stream ended",
+		zap.String("url", url),
+		zap.String("path", dstFile),
+		zap.Int64("bytes", written),
+		zap.Error(copyErr))
+	if copyErr != nil && !errors.Is(copyErr, context.Canceled) {
+		return copyErr
+	}
+	return nil
 }

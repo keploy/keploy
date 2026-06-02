@@ -13,6 +13,7 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = fmt.Sprintf(`
 path: ""
+storageFormat: "yaml"
 appId: 0
 appName: ""
 command: ""
@@ -39,6 +40,8 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  healthUrl: ""
+  healthPollTimeout: 60s
   host: "localhost"
   port: 0
   grpcPort: 0
@@ -62,8 +65,6 @@ test:
   basePath: ""
   mocking: true
   disableLineCoverage: false
-  disableMockUpload: true
-  useLocalMock: false
   updateTemplate: false
   mustPass: false
   maxFailAttempts: 5
@@ -91,6 +92,20 @@ record:
   filters: []
   sync: false
   memoryLimit: 0
+  testCaseNaming: descriptive
+  # recordBuffer tunes the per-connection recording queue. Touch only
+  # if you see "mock incomplete" warnings (reason: per_conn_cap or
+  # channel_full) in the agent logs. Env vars
+  # KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+  # override these values.
+  recordBuffer:
+    # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in
+    # default. Bump for workloads with large responses (e.g. >10 MB
+    # query results).
+    maxMemoryPerConnection: 67108864
+    # Number of chunk slots (~32 KiB each). Zero falls through to
+    # the built-in default. Bump for bursty traffic.
+    queueSize: 1024
 configPath: ""
 bypassRules: []
 disableMapping: true
@@ -134,6 +149,11 @@ func New() *Config {
 	if err != nil {
 		panic(err)
 	}
+	// Defaults for fields whose Go zero value is not the desired default.
+	// EnableIPv6Redirect defaults to true so ::1 traffic is redirected to
+	// the proxy on modern Linux distros where glibc resolves localhost to
+	// ::1 first. Setting it false in config is the opt-in rollback knob.
+	config.Agent.EnableIPv6Redirect = true
 	return config
 }
 

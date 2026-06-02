@@ -285,7 +285,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	// If decoded data matches but message length differs, ignore the length difference
 	if decodedDataNormal && !messageLengthNormal {
-		logger.Warn("Ignoring message length mismatch since decoded data is identical",
+		logger.Debug("Ignoring message length mismatch since decoded data is identical",
 			zap.Uint32("expected", expectedResp.Body.MessageLength),
 			zap.Uint32("actual", actualResp.Body.MessageLength))
 		// Update the message length result to Normal=true

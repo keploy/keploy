@@ -37,7 +37,7 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 	cmd := exec.Command("coverage")
 	err := cmd.Run()
 	if err != nil {
-		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
+		p.logger.Info("coverage tool not found, skipping coverage calculation. Please install coverage tool using 'pip install coverage'")
 		return p.cmd, err
 	}
 	createPyCoverageConfig(p.logger)
@@ -121,7 +121,7 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("glob failed for .coverage.keploy.*: %w", err)
 	}
 	if len(matches) == 0 {
-		p.logger.Warn("no per-process .coverage files found – nothing to combine")
+		p.logger.Debug("no per-process .coverage files found – nothing to combine")
 		return testCov, nil
 	}
 

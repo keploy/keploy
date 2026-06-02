@@ -196,8 +196,100 @@ func ValidatePath(path string) (string, error) {
 	return path, nil
 }
 
+// NextIndexForPrefix scans path for testcase files named
+// "{prefix}-{N}.{ext}" (where {ext} is either yaml or json) and returns
+// the next sequential index (max+1, starting at 1). It is used to
+// disambiguate descriptive test case slugs when multiple recordings
+// share the same endpoint.
+//
+// Both .yaml and .json files are counted into the same index space so
+// a tests/ directory containing a mix of formats (e.g. a yaml-record +
+// json-record dual pass) does not hand out colliding indices to a
+// JSON recorder. Without this, claimName loops 256× on every second
+// JSON-format capture for any repeating slug because the existing
+// .json sibling is invisible to the index scan and generateName keeps
+// re-suggesting the same N.
+//
+// A missing directory is treated as "no existing files" and returns 1
+// (first recording in a new test set). Any other IO error is returned
+// to the caller so we never silently overwrite an existing testcase
+// file because of a transient read failure.
+func NextIndexForPrefix(path, prefix string) (int, error) {
+	if prefix == "" {
+		return 1, nil
+	}
+	// Reject a prefix that could escape its containing directory
+	// (path separators or parent references). The slug builder never
+	// emits these, but NextIndexForPrefix is exported so keep the
+	// guard in place for future callers.
+	if strings.ContainsAny(prefix, `/\`) || strings.Contains(prefix, "..") {
+		return 0, fmt.Errorf("invalid prefix %q: must not contain path separators or parent references", prefix)
+	}
+	// The directory path itself is what we actually read from, so
+	// validate that here instead of validating the slug prefix.
+	// Capture and reuse the (potentially normalised) return value
+	// so a future hardening of ValidatePath — e.g. calling
+	// filepath.Clean — automatically flows through to the ReadDir
+	// and HasPrefix checks below without leaving this function
+	// silently using the raw input.
+	validatedPath, err := ValidatePath(path)
+	if err != nil {
+		return 0, err
+	}
+	path = validatedPath
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 1, nil
+		}
+		return 0, err
+	}
+	defer func() { _ = dir.Close() }()
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return 0, err
+	}
+	lastIndex := 0
+	for _, v := range files {
+		name := filepath.Base(v.Name())
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".json" {
+			continue
+		}
+		stem := name[:len(name)-len(ext)]
+		if !strings.HasPrefix(stem, prefix+"-") {
+			continue
+		}
+		numStr := stem[len(prefix)+1:]
+		idx, err := strconv.Atoi(numStr)
+		if err != nil {
+			continue
+		}
+		if idx > lastIndex {
+			lastIndex = idx
+		}
+	}
+	return lastIndex + 1, nil
+}
+
 // FindLastIndex returns the index for the new yaml file by reading the yaml file names in the given path directory
-func FindLastIndex(path string, _ *zap.Logger) (int, error) {
+func FindLastIndex(path string, logger *zap.Logger) (int, error) {
+	return FindLastIndexF(path, logger, FormatYAML)
+}
+
+func FindLastIndexF(path string, logger *zap.Logger, format Format) (int, error) {
+	// Delegate to the format-agnostic scanner: when allocating the next
+	// test-N index we must see BOTH .yaml and .json files so we don't
+	// hand out a number that collides with an existing file of the other
+	// format after a StorageFormat switch.
+	_ = format
+	return FindLastIndexAny(path, logger)
+}
+
+// FindLastIndexAny scans `path` for both test-N.yaml and test-N.json (and
+// report-N.*) and returns the next index, ensuring newly-created files never
+// collide with pre-existing files of the other format.
+func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		return 1, nil
@@ -209,18 +301,22 @@ func FindLastIndex(path string, _ *zap.Logger) (int, error) {
 
 	lastIndex := 0
 	for _, v := range files {
-		if v.Name() == "mocks.yaml" || v.Name() == "config.yaml" {
+		name := v.Name()
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".json" {
 			continue
 		}
-		fileName := filepath.Base(v.Name())
-		fileNameWithoutExt := fileName[:len(fileName)-len(filepath.Ext(fileName))]
-		fileNameParts := strings.Split(fileNameWithoutExt, "-")
+		// Skip well-known non-test files in either format.
+		base := name[:len(name)-len(ext)]
+		if base == "mocks" || base == "config" {
+			continue
+		}
+		fileNameParts := strings.Split(base, "-")
 		if len(fileNameParts) != 2 || (fileNameParts[0] != "test" && fileNameParts[0] != "report") {
 			continue
 		}
-		indxStr := fileNameParts[1]
-		indx, err := strconv.Atoi(indxStr)
-		if err != nil {
+		indx, convErr := strconv.Atoi(fileNameParts[1])
+		if convErr != nil {
 			continue
 		}
 		if indx > lastIndex {
@@ -386,18 +482,40 @@ func generateSchemaName(src string) string {
 }
 
 func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	return FileExistsF(nil, logger, path, fileName, FormatYAML)
+}
+
+func FileExistsF(_ context.Context, logger *zap.Logger, path string, fileName string, format Format) (bool, error) {
+	filePath, err := ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
 	if err != nil {
-		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to validate the file path", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
-	if _, err := os.Stat(yamlPath); err != nil {
+	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		utils.LogError(logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		utils.LogError(logger, err, "failed to check if the file exists", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
 	}
 
 	return true, nil
+}
+
+// FileExistsAny checks whether <path>/<fileName>.<ext> exists for either
+// supported format, preferring `preferred`. Returns true + the format that
+// was found. Use this on read paths where the stored file may be in a
+// different format than the current StorageFormat.
+func FileExistsAny(ctx context.Context, logger *zap.Logger, path string, fileName string, preferred Format) (bool, Format, error) {
+	other := otherFormat(preferred)
+	for _, f := range [2]Format{preferred, other} {
+		exists, err := FileExistsF(ctx, logger, path, fileName, f)
+		if err != nil {
+			return false, "", err
+		}
+		if exists {
+			return true, f, nil
+		}
+	}
+	return false, preferred, nil
 }

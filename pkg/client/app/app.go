@@ -328,7 +328,7 @@ func (a *App) waitTillExit() {
 				return
 			}
 		case <-timeout.C:
-			a.logger.Warn("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			a.logger.Debug("timeout waiting for the container to stop", zap.String("containerID", containerID))
 			return
 		}
 	}
@@ -557,7 +557,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				if err != nil {
 					warning := fmt.Sprintf("error sending SIGINT: %s", err)
-					a.logger.Warn(warning)
+					a.logger.Debug(warning)
 				}
 				gracePeriod := 5
 				for i := 0; i < gracePeriod; i++ {
@@ -580,13 +580,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 				// Force Kill using Docker API
 				// We tell the Docker Daemon explicitly to kill this container.
-				a.logger.Warn("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
+				a.logger.Debug("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
 
 				// "SIGKILL" string is standard for Docker API to force kill
 				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
 				if err != nil {
 					warning := fmt.Sprintf("error killing container: %s", err)
-					a.logger.Warn(warning)
+					a.logger.Debug(warning)
 				}
 				// Clean up the CLI process as well
 				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)

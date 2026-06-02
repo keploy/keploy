@@ -29,7 +29,6 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
-	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -147,20 +146,25 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
-	logger             *zap.Logger
-	testDB             TestDB
-	mockDB             MockDB
-	mappingDB          MappingDB
-	reportDB           ReportDB
-	testSetConf        TestSetConfig
-	telemetry          Telemetry
-	instrumentation    Instrumentation
-	config             *config.Config
-	auth               service.Auth
-	mock               *mock
-	instrument         bool
-	isLastTestSet      bool
-	isLastTestCase     bool
+	logger          *zap.Logger
+	testDB          TestDB
+	mockDB          MockDB
+	mappingDB       MappingDB
+	reportDB        ReportDB
+	testSetConf     TestSetConfig
+	telemetry       Telemetry
+	instrumentation Instrumentation
+	config          *config.Config
+	instrument      bool
+	isLastTestSet   bool
+	isLastTestCase  bool
+	// isFirstTestSet mirrors isLastTestSet — true while the test-set
+	// about to run is the first one of the current replay run. Read
+	// by the waitForAppReady gate so --delay applies only to the first
+	// test-set when --keep-app-alive is set (subsequent test-sets
+	// inherit a warm app and would otherwise pay --delay seconds of
+	// dead time per boundary).
+	isFirstTestSet     bool
 	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
 	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
 	testRunID          string               // current test run ID (used by RunTestSet)
@@ -175,6 +179,7 @@ type Replayer struct {
 	totalTestFailed       int
 	totalTestObsolete     int
 	totalTestIgnored      int
+	consumedMockNames     map[string]struct{} // distinct mock names consumed across all test sets in the current run; size emitted as Mocks-Consumed on the TestRun event
 	totalTestTimeTaken    time.Duration
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
@@ -191,17 +196,8 @@ func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
-
-	// TODO: add some comment.
-	mock := &mock{
-		cfg:        config,
-		storage:    storage,
-		logger:     logger,
-		tsConfigDB: testSetConf,
-	}
-
-	defaultHook := NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock)
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, storage Storage, config *config.Config) Service {
+	defaultHook := NewHooks(logger, config, instrumentation)
 
 	instrument := config.Command != ""
 	return &Replayer{
@@ -215,8 +211,6 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		instrumentation: instrumentation,
 		config:          config,
 		instrument:      instrument,
-		auth:            auth,
-		mock:            mock,
 		hookImpl:        defaultHook,
 
 		completeTestReport:   make(map[string]TestReportVerdict),
@@ -302,6 +296,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.completeTestReportMu.Lock()
 	r.completeTestReport = make(map[string]TestReportVerdict)
 	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
+	r.consumedMockNames = make(map[string]struct{})
 	r.totalTestTimeTaken = 0
 	r.completeTestReportMu.Unlock()
 	r.failedTCsBySetID = make(map[string][]string)
@@ -323,10 +318,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
 			if language == models.Unknown {
-				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.logger.Debug("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
 				r.config.Test.SkipCoverage = true
 			} else {
-				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+				r.logger.Debug(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 			}
 			r.config.Test.Language = language
 		} else if language != r.config.Test.Language && language != models.Unknown {
@@ -344,7 +339,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	case models.Python:
 		// if the executable is not starting with "python" or "python3" then skipCoverage
 		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
-			r.logger.Warn("python command not python or python3, skipping coverage calculation")
+			r.logger.Debug("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
@@ -366,7 +361,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+			r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation", zap.Error(err))
 		}
 	}
 
@@ -382,6 +377,74 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	hookCancel = inst.HookCancel
+
+	// Hoist cmdType up to before the test-set loop so the one-shot
+	// user-app spawn below can read it. The original assignment that
+	// lived just above the for-range over testSets is removed (kept
+	// in a single canonical location here).
+	cmdType := utils.CmdType(r.config.CommandType)
+
+	// --keep-app-alive: start the user app ONCE on the outer errgroup
+	// so its lifecycle is tied to the whole replay run rather than a
+	// single test-set. The per-test-set RunApplication spawn (and its
+	// sibling NotifyGracefulShutdown notify) below is gated off via
+	// the existing `serveTest` parameter on RunTestSet — we pass
+	// `effectiveKeepAlive` as that parameter at the call site (line
+	// ~480). Keeps long-lived TCP connections (asyncpg pool, HikariCP,
+	// etc.) warm across the test-set boundary — the precondition the
+	// cross-test-set session/startup-tier staleness bugs in
+	// keploy/integrations#203 need to surface.
+	//
+	// Supported command types: docker-compose, docker-run,
+	// docker-start, native. All of them ultimately call
+	// r.instrumentation.Run(ctx, opts) — the only difference is what
+	// child command runs — so the same one-shot spawn pattern works
+	// for every cmdType. cmdType == Empty (no -c) means there is no
+	// user application to manage; the same gate ALSO suppresses
+	// passing serveTest=true to RunTestSet (which would otherwise skip
+	// the per-test-set RunApplication path and leave the app
+	// unstarted), and the per-test-set waitForAppReady skip below
+	// stays armed only when the one-shot spawn actually fired.
+	// Single computed predicate so all three gates move together.
+	effectiveKeepAlive := r.config.Test.KeepAppAlive && r.instrument && cmdType != utils.Empty
+	if effectiveKeepAlive {
+		g.Go(func() error {
+			defer utils.Recover(r.logger)
+			appErr := r.RunApplication(ctx, models.RunOptions{
+				AppCommand: r.config.Command,
+			})
+			// Two outcomes that are NOT failures from the replay's
+			// point of view:
+			//   1. Zero-value AppError: RunApplication returned cleanly.
+			//   2. ErrCtxCanceled: ctx was cancelled (normal end-of-run
+			//      teardown — the outer Start() defers a graceful
+			//      shutdown notify; the app exits as a consequence).
+			// Either case → return nil; errgroup keeps the run alive.
+			if appErr == (models.AppError{}) || appErr.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			// Anything else is an app startup / crash failure. Propagate
+			// it back through the errgroup so g.Wait() at the bottom of
+			// Start() surfaces the cause as the run's exit reason and
+			// any sibling goroutine listening on the errgroup-derived
+			// context unblocks. Logging the failure here too because
+			// errgroup only ever returns the FIRST error — if the test
+			// loop trips on a parallel error first, the actionable
+			// next_step that explains WHY tests started failing en
+			// masse would otherwise be hidden.
+			utils.LogError(r.logger, fmt.Errorf("user application failed under --keep-app-alive: %v", appErr),
+				applicationFailedToRunLogMessage,
+				zap.String("kind", string(appErr.AppErrorType)),
+				zap.Any("err", appErr),
+				zap.String("next_step",
+					"the user application started by --keep-app-alive exited or failed to start during the replay run. "+
+						"Check the application's own logs (the -c command's stdout/stderr is captured by keploy) for the root cause. "+
+						"Common causes: image build failure, port already in use, missing env var, dependency container crash-looped. "+
+						"If the app is expected to manage its own lifecycle across test-sets, drop --keep-app-alive and let keploy "+
+						"restart it per test-set instead."))
+			return appErr
+		})
+	}
 
 	var testSetResult bool
 	testRunResult := true
@@ -403,7 +466,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	cmdType := utils.CmdType(r.config.CommandType)
+	// cmdType is hoisted above the one-shot RunApplication block; the
+	// original assignment that lived here is removed to keep a single
+	// canonical declaration.
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
@@ -425,7 +490,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+				r.logger.Debug("failed to set TESTSETID env variable, skipping coverage calculation", zap.Error(err))
 			}
 		}
 
@@ -434,6 +499,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if i == len(testSets)-1 {
 			r.isLastTestSet = true
 		}
+		// Mirror of isLastTestSet but for the first-testset boundary.
+		// Set BEFORE the RunTestSet call so the waitForAppReady call
+		// sites in RunTestSet observe the right value. Reset only at
+		// the top of this iteration (so a flaky-retry attempt within
+		// the SAME iteration still observes the same value).
+		r.isFirstTestSet = (i == 0)
 
 		r.completeTestReportMu.RLock()
 		initTotal := r.totalTests
@@ -442,6 +513,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initObsolete := r.totalTestObsolete
 		initIgnored := r.totalTestIgnored
 		initTimeTaken := r.totalTestTimeTaken
+		// Snapshot a copy of the run-level distinct mock set so per-attempt
+		// additions can be reverted on retry just like the int totals above.
+		initConsumedMockNames := make(map[string]struct{}, len(r.consumedMockNames))
+		for k := range r.consumedMockNames {
+			initConsumedMockNames[k] = struct{}{}
+		}
 		r.completeTestReportMu.RUnlock()
 
 		var initialFailedTCs map[string]bool
@@ -465,13 +542,52 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.totalTestObsolete = initObsolete
 			r.totalTestIgnored = initIgnored
 			r.totalTestTimeTaken = initTimeTaken
+			// Re-clone from the snapshot so the next RunTestSet attempt
+			// mutates a fresh per-attempt copy without polluting the
+			// preserved snapshot for any further retry.
+			r.consumedMockNames = make(map[string]struct{}, len(initConsumedMockNames))
+			for k := range initConsumedMockNames {
+				r.consumedMockNames[k] = struct{}{}
+			}
 			r.completeTestReportMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
+			// serveTest=true reuses the pre-existing gating inside
+			// RunTestSet (skips per-test-set RunApplication spawn and
+			// NotifyGracefulShutdown). Pass `effectiveKeepAlive` —
+			// not the raw config bool — so a `--keep-app-alive` set
+			// with `--cmd-type=""` (or with instrument disabled) does
+			// NOT skip per-test-set RunApplication while the one-shot
+			// spawn was also suppressed; that combination would leave
+			// the app entirely unstarted. With this gate the
+			// historical per-test-set restart behaviour is preserved
+			// whenever the one-shot spawn didn't fire.
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
+				}
+				// DockerCompose: when the user-app container exits,
+				// compose's --abort-on-container-exit cancels our inner
+				// runTestSetCtx. RunTestSet then returns one of three
+				// statuses depending on which goroutine wins the race —
+				// AppHalted, FaultUserApp, or UserAbort (the last one
+				// happens at line ~964 when the ctx-Done select case
+				// fires before the appErr-status mapping). The outer
+				// ctx is intact (we already early-returned above if it
+				// was), so all three are recoverable: the next test set
+				// builds a fresh compose. Other errors still abort.
+				if cmdType == utils.DockerCompose &&
+					(testSetStatus == models.TestSetStatusAppHalted ||
+						testSetStatus == models.TestSetStatusFaultUserApp ||
+						testSetStatus == models.TestSetStatusUserAbort) {
+					utils.LogError(r.logger, err,
+						"test set failed because the app exited; continuing to next test set",
+						zap.String("test-set", testSet),
+						zap.String("status", string(testSetStatus)))
+					testSetResult = false
+					testRunResult = false
+					break
 				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -593,12 +709,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set CLEAN env variable, skipping coverage calculation.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Debug("failed to set APPEND env variable, skipping coverage calculation.", zap.Error(err))
 			}
 		}
 	}
@@ -610,7 +726,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if len(flakyTestSets) > 0 {
-		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+		r.logger.Info("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
 	}
 
 	testRunStatus := "fail"
@@ -618,15 +734,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		testRunStatus = "pass"
 	}
 
-	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
-	}
-
 	r.completeTestReportMu.RLock()
 	passed := r.totalTestPassed
 	failed := r.totalTestFailed
+	mocksConsumed := len(r.consumedMockNames)
 	r.completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+	r.telemetry.TestRun(passed, failed, len(testSets), mocksConsumed, testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
 	// Shutdown is optional: the static Telemetry interface does not require it,
@@ -649,7 +762,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -666,7 +779,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 
 			} else {
-				r.logger.Warn("failed to calculate coverage for the test run", zap.Error(err))
+				r.logger.Debug("failed to calculate coverage for the test run", zap.Error(err))
 			}
 		}
 
@@ -765,7 +878,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if len(testCases) == 0 {
-		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
+		r.logger.Debug("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
 		testReport := &models.TestReport{
 			Version:   models.GetVersion(),
@@ -958,7 +1071,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
 		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
-		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, r.firstRun)
+		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, testSetID, r.firstRun)
 		if err != nil {
 			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -976,11 +1089,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:                  r.config.BypassRules,
 			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay),
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1035,7 +1149,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if filteredMocks == nil && unfilteredMocks == nil {
-			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
+			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
@@ -1059,10 +1173,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 
-		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
+		// Wait for the user application to become ready before firing the first test.
+		// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
+		//
+		// --keep-app-alive: the app was spawned ONCE in Start() and
+		// has already passed its readiness check during the first
+		// test-set; subsequent test-sets inherit the warm app, so
+		// paying --delay seconds (or another HealthURL poll round)
+		// per boundary is dead time. Skip when we're past the first
+		// test-set. The first test-set still runs the wait so the
+		// initial app startup can finish (build/boot/connect) before
+		// the first request fires.
+		//
+		// Gate keyed on `serveTest` (the parameter Start() computes
+		// as `effectiveKeepAlive`) rather than the raw config bool,
+		// so the skip ONLY arms when the one-shot spawn actually
+		// fired. If --keep-app-alive was set on a cmdType where the
+		// one-shot spawn was suppressed (cmdType == Empty / instrument
+		// off), serveTest will be false here and the readiness wait
+		// runs every test-set, matching the historical lifecycle.
+		if serveTest && !r.isFirstTestSet {
+			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
+		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1144,11 +1276,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:                  r.config.BypassRules,
 			MongoPassword:          r.config.Test.MongoPassword,
-			SQLDelay:               time.Duration(r.config.Test.Delay),
+			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1204,10 +1337,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			})
 
-			// Delay for user application to run
-			select {
-			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-			case <-runTestSetCtx.Done():
+			// Wait for the user application to become ready before firing the first test.
+			// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
+			// See the parallel call in the docker-compose branch above
+			// for the --keep-app-alive rationale. On the non-compose
+			// paths (native, docker-run, docker-start) the one-shot
+			// spawn in Start() also fires when KeepAppAlive is set
+			// AND cmdType is non-empty AND instrument is enabled.
+			// Gate keyed on `serveTest` (the Start()-computed
+			// effectiveKeepAlive predicate) — identical to the compose
+			// branch above — so the readiness skip arms only when the
+			// one-shot spawn actually fired.
+			if serveTest && !r.isFirstTestSet {
+				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
+			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -1254,7 +1397,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if len(utils.SecretValues) > 0 {
 		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
 		if err != nil {
-			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+			r.logger.Debug("Failed to add secret files to .gitignore", zap.Error(err))
 		}
 	}
 
@@ -1397,7 +1540,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.config.Test.BasePath != "" {
 				newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
 				if err != nil {
-					r.logger.Warn("failed to replace the request basePath", zap.String("testcase", testCase.Name), zap.String("basePath", r.config.Test.BasePath), zap.Error(err))
+					r.logger.Error("failed to replace the request basePath",
+						zap.String("testcase", testCase.Name),
+						zap.String("basePath", r.config.Test.BasePath),
+						zap.String("next_step", "verify --basePath / test.basePath value — expected format is an absolute URL like http://host:port or a path prefix starting with /; ensure the recorded URL is compatible with this base"),
+						zap.Error(err))
 				} else {
 					testCase.HTTPReq.URL = newURL
 				}
@@ -1477,8 +1624,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
+			// instrumentConsumedFetchErr captures whether THIS test's per-test
+			// consumed-mock fetch in instrument mode succeeded. Read later by
+			// the per-test perTestConsumedKnown signal so a failed instrument
+			// fetch is treated the same as a failed non-instrument fetch
+			// (skip MockMismatches / MatchedCalls rather than emit stale data).
+			var instrumentConsumedFetchErr error
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				instrumentConsumedFetchErr = err
 				if err != nil {
 					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 						testSetStatus = resolvedStatus
@@ -1486,12 +1640,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					} else {
 						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 					}
+					// On fetch failure, consumedMocks may carry stale/partial
+					// data from the previous test. Clear it so downstream uses
+					// in this iteration (logging, mockNames, upsertActualTest-
+					// MockMapping) and the next iteration's filter params
+					// don't attribute the previous test's data to this one.
+					consumedMocks = nil
 				}
 				r.logger.Debug("consumed mocks after test case simulation",
 					zap.String("testSetID", testSetID),
 					zap.String("testCaseID", testCase.Name),
 					zap.Int("count", len(consumedMocks)),
-					zap.Any("mocks", consumedMocks))
+					zap.Any("mocks", consumedMocks),
+					zap.Bool("fetchOk", instrumentConsumedFetchErr == nil))
+				// totalConsumedMocks aggregation is implicit-gated: on fetch
+				// failure consumedMocks was nil'd above, so this loop is a
+				// no-op and stale data can't leak into the next iteration's
+				// filter params (SendMockFilterParamsToAgent).
 				for _, m := range consumedMocks {
 					totalConsumedMocks[m.Name] = m
 				}
@@ -1528,8 +1693,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			mockSetMismatch := false
-			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
+				// Filter out DNS mocks from comparison since DNS resolution
+				// order is non-deterministic. Also gate on a successful per-
+				// test GetConsumedMocks — when the fetch failed, consumedMocks
+				// was cleared to nil above, which would deterministically
+				// compute mockSetMismatch=true (empty subset of any non-empty
+				// expected set) and falsely mark the test OBSOLETE due to an
+				// unrelated transport error rather than a real mock-pool
+				// divergence.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
@@ -1712,30 +1884,89 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
 					}
-					// Populate matched/unmatched calls for failed/obsolete test cases
+					// Per-test consumed-mock fetch + failure-diagnostic population.
+					// Two distinct outputs are computed from the per-test
+					// consumed-mock list below:
+					//   (a) MatchedCalls / UnmatchedCalls on FailureInfo —
+					//       populated only on failed/obsolete tests
+					//       (UnmatchedCalls is independent of the consumed
+					//       set; MatchedCalls gates on perTestConsumedKnown).
+					//   (b) TestResult.MockMismatches — populated on EVERY
+					//       test (pass or fail) when consumed data is known.
+					//
+					// In non-instrument mode (k8s-proxy / remote agent) the
+					// loop-scoped `consumedMocks` is only refreshed inside the
+					// `if r.instrument` branch after simulation — for non-
+					// instrument it stays at whatever the initial setup set,
+					// which is stale for every test except the first. Fetch
+					// the per-test consumed-mock set into a PER-TEST LOCAL
+					// (perTestConsumed) rather than overwriting consumedMocks,
+					// so the value doesn't leak into the next iteration's
+					// upsertActualTestMockMapping / mockNames computations.
+					// One fetch services both outputs (a) and (b).
+					//
+					// On fetch error we set perTestConsumedKnown=false and
+					// skip both MatchedCalls population AND MockMismatches
+					// for this test (rather than falling back to the stale
+					// loop-scoped consumedMocks, which would emit misleading
+					// data attributed to the wrong test case).
+					// perTestConsumedKnown tracks whether consumed-mock data for
+					// THIS test is reliable. Instrument mode: only when the
+					// per-test fetch upstream (in the `if r.instrument` branch
+					// after simulation) succeeded — a failed instrument fetch
+					// leaves consumedMocks at stale/partial state, same as
+					// non-instrument's stale loop-scope problem. Non-instrument
+					// mode: only when this block's per-test fetch succeeds.
+					// MatchedCalls / MockMismatches gate on this signal so
+					// stale data isn't attributed to the wrong test case.
+					perTestConsumed := consumedMocks
+					perTestConsumedKnown := r.instrument && instrumentConsumedFetchErr == nil
+					if !r.instrument {
+						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
+							perTestConsumed = fetched
+							perTestConsumedKnown = true
+						} else {
+							// Mirror the instrument-mode skip: leaves
+							// perTestConsumedKnown false so downstream skips
+							// MatchedCalls AND MockMismatches (any consumed-
+							// mock-derived field) rather than attribute stale
+							// data. UnmatchedCalls is unaffected — independent
+							// sources (mockMismatchFailures channel + GetMock-
+							// Errors) still populate for failed/obsolete tests.
+							r.logger.Debug("non-instrument GetConsumedMocks failed; skipping all consumed-mock-derived fields (MatchedCalls + MockMismatches) for this test",
+								zap.String("testSetID", testSetID),
+								zap.String("testCaseID", testCase.Name),
+								zap.Error(fetchErr))
+						}
+					}
 					if testStatus == models.TestStatusFailed || testStatus == models.TestStatusObsolete {
-						// In non-instrument mode (k8s-proxy), fetch consumed mocks for this test case via HTTP API
-						matchedMocks := consumedMocks
-						if !r.instrument {
-							if fetched, err := r.hookImpl.GetConsumedMocks(runTestSetCtx); err == nil {
-								matchedMocks = fetched
-							}
-						}
-						for _, m := range matchedMocks {
-							if m.Kind != models.DNS {
-								info := mockLookup[m.Name]
-								protocol := info.protocol
-								if protocol == "" {
-									protocol = string(m.Kind)
+						// MatchedCalls is built from perTestConsumed and is
+						// only meaningful when that data is known for THIS
+						// test. Skip if not — stale data would attribute the
+						// previous test's matched mocks to this one.
+						if perTestConsumedKnown {
+							for _, m := range perTestConsumed {
+								if m.Kind != models.DNS {
+									info := mockLookup[m.Name]
+									protocol := info.protocol
+									if protocol == "" {
+										protocol = string(m.Kind)
+									}
+									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
+										MockName: m.Name,
+										Protocol: protocol,
+										Summary:  info.summary,
+									})
 								}
-								testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
-									MockName: m.Name,
-									Protocol: protocol,
-									Summary:  info.summary,
-								})
 							}
 						}
-						// Populate unmatched calls from mock errors (channel-based for in-process)
+						// UnmatchedCalls comes from independent sources
+						// (mockMismatchFailures channel for in-process,
+						// GetMockErrors for remote/k8s-proxy) — neither
+						// depends on the consumed-mock list, so populate
+						// regardless of perTestConsumedKnown so failed/
+						// obsolete tests still surface their mock errors
+						// even when the consumed-mock fetch failed.
 						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
 							if f.MismatchReport != nil {
 								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
@@ -1747,7 +1978,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 								})
 							}
 						}
-						// Fetch mock errors via HTTP API (for remote agent / k8s-proxy mode only)
 						if !r.instrument {
 							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
 								for _, me := range mockErrors {
@@ -1756,31 +1986,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 					}
+					// Build the {expected, actual} mock set for THIS test case.
+					// See buildExpectedMockInfos / buildActualMockInfos at the
+					// bottom of this file for DNS-filter + perTestConsumed-known
+					// semantics. Both extracted as helpers for unit testability.
+					expectedMockInfos := buildExpectedMockInfos(expectedMocks, mockKindByName)
+					actualMockInfos := buildActualMockInfos(perTestConsumed, perTestConsumedKnown)
+
+					// TestResult.MockMismatches: populated for tests going
+					// through this (non-streaming) replay path — regardless of
+					// pass/fail or obsolescence. Mirrors the sandbox integration
+					// runner's behaviour so report UIs can render expected vs
+					// actual mocks for passing tests too, not just the
+					// obsolete-mismatch path. The deferred streaming-test path
+					// (Phase 2 stream replay) does NOT populate this field
+					// today — consumers should treat absence as "data not
+					// available for this run mode", not "no mocks". Skip when
+					// both sides are empty so the json/yaml field stays absent
+					// via omitempty. Also skip when perTestConsumed is unknown
+					// (non-instrument GetConsumedMocks failed) so we don't
+					// emit ActualMocks built from stale loop-scoped data.
+					if perTestConsumedKnown && (len(expectedMockInfos) > 0 || len(actualMockInfos) > 0) {
+						testCaseResult.MockMismatches = &models.MockMismatchInfo{
+							ExpectedMocks: expectedMockInfos,
+							ActualMocks:   actualMockInfos,
+						}
+					}
+
+					// Existing FailureInfo.MockMismatch semantics preserved:
+					// only set when the test became OBSOLETE due to a real
+					// mock-pool divergence. Downstream code that branches on
+					// "is this an obsolete-mismatch?" keeps working.
 					if mockSetMismatch && testStatus == models.TestStatusObsolete {
-						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
-						for _, m := range expectedMocks {
-							isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-							if !isDNS {
-								if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-									isDNS = true
-								}
-							}
-							if !isDNS {
-								resolvedKind := m.Kind
-								if resolvedKind == "" {
-									if kind, ok := mockKindByName[m.Name]; ok {
-										resolvedKind = string(kind)
-									}
-								}
-								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
-							}
-						}
-						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
-						for _, m := range consumedMocks {
-							if m.Kind != models.DNS {
-								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
-							}
-						}
 						testCaseResult.FailureInfo.MockMismatch = &models.MockMismatchInfo{
 							ExpectedMocks: expectedMockInfos,
 							ActualMocks:   actualMockInfos,
@@ -1821,7 +2058,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		insertStart := time.Now()
 		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, tcResult)
 		if time.Since(insertStart) > 50*time.Millisecond {
-			r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+			r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 		}
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert final test case result")
@@ -2325,7 +2562,58 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
+	// Test-mode mapping write semantics:
+	//
+	//   UpdateTestMapping=true  → always write/merge mappings.yaml
+	//                             (operator-driven update).
+	//   UpdateTestMapping=false → create-if-not-present: write only
+	//                             when mappings.yaml is absent for
+	//                             this test-set AND we have at least
+	//                             one populated test→mocks entry.
+	//                             Once a file exists, we leave it
+	//                             alone — repeat test runs don't
+	//                             churn it.
+	//
+	// Rationale: mappings.yaml is the artifact k8s-proxy autoreplay
+	// (and other final-candidate analyses) consults to find which
+	// mocks each test consumed. Operators who never set the flag
+	// still need a usable file the first time test mode runs; gating
+	// strictly on UpdateTestMapping leaves them without one. The
+	// create-if-not-present default closes that gap without changing
+	// behaviour for existing users who already have a mappings.yaml
+	// they don't want overwritten — they can keep flag=false and the
+	// existing file is preserved. To force a refresh, flag=true.
+	//
+	// Independence from DisableMapping: the two flags express
+	// orthogonal concerns. DisableMapping picks the replay-time mock
+	// FILTERING strategy (timestamp-vs-index); the mapping WRITE is
+	// a separate side-effect that records consumption. We don't gate
+	// the write on the filter strategy.
+	//
+	// The non-emptiness guard on the create-if-not-present branch
+	// matters because actualTestMockMappings is populated by
+	// upsertActualTestMockMapping calls that depend on consumedMocks,
+	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
+	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
+	// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
+	// so without this guard the first run would create an empty
+	// mappings.yaml and every subsequent run would skip the create
+	// branch (file exists), leaving autoreplay permanently without
+	// the mappings the feature relies on. UpdateTestMapping=true
+	// still writes an empty file when explicitly requested — that
+	// matches the operator intent of "force a refresh".
+	shouldWriteMappings := r.config.Test.UpdateTestMapping
+	if !shouldWriteMappings && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
+		exists, existsErr := r.mappingDB.Exists(ctx, testSetID)
+		if existsErr != nil {
+			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
+				zap.String("testSetID", testSetID),
+				zap.Error(existsErr))
+		} else if !exists {
+			shouldWriteMappings = true
+		}
+	}
+	if shouldWriteMappings {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -2444,6 +2732,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
+
+	// Merge mock NAMES (not the count) into the run-level distinct
+	// set so duplicates across test sets aren't double-counted.
+	r.completeTestReportMu.Lock()
+	for name := range totalConsumedMocks {
+		r.consumedMockNames[name] = struct{}{}
+	}
+	r.completeTestReportMu.Unlock()
 
 	return testSetStatus, nil
 }
@@ -2994,7 +3290,7 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 }
 
 // UpdateTestSetTemplate writes the updated template values to the test-set's config.
-// It preserves existing pre/post scripts, secret, mock registry and metadata fields.
+// It preserves existing pre/post scripts, secret and metadata fields.
 func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
 	if len(template) == 0 { // nothing to persist
 		return nil
@@ -3009,7 +3305,6 @@ func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, 
 		ts.PreScript = existing.PreScript
 		ts.PostScript = existing.PostScript
 		ts.Secret = existing.Secret
-		ts.MockRegistry = existing.MockRegistry
 		ts.Metadata = existing.Metadata
 	} else {
 		ts.Metadata = map[string]interface{}{}
@@ -3233,7 +3528,7 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		utils.LogError(r.logger, err, "failed to get all test set ids")
-		return nil, fmt.Errorf("mocks downloading failed to due to error in getting test set ids")
+		return nil, fmt.Errorf("failed to get test set ids")
 	}
 
 	var testSets []string
@@ -3250,103 +3545,6 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 	// Sort the testsets.
 	natsort.Sort(testSets)
 	return testSets, nil
-}
-
-func (r *Replayer) authenticateUser(ctx context.Context) error {
-	//authenticate the user
-	token, err := r.auth.GetToken(ctx)
-	if err != nil {
-		r.logger.Error("Failed to Authenticate user", zap.Error(err))
-		r.logger.Warn("Looks like you haven't logged in, skipping mock upload/download")
-		r.logger.Warn("Please login using `keploy login` to perform mock upload/download action")
-		return fmt.Errorf("mocks downloading failed to due to authentication error")
-	}
-
-	r.mock.setToken(token)
-	return nil
-}
-func (r *Replayer) DownloadMocks(ctx context.Context) error {
-	// Authenticate the user for mock registry
-	err := r.authenticateUser(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(r.config.MockDownload.RegistryIDs) > 0 {
-		for _, registryID := range r.config.MockDownload.RegistryIDs {
-			// Use the registry ID to download mocks directly
-			r.logger.Info("Downloading mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("app", r.config.AppName))
-
-			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return err
-				}
-				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
-				continue
-			}
-
-			r.logger.Info("Successfully downloaded mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
-		}
-		return nil
-	}
-
-	testSets, err := r.GetSelectedTestSets(ctx)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get selected test sets")
-		return fmt.Errorf("mocks downloading failed to due to error in getting selected test sets")
-	}
-
-	for _, testSetID := range testSets {
-		r.logger.Info("Downloading mocks for the testset", zap.String("testset", testSetID))
-
-		err := r.mock.download(ctx, testSetID)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			utils.LogError(r.logger, err, "failed to download mocks", zap.String("testset", testSetID))
-			continue
-		}
-
-	}
-	return nil
-}
-
-func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
-	// Authenticate the user for mock registry
-	err := r.authenticateUser(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(testSets) == 0 {
-		testSets, err = r.GetSelectedTestSets(ctx)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get selected test sets")
-			return fmt.Errorf("mocks uploading failed to due to error in getting selected test sets")
-		}
-	}
-
-	for _, testSetID := range testSets {
-		r.logger.Info("Uploading mocks for the testset", zap.String("testset", testSetID))
-
-		err := r.mock.upload(ctx, testSetID)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			utils.LogError(r.logger, err, "failed to upload mocks", zap.String("testset", testSetID))
-			continue
-		}
-
-	}
-
-	return nil
 }
 
 func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
@@ -3498,7 +3696,7 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	// Try to get mappings from the database.
 	expectedTestMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+		r.logger.Debug("Failed to get mappings, falling back to timestamp-based filtering",
 			zap.String("testSetID", testSetID),
 			zap.Error(err))
 		return false, defaultMappings
@@ -3531,4 +3729,57 @@ func isMockSubset(actual []string, expected []string) bool {
 		}
 	}
 	return true
+}
+
+// buildExpectedMockInfos converts the per-test expected mock list (from the
+// recorded mappings) into the MockMismatchInfo.ExpectedMocks shape. DNS
+// entries are filtered out both at the entry level (m.Kind == "DNS") and via
+// the mockKindByName lookup, because DNS resolution order is non-deterministic
+// and including it produces noisy spurious mismatches downstream. Resolves an
+// empty Kind by looking up mockKindByName so the consumer always gets a kind
+// label when one is available.
+//
+// Extracted from RunTestSet for unit-testability.
+func buildExpectedMockInfos(expectedMocks []models.MockEntry, mockKindByName map[string]models.Kind) []models.MockMismatchMock {
+	out := make([]models.MockMismatchMock, 0, len(expectedMocks))
+	for _, m := range expectedMocks {
+		isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+		if !isDNS {
+			if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+				isDNS = true
+			}
+		}
+		if isDNS {
+			continue
+		}
+		resolvedKind := m.Kind
+		if resolvedKind == "" {
+			if kind, ok := mockKindByName[m.Name]; ok {
+				resolvedKind = string(kind)
+			}
+		}
+		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: resolvedKind})
+	}
+	return out
+}
+
+// buildActualMockInfos converts the per-test consumed mock list (from the
+// instrumentation/agent) into the MockMismatchInfo.ActualMocks shape.
+// `known` gates the build: when false (e.g. GetConsumedMocks failed for THIS
+// test in non-instrument mode) we return an empty slice rather than walking
+// stale data attributed to the wrong test case. DNS entries are filtered.
+//
+// Extracted from RunTestSet for unit-testability.
+func buildActualMockInfos(consumed []models.MockState, known bool) []models.MockMismatchMock {
+	out := make([]models.MockMismatchMock, 0, len(consumed))
+	if !known {
+		return out
+	}
+	for _, m := range consumed {
+		if m.Kind == models.DNS {
+			continue
+		}
+		out = append(out, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+	}
+	return out
 }

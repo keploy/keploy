@@ -274,7 +274,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 				if err != nil {
 					return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
 				}
-				logger.Warn("AuthNextFactor packet not supported, further flow can be affected")
+				logger.Debug("AuthNextFactor packet not supported, further flow can be affected")
 				setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
 				logger.Debug("AuthNextFactor decoded", zap.Any("parsed packet", parsedPacket))
 			}
@@ -337,7 +337,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		pkt := &mysql.ChangeUserPacket{
 			Command: payloadType,
 		}
-		logger.Warn("COM_CHANGE_USER packet not supported, further flow can be affected")
+		logger.Debug("COM_CHANGE_USER packet not supported, further flow can be affected")
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_CHANGE_USER), clientConn, mysql.COM_CHANGE_USER, decodeCtx)
 		logger.Debug("COM_CHANGE_USER decoded", zap.Any("parsed packet", parsedPacket))
 
@@ -426,7 +426,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), clientConn, mysql.COM_STMT_SEND_LONG_DATA, decodeCtx)
 		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
-		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
+		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
 		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 

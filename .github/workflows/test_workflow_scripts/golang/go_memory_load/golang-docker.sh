@@ -188,7 +188,7 @@ check_for_errors() {
 }
 
 check_recorded_tests() {
-    if ! find ./keploy -path '*/tests/test-*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    if ! find ./keploy -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
         echo "No recorded test cases were generated."
         return 1
     fi
@@ -457,6 +457,35 @@ stop_memory_monitor
 check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
+
+# Supplemental json-format pass: record once more under the same memory
+# constraints with --storage-format json so the json codec is exercised
+# on the memory-load path. No replay (replay is intentionally disabled in
+# this workflow — it's a record-side memory regression test).
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    section "Recording load-test traffic (json)"
+    cleanup_compose
+    rm -f record_json.txt
+    run_with_keploy_privileges "$RECORD_BIN" record --storage-format json -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --enable-sampling --generate-github-actions=false 2>&1 | tee record_json.txt &
+    record_pid=$!
+
+    keploy_container="$(wait_for_keploy_container 120)"
+    start_memory_monitor "$keploy_container" "$record_pid" "record_json"
+
+    wait_for_http "$APP_HEALTH_URL" 180
+    run_loadtest
+
+    sleep 10
+    stop_keploy_record
+    wait "$record_pid" || true
+    stop_memory_monitor
+
+    check_memory_violation
+    check_for_errors record_json.txt
+fi
 
 # section "Preparing Replay"
 # cleanup_compose

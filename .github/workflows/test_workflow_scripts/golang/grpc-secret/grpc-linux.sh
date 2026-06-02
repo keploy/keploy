@@ -149,9 +149,23 @@ kill_keploy_process() {
 send_grpc_requests() {
     echo "Waiting for gRPC server to be ready..."
     sleep 10
-    
+
+    # 0. Reflection probes — exercise the LifetimeSession mock path end-to-end.
+    # The grpc-secret server registers grpc.reflection.v1.ServerReflection in
+    # main.go. These two grpcurl invocations issue ServerReflectionInfo RPCs
+    # that the keploy recorder tags as type=="config" / Lifetime==Session, so
+    # replay must serve them from the session pool (not the per-test pool).
+    # Without this, the matcher's per-test-only path could regress silently
+    # because the regular Jwt/Curl/Cdn/GetSecret RPCs all live in per-test.
+    echo "Probing gRPC reflection (list)..."
+    grpcurl -plaintext -v localhost:50051 list >/dev/null 2>&1 || echo "reflection list completed"
+    sleep 1
+    echo "Probing gRPC reflection (describe SecretService)..."
+    grpcurl -plaintext -v localhost:50051 describe secrets.SecretService >/dev/null 2>&1 || echo "reflection describe completed"
+    sleep 1
+
     echo "Sending all 4 gRPC requests..."
-    
+
     # 1. JwtLab
     echo "Sending JwtLab request..."
     grpcurl -plaintext -v \
@@ -281,34 +295,46 @@ echo "✅ Built grpc-secret binary"
 # --- Record 2 test sets ---
 echo "📝 Phase 1: Recording 2 test sets with all 4 endpoints..."
 
-for i in 1 2; do
-    app_name="grpcSecret_${i}"
-    echo "Recording iteration $i..."
+do_record_iteration() {
+    local i="$1"
+    local extra_flags="${2:-}"
+    local label="${extra_flags:+_json}"
+    local app_name="grpcSecret_${i}${label}"
+    echo "Recording iteration ${i}${label:+ (json)}..."
 
     ensure_grpc_secret_stopped
 
-    # Start keploy record in background and retain the actual record process PID.
-    "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false > >(tee "${app_name}.txt") 2>&1 &
-    record_pid=$!
+    # shellcheck disable=SC2086
+    "$RECORD_BIN" record $extra_flags -c "./grpc-secret" --generateGithubActions=false > >(tee "${app_name}.txt") 2>&1 &
+    local record_pid=$!
 
-    # Send all 4 gRPC requests and wait for them to finish before stopping keploy.
     send_grpc_requests &
-    request_pid=$!
+    local request_pid=$!
     wait "${request_pid}"
 
-    # Kill keploy
     kill_keploy_process
 
-    # Wait for the record process to finish cleaning up the app and the proxy state.
     wait "${record_pid}" || true
     ensure_grpc_secret_stopped
-    
-    # Check for errors and race conditions
+
     check_for_errors "${app_name}.txt"
-    
+
     sleep 5
-    echo "✅ Recorded test set ${i}"
+    echo "✅ Recorded test set ${i}${label:+ (json)}"
+}
+
+for i in 1 2; do
+    do_record_iteration "$i"
 done
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    for i in 1 2; do
+        do_record_iteration "$i" "--storage-format json"
+    done
+fi
 
 # --- Run keploy test (before sanitize) ---
 echo "🧪 Phase 2: Running keploy test (before sanitize)..."
@@ -349,6 +375,17 @@ if ! check_test_report 2; then
 fi
 
 echo "✅ All tests passed after sanitize!"
+
+if json_pass_supported; then
+    echo "🧪 Phase 5: Running keploy test (json) after sanitize..."
+    "$REPLAY_BIN" test --storage-format json -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_json_after_sanitize.txt || true
+    check_for_errors test_json_after_sanitize.txt
+    if ! json_scan_reports; then
+        cat test_json_after_sanitize.txt
+        exit 1
+    fi
+    echo "✅ All tests passed in json mode!"
+fi
 
 # --- Cleanup ---
 cleanup_keploy

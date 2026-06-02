@@ -101,40 +101,40 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
-for i in 1 2; do
-  section "Record iteration $i"
-  app_name="nodeApp_${i}"
+do_record_iteration() {
+  local i="$1"
+  local extra_flags="${2:-}"
+  local label="${extra_flags:+_json}"
+  local app_name="nodeApp_${i}${label}"
+  section "Record iteration $i${label:+ (json)}"
 
-  # Start keploy recording in background, capture PID
-  "$RECORD_BIN" record -c 'npm start' \
+  # shellcheck disable=SC2086
+  "$RECORD_BIN" record $extra_flags -c 'npm start' \
     > "${app_name}.txt" 2>&1 &
-  KEPLOY_PID=$!
+  local KEPLOY_PID=$!
 
-  # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
 
   cat "${app_name}.txt"
 
-  # Wait + capture rc
   set +e
   wait "$KEPLOY_PID"
-  rc=$?
+  local rc=$?
   set -e
   echo "Record exit code: $rc"
 
-  # Fail hard like the reference script
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
     cat "${app_name}.txt"
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
-    echo "::error::Error found during recording (iteration $i)"
+    echo "::error::Error found during recording (iteration $i${label:+ json})"
     cat "${app_name}.txt"
     exit 1
   fi
   if [[ $rc -ne 0 ]]; then
-    echo "::error::Keploy record exited non-zero (iteration $i)"
+    echo "::error::Keploy record exited non-zero (iteration $i${label:+ json})"
     cat "${app_name}.txt" || true
     exit "$rc"
   fi
@@ -142,23 +142,41 @@ for i in 1 2; do
   echo "== keploy artifacts (depth 3) =="
   find ./keploy -maxdepth 3 -type f | sort || true
 
-  # Ensure at least one test/mocks were produced for this iteration
-  if ! find ./keploy -type f -name 'test-*.yaml' -o -name 'mocks-*.yaml' | grep -q .; then
-    echo "::error::No tests/mocks produced in iteration $i"
+  # Ensure at least one test was produced for this iteration.
+  # Match any *.yaml under a tests/ dir so we are agnostic to the testcase
+  # naming scheme (legacy "test-N.yaml" or descriptive slugs).
+  if ! find ./keploy -type f -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+    echo "::error::No tests produced in iteration $i"
     cat "${app_name}.txt" || true
     exit 1
   fi
 
   endsec
-  echo "Recorded test case and mocks for iteration ${i}"
+  echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
+}
+
+for i in 1 2; do
+  do_record_iteration "$i"
 done
 
-# Optional tweak to a mock; guard if file exists
-mocks_file="keploy/test-set-0/tests/test-5.yaml"
-if [[ -f "$mocks_file" ]]; then
-  sed -i 's/"page":1/"page":4/' "$mocks_file"
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+  for i in 1 2; do
+    do_record_iteration "$i" "--storage-format json"
+  done
+fi
+
+# Tweak the testcase whose recorded body contains "page":1, flipping it
+# to "page":4. Located by content rather than filename so this works
+# under both legacy (test-N.yaml) and descriptive testcase naming.
+target_test=$(grep -l '"page":1' keploy/test-set-0/tests/*.yaml 2>/dev/null | head -n1 || true)
+if [[ -n "$target_test" ]]; then
+  echo "Patching $target_test: page:1 -> page:4"
+  sed -i 's/"page":1/"page":4/' "$target_test"
 else
-  echo "::warning::$mocks_file not found; skipping page change"
+  echo "::notice::no recorded testcase contains \"page\":1; skipping page change"
 fi
 
 # ---- Replays ----
@@ -263,14 +281,53 @@ run_replay() {
 run_replay 1
 run_replay 2 "--testsets test-set-0"
 
-# enable selected tests in keploy.yml (guarded)
+# Enable selectedTests with the first two recorded testcase IDs.
+# The IDs are derived from the on-disk filenames so this is naming-scheme
+# agnostic (legacy test-N or descriptive slugs both work).
 if [[ -f "./keploy.yml" ]]; then
-  sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml" || true
+  shopt -s nullglob
+  recorded_files=( ./keploy/test-set-0/tests/*.yaml )
+  shopt -u nullglob
+  if (( ${#recorded_files[@]} >= 2 )); then
+    id1=$(basename "${recorded_files[0]}" .yaml)
+    id2=$(basename "${recorded_files[1]}" .yaml)
+    echo "Setting selectedTests to [\"$id1\", \"$id2\"]"
+    sed -i "s/selectedTests: {}/selectedTests: {\"test-set-0\": [\"$id1\", \"$id2\"]}/" "./keploy.yml" || true
+  else
+    echo "::notice::fewer than 2 recorded testcases; skipping selectedTests"
+  fi
 else
-  echo "::warning::keploy.yml missing; cannot set selectedTests"
+  echo "::notice::keploy.yml missing; cannot set selectedTests"
 fi
 
 run_replay 3 "--apiTimeout 30"
+
+if json_pass_supported; then
+  section "Replay (json)"
+  set +e
+  "$REPLAY_BIN" test --storage-format json -c 'npm start' --delay 10 \
+    > test_logs_json.txt 2>&1
+  rc=$?
+  set -e
+  echo "json replay exit code: $rc"
+  cat test_logs_json.txt || true
+  if grep -q "WARNING: DATA RACE" "test_logs_json.txt"; then
+    echo "::error::Data race detected in json replay"
+    exit 1
+  fi
+  if grep -q "ERROR" "test_logs_json.txt"; then
+    echo "::error::Error found in json replay"
+    exit 1
+  fi
+  if ! json_scan_reports; then
+    cat test_logs_json.txt
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    exit "$rc"
+  fi
+  endsec
+fi
 
 echo "All replays completed and PASSED."
 exit 0

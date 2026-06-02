@@ -25,7 +25,7 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 		if slices.Contains(cmdFields, "-cover") {
 			return true
 		}
-		logger.Warn("cover flag not found in command, skipping coverage calculation")
+		logger.Debug("cover flag not found in command, skipping coverage calculation")
 		return false
 	}
 	file, err := elf.Open(cmdFields[i])
@@ -51,6 +51,6 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 			return true
 		}
 	}
-	logger.Warn("go binary was not build with -cover flag", zap.String("file", cmd))
+	logger.Debug("go binary was not build with -cover flag", zap.String("file", cmd))
 	return false
 }

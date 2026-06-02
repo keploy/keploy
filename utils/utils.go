@@ -956,7 +956,7 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 		select {
 		case <-timeoutCh:
 			// If the timeout is reached, log the timeout and break
-			logger.Warn("Timed out waiting for process to exit", zap.Int("pid", pid))
+			logger.Debug("Timed out waiting for process to exit", zap.Int("pid", pid))
 			return nil
 		default:
 			// Check if the process is running

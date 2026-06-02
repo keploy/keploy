@@ -53,7 +53,7 @@ func (pm *IngressProxyManager) getActualDestination(ctx context.Context, clientC
 
 		// Delete the entry from hooks to clean up
 		if deleteErr := pm.hooks.Delete(ctx, srcPort); deleteErr != nil {
-			logger.Warn("Failed to delete destination entry for gRPC",
+			logger.Debug("Failed to delete destination entry for gRPC",
 				zap.Uint16("srcPort", srcPort),
 				zap.Error(deleteErr))
 		}

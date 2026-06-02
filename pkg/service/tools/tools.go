@@ -17,7 +17,7 @@ import (
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
 	"go.keploy.io/server/v3/utils"
@@ -25,11 +25,10 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, config *config.Config) Service {
 	return &Tools{
 		logger:      logger,
 		telemetry:   telemetry,
-		auth:        auth,
 		testSetConf: testsetConfig,
 		testDB:      testDB,
 		reportDB:    reportDB,
@@ -44,7 +43,6 @@ type Tools struct {
 	testDB      TestDB
 	reportDB    ReportDB
 	config      *config.Config
-	auth        service.Auth
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -58,7 +56,7 @@ func (t *Tools) Export(ctx context.Context) error {
 }
 
 func (t *Tools) Import(ctx context.Context, path, basePath string) error {
-	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
+	postmanImport := postmanimport.NewPostmanImporterWithFormat(ctx, t.logger, yaml.ParseFormat(t.config.StorageFormat))
 	return postmanImport.Import(path, basePath)
 }
 
@@ -345,10 +343,6 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 	return nil
 }
 
-func (t *Tools) Login(ctx context.Context) bool {
-	return t.auth.Login(ctx)
-}
-
 func (t *Tools) Templatize(ctx context.Context) error {
 
 	testSets := t.config.Templatize.TestSets
@@ -362,7 +356,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	}
 
 	if len(testSets) == 0 {
-		t.logger.Warn("No test sets found to templatize")
+		t.logger.Debug("No test sets found to templatize")
 		return nil
 	}
 
@@ -389,7 +383,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 
 		if len(tcs) == 0 {
-			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
+			t.logger.Debug("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
 

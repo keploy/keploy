@@ -24,7 +24,7 @@ type Instrumentation interface {
 	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
 	BeforeTestRun(ctx context.Context, testRunID string) error
-	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
@@ -46,7 +46,7 @@ type Service interface {
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
 	// UpdateTestSetTemplate persists the (possibly updated) template map for a test-set.
-	// Used during re-record to dynamically refresh values like JWTs/IDs as soon as
+	// Used during replay to dynamically refresh values like JWTs/IDs as soon as
 	// their producing API responses are observed, so subsequent test cases use the
 	// latest values rather than stale ones from the previous run.
 	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
@@ -54,9 +54,6 @@ type Service interface {
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
-
-	DownloadMocks(ctx context.Context) error
-	UploadMocks(ctx context.Context, testSets []string) error
 
 	StoreMappings(ctx context.Context, mapping *models.Mapping) error
 
@@ -98,7 +95,7 @@ type TestSetConfig interface {
 
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
-	TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{})
+	TestRun(success int, failure int, testSets int, mocksConsumed int, runStatus string, metadata map[string]interface{})
 	MockTestRun(utilizedMocks int)
 }
 
@@ -109,7 +106,7 @@ type TestHooks interface {
 	// for the provided test set during BeforeTestResult processing.
 	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error
-	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, testSetID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
 	BeforeTestSetReplay(ctx context.Context, testSetID string) error
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
@@ -129,4 +126,11 @@ type InstrumentState struct {
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
 	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
+	// Exists reports whether the mappings.yaml file is present on disk
+	// for the given test-set. Distinct from Get's second return (which
+	// reports "file present AND contains at least one test case with
+	// mocks") because the create-if-not-present write path needs to
+	// distinguish "no file at all" from "file exists but has empty
+	// entries" — only the former should trigger an automatic create.
+	Exists(ctx context.Context, testSetID string) (bool, error)
 }

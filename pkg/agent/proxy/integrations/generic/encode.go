@@ -147,7 +147,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	var genericRequests []models.Payload
 	var genericResponses []models.Payload
 	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
-	reqTimestampMock := time.Now()
+	reqTimestampMock := models.CapturedReqTime(ctx)
 	var resTimestampMock time.Time
 
 	flushMock := func() {
@@ -169,6 +169,17 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				ReqTimestampMock: reqTimestampMock,
 				ResTimestampMock: resTimestampMock,
 				Metadata:         metadata,
+			},
+			// Generic TCP has no well-defined protocol for the recorder to
+			// classify commands against; the legacy recorder tags every
+			// exchange Metadata["type"]="config" which DeriveLifetime
+			// previously resolved to LifetimeSession. Stamp that explicitly
+			// so the filter layer's authoritative routing (Lifetime-first,
+			// metadata.type fallback) short-circuits on a single enum
+			// compare — no map probe, no kind fallback.
+			TestModeInfo: models.TestModeInfo{
+				Lifetime:        models.LifetimeSession,
+				LifetimeDerived: true,
 			},
 		}
 		if mgr := syncMock.Get(); mgr != nil {
@@ -203,7 +214,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 			// timestamp to this request's arrival time.
 			if len(genericRequests) == 0 {
 				genericResponses = nil
-				reqTimestampMock = time.Now()
+				reqTimestampMock = models.CapturedReqTime(ctx)
 			}
 			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
 			prevChunkWasReq = true
@@ -214,7 +225,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				continue
 			}
 			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
-			resTimestampMock = time.Now()
+			resTimestampMock = models.CapturedRespTime(ctx)
 
 			// Flush the moment the first response chunk for an
 			// outstanding request arrives. This makes the mock visible

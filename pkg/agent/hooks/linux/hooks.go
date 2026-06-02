@@ -66,9 +66,11 @@ type Hooks struct {
 	socket      link.Link
 	connect4    link.Link
 	udp4Sendmsg link.Link
+	udp4Recvmsg link.Link
 	gp4         link.Link
 	connect6    link.Link
 	udp6Sendmsg link.Link
+	udp6Recvmsg link.Link
 	gp6         link.Link
 	objects     bpfObjects
 	cgBind4     link.Link
@@ -98,7 +100,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		<-ctx.Done()
 		h.unLoad(ctx, opts)
 
-		//deleting in order to free the memory in case of rerecord.
+		// deleting in order to free the memory on shutdown.
 		h.sess.Delete(uint64(0))
 		return nil
 	})
@@ -259,6 +261,30 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.udp4Sendmsg = udp4
 	}
 
+	// Partner to udp4_sendmsg: rewrites the source of the DNS reply back to
+	// the original nameserver address. Without it, strict DNS clients (RFC
+	// 5452 source validation — dnspython, raw recvfrom-based clients, glibc
+	// res_send on the unconnected path) see the reply coming from keploy's
+	// DNS port, reject it as spoofed, and retransmit until they time out
+	// with EAI_AGAIN / "Temporary failure in name resolution".
+	//
+	// Attach is non-fatal on purpose. `cgroup/recvmsg4` requires kernel
+	// >= 5.11; if it is not available the non-strict client paths (glibc
+	// res_send's connected branch, Go's pure resolver, dig, getent) still
+	// work via the existing getpeername4 hook, so a missing recvmsg4
+	// attach is a strict-subset degradation of the pre-fix behaviour
+	// rather than a regression.
+	udp4Recv, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP4Recvmsg,
+		Program: objs.K_udp4Recvmsg,
+	})
+	if err != nil {
+		h.logger.Warn("failed to attach the udp4 recvmsg cgroup hook (requires kernel >= 5.11; strict DNS clients may fail with EAI_AGAIN, other clients unaffected)", zap.Error(err))
+	} else {
+		h.udp4Recvmsg = udp4Recv
+	}
+
 	gp4, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet4GetPeername,
@@ -294,6 +320,22 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.udp6Sendmsg = udp6
 	}
 
+	// IPv6 partner to udp6_sendmsg — see the equivalent comment on the
+	// udp4_recvmsg attach above for the full rationale. Same attach-is-
+	// non-fatal trade-off: strict DNS clients lose source-address rewriting
+	// if the hook is missing, but every other client path continues to
+	// work via getpeername6.
+	udp6Recv, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupUDP6Recvmsg,
+		Program: objs.K_udp6Recvmsg,
+	})
+	if err != nil {
+		h.logger.Warn("failed to attach the udp6 recvmsg cgroup hook (requires kernel >= 5.11; strict DNS clients may fail with EAI_AGAIN, other clients unaffected)", zap.Error(err))
+	} else {
+		h.udp6Recvmsg = udp6Recv
+	}
+
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet6GetPeername,
@@ -310,9 +352,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	var agentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
-	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, agentInfo.KeployAgentDev, err = GetSelfInodeNumber()
 	if err != nil {
-		h.logger.Error("failed to get the inode number of the keploy process", zap.Error(err))
+		h.logger.Error("failed to read inode and dev of /proc/self/ns/pid for the keploy process; ensure /proc is mounted and accessible (not running under a restrictive procfs / sandbox that hides namespace files)", zap.Error(err))
 		return err
 	}
 	agentInfo.IsDocker = 0
@@ -326,7 +368,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if setupOpts.IsDocker {
 		var ts unix.Timespec
 		if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-			h.logger.Warn("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
+			h.logger.Debug("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
 		} else {
 			agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 			h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
@@ -395,6 +437,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 
+	if h.udp4Recvmsg != nil {
+		if err := h.udp4Recvmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp4 recvmsg hook")
+		}
+	}
+
 	if h.gp4 != nil {
 		if err := h.gp4.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the gp4")
@@ -410,6 +458,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.udp6Sendmsg != nil {
 		if err := h.udp6Sendmsg.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the udp6 sendmsg hook")
+		}
+	}
+	if h.udp6Recvmsg != nil {
+		if err := h.udp6Recvmsg.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udp6 recvmsg hook")
 		}
 	}
 	if h.gp6 != nil {
@@ -491,11 +544,20 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 			return structs.ProxyInfo{}, err
 		}
 
-		// Keep non-docker behavior backward-compatible with main by default:
-		// do not redirect generic IPv6 traffic to proxy unless an explicit
-		// proxy-port override is configured.
+		// Non-docker v6 redirect: when EnableIPv6Redirect is set (the
+		// default) we publish ::ffff:127.0.0.1 so the BPF cgroup program
+		// rewrites ::1 and other IPv6 destinations to the v4-mapped proxy
+		// address. Without this, modern Linux distros (glibc resolves
+		// localhost → ::1 before 127.0.0.1) would have their traffic
+		// silently bypass the proxy because the cgroup program cannot
+		// redirect to an all-zero address.
+		//
+		// The explicit cfg.Port override path kept the pre-existing
+		// behaviour (non-zero when a per-app port override was given) as
+		// a safety net; with the default flipped, that branch is now
+		// subsumed by the flag but we honour the override unconditionally.
 		var proxyIPv6 [4]uint32
-		if cfg.Port != 0 {
+		if opts.EnableIPv6Redirect || cfg.Port != 0 {
 			proxyIPv6, err = ToIPv4MappedIPv6("127.0.0.1")
 			if err != nil {
 				return structs.ProxyInfo{}, err

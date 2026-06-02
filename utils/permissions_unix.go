@@ -153,7 +153,7 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 
 	// Log the files with permission issues
 	fmt.Println()
-	logger.Warn("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
+	logger.Info("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
 
 	// Show the problematic files (up to 5, then "and X more...")
 	if len(permErrors) > 0 {
@@ -190,8 +190,8 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 				return context.Canceled
 			}
 		}
-		logger.Warn(fmt.Sprintf("Failed to authenticate sudo: %v", err))
-		logger.Warn(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
+		logger.Info(fmt.Sprintf("Failed to authenticate sudo: %v", err))
+		logger.Info(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
 		return fmt.Errorf("sudo authentication failed")
 	}
 
@@ -201,8 +201,8 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		logger.Warn(fmt.Sprintf("Failed to fix permissions: %v", err))
-		logger.Warn(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
+		logger.Info(fmt.Sprintf("Failed to fix permissions: %v", err))
+		logger.Info(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", currentUser.Username, keployPath))
 		return fmt.Errorf("failed to fix permissions")
 	}
 
@@ -311,7 +311,7 @@ func FixFilePermission(ctx context.Context, logger *zap.Logger, filePath string)
 		return fmt.Errorf("failed to get current user: %w", err)
 	}
 
-	logger.Warn("Cannot access file (likely owned by root from older keploy version)",
+	logger.Debug("Cannot access file (likely owned by root from older keploy version)",
 		zap.String("path", filePath))
 	logger.Info(fmt.Sprintf("Running: sudo chown %s %s", currentUser.Username, filePath))
 
@@ -378,7 +378,7 @@ func RestoreKeployFolderOwnership(logger *zap.Logger, keployPath string) {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		logger.Warn("Failed to restore keploy folder ownership",
+		logger.Debug("Failed to restore keploy folder ownership",
 			zap.String("user", sudoUser),
 			zap.String("path", keployPath),
 			zap.Error(err))
