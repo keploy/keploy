@@ -372,6 +372,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MongoPassword = r.config.Test.MongoPassword
 		outOpts.SQLDelay = time.Duration(r.config.Test.Delay) * time.Second
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
+		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
 		outOpts.MysqlPorts = r.config.MysqlPorts
 	}
 	if headerNoise, ok := r.globalNoise["header"]; ok {

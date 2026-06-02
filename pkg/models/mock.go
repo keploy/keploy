@@ -663,6 +663,12 @@ type MockState struct {
 	// workloads whose recorder classifies handshake / pool-warmup /
 	// catalog probes as session-tier (#empty-mapping bug).
 	Lifetime Lifetime `json:"lifetime,omitempty"`
+	// ReqBodyNoise carries field-path request-body noise detected during
+	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
+	// back from the agent to the replay service so UpdateMocks can persist
+	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
+	// -> regex list; empty list means "ignore the whole field".
+	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
@@ -743,6 +749,16 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
+		// Deep copy the request-body noise map so a clone's detected noise
+		// can't mutate the shared pooled mock's map (and vice versa).
+		if m.Spec.HTTPReq.ReqBodyNoise != nil {
+			httpReqCopy.ReqBodyNoise = make(map[string][]string, len(m.Spec.HTTPReq.ReqBodyNoise))
+			for k, v := range m.Spec.HTTPReq.ReqBodyNoise {
+				vc := make([]string, len(v))
+				copy(vc, v)
+				httpReqCopy.ReqBodyNoise[k] = vc
+			}
+		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {

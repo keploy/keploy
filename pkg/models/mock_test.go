@@ -14,6 +14,36 @@ import (
 // these strings silently splits the pool. The integrations-repo
 // recorder is expected to migrate to these constants in a follow-up
 // commit so the string literal and the constant remain identical.
+func TestDeepCopyPreservesReqBodyNoise(t *testing.T) {
+	orig := &Mock{
+		Kind: Kind(HTTP),
+		Spec: MockSpec{
+			HTTPReq: &HTTPReq{
+				Body:         `{"id":"a"}`,
+				ReqBodyNoise: map[string][]string{"body.id": {}, "body.ts": {"re"}},
+			},
+		},
+	}
+
+	c := orig.DeepCopy()
+	if c.Spec.HTTPReq == nil {
+		t.Fatal("DeepCopy dropped HTTPReq")
+	}
+	if len(c.Spec.HTTPReq.ReqBodyNoise) != 2 {
+		t.Fatalf("DeepCopy dropped ReqBodyNoise: %v", c.Spec.HTTPReq.ReqBodyNoise)
+	}
+
+	// Mutating the copy must not affect the original (independent backing maps).
+	c.Spec.HTTPReq.ReqBodyNoise["body.new"] = []string{}
+	c.Spec.HTTPReq.ReqBodyNoise["body.ts"] = append(c.Spec.HTTPReq.ReqBodyNoise["body.ts"], "x")
+	if _, ok := orig.Spec.HTTPReq.ReqBodyNoise["body.new"]; ok {
+		t.Fatal("DeepCopy shared the noise map with the original")
+	}
+	if len(orig.Spec.HTTPReq.ReqBodyNoise["body.ts"]) != 1 {
+		t.Fatal("DeepCopy shared a noise slice with the original")
+	}
+}
+
 func TestMockNamePostgresV3Constants(t *testing.T) {
 	if MockNamePostgresV3Query != "PostgresV3Query" {
 		t.Fatalf("MockNamePostgresV3Query: want %q, got %q", "PostgresV3Query", MockNamePostgresV3Query)

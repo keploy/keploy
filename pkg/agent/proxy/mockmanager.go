@@ -1737,6 +1737,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			Lifetime:         new.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
+			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -1785,6 +1786,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -1824,6 +1826,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2050,6 +2053,16 @@ func (m *MockManager) rebuildHitIndex(slices ...[]*models.Mock) {
 // order; subsequent calls for the same name update the stored state in-place
 // without changing its position. This preserves true network call order in
 // GetConsumedMocks.
+// reqBodyNoiseOf returns the field-path request-body noise detected on an HTTP
+// mock's request (nil for non-HTTP mocks or when none was detected). Used to
+// carry schema-detected noise out on MockState so UpdateMocks can persist it.
+func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
+	if spec.HTTPReq == nil {
+		return nil
+	}
+	return spec.HTTPReq.ReqBodyNoise
+}
+
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")

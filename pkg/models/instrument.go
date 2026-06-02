@@ -63,6 +63,7 @@ type OutgoingOptions struct {
 	Backdate               time.Time                      // used to set backdate in cacert request
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
+	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
 	// CapturePackets toggles raw packet capture on the agent's proxy ports
