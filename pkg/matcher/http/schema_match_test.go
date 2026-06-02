@@ -8,7 +8,8 @@ import (
 )
 
 // TestSchemaMatch_HeadersResult verifies that result.HeadersResult is populated
-// and the pass/fail banner matches the actual outcome (regression for issue #4221).
+// correctly and the pass/fail return value is consistent with header existence
+// (regression for issue #4221).
 func TestSchemaMatch_HeadersResult(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 

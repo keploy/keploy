@@ -109,10 +109,14 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	// (c) missing headers are surfaced in the diff printer output.
 	for k, v := range tc.HTTPResp.Header {
 		actualVal, ok := actualResponse.Header[k]
+		var actualVals []string
+		if ok {
+			actualVals = []string{actualVal}
+		}
 		result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
 			Normal:   ok,
 			Expected: models.Header{Key: k, Value: []string{v}},
-			Actual:   models.Header{Key: k, Value: []string{actualVal}},
+			Actual:   models.Header{Key: k, Value: actualVals},
 		})
 		if !ok {
 			pass = false
