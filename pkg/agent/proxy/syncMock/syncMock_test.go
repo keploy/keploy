@@ -12,43 +12,46 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-func TestSetMemoryPressureClearsBufferedMocksAndDropsNewOnes(t *testing.T) {
+func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testing.T) {
 	t.Parallel()
+
+	// Requests from before pressure: their TCs were captured at the ingress,
+	// so their mocks must survive pressure or replay orphans those TCs.
+	calmTime := time.Now().Add(-10 * time.Second)
 
 	mgr := &SyncMockManager{
 		buffer: []*models.Mock{
-			{
-				Spec: models.MockSpec{ReqTimestampMock: time.Now()},
-			},
-			{
-				Spec: models.MockSpec{ReqTimestampMock: time.Now()},
-			},
+			{Spec: models.MockSpec{ReqTimestampMock: calmTime}},
+			{Spec: models.MockSpec{ReqTimestampMock: calmTime}},
 		},
 	}
-	oldBuffer := mgr.buffer
 
 	mgr.SetMemoryPressure(true)
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected memory pressure to clear buffered mocks, got %d items", len(mgr.buffer))
-	}
-	if cap(mgr.buffer) != defaultMockBufferCapacity {
-		t.Fatalf("expected buffer capacity to reset to %d, got %d", defaultMockBufferCapacity, cap(mgr.buffer))
-	}
-	for i, mock := range oldBuffer {
-		if mock != nil {
-			t.Fatalf("expected cleared buffer entry %d to be nil", i)
-		}
+
+	// Calm-captured buffered mocks must NOT be wiped by pressure.
+	if len(mgr.buffer) != 2 {
+		t.Fatalf("expected calm-captured buffered mocks to survive pressure, got %d", len(mgr.buffer))
 	}
 
+	// A mock whose request happened DURING pressure was never captured at the
+	// ingress (no TC) → safe to drop.
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected memory pressure to drop new mocks, got %d buffered items", len(mgr.buffer))
+	if len(mgr.buffer) != 2 {
+		t.Fatalf("expected pressure-request mock to be dropped, buffer changed to %d", len(mgr.buffer))
 	}
 
+	// A mock decoded late DURING pressure but whose request was during calm
+	// belongs to a captured TC → must be kept (the orphan fix).
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: calmTime}})
+	if len(mgr.buffer) != 3 {
+		t.Fatalf("expected late calm-request mock to be kept during pressure, got %d", len(mgr.buffer))
+	}
+
+	// After recovery, mocks buffer normally again.
 	mgr.SetMemoryPressure(false)
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	if len(mgr.buffer) != 1 {
-		t.Fatalf("expected buffer to accept mocks after recovery, got %d buffered items", len(mgr.buffer))
+	if len(mgr.buffer) != 4 {
+		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
 	}
 }
 

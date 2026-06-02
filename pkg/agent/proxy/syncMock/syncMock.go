@@ -384,23 +384,34 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
-		m.mu.Unlock()
-		totalDropped := m.pressureDropped.Add(1)
-		totalAdded := m.totalAdded.Load()
-		if logger := m.dropLogger(); logger != nil {
-			logger.Info("agent: mock dropped by memory pressure",
-				zap.String("dropped_mock", pressureDropSummary(mock, totalDropped, totalAdded)),
-				zap.String("tc_correlation", tcCorrHint(mock)),
-				zap.String("mock_kind", string(mock.Kind)),
-				zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-				zap.Int64("mocks_dropped_total", totalDropped),
-				zap.Int64("mocks_added_total", totalAdded),
-			)
+		// Pressure is on at decode time, but this mock may have been decoded
+		// late for a request that happened during calm — its TC was captured
+		// at the ingress, so dropping the mock would orphan it. Decide by the
+		// request time, not now: drop only if the request ITSELF happened
+		// during pressure (the ingress never captured it, so there is no TC).
+		// Unknown timestamp → keep (safer than orphaning a captured TC).
+		reqTime := mock.Spec.ReqTimestampMock
+		if !reqTime.IsZero() && m.pressureActiveAtLocked(reqTime) {
+			m.mu.Unlock()
+			totalDropped := m.pressureDropped.Add(1)
+			totalAdded := m.totalAdded.Load()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("agent: mock dropped by memory pressure",
+					zap.String("dropped_mock", pressureDropSummary(mock, totalDropped, totalAdded)),
+					zap.String("tc_correlation", tcCorrHint(mock)),
+					zap.String("mock_kind", string(mock.Kind)),
+					zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
+					zap.Int64("ts_ms", time.Now().UnixMilli()),
+					zap.Int64("mocks_dropped_total", totalDropped),
+					zap.Int64("mocks_added_total", totalAdded),
+				)
+			}
+			return
 		}
-		return
+		// Request was during calm (or timestamp unknown) → its TC was captured
+		// → keep this mock; fall through to the normal buffer/forward path.
 	}
-	// Mock is NOT being pressure-dropped — count it as successfully added.
+	// Mock is being kept — count it as successfully added.
 	m.totalAdded.Add(1)
 
 	// Decide forward vs buffer vs drop under a single snapshot of
@@ -693,6 +704,24 @@ func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool,
 	return count > 0, count
 }
 
+// pressureActiveAtLocked reports whether instant t fell inside any recorded
+// pressure interval. Caller MUST hold m.mu (this is the unlocked twin of
+// WasPressureActiveInWindow, used on the AddMock / SetMemoryPressure paths
+// that already hold the lock). A still-open interval extends to now.
+func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		end := r.end
+		if end.IsZero() {
+			end = now
+		}
+		if !t.Before(r.start) && !t.After(end) {
+			return true
+		}
+	}
+	return false
+}
+
 // PressureRangeCount returns the total number of pressure intervals recorded
 // so far. Exposed for the session-summary log in routes/record.go.
 func (m *SyncMockManager) PressureRangeCount() int {
@@ -738,13 +767,8 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	m.mu.Lock()
 	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
-	var bufSizeBeforeClear int
+	var clearedFromBuffer int
 	if enabled {
-		bufSizeBeforeClear = len(m.buffer)
-		for i := range m.buffer {
-			m.buffer[i] = nil
-		}
-		m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
 		if !wasEnabled {
 			// false→true transition: open a new pressure interval.
 			// memoryguard fires SetMemoryPressure(true) once per 500ms tick,
@@ -753,6 +777,26 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			// for range tracking — they would otherwise spam the slice.
 			m.pressureRanges = append(m.pressureRanges, pressureRange{start: now})
 		}
+		// Don't wipe the whole buffer: a mock whose request happened during
+		// calm belongs to an already-captured TC and must survive (else replay
+		// orphans it). Drop only mocks whose request was during pressure — the
+		// ingress never captured those, so there is no TC to orphan. Unknown
+		// timestamp → keep (safe default). In-place filter, then nil the tail.
+		before := len(m.buffer)
+		keep := m.buffer[:0]
+		for _, mk := range m.buffer {
+			if mk == nil {
+				continue
+			}
+			if rt := mk.Spec.ReqTimestampMock; rt.IsZero() || !m.pressureActiveAtLocked(rt) {
+				keep = append(keep, mk)
+			}
+		}
+		for i := len(keep); i < before; i++ {
+			m.buffer[i] = nil
+		}
+		m.buffer = keep
+		clearedFromBuffer = before - len(keep)
 	} else if wasEnabled {
 		// true→false transition: close the most recent open interval.
 		// The defensive len check covers the degenerate case where
@@ -769,8 +813,8 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if logger := m.dropLogger(); logger != nil {
 		if enabled && !wasEnabled {
 			// Pressure just turned ON (false→true transition)
-			logger.Info("agent: memory pressure activated — mock buffer cleared",
-				zap.Int("mocks_cleared_from_buffer", bufSizeBeforeClear),
+			logger.Info("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
+				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
 				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
 				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
 			)
