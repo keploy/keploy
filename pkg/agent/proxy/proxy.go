@@ -684,9 +684,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// disables the channel-binding fix without affecting anything else.
 	if cb, err := cbshim.New(logger); err == nil {
 		proxy.SetCBShim(cb)
-		logger.Debug("cbshim: BPF-backed channel-binding shim enabled")
+		logger.Info("cbshim: BPF-backed channel-binding shim enabled")
 	} else {
-		logger.Debug("cbshim: disabled — SCRAM-SHA-256-PLUS clients "+
+		logger.Info("cbshim: disabled — SCRAM-SHA-256-PLUS clients "+
 			"will fail across the MITM as today",
 			zap.Error(err))
 	}
@@ -906,11 +906,18 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// means we don't yet know the app PID — also a no-op; future
 	// session-bind paths can call this explicitly.
 	if p.cbshim != nil && p.appPID != 0 {
+		p.logger.Info("cbshim: attaching to process tree", zap.Uint32("appPID", p.appPID))
 		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
-			p.logger.Debug("cbshim: initial AttachToProcessTree returned error (rescan loop will retry)",
+			p.logger.Info("cbshim: initial AttachToProcessTree returned error (rescan loop will retry)",
 				zap.Uint32("appPID", p.appPID), zap.Error(err))
+		} else {
+			p.logger.Info("cbshim: initial AttachToProcessTree succeeded", zap.Uint32("appPID", p.appPID))
 		}
 		p.cbshim.WatchProcessTree(ctx, int(p.appPID))
+	} else if p.cbshim == nil {
+		p.logger.Info("cbshim: nil — skipping AttachToProcessTree (BPF load failed at proxy.New)")
+	} else {
+		p.logger.Info("cbshim: appPID==0 — skipping AttachToProcessTree (no app PID yet)")
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
