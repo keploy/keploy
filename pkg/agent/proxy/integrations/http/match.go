@@ -1090,7 +1090,17 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			out[key] = []string{} // key dropped on replay
 			continue
 		}
-		if strings.Join(rv, ",") != strings.Join(mv, ",") {
+		// Compare occurrences element-wise (order-sensitive) rather than
+		// joining: a join is lossy when values embed the separator or the
+		// repeated-key cardinality differs (["a","bc"] vs ["a,bc"]), which
+		// would miss or falsely report drift. Mirrors formBodiesMatchModuloNoise.
+		drifted := len(rv) != len(mv)
+		for i := 0; !drifted && i < len(mv); i++ {
+			if rv[i] != mv[i] {
+				drifted = true
+			}
+		}
+		if drifted {
 			out[key] = []string{} // value drifted
 		}
 	}
