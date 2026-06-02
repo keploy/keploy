@@ -1251,6 +1251,25 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 	}
 }
 
+// CurrentTestWindow returns the [start, end] request-timestamp bounds of the
+// outer test currently being replayed (as set by SetCurrentTestWindow /
+// SetMocksWithWindow). Both zero means no window is active (initial staging
+// or between tests). Read under windowMu so callers see a tear-free pair.
+//
+// Exposed for matchers that receive data mocks in the SESSION pool (because
+// the enterprise agent lax-promotes per-test data mocks to session and lets
+// MockManager.SetMocksWithWindow enforce strict windowing) but still need to
+// distinguish a mock recorded INSIDE the current test window from one
+// recorded for an earlier test. The MySQL replayer uses this to disambiguate
+// repeated identical prepared-statement reads (e.g. login's username lookup,
+// register's read-back of a freshly-generated id) so each consumes the row
+// recorded at that position rather than a stale earlier-test row.
+func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.windowStart, m.windowEnd
+}
+
 // GetPerTestMocksInWindow is the unification-plan canonical name for
 // the time-windowed per-test pool. Aliases GetFilteredMocksInWindow
 // during Phase 2 migration. SetMocksWithWindow already pre-filters
