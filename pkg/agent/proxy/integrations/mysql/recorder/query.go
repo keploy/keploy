@@ -34,11 +34,14 @@ type mysqlDecodeItem struct {
 // may end up missing or mid-stream-truncated. Sampled power-of-2 to stay
 // flood-safe in the hot forwarding path.
 var (
-	traceMySQLPressureSkipReq  atomic.Int64
-	traceMySQLPressureSkipResp atomic.Int64
+	// pressure-active-fed: bytes fed to the decoder while memory pressure
+	// was active (connection started in calm, pressure hit mid-connection).
+	// Under the old code these would have been silently dropped → orphan TC.
+	// Now they are always forwarded; this counter is diagnostic only.
+	traceMySQLPressureKeptReq  atomic.Int64
+	traceMySQLPressureKeptResp atomic.Int64
 	// channel-full drops: decoder fell behind, decodeChan was full, the
-	// recording copy was dropped (real bytes still forwarded). This is the
-	// prime suspect for teardown mock-loss — counted on the PRIMARY path.
+	// recording copy was dropped (real bytes still forwarded).
 	traceMySQLChanFullReq  atomic.Int64
 	traceMySQLChanFullResp atomic.Int64
 )
@@ -182,7 +185,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				logger.Info("TRACE/mysql-shutdown: recording ctx cancelled — final decode pipeline snapshot",
 					zap.Int("decodeChan_pending", len(decodeChan)),
 					zap.Int("decodeChan_cap", cap(decodeChan)),
-					zap.Int64("total_pressure_skips", traceMySQLPressureSkipReq.Load()+traceMySQLPressureSkipResp.Load()),
+					zap.Int64("pressure_kept_req", traceMySQLPressureKeptReq.Load()),
+					zap.Int64("pressure_kept_resp", traceMySQLPressureKeptResp.Load()),
 					zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
 					zap.Int64("ts_ms", time.Now().UnixMilli()),
 				)
@@ -195,7 +199,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 					zap.Int("decodeChan_pending", pending),
 					zap.Int("decodeChan_cap", capChan),
 					zap.Int("fill_pct", pctFull),
-					zap.Int64("pressure_skips", traceMySQLPressureSkipReq.Load()+traceMySQLPressureSkipResp.Load()),
+					zap.Int64("pressure_kept", traceMySQLPressureKeptReq.Load()+traceMySQLPressureKeptResp.Load()),
 					zap.Int64("chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
 					zap.Int64("ts_ms", time.Now().UnixMilli()),
 				)
@@ -203,28 +207,24 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		}
 	}()
 
-	// forwardClient/forwardDest replay the steady-state forwarding
-	// logic (write to peer + non-blocking copy into the decoder) so
-	// the drain helpers below can reuse it without duplication.
+	// forwardClient/forwardDest: always feed bytes to the decoder for
+	// connections that started in recording mode. The entry-point check
+	// above handles new connections under pressure (passthrough); once
+	// recording started, dropping mid-connection bytes creates orphan TCs.
 	forwardClient := func(buf []byte) {
 		if buf == nil {
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 			default:
 			}
-		} else if memoryguard.IsRecordingPaused() {
-			if n := traceMySQLPressureSkipReq.Add(1); n&(n-1) == 0 {
-				logger.Info("TRACE/mysql-mock-skip: PRESSURE — client/request bytes NOT fed to decoder (mock will be missing or mid-stream truncated)",
-					zap.Int("bytes", len(buf)),
-					zap.Int64("ts_ms", models.CapturedReqTime(ctx).UnixMilli()),
-					zap.Int64("total_req_pressure_skips", n),
-				)
+			if memoryguard.IsRecordingPaused() {
+				traceMySQLPressureKeptReq.Add(1)
 			}
 		}
 	}
@@ -233,20 +233,15 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 			default:
 			}
-		} else if memoryguard.IsRecordingPaused() {
-			if n := traceMySQLPressureSkipResp.Add(1); n&(n-1) == 0 {
-				logger.Info("TRACE/mysql-mock-skip: PRESSURE — server/response bytes NOT fed to decoder (mock will be missing or mid-stream truncated)",
-					zap.Int("bytes", len(buf)),
-					zap.Int64("ts_ms", models.CapturedRespTime(ctx).UnixMilli()),
-					zap.Int64("total_resp_pressure_skips", n),
-				)
+			if memoryguard.IsRecordingPaused() {
+				traceMySQLPressureKeptResp.Add(1)
 			}
 		}
 	}
@@ -368,13 +363,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// Non-blocking send to async decode. Check channel capacity
 			// before copying to avoid allocation/GC churn when the decoder
 			// can't keep up (the copy would just be dropped).
-			// TRACE (Bug-0 loss proof): count the two silent drops on the
-			// PRIMARY recording path — pressure-skip and decodeChan-full
-			// (decoder behind). Counters only (no per-chunk log) to stay
-			// flood-safe; reported in the shutdown snapshot below.
 			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureSkipReq.Add(1)
-			} else if len(decodeChan) >= cap(decodeChan) {
+				traceMySQLPressureKeptReq.Add(1)
+			}
+			if len(decodeChan) >= cap(decodeChan) {
 				traceMySQLChanFullReq.Add(1)
 			} else {
 				buf := make([]byte, len(buffer))
@@ -405,8 +397,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// Non-blocking send to async decode.
 			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureSkipResp.Add(1)
-			} else if len(decodeChan) >= cap(decodeChan) {
+				traceMySQLPressureKeptResp.Add(1)
+			}
+			if len(decodeChan) >= cap(decodeChan) {
 				traceMySQLChanFullResp.Add(1)
 			} else {
 				buf := make([]byte, len(buffer))
