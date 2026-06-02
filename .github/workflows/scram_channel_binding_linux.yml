@@ -113,6 +113,7 @@ jobs:
           path: |
             .github/workflows/test_workflow_scripts/python/scram-channel-binding/record_logs.txt
             .github/workflows/test_workflow_scripts/python/scram-channel-binding/test_logs.txt
+            .github/workflows/test_workflow_scripts/python/scram-channel-binding/postgres_logs.txt
             .github/workflows/test_workflow_scripts/python/scram-channel-binding/keploy/
           if-no-files-found: warn
           retention-days: 7

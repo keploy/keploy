@@ -45,8 +45,14 @@ cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/scram-chann
 
 # pkill keploy by comm to avoid -f self-matches against this script.
 # See outbound-fin-stall/python-linux.sh for the matching rationale.
+# On exit, dump the postgres container's logs so the uploaded artifact
+# carries the server-side view of what happened (auth attempts, TLS
+# handshake errors, etc) — invaluable for debugging SCRAM-PLUS failures.
 cleanup() {
     echo "cleanup..."
+    # Dump postgres logs before tearing down the container — they're
+    # the server-side view of every SCRAM-PLUS attempt.
+    docker compose logs postgres 2>/dev/null > postgres_logs.txt || true
     sudo pkill -9 keploy 2>/dev/null || true
     docker compose down -v 2>/dev/null || true
     sleep 1
@@ -86,6 +92,33 @@ done
 if [ "$ready" -ne 1 ]; then
     echo "::error::postgres did not become healthy within 60s"
     docker compose logs postgres | tail -100
+    exit 1
+fi
+
+echo "=== baseline: connect to postgres WITHOUT keploy to verify the cluster works ==="
+# Run the same SCRAM-PLUS conninfo psycopg2 will use, but BEFORE keploy
+# starts. If this fails, the cert/SCRAM setup is broken — bail early
+# with a clear message rather than blaming cbshim.
+baseline_rc=0
+python3 - <<'PY' || baseline_rc=$?
+import psycopg2, sys, traceback
+try:
+    conn = psycopg2.connect(
+        "host=127.0.0.1 port=5432 dbname=app user=app password=app-secret "
+        "sslmode=require channel_binding=require"
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT 1")
+    print("baseline ok: SCRAM-PLUS works against the postgres cluster without keploy in the path")
+    cur.close(); conn.close()
+except Exception as e:
+    print(f"baseline FAILED: {e}", file=sys.stderr)
+    traceback.print_exc()
+    sys.exit(2)
+PY
+if [ "$baseline_rc" -ne 0 ]; then
+    echo "::error::SCRAM-PLUS does not work even WITHOUT keploy in the path (rc=$baseline_rc); the postgres cluster or cert setup is broken — not a cbshim issue"
+    docker compose logs postgres | tail -60
     exit 1
 fi
 
