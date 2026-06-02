@@ -365,6 +365,123 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 	}
 }
 
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP
+// is the regression test for issue #2006.
+//
+// Root cause (Fix B): in test mode, a mock-miss triggers forwardDNSUpstream.
+// When the app runs in docker-compose the upstream is Docker's embedded DNS
+// 127.0.0.11:53 (port 53 ≠ proxy's DNSPort 26789, so it passes the
+// self-referential-loopback filter). For a bare service name like "localstack"
+// Docker's DNS answers NXDOMAIN (Rcode=3). The old code returned ANY non-nil
+// upstream response, so the NXDOMAIN was relayed straight to the app,
+// bypassing defaultDNSResponse — the synthetic A→proxy-IP fallback that is
+// supposed to catch every unknown name in test mode.
+//
+// After Fix B: forwardDNSUpstream's answer is only accepted when
+// Rcode == RcodeSuccess AND len(Answer) > 0. A NXDOMAIN falls through to
+// defaultDNSResponse, which returns the proxy IP so eBPF can intercept the
+// TCP connection and match it against the recorded HTTP mocks.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP(t *testing.T) {
+	// Fake upstream that always returns NXDOMAIN (Docker embedded DNS
+	// behaviour for bare service names like "localstack" that have no
+	// matching entry in the docker-compose network).
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeNameError // NXDOMAIN
+		// No Answer RRs — this is exactly what Docker's 127.0.0.11:53 sends.
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	// "localstack" is the bare service name from the issue — no FQDN,
+	// so Docker DNS returns NXDOMAIN for it.
+	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	// The result MUST be the proxy's synthetic A record (127.0.0.1), not
+	// NXDOMAIN. eBPF intercepts all TCP regardless of dest IP, so any
+	// resolvable address lets the mock match.
+	if entry.Msg == nil {
+		t.Fatalf("expected synthetic fallback response, got nil Msg")
+	}
+	if entry.Msg.Rcode == dns.RcodeNameError {
+		t.Errorf("upstream NXDOMAIN leaked to app (Rcode=%d); expected synthetic proxy-IP fallback (Rcode=0) — this is issue #2006", entry.Msg.Rcode)
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want %d (RcodeSuccess)", entry.Msg.Rcode, dns.RcodeSuccess)
+	}
+	if len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected 1 synthetic A answer, got %d answers", len(entry.Msg.Answer))
+	}
+	a, ok := entry.Msg.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer not *dns.A: %T", entry.Msg.Answer[0])
+	}
+	if !a.A.Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("synthetic A = %v, want 127.0.0.1 (proxy IP4, not NXDOMAIN)", a.A)
+	}
+	if entry.FromUpstream {
+		t.Errorf("entry.FromUpstream = true; must be false for synthetic fallback")
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
+// confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
+// real cluster-internal name still passes through unchanged after Fix B.
+// This guards against an over-broad filter that would break the sap-demo
+// use case (mysql.svc.cluster.local → real CoreDNS answer → real IP).
+func TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess
+		if len(r.Question) > 0 {
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   r.Question[0].Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    30,
+				},
+				A: net.ParseIP("10.96.5.1"),
+			})
+		}
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "mysql.sap-demo.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatalf("expected forwarded response, got nil Msg")
+	}
+	if !entry.FromUpstream {
+		t.Errorf("entry.FromUpstream = false; expected true for valid upstream answer")
+	}
+	if len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected 1 upstream answer, got %d", len(entry.Msg.Answer))
+	}
+	a, ok := entry.Msg.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer not *dns.A: %T", entry.Msg.Answer[0])
+	}
+	if !a.A.Equal(net.ParseIP("10.96.5.1")) {
+		t.Errorf("A = %v, want 10.96.5.1 (real cluster IP from upstream, not proxy IP)", a.A)
+	}
+}
+
 // TestCaptureDNSUpstream_ReadsResolvConf verifies the startup
 // capture reads a resolv.conf file and correctly filters
 // self-referential loopback entries (loopback at the proxy's own DNS
