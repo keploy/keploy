@@ -701,6 +701,16 @@ jobs:
     # bug — call-2 hits the 60s read_timeout, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/outbound-fin-stall-linux.yml
+  run_scram_channel_binding_linux:
+    # E2E for the BPF channel-binding shim (PR #4239) — verifies
+    # SCRAM-SHA-256-PLUS works through keploy's TLS MITM for
+    # auditwheel-bundled libcrypto (psycopg2-binary), the case that
+    # broke the legacy LD_PRELOAD cbshim. Matrix runs the standard
+    # 3-config record/replay grid; record_build_replay_build must
+    # pass, the latest-touching legs are continue-on-error until a
+    # release containing the cbshim ships.
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/scram_channel_binding_linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
@@ -1142,6 +1152,7 @@ jobs:
       - run_python_linux
       - run_http_stale_pool_race_linux
       - run_outbound_fin_stall_linux
+      - run_scram_channel_binding_linux
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
@@ -1164,6 +1175,7 @@ jobs:
             "${{ needs.run_python_linux.result }}" \
             "${{ needs.run_http_stale_pool_race_linux.result }}" \
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
+            "${{ needs.run_scram_channel_binding_linux.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
