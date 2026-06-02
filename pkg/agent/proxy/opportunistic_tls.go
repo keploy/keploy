@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -272,6 +273,29 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 		return fmt.Errorf("upstream handshake to %s: %w", dstAddr, err)
 	}
 	defer tlsUpstream.Close()
+
+	// Publish the upstream's real leaf cert into the cbshim's
+	// rendezvous so SCRAM-SHA-256-PLUS clients get the real cert's
+	// hash substituted in place of the MITM cert's hash. Without this
+	// the opportunistic-TLS path is invisible to cbshim — only the
+	// parser-directive path (relay/directive_proc.go::handleUpgradeTLS)
+	// publishes today, so any postgres client whose protocol has no
+	// registered parser (OSS doesn't ship PostgresV3) falls through to
+	// hijackAndMITM and breaks SCRAM-PLUS. The connID matches the one
+	// CertForClient uses (client's source port as decimal string) so
+	// the MITM half (RegisterMITM, fired from CertForClient inside
+	// HandleTLSConnection above) and the real half rendezvous on the
+	// same key.
+	if p.cbshim != nil {
+		state := tlsUpstream.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
+				leaf := state.PeerCertificates[0]
+				connID := strconv.Itoa(tcpAddr.Port)
+				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+			}
+		}
+	}
 
 	p.logger.Debug("opportunistic TLS intercept: hijacked, both sides MITM'd",
 		zap.String("upstream", dstAddr),
