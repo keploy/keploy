@@ -86,20 +86,28 @@ func TestDetectReqBodyNoise(t *testing.T) {
 }
 
 func TestMergeReqBodyNoise(t *testing.T) {
-	existing := map[string][]string{"body.id": {}}
-	detected := map[string][]string{"body.id": {"ignored"}, "body.ts": {}}
+	existing := map[string][]string{"body.id": {"keep"}}
+	detected := map[string][]string{"body.id": {"ignored"}, "body.ts": {"orig"}}
 	merged := mergeReqBodyNoise(existing, detected)
 
 	if len(merged) != 2 {
 		t.Fatalf("expected 2 keys, got %v", merged)
 	}
-	// Existing entry must win on collision (stays the empty slice).
-	if v, ok := merged["body.id"]; !ok || len(v) != 0 {
-		t.Fatalf("expected existing body.id to win, got %v", merged["body.id"])
+	// Existing entry must win on collision (detected's value is dropped).
+	if v := merged["body.id"]; len(v) != 1 || v[0] != "keep" {
+		t.Fatalf("expected existing body.id to win, got %v", v)
 	}
-	// Mutating the result must not touch the inputs (fresh backing storage).
-	merged["body.ts"] = append(merged["body.ts"], "x")
-	if len(detected["body.ts"]) != 0 {
-		t.Fatalf("merge leaked backing storage into detected input")
+
+	// Mutate the merged slices by index — not via append — and assert the
+	// inputs are untouched. Non-empty slices + index mutation is what actually
+	// proves fresh backing storage: append on an empty slice always reallocates,
+	// so it would pass even if mergeReqBodyNoise aliased the input slice.
+	merged["body.ts"][0] = "mutated"
+	if detected["body.ts"][0] != "orig" {
+		t.Fatalf("merge leaked backing storage into detected input: %v", detected["body.ts"])
+	}
+	merged["body.id"][0] = "mutated"
+	if existing["body.id"][0] != "keep" {
+		t.Fatalf("merge leaked backing storage into existing input: %v", existing["body.id"])
 	}
 }
