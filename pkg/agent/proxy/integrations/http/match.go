@@ -1044,27 +1044,53 @@ func isFormURLEncoded(header map[string]string) bool {
 // drifted/removed keys as body.<key> field-path noise. Keys already known or
 // covered by the obfuscator value-regexes are skipped.
 func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
-	mockVals, err1 := url.ParseQuery(mockBody)
-	reqVals, err2 := url.ParseQuery(reqBody)
-	if err1 != nil || err2 != nil {
-		return nil
+	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
+	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
+	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
+	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
+	// only the decoded value here would never match a key-anchored regex, so
+	// obfuscated form fields would be wrongly re-flagged as schema noise.
+	rawValuesByKey := func(body string) map[string][]string {
+		out := map[string][]string{}
+		for _, seg := range strings.Split(body, "&") {
+			if seg == "" {
+				continue
+			}
+			key, val := seg, ""
+			if i := strings.IndexByte(seg, '='); i >= 0 {
+				key, val = seg[:i], seg[i+1:]
+			}
+			out[key] = append(out[key], val)
+		}
+		return out
 	}
+	mockVals := rawValuesByKey(mockBody)
+	reqVals := rawValuesByKey(reqBody)
+
 	out := map[string][]string{}
-	for k, mv := range mockVals {
-		key := "body." + k
+	for rawKey, mv := range mockVals {
+		key := "body." + rawKey
 		if _, ok := known[key]; ok {
 			continue
 		}
-		joined := strings.Join(mv, ",")
-		if isObfuscated(joined) {
+		// Obfuscator exclusion is per-occurrence on the full raw key=value
+		// segment, matching how Mock.Noise is evaluated for form bodies.
+		obfuscated := false
+		for _, v := range mv {
+			if isObfuscated(rawKey + "=" + v) {
+				obfuscated = true
+				break
+			}
+		}
+		if obfuscated {
 			continue
 		}
-		rv, ok := reqVals[k]
+		rv, ok := reqVals[rawKey]
 		if !ok {
 			out[key] = []string{} // key dropped on replay
 			continue
 		}
-		if strings.Join(rv, ",") != joined {
+		if strings.Join(rv, ",") != strings.Join(mv, ",") {
 			out[key] = []string{} // value drifted
 		}
 	}

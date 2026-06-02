@@ -8,12 +8,12 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-// TestMockNamePostgresV3Constants pins the exact string values of the
-// PostgresV3 Mock.Name constants. Mock.Name participates in hit-count
-// indexing, dedup, and by-name lookups across MockManager; drifting
-// these strings silently splits the pool. The integrations-repo
-// recorder is expected to migrate to these constants in a follow-up
-// commit so the string literal and the constant remain identical.
+// TestDeepCopyPreservesReqBodyNoise verifies Mock.DeepCopy deep-copies
+// HTTPReq.ReqBodyNoise: the clone must carry the same paths/regexes as the
+// original, and mutating either side's map (keys or per-path regex slices)
+// must not leak across to the other. Without an independent backing map the
+// gob async-writer / pool clones would silently share — and drop — the
+// schema-detected noise.
 func TestDeepCopyPreservesReqBodyNoise(t *testing.T) {
 	orig := &Mock{
 		Kind: Kind(HTTP),
