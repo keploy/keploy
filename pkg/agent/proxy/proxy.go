@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -244,6 +245,32 @@ type Proxy struct {
 	// own defaults via withDefaults().
 	recordBufferCap       int64
 	recordBufferQueueSize int
+
+	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
+	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
+	// pairs into its BPF map so SCRAM-SHA-256-PLUS auth succeeds across
+	// keploy's TLS MITM. Nil on platforms where BPF is unavailable, or
+	// when the cbshim failed to load (missing CAP_BPF / older kernel);
+	// the proxy keeps working for non-PLUS clients in that case.
+	cbshim *cbshim.CBShim
+}
+
+// SetCBShim wires the eBPF channel-binding shim handle into the proxy.
+// Typically called by the agent that owns the cbshim lifecycle, once
+// per proxy instance, before StartProxy. Pass nil to disable.
+//
+// Also installs the tls.MITMPublishHook so CertForClient publishes the
+// MITM half of every connection's cbshim rendezvous. Cleared (back to
+// nil) when called with a nil cbshim.
+func (p *Proxy) SetCBShim(c *cbshim.CBShim) {
+	p.cbshim = c
+	if c == nil {
+		pTls.MITMPublishHook = nil
+		return
+	}
+	pTls.MITMPublishHook = func(connID string, mitmDER []byte) {
+		c.RegisterMITM(connID, mitmDER)
+	}
 }
 
 // SetSkipListener disables the TCP accept loop.
@@ -384,7 +411,12 @@ func isPostgresSSLRequestPrefix(b []byte) bool {
 // from the passed-in context so a hung upstream does not block the
 // parser goroutine indefinitely; a 10 s default kicks in when the
 // context has no deadline (typical for record/replay mode).
-func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
+//
+// connID is the app-side source-port string; if cb is non-nil the
+// upstream peer cert is published via cb.RegisterReal so channel-
+// binding substitution can rendezvous it with the MITM cert from
+// CertForClient. Pass nil to disable cbshim publishing (unit tests).
+func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger, cb *cbshim.CBShim) (net.Conn, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(10 * time.Second)
@@ -428,6 +460,19 @@ func dialPostgresSSLUpstream(ctx context.Context, addr string, cfg *tls.Config, 
 		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
 			zap.String("addr", addr),
 			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
+
+		// Publish the real upstream cert to the cbshim rendezvous.
+		// If CertForClient has already registered the MITM half for
+		// the same connID this triggers cbmap.Publish into the BPF
+		// map; otherwise the MITM half will publish when it arrives.
+		if cb != nil && connID != "" {
+			state := tlsConn.ConnectionState()
+			if len(state.PeerCertificates) > 0 {
+				leaf := state.PeerCertificates[0]
+				cb.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+			}
+		}
+
 		return tlsConn, nil
 	case 'N':
 		_ = rawConn.Close()
@@ -629,6 +674,21 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// how the overflow warning became invisible on customer runs.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetLogger(logger)
+	}
+
+	// Channel-binding shim: best-effort BPF load. Failure (missing
+	// CAP_BPF, older kernel without uprobe support, bpf_probe_write_user
+	// disabled by the kernel hardener) is logged at Debug and the
+	// proxy keeps working for non-SCRAM-PLUS clients. The cbshim is
+	// nil-safe at every consumer site, so a nil instance silently
+	// disables the channel-binding fix without affecting anything else.
+	if cb, err := cbshim.New(logger); err == nil {
+		proxy.SetCBShim(cb)
+		logger.Debug("cbshim: BPF-backed channel-binding shim enabled")
+	} else {
+		logger.Debug("cbshim: disabled — SCRAM-SHA-256-PLUS clients "+
+			"will fail across the MITM as today",
+			zap.Error(err))
 	}
 
 	return proxy
@@ -833,6 +893,26 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		)
 		pTls.MarkCAFailed(err)
 	}
+
+	// Channel-binding shim: now that appPID is known, walk the app's
+	// process tree, register every visible descendant in the BPF
+	// allowlist, attach uprobes to whatever libcryptos they map, and
+	// kick off a background rescan that picks up workers forked
+	// later (gunicorn/uwsgi) and lazy dlopen'd wheels (psycopg2-
+	// binary loads its bundled libssl only on the first connect).
+	//
+	// Nil-safe: if cbshim failed to load (no CAP_BPF, older kernel,
+	// etc.) p.cbshim is nil and these calls are no-ops. p.appPID==0
+	// means we don't yet know the app PID — also a no-op; future
+	// session-bind paths can call this explicitly.
+	if p.cbshim != nil && p.appPID != 0 {
+		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
+			p.logger.Debug("cbshim: initial AttachToProcessTree returned error (rescan loop will retry)",
+				zap.Uint32("appPID", p.appPID), zap.Error(err))
+		}
+		p.cbshim.WatchProcessTree(ctx, int(p.appPID))
+	}
+
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
@@ -1904,7 +1984,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
 					dialStart := time.Now()
-					dstConn, err = dialPostgresSSLUpstream(ctx, addr, cfg, p.logger)
+					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim)
 					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				} else if speculativeDial != nil && addr == speculativeDialAddr &&
 					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
@@ -2180,6 +2260,20 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
 
 		}
+	}
+
+	// Channel-binding shim teardown — detach uprobes, drop allowlist
+	// entries, release BPF maps. Nil-safe so the no-BPF path doesn't
+	// trip a panic here. WatchProcessTree's goroutine has already
+	// exited via the proxy context being cancelled by the caller of
+	// StopProxyServer; Close() is idempotent against an in-flight
+	// goroutine racing it.
+	if p.cbshim != nil {
+		if err := p.cbshim.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors,
+				fmt.Errorf("failed to close cbshim: %w", err))
+		}
+		p.cbshim = nil
 	}
 
 	p.CloseErrorChannel()

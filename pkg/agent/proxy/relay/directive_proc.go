@@ -2,9 +2,11 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -406,6 +408,15 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			}
 		}
 		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
+
+		// V2-relay equivalent of dialPostgresSSLUpstream's
+		// cb.RegisterReal call. Capture the real upstream cert here
+		// so the channel-binding shim can rendezvous it with the MITM
+		// cert minted by CertForClient. This is the chokepoint for
+		// every parser that drives upstream TLS through the supervisor
+		// relay (Postgres V3, MySQL, Mongo, etc.) so wiring here
+		// covers all of them without per-parser changes.
+		publishRealCertFromUpgraded(r, upgradedDst, log)
 	}
 
 	if params.ClientTLSConfig != nil {
@@ -752,4 +763,68 @@ func (r *Relay) teeFor(d fakeconn.Direction) *tee {
 	default:
 		return nil
 	}
+}
+
+// publishRealCertFromUpgraded extracts the real upstream peer cert
+// from the just-upgraded dest connection and notifies the configured
+// RealCertHook (typically cbshim.RegisterReal). Keyed by the app's
+// source-port (matching what tls.CertForClient registered as the
+// MITM half via MITMPublishHook).
+//
+// Best-effort: if the cfg has no hook, if the upgraded conn isn't a
+// *tls.Conn (defensive — should always be), if peer certs are empty,
+// or if the source-port can't be resolved, we silently skip — channel
+// binding then fails as it would without this feature for that
+// connection.
+func publishRealCertFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
+	if r.cfg.RealCertHook == nil {
+		return
+	}
+	tlsView, ok := unwrapToTLSConn(upgraded)
+	if !ok {
+		return
+	}
+	state := tlsView.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return
+	}
+	leaf := state.PeerCertificates[0]
+
+	src := r.src.Load()
+	if src == nil || *src == nil {
+		return
+	}
+	tcpAddr, ok := (*src).RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		return
+	}
+	r.cfg.RealCertHook(strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)
+	if log != nil {
+		log.Debug("relay: RealCertHook fired",
+			zap.String("conn_id", strconv.Itoa(tcpAddr.Port)),
+			zap.String("subject", leaf.Subject.String()))
+	}
+}
+
+// unwrapToTLSConn walks a small chain of net.Conn wrappers looking
+// for the underlying *tls.Conn. Mirrors the same pattern used by the
+// V1 parser path in util/tls_upgrader.go.
+func unwrapToTLSConn(c net.Conn) (*tls.Conn, bool) {
+	type unwrapper interface{ Unwrap() net.Conn }
+	type netConner interface{ NetConn() net.Conn }
+	for i := 0; i < 8 && c != nil; i++ {
+		if tc, ok := c.(*tls.Conn); ok {
+			return tc, true
+		}
+		if u, ok := c.(unwrapper); ok {
+			c = u.Unwrap()
+			continue
+		}
+		if w, ok := c.(netConner); ok {
+			c = w.NetConn()
+			continue
+		}
+		return nil, false
+	}
+	return nil, false
 }

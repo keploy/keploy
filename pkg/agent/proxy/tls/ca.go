@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"embed"
+	_ "embed"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,19 @@ var caCrt []byte //certificate
 //go:embed asset/ca.key
 var caPKey []byte //private key
 
+// MITMPublishHook, if non-nil, is invoked by CertForClient once the
+// MITM cert for a connection is determined (whether freshly minted or
+// served from cache). The arguments are the connection-level identifier
+// — the client's source port as a decimal string, matching what
+// dialPostgresSSLUpstream uses — and the DER bytes of the leaf cert.
+//
+// The agent wires this to cbshim.RegisterMITM so the eBPF channel-
+// binding shim can publish the (mitm_hash → real_hash) pair into the
+// BPF map once both halves of the connection are known. Nil-safe: when
+// unset, CertForClient is a no-op on the cbshim side and works exactly
+// as it did before the shim existed.
+var MITMPublishHook func(connID string, mitmCertDER []byte)
+
 // embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
 // https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
 // certdata.txt). Compiled into the binary via go:embed so the agent always
@@ -55,9 +69,6 @@ var caPKey []byte //private key
 //
 //go:embed data/mozilla_roots.pem
 var embeddedFallbackRoots []byte
-
-//go:embed asset
-var _ embed.FS
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -238,12 +249,13 @@ func SetupCaCertEnv(logger *zap.Logger) error {
 // bundle; that split is the whole reason the shared-volume path exists
 // and cannot be replicated by any sequence of SetEnvForPath calls.
 func SetEnvForPath(logger *zap.Logger, path string) error {
-	return setEnvVars(logger, map[string]string{
+	envs := map[string]string{
 		"NODE_EXTRA_CA_CERTS": path,
 		"REQUESTS_CA_BUNDLE":  path,
 		"SSL_CERT_FILE":       path,
 		"CARGO_HTTP_CAINFO":   path,
-	})
+	}
+	return setEnvVars(logger, envs)
 }
 
 // setEnvForSharedVolume wires the language-runtime trust-store env vars for the
@@ -1169,6 +1181,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		if cached, ok := getCertCache().Get(dstURL); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
 	}
@@ -1255,5 +1268,17 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		getCertCache().Add(dstURL, &serverTLSCert)
 	}
 
+	publishMITM(sourcePort, &serverTLSCert)
 	return &serverTLSCert, nil
+}
+
+// publishMITM notifies the registered MITMPublishHook (typically
+// cbshim.RegisterMITM) of the freshly-determined MITM cert for this
+// client connection. Nil-safe everywhere: a nil hook, a cert without
+// a usable leaf, or a zero-port source addr all silently no-op.
+func publishMITM(sourcePort int, cert *tls.Certificate) {
+	if MITMPublishHook == nil || cert == nil || len(cert.Certificate) == 0 {
+		return
+	}
+	MITMPublishHook(strconv.Itoa(sourcePort), cert.Certificate[0])
 }
