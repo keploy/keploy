@@ -123,6 +123,21 @@ func New(log *zap.Logger) (*CBShim, error) {
 
 // Close detaches all probes and releases BPF resources.
 func (c *CBShim) Close() error {
+	// Diagnostic counter dump BEFORE we tear down the maps. These are
+	// the single most useful breadcrumb for "did cbshim do anything?"
+	// — they tell us how many X509_digest calls fired, how many passed
+	// each filter stage, and how many writes landed. Log unlocked
+	// (Counters takes the lock internally) before grabbing c.mu below.
+	counters := c.Counters()
+	c.log.Info("cbshim: counter dump at shutdown",
+		zap.Uint64("total_fires", counters.TotalFires),
+		zap.Uint64("tgid_matched", counters.TGIDMatched),
+		zap.Uint64("libpq_fires", counters.LibpqFires),
+		zap.Uint64("lookup_hit", counters.LookupHit),
+		zap.Uint64("lookup_miss", counters.LookupMiss),
+		zap.Uint64("write_ok", counters.WriteOK),
+		zap.Uint64("write_fail", counters.WriteFail))
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -329,6 +344,25 @@ func (c *CBShim) AttachToProcess(tgid int) error {
 	if err != nil {
 		return fmt.Errorf("cbshim: scan /proc/%d/maps: %w", tgid, err)
 	}
+
+	// Diagnostic: log what scanProcessMaps found per-PID. Without this,
+	// a missing-libpq case (selectivity filter rejects everything →
+	// no hash substitution → SCRAM-PLUS fails silently) looks the same
+	// in logs as a working attach.
+	libpqPaths := make([]string, 0, len(libpqs))
+	for _, lp := range libpqs {
+		libpqPaths = append(libpqPaths, lp.path)
+	}
+	libcryptoPaths := make([]string, 0, len(libcryptos))
+	for _, lc := range libcryptos {
+		libcryptoPaths = append(libcryptoPaths, lc.path)
+	}
+	c.log.Info("cbshim: scanProcessMaps result",
+		zap.Int("tgid", tgid),
+		zap.Int("libpq_count", len(libpqs)),
+		zap.Strings("libpq_paths", libpqPaths),
+		zap.Int("libcrypto_count", len(libcryptos)),
+		zap.Strings("libcrypto_paths", libcryptoPaths))
 
 	// Register libpq ranges (even if empty — clears stale state).
 	ranges := make([]LibpqRange, 0, len(libpqs))
