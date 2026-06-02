@@ -14,12 +14,12 @@ func TestSchemaMatch_HeadersResult(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
 	tests := []struct {
-		name                string
-		recordedHeaders     map[string]string
-		actualHeaders       map[string]string
-		wantPass            bool
-		wantHeadersLen      int
-		wantMissingKey      string
+		name            string
+		recordedHeaders map[string]string
+		actualHeaders   map[string]string
+		wantPass        bool
+		wantHeadersLen  int
+		wantMissingKey  string
 	}{
 		{
 			name:            "all recorded headers present — pass, HeadersResult populated",
