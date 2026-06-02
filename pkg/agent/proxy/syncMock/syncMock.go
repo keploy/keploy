@@ -338,13 +338,33 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
 	m.sendToOutChan(mock)
 }
 
-// CloseOutChan closes the outgoing mock channel under the writer
-// lock so an in-flight sendToOutChan cannot race the close.
-// Idempotent; safe to call with outChan still nil.
+// CloseOutChan flushes any still-attributable buffered mocks and then
+// closes the outgoing mock channel under the writer lock so an in-flight
+// sendToOutChan cannot race the close. Idempotent; safe to call with
+// outChan still nil.
+//
+// The final FlushOwnedWindows is the shutdown twin of the periodic flush
+// ticker the proxy runs while recording is live (see proxy.go): that
+// ticker stops one step earlier in the shutdown sequence (its
+// clientConnCancel), so a mock that finished decoding after the ticker's
+// last tick — the classic teardown-phase late mock, a DB response still
+// being decoded when recording is asked to stop — would otherwise sit in
+// the buffer and be discarded here, orphaning its already-recorded test
+// case at replay. Flushing first persists every mock the buffer can still
+// attribute (session/connection mocks and per-test mocks whose
+// ReqTimestampMock falls inside an already-resolved window).
+//
+// FlushOwnedWindows takes outChanMu.RLock (via sendToOutChan); it runs to
+// completion and releases that lock BEFORE we take the write lock below,
+// so the two never deadlock. The proxy calls CloseOutChan only after all
+// connection handlers have drained, so no new mocks enter the buffer
+// between the flush and the close.
 func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
+	m.FlushOwnedWindows()
+
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {
