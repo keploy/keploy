@@ -1476,18 +1476,8 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 
 	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
 
-	// Was 500 ms (best-effort log-flag notification). Raised to 30 s
-	// because the agent's /graceful-shutdown handler now SYNCHRONOUSLY
-	// flushes the syncMock buffer (FlushOwnedWindows + close outChan)
-	// through the live /outgoing stream before responding. On heavy-
-	// load lanes (go-memory-load-mongo) the buffered teardown tail can
-	// hold 800-1,200 mocks; pushing them through gob-encode + HTTP +
-	// host-side InsertMock yaml-encode takes 5-15 s on a 2-vCPU CI
-	// runner. A 500 ms ceiling would interrupt the flush mid-way and
-	// resurrect the chronic teardown-TC orphan bug. 30 s comfortably
-	// covers the worst observed case while still bounding the wait if
-	// the agent has genuinely hung.
-	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Use a short timeout since this is a best-effort notification
+	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)

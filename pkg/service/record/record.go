@@ -178,25 +178,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 		r.logger.Info("Stopping Keploy recording...")
 
-		// Notify the agent that we are shutting down gracefully.
-		// Per the new contract (Option A fix for chronic mongo teardown
-		// orphans), the agent SYNCHRONOUSLY flushes its syncMock buffer
-		// here before returning — so by the time this call returns we
-		// know the host's drain loop has received the teardown tail and
-		// the agent is safe to docker-stop. Sets a logging-cosmetic
-		// graceful-shutdown flag too as a side effect.
-		r.logger.Info("DIAG/host-notify-graceful-shutdown-begin: requesting agent flush",
-			zap.Int64("ts_ms", time.Now().UnixMilli()))
-		notifyStart := time.Now()
+		// Notify the agent that we are shutting down gracefully
+		// This will cause connection errors to be logged as debug instead of error
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-			r.logger.Info("DIAG/host-notify-graceful-shutdown-failed: agent flush request errored — buffer may not have drained",
-				zap.Error(err),
-				zap.Duration("notify_duration", time.Since(notifyStart)),
-				zap.Int64("ts_ms", time.Now().UnixMilli()))
-		} else {
-			r.logger.Info("DIAG/host-notify-graceful-shutdown-end: agent flush completed",
-				zap.Duration("notify_duration", time.Since(notifyStart)),
-				zap.Int64("ts_ms", time.Now().UnixMilli()))
+			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
 		// Pcap + keylog flow over long-lived HTTP streams started in
 		// Start() right after the agent's broadcaster came up. The
