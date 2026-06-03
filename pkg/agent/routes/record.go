@@ -800,15 +800,67 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 
 // HandleGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 // When this flag is set, connection errors will be logged as debug instead of error.
+// HandleGracefulShutdown is called by the host CLI BEFORE the host
+// shuts down the application/agent containers. Historically this
+// handler only set a logging-cosmetic boolean flag — it did nothing
+// to ensure the agent's syncMock buffer was flushed before the host
+// proceeded with `docker compose down`. That left the buffered mongo
+// teardown tail (typically 800-1,200 mocks at SIGINT) stranded inside
+// the agent container and lost when docker SIGTERM'd it.
+//
+// This handler now does the flush synchronously while the /outgoing
+// HTTP stream handler is still alive and the host is still reading
+// from it:
+//
+//  1. syncMock.CloseOutChan() runs FlushOwnedWindows internally,
+//     pushing every still-attributable buffered mock into the
+//     outChan (which is the mockChan being read by the live
+//     /outgoing stream handler). CloseOutChan then closes outChan.
+//
+//  2. The /outgoing stream handler drains the now-closed channel,
+//     gob-encodes each mock to the HTTP response, and exits cleanly
+//     when the channel is empty and closed.
+//
+//  3. Only after step 2 completes do we respond 200 OK to the host.
+//     The host then proceeds with runAppCtxCancel → docker compose
+//     down. By that point the agent's syncMock buffer is empty, the
+//     /outgoing stream has reached EOF on the host side, and every
+//     teardown mock is safely in the host's InsertMock pipeline.
+//
+// We also keep the legacy SetGracefulShutdown flag so connection
+// errors continue to log at Debug instead of Error during the
+// post-flush container teardown — preserving existing behavior.
 func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
-	a.logger.Debug("Received graceful shutdown notification")
+	a.logger.Info("DIAG/graceful-shutdown-begin: host requested graceful shutdown — flushing syncMock",
+		zap.Int64("ts_ms", time.Now().UnixMilli()))
 
+	// Step 1: flush syncMock through the live /outgoing stream.
+	// This MUST happen before we set the graceful-shutdown flag (which
+	// only changes log levels) so the host's drain receives every
+	// buffered mock before its stream-EOF.
+	if mgr := syncmgr.Get(); mgr != nil {
+		a.logger.Info("DIAG/graceful-shutdown-flush-begin: calling SyncMock.CloseOutChan",
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+		flushStart := time.Now()
+		mgr.CloseOutChan()
+		a.logger.Info("DIAG/graceful-shutdown-flush-end: SyncMock.CloseOutChan returned",
+			zap.Duration("flush_duration", time.Since(flushStart)),
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+	} else {
+		a.logger.Info("DIAG/graceful-shutdown-flush-skipped: no SyncMockManager (likely test/replay mode)")
+	}
+
+	// Step 2: set the legacy graceful-shutdown flag (logging-cosmetic).
+	// Kept after the flush so any flush-time errors still log at Error.
 	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
 		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
 		http.Error(w, "failed to set graceful shutdown", http.StatusInternalServerError)
 		return
 	}
 
+	a.logger.Info("DIAG/graceful-shutdown-done: flush complete, replying 200 OK",
+		zap.Int64("ts_ms", time.Now().UnixMilli()))
+
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Graceful shutdown flag set\n"))
+	_, _ = w.Write([]byte("Graceful shutdown: syncMock flushed\n"))
 }
