@@ -1448,6 +1448,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	defer func() {
+		// TRACE/conn-teardown: fires every time a connection's handleConnection
+		// exits. During normal recording this happens when the connection closes
+		// naturally. If this fires at unexpected times (e.g. teardown window),
+		// the subsequent TRACE/conn-errgroup-failed will show the root cause.
+		p.logger.Info("TRACE/conn-teardown: handleConnection returning — parserCtx will be cancelled",
+			zap.Int64("clientConnID", int64(clientConnID)),
+			zap.Int64("ts_ms", time.Now().UnixMilli()),
+		)
 		parserCtxCancel()
 
 		if srcConn != nil {
@@ -1472,6 +1480,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		err = parserErrGrp.Wait()
 		if err != nil {
+			// TRACE/conn-errgroup-failed: a goroutine in parserErrGrp returned
+			// an error, which cancelled parserCtx and caused the decoders to
+			// drain. The error message identifies exactly which goroutine failed
+			// and why — this is the root cause of unexpected connection teardowns.
+			p.logger.Info("TRACE/conn-errgroup-failed: parserErrGrp error cancelled parserCtx — this is why decoders drained",
+				zap.Int64("clientConnID", int64(clientConnID)),
+				zap.Error(err),
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
