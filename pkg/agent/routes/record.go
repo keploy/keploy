@@ -195,7 +195,52 @@ func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
-	// Stop the agent first
+	// FIX FOR MONGO TEARDOWN ORPHAN TCs:
+	//
+	// Previously this handler called utils.Stop() FIRST, which cancels
+	// the agent's main context. That cancels every in-flight HTTP
+	// handler — including the long-running /outgoing mock-stream
+	// handler — before the proxy's syncMock buffer is drained.
+	// Any mocks the proxy had decoded but not yet pushed through the
+	// stream (typically the teardown-phase tail: ~800-1,200 mocks on
+	// go-memory-load-mongo) were stranded in syncMock.buffer with no
+	// consumer and lost when the agent container terminated.
+	//
+	// The fix: explicitly flush syncMock BEFORE triggering main-context
+	// shutdown. CloseOutChan calls FlushOwnedWindows internally — that
+	// pushes every still-attributable buffered mock into the outChan
+	// (= mockChan = the live HTTP stream to the host) while the
+	// outgoing-stream handler is still actively reading. CloseOutChan
+	// then closes the outChan, which lets the outgoing-stream handler
+	// exit cleanly (channel-closed read returns ok=false) after it
+	// has drained every queued mock. Only then do we cancel the main
+	// context, so the host receives the full teardown tail before
+	// stream-EOF is observed on its side.
+	//
+	// Sequencing is enforced by channel semantics: a buffered channel
+	// closed by the producer can still be drained by the consumer
+	// until empty. The Go HTTP server's graceful Shutdown (see
+	// pkg/agent/routes/server.go — 10 s timeout) waits for the
+	// outgoing-stream handler to finish before the process exits, so
+	// no extra synchronisation primitive is needed here.
+	a.logger.Info("DIAG/agent-stop-begin: /stop received — flushing syncMock before main ctx cancel",
+		zap.Int64("ts_ms", time.Now().UnixMilli()))
+
+	if mgr := syncmgr.Get(); mgr != nil {
+		a.logger.Info("DIAG/agent-stop-flush-begin: calling SyncMock.CloseOutChan (drains buffer to host)",
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+		flushStart := time.Now()
+		mgr.CloseOutChan()
+		a.logger.Info("DIAG/agent-stop-flush-end: SyncMock.CloseOutChan returned",
+			zap.Duration("flush_duration", time.Since(flushStart)),
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+	} else {
+		a.logger.Info("DIAG/agent-stop-flush-skipped: no SyncMockManager (likely test mode)")
+	}
+
+	// Now cancel the main context. The outgoing-stream handler will
+	// have already exited cleanly (its mockChan was closed by
+	// CloseOutChan above), so no in-flight mocks remain.
 	if err := utils.Stop(a.logger, "stop requested via agent API"); err != nil {
 		a.logger.Error("failed to stop agent", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
@@ -204,6 +249,9 @@ func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
 		}
 		return
 	}
+
+	a.logger.Info("DIAG/agent-stop-done: utils.Stop completed, replying 200 OK",
+		zap.Int64("ts_ms", time.Now().UnixMilli()))
 
 	// Send response after agent has stopped successfully
 	w.WriteHeader(http.StatusOK)
@@ -527,21 +575,39 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Debug("Streaming outgoing mocks to client")
+	a.logger.Info("DIAG/outgoing-handler-begin: streaming outgoing mocks to client",
+		zap.Int64("ts_ms", time.Now().UnixMilli()))
 
 	// Flush the headers to establish the connection immediately
 	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
 
+	// Track how many mocks this handler forwarded so the exit log
+	// shows whether we managed to drain the buffer end-to-end. With
+	// the /stop-side CloseOutChan flush in place, the expected exit
+	// reason at graceful shutdown is "mockChan-closed" with
+	// mocks_forwarded matching the agent's totalAdded.
+	var mocksForwarded int64
+	defer func() {
+		a.logger.Info("DIAG/outgoing-handler-exit: stream handler returning",
+			zap.Int64("mocks_forwarded", mocksForwarded),
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+	}()
+
 	for {
 		select {
 		case <-r.Context().Done():
+			a.logger.Info("DIAG/outgoing-handler-exit-reason: r.Context().Done() — host disconnected or main ctx cancelled",
+				zap.Int64("ts_ms", time.Now().UnixMilli()))
 			return
 		case m, ok := <-mockChan:
 			if !ok {
+				a.logger.Info("DIAG/outgoing-handler-exit-reason: mockChan closed and drained (expected at graceful /stop)",
+					zap.Int64("ts_ms", time.Now().UnixMilli()))
 				return
 			}
+			mocksForwarded++
 			if err := enc.Encode(m); err != nil {
 				// enc.Encode(m) folds two distinct failure modes into
 				// one error: (a) per-mock serialization errors (an
