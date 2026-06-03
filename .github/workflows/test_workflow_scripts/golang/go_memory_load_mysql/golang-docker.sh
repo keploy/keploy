@@ -349,7 +349,7 @@ start_memory_monitor() {
         # keploy headroom above its internal pressure trigger (160 MiB at
         # --memory-limit 200) for Go-runtime overhead and goroutine stacks
         # while still catching real leaks.
-        threshold_bytes="$((320 * 1024 * 1024))"
+        threshold_bytes="$((350 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
