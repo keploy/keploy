@@ -232,18 +232,15 @@ func (c *kmsKeyCache) decryptTestCaseRequest(ctx context.Context, tc *models.Tes
 }
 
 // newKMSCacheForRun creates a per-run key cache for decryption.
-// Returns nil (skip decryption) when api-server URL or auth token is not available.
-func (r *Replayer) newKMSCacheForRun(ctx context.Context) *kmsKeyCache {
+// Returns nil (skip decryption) when api-server URL is not configured.
+// In OSS mode no auth token is available — requests are made without one.
+// Enterprise/k8s-proxy override this by setting a token provider on the
+// Replayer after construction.
+func (r *Replayer) newKMSCacheForRun(_ context.Context) *kmsKeyCache {
 	if r.config == nil || strings.TrimSpace(r.config.APIServerURL) == "" {
 		// Running fully offline — no decryption available.
 		return nil
 	}
-	if r.auth == nil {
-		return nil
-	}
-	token, err := r.auth.GetToken(ctx)
-	if err != nil || strings.TrimSpace(token) == "" {
-		return nil
-	}
-	return newKMSKeyCache(r.config.APIServerURL, strings.TrimSpace(token))
+	// OSS mode: no auth token. Enterprise/k8s-proxy inject one at their own layer.
+	return newKMSKeyCache(r.config.APIServerURL, "")
 }
