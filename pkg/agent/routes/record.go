@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +28,62 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+// OutgoingHandlerStats are package-level atomic counters that the
+// black-box recorder in cli/agent.go reads every second to track the
+// /outgoing HTTP stream handler's state without needing to thread a
+// handle through the cobra command graph. All fields are monotonic
+// counters that can be safely read concurrently.
+//
+// These together with syncMock.ShutdownSnapshot() answer the question
+// "where in the agent-side pipeline are mocks being lost?":
+//
+//	syncmock.totalAdded - outgoingForwardedTotal  =  mocks that entered
+//	                                                 syncMock but never
+//	                                                 reached the host
+//	                                                 HTTP stream
+//
+//	outgoingHandlerStarted - outgoingHandlerExited  =  number of
+//	                                                 /outgoing stream
+//	                                                 handlers currently
+//	                                                 in flight (= 1 in
+//	                                                 normal recording, 0
+//	                                                 when the host has
+//	                                                 disconnected)
+var (
+	outgoingForwardedTotal atomic.Int64
+	outgoingHandlerStarted atomic.Int64
+	outgoingHandlerExited  atomic.Int64
+	outgoingLastForwardMs  atomic.Int64 // wall-clock UnixMilli of last successful gob.Encode
+)
+
+// OutgoingForwardedTotal returns the lifetime count of mocks
+// successfully gob-encoded onto the /outgoing HTTP response stream
+// across every handler invocation in this process.
+func OutgoingForwardedTotal() int64 { return outgoingForwardedTotal.Load() }
+
+// OutgoingHandlerInFlight returns the number of currently-active
+// /outgoing stream handlers (started minus exited). Normal value is
+// 1 while the host is recording, 0 when the host has disconnected
+// and not yet reconnected.
+func OutgoingHandlerInFlight() int64 {
+	return outgoingHandlerStarted.Load() - outgoingHandlerExited.Load()
+}
+
+// OutgoingHandlerStartedTotal returns the lifetime count of
+// /outgoing stream handler invocations.
+func OutgoingHandlerStartedTotal() int64 { return outgoingHandlerStarted.Load() }
+
+// OutgoingHandlerExitedTotal returns the lifetime count of
+// /outgoing stream handler returns.
+func OutgoingHandlerExitedTotal() int64 { return outgoingHandlerExited.Load() }
+
+// OutgoingLastForwardUnixMs returns the wall-clock millisecond
+// timestamp of the most recent successful mock forward, or 0 if
+// none has happened yet. The recorder uses this to flag "stream is
+// alive but stalled" — when the value stops advancing while the
+// host is still recording.
+func OutgoingLastForwardUnixMs() int64 { return outgoingLastForwardMs.Load() }
 
 type Agent struct {
 	logger *zap.Logger
@@ -500,6 +557,13 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Received request to handle outgoing mocks")
 
+	// Track handler lifetime for the black-box recorder (cli/agent.go).
+	// Started/Exited are monotonic counters; (Started - Exited) gives the
+	// current in-flight count. Deferred Exited increment guarantees we
+	// account for every exit, including early returns below.
+	outgoingHandlerStarted.Add(1)
+	defer outgoingHandlerExited.Add(1)
+
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -584,6 +648,13 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			flusher.Flush()
+			// Track successful forward for the black-box recorder.
+			// Bump after Flush so the counter reflects "host has at
+			// least had this mock pushed at it", not "encoded into
+			// the response buffer but maybe still trapped behind a
+			// blocked write".
+			outgoingForwardedTotal.Add(1)
+			outgoingLastForwardMs.Store(time.Now().UnixMilli())
 		}
 	}
 }
