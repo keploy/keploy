@@ -109,6 +109,15 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 	logger.Info("[PROBE/dial]", append(base, fields...)...)
 }
 
+// destCacheEntry holds all recently-seen destinations from a single source IP.
+// Keyed by destination port so the fallback can be used safely when the app
+// only connects to ONE backend on a given port (unambiguous) but not when
+// multiple distinct destinations are cached (would guess wrong).
+type destCacheEntry struct {
+	mu     sync.Mutex
+	byPort map[uint32]*agent.NetworkAddress // destPort → destInfo
+}
+
 type Proxy struct {
 	logger *zap.Logger
 
@@ -150,6 +159,18 @@ type Proxy struct {
 	// themselves via their own defers / context cancellation; we do
 	// not need references to force-close them.
 	activeConns sync.WaitGroup
+
+	// destCache is a fallback for when the eBPF redirectProxyMap lookup
+	// fails during an active recording session. Each successful DestInfo.Get
+	// stores the destination under the source IP key.
+	//
+	// Map structure: sourceIP (string) → *destCacheEntry
+	// destCacheEntry holds all destinations seen from that source IP,
+	// keyed by destination port (uint32). If exactly one destination
+	// was seen, it is safe to use as a fallback (avoids guessing wrong
+	// when the app connects to multiple backends). Multiple destinations
+	// → no fallback (can't determine the right one without dest port).
+	destCache sync.Map
 
 	Listener net.Listener
 
@@ -1198,33 +1219,130 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
+	// Extract source IP for the dest cache (fallback when eBPF miss occurs).
+	// RemoteAddr is always a *net.TCPAddr when listening on TCP, so the
+	// type assertion is safe. Capture it before any early return.
+	sourceIP := remoteAddr.IP.String()
+
+	// TRACE: proof log — fires for EVERY connection that arrives at the
+	// proxy TCP listener. If this fires at teardown timestamp (~get-orders TC
+	// capture time), the eBPF IS redirecting teardown connections and the
+	// failure is in the DestInfo lookup. If it DOESN'T fire at teardown time,
+	// the eBPF is not redirecting those connections at all (true bypass).
+	// One log per connection — no per-packet overhead.
+	p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
+		zap.Int("srcPort", sourcePort),
+		zap.String("sourceIP", sourceIP),
+		zap.Int64("ts_ms", time.Now().UnixMilli()),
+	)
+
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
+
+	// usedFallback is set to true when the eBPF lookup failed but the dest
+	// cache provided a recovery. In that case DestInfo.Delete must be skipped
+	// (there is no map entry to remove).
+	var usedFallback bool
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		// Gracefully handle untracked connections (eBPF lookup failed)
+		// eBPF redirectProxyMap lookup failed — the original destination is unknown.
 		// This can happen when:
-		// 1. A new connection was opened after test completion (e.g., driver health check)
-		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
-		// 3. The entry was already deleted before this lookup
-		//
-		// Instead of failing with an error (which causes the app to see a broken connection),
-		// we close the connection gracefully. The client will see "connection refused" or EOF,
-		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
-			zap.Int("Source port", sourcePort), zap.Error(err))
-		if srcConn != nil {
-			srcConn.Close()
+		// 1. eBPF hook didn't fire (race, or hook not covering this connection)
+		// 2. eBPF fired but this lookup raced with a deletion elsewhere
+		// 3. Connection opened after recording/test-set completed (health check etc.)
+		rule := p.getSession()
+		sessionMode := "none"
+		if rule != nil {
+			sessionMode = string(rule.Mode)
 		}
-		return nil
+
+		// TRACE: eBPF lookup failed. sessionMode tells us whether this happened
+		// during active recording (critical) or normal passthrough (expected).
+		// In MODE_RECORD this is the drop-site for teardown mocks.
+		p.logger.Info("TRACE/proxy-destinfo-miss: eBPF lookup failed — original destination unknown",
+			zap.Int("srcPort", sourcePort),
+			zap.String("sourceIP", sourceIP),
+			zap.String("sessionMode", sessionMode),
+			zap.Error(err),
+			zap.Int64("ts_ms", time.Now().UnixMilli()),
+		)
+
+		// Fallback: during an active recording session, recover the destination
+		// from the per-sourceIP cache populated by previous successful lookups.
+		// Only safe when EXACTLY ONE destination was ever seen from this sourceIP
+		// (unambiguous). Multiple destinations → skip to avoid wrong-backend
+		// forwarding (e.g. sending a mongo connection to mysql).
+		if rule != nil && rule.Mode == models.MODE_RECORD {
+			if cached, ok := p.destCache.Load(sourceIP); ok {
+				entry := cached.(*destCacheEntry)
+				entry.mu.Lock()
+				numDests := len(entry.byPort)
+				var fallbackDest *agent.NetworkAddress
+				for _, d := range entry.byPort {
+					fallbackDest = d
+				}
+				entry.mu.Unlock()
+
+				switch {
+				case numDests == 1 && fallbackDest != nil:
+					// Exactly one known destination — safe to use as fallback.
+					p.logger.Info("TRACE/proxy-destinfo-fallback: recovered destination from cache for eBPF-missed recording connection",
+						zap.Int("srcPort", sourcePort),
+						zap.String("sourceIP", sourceIP),
+						zap.Uint32("cached_dest_port", fallbackDest.Port),
+						zap.Uint32("cached_dest_ipv4", fallbackDest.IPv4Addr),
+						zap.Int64("ts_ms", time.Now().UnixMilli()),
+					)
+					destInfo = fallbackDest
+					usedFallback = true
+					// Fall through to the normal recording path below.
+
+				default:
+					// Multiple destinations cached — cannot safely pick one.
+					p.logger.Info("TRACE/proxy-destinfo-fallback-ambiguous: multiple cached destinations, cannot recover — closing connection",
+						zap.Int("srcPort", sourcePort),
+						zap.String("sourceIP", sourceIP),
+						zap.Int("cached_dest_count", numDests),
+						zap.Int64("ts_ms", time.Now().UnixMilli()),
+					)
+				}
+			} else {
+				// No cache entry for this source IP yet (first missed connection).
+				p.logger.Info("TRACE/proxy-destinfo-fallback-no-cache: no cached destination for source IP, closing connection",
+					zap.Int("srcPort", sourcePort),
+					zap.String("sourceIP", sourceIP),
+					zap.Int64("ts_ms", time.Now().UnixMilli()),
+				)
+			}
+		}
+
+		// If fallback didn't recover a destination, close and return.
+		if !usedFallback {
+			if srcConn != nil {
+				srcConn.Close()
+			}
+			return nil
+		}
+	}
+
+	if !usedFallback {
+		// Successful eBPF lookup — populate the cache for future fallbacks.
+		raw, _ := p.destCache.LoadOrStore(sourceIP, &destCacheEntry{byPort: make(map[uint32]*agent.NetworkAddress)})
+		entry := raw.(*destCacheEntry)
+		entry.mu.Lock()
+		entry.byPort[destInfo.Port] = destInfo
+		entry.mu.Unlock()
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
-		return err
+	// releases the occupied source port when done fetching the destination info.
+	// Skipped on the fallback path (no eBPF map entry to remove).
+	if !usedFallback {
+		err = p.DestInfo.Delete(ctx, uint16(sourcePort))
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
+			return err
+		}
 	}
 
 	//get the session rule
