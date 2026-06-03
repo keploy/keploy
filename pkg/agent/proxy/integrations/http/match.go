@@ -115,7 +115,7 @@ type req struct {
 	raw    []byte
 }
 
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, schemaNoiseDetection bool) (bool, *models.Mock, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, ctx.Err()
@@ -199,6 +199,16 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
 			if err != nil {
 				return false, nil, err
+			}
+
+			// Strict enforcement (replay path): for any candidate that already
+			// carries learned req_body_noise, every request-body field must
+			// match except those learned-noise paths. A drift on a non-noise
+			// field rejects that candidate, so a changed-but-unmarked field
+			// fails the test instead of being silently served. Candidates with
+			// no learned noise keep the lenient schema/key behaviour.
+			if schemaNoiseStrict {
+				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, input.body)
 			}
 
 			if len(bodyMatched) == 0 {
@@ -967,6 +977,33 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 		return true
 	}
 	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+}
+
+// filterStrictNoiseMatches enforces strict request-body matching on the
+// replay path. A candidate mock is dropped only when it already carries
+// learned req_body_noise AND a field OUTSIDE that learned-noise set drifted
+// from the recorded body — i.e. an unmarked field changed. Candidates with no
+// learned noise are kept unchanged (lenient schema/key behaviour), so this
+// never tightens matching for mocks the auto-replay never learned noise for.
+//
+// It reuses detectReqBodyNoise, which returns exactly the drifting field paths
+// that are NOT already known noise (and not obfuscator-covered): a non-empty
+// result means an unmarked field changed, so the candidate cannot match.
+func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, reqBody []byte) []*models.Mock {
+	var kept []*models.Mock
+	for _, m := range candidates {
+		if m == nil || m.Spec.HTTPReq == nil || len(m.Spec.HTTPReq.ReqBodyNoise) == 0 {
+			kept = append(kept, m)
+			continue
+		}
+		if drift := h.detectReqBodyNoise(true, m, reqBody); len(drift) > 0 {
+			h.Logger.Debug("strict req-body match rejected mock: non-noise field drift",
+				zap.String("mock name", m.Name), zap.Any("drift", drift))
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
 }
 
 // detectReqBodyNoise diffs the recorded mock request body against the actual
