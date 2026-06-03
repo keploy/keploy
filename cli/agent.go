@@ -20,61 +20,6 @@ func init() {
 	Register("agent", Agent)
 }
 
-// writeAgentStateLine emits one comprehensive PROBE/agent-state line
-// to stderr. Reads atomic counters from syncMock + the routes package
-// to give a snapshot of every agent-side stage where mocks can be
-// lost. Caller passes finalSnapshot=true for the post-ctx-cancel
-// emission so the trailing line is distinguishable from periodic
-// ones in the CI log.
-//
-// Uses fmt.Fprintf + os.Stderr.Sync so the line survives the
-// agent's abrupt death — zap is async-buffered and routinely drops
-// the last few hundred ms of output when the process is SIGKILL'd.
-func writeAgentStateLine(finalSnapshot bool) {
-	snap := syncMock.Get().ShutdownSnapshot()
-	tag := "PROBE/agent-state"
-	if finalSnapshot {
-		tag = "PROBE/agent-state-final"
-	}
-	// Compute the cross-stage gap that's the smoking gun for "mocks
-	// trapped between syncMock and the HTTP stream":
-	//
-	//   leak_total - bufferLen - outChanLen  =  mocks that vanished
-	//                                            between syncMock's
-	//                                            internal buffer/queue
-	//                                            and the wire
-	//
-	// where leak_total = syncMock.totalAdded - routes.OutgoingForwardedTotal
-	totalAdded := snap.TotalAdded
-	forwarded := routes.OutgoingForwardedTotal()
-	leakTotal := totalAdded - forwarded
-	leakStuckInternal := int64(snap.BufferLen + snap.OutChanLen)
-	leakOnTheWire := leakTotal - leakStuckInternal
-	fmt.Fprintf(os.Stderr,
-		"%s: ts_ms=%d "+
-			"syncmock_total_added=%d syncmock_buffer=%d "+
-			"syncmock_outchan_len=%d syncmock_outchan_cap=%d "+
-			"syncmock_outchan_bound=%v syncmock_outchan_closed=%v "+
-			"syncmock_pressure_dropped=%d syncmock_send_drops=%d "+
-			"syncmock_first_req_seen=%v syncmock_recent_windows=%d "+
-			"outgoing_forwarded=%d outgoing_handler_inflight=%d "+
-			"outgoing_handler_started=%d outgoing_handler_exited=%d "+
-			"outgoing_last_forward_ms=%d "+
-			"leak_total=%d leak_stuck_internal=%d leak_on_the_wire=%d\n",
-		tag, time.Now().UnixMilli(),
-		totalAdded, snap.BufferLen,
-		snap.OutChanLen, snap.OutChanCap,
-		snap.OutChanBound, snap.OutChanClosed,
-		snap.PressureDropped, snap.SendDropsTotal,
-		snap.FirstReqSeen, snap.RecentWindows,
-		forwarded, routes.OutgoingHandlerInFlight(),
-		routes.OutgoingHandlerStartedTotal(), routes.OutgoingHandlerExitedTotal(),
-		routes.OutgoingLastForwardUnixMs(),
-		leakTotal, leakStuckInternal, leakOnTheWire,
-	)
-	_ = os.Stderr.Sync()
-}
-
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
@@ -84,77 +29,23 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// BLACK-BOX RECORDER (comprehensive, per-second snapshots)
+			// PROBE: register a SIGTERM-time snapshot that writes the
+			// SyncMockManager's buffer state directly to stderr (NOT
+			// via zap — zap is async-buffered and silently drops lines
+			// when the process dies in the few hundred milliseconds
+			// between SIGTERM and container destruction in docker mode).
 			//
-			// The agent in docker-compose mode dies abruptly when
-			// `docker compose down` fires SIGKILL (its sudo wrapper
-			// doesn't forward SIGTERM and the container's 10s grace
-			// is exceeded). Pre-cancel hooks that fire INSIDE the Go
-			// signal handler never run in that case — the SIGTERM
-			// probe we tried in a previous commit never appeared in
-			// any mongo lane's log for exactly that reason.
-			//
-			// This recorder runs as a background goroutine that
-			// snapshots every agent-side counter every 1 second and
-			// writes one PROBE/agent-state line to stderr (sync,
-			// bypasses zap). Even if the agent is SIGKILL'd, the
-			// LAST snapshot before death survives in the CI log
-			// because stderr writes go straight to the syscall.
-			//
-			// What this answers, end-to-end:
-			//
-			//   syncMock.totalAdded                = mocks that ever
-			//                                        entered the agent
-			//                                        buffer
-			//   syncMock.bufferLen                 = mocks parked
-			//                                        inside the
-			//                                        windowing buffer
-			//                                        NOW
-			//   syncMock.outChanLen                = mocks queued for
-			//                                        the HTTP stream
-			//                                        NOW
-			//   routes.OutgoingForwardedTotal      = mocks the agent
-			//                                        has actually
-			//                                        gob-encoded onto
-			//                                        the response wire
-			//   routes.OutgoingHandlerInFlight     = is the /outgoing
-			//                                        handler currently
-			//                                        alive?
-			//   routes.OutgoingLastForwardUnixMs   = wall-clock of last
-			//                                        successful forward
-			//                                        (so we can see a
-			//                                        stall: handler
-			//                                        alive but not
-			//                                        moving mocks)
-			//
-			// At end of recording the LAST printed snapshot answers
-			// "where in the agent pipeline are mocks stuck?"
-			// definitively, even when the agent dies in 261 ms.
-			//
-			// The pre-cancel SIGTERM probe is kept as well — if the
-			// agent's signal handler DOES happen to run (e.g. native
-			// mode, or docker mode with a fixed entrypoint), it adds
-			// a final marker line just before cancel().
-			go func() {
-				ticker := time.NewTicker(1 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						// Print one last snapshot on the way out so
-						// the trailing line is anchored to a known
-						// "ctx-cancel observed" event when this path
-						// actually runs (it may not in SIGKILL).
-						writeAgentStateLine(true)
-						return
-					case <-ticker.C:
-						writeAgentStateLine(false)
-					}
-				}
-			}()
-
-			// Keep the SIGTERM-instant probe too — it's a more precise
-			// "moment of death" marker IF the signal handler runs.
+			// This hook fires in utils.NewCtx's signal handler at the
+			// exact instant before cancel() is called, so it reads
+			// live state untainted by shutdown propagation. If the
+			// agent has buffered mocks the host never received, the
+			// PROBE/syncmock-at-sigterm line in the CI log will show
+			// it definitively (BufferLen, OutChanLen, totalAdded vs
+			// what host actually persisted to mocks.yaml). If those
+			// counters are zero, the loss is happening upstream of
+			// SyncMockManager — in the mongo decoder itself or the
+			// proxy connection layer — and the next investigation
+			// round needs to instrument there.
 			utils.RegisterPreCancelHook(func() {
 				snap := syncMock.Get().ShutdownSnapshot()
 				fmt.Fprintf(os.Stderr,
@@ -169,6 +60,9 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					snap.TotalAdded, snap.PressureDropped, snap.SendDropsTotal,
 					snap.FirstReqSeen, snap.RecentWindows,
 				)
+				// Force stderr to flush — Go's os.Stderr writes are
+				// synchronous syscalls, but Sync explicitly ensures
+				// kernel buffers are committed before SIGKILL can hit.
 				_ = os.Stderr.Sync()
 			})
 
