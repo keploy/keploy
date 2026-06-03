@@ -301,6 +301,51 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 		decoder := gob.NewDecoder(res.Body)
 
+		// FIX FOR CHRONIC MONGO TEARDOWN-TC ORPHANS
+		//
+		// Root cause proven by the comprehensive black-box recorder on
+		// pipeline 26909575767:
+		//
+		//   agent  syncmock.totalAdded   = 1899
+		//   agent  outgoing_forwarded    = 1901   (wire-side)
+		//   host   total_forwarded       = 1243   (drain-end)
+		//   host   mocks.yaml on disk    ≈ 1243
+		//
+		// The agent flushes everything onto the wire; the host receives
+		// only 65%. The host's gob-decoder goroutine (this one) used to
+		// have `case <-ctx.Done(): return nil` in its inner select. When
+		// the host received SIGINT, ctx cancelled, this goroutine
+		// exited within milliseconds, the deferred res.Body.Close()
+		// closed the HTTP connection to the agent, and every still-
+		// queued mock on the TCP wire was discarded. The outer 60-s
+		// drainGrace in pkg/service/record/record.go was useless
+		// because mockChan was already closed by this defer.
+		//
+		// New behavior — mirrors the drain pattern in
+		// record.go::GetTestAndMockChans:
+		//
+		//   - Until ctx is done, normal path: decode + forward, with
+		//     ctx-cancellation watched.
+		//   - When ctx cancels for the first time, arm a 60-s drain
+		//     deadline. The select stops watching ctx (deadlineC is
+		//     now non-nil) and watches the deadline instead. We KEEP
+		//     reading and forwarding mocks until either:
+		//       * The agent closes its end of the stream (decoder
+		//         returns a shutdown error → break the for loop).
+		//       * The drain deadline expires (return early).
+		//
+		// This guarantees the teardown tail the agent is still
+		// flushing reaches the host's record.go drain — which then
+		// pushes it into InsertMock and finally mocks.yaml.
+		const drainGrace = 60 * time.Second
+		var drainDeadline <-chan time.Time
+		var deadlineT *time.Timer
+		defer func() {
+			if deadlineT != nil {
+				deadlineT.Stop()
+			}
+		}()
+
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
@@ -312,9 +357,29 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 
+			// Once ctx cancels we arm the drain deadline ONCE and then
+			// stop checking ctx — drainDeadline becomes the new "give
+			// up" signal. Until that arming, we still watch ctx so a
+			// caller cancelling without our drain extension (tests,
+			// non-record paths) exits promptly.
+			var ctxDone <-chan struct{}
+			if drainDeadline == nil {
+				ctxDone = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
-				// If the context is done, exit the loop
+			case <-ctxDone:
+				// First ctx cancellation — arm drain and try to send
+				// THIS mock under the new bounded wait. The for loop
+				// continues with drainDeadline armed (ctxDone now nil).
+				deadlineT = time.NewTimer(drainGrace)
+				drainDeadline = deadlineT.C
+				select {
+				case mockChan <- &mock:
+				case <-drainDeadline:
+					return nil
+				}
+			case <-drainDeadline:
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
