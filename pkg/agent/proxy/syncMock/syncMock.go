@@ -412,7 +412,27 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// → keep this mock; fall through to the normal buffer/forward path.
 	}
 	// Mock is being kept — count it as successfully added.
-	m.totalAdded.Add(1)
+	added := m.totalAdded.Add(1)
+
+	// DIAG: every 500th mock, log the lock-free atomic counters so we
+	// can correlate agent-side throughput with host-side InsertMock
+	// rate. We avoid touching m.buffer or m.outChan here (both would
+	// require taking a lock already held by AddMock or a sibling mutex
+	// that could deadlock under load); a periodic snapshot at this
+	// granularity is enough to confirm the agent stayed alive and was
+	// producing while the host writer fell behind.
+	if added%500 == 0 {
+		// Best-effort logger fetch — dropLogger may return nil during
+		// teardown when the parent logger is being torn down.
+		if logger := m.dropLogger(); logger != nil {
+			logger.Info("DIAG/syncmock-snapshot: agent producer state",
+				zap.Int64("totalAdded", added),
+				zap.Uint64("send_drops_total", m.dropCount.Load()),
+				zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
+	}
 
 	// Decide forward vs buffer vs drop under a single snapshot of
 	// (outChan, outChanClosed). The trio has three legal outcomes:

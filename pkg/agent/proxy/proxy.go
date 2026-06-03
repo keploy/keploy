@@ -1090,6 +1090,21 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}()
 
 	defer func() {
+		// DIAG: prove the proxy shutdown defer entered. If this log
+		// never appears in a CI run but the agent container was
+		// reported "Stopped", the agent was killed (docker stop / SIGKILL)
+		// before reaching this defer — every still-buffered mock in
+		// SyncMockManager is then lost without CloseOutChan ever
+		// running its FlushOwnedWindows + TRACE/syncmock-shutdown
+		// summary. That outcome is the smoking gun for "teardown
+		// mocks lost because the agent process was terminated
+		// before the host process finished draining". The companion
+		// TRACE/syncmock-shutdown that fires from CloseOutChan
+		// reports the residual unattributable mocks left in the
+		// buffer at close.
+		p.logger.Info("DIAG/proxy-shutdown-begin: entering shutdown defer chain",
+			zap.Int64("ts_ms", time.Now().UnixMilli()))
+
 		clientConnCancel()
 
 		// Close the listener synchronously BEFORE waiting for connection
@@ -1117,6 +1132,8 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// CloseOutChan takes an RWMutex that AddMock holds for read,
 		// guaranteeing every send completes before close runs.
 		if mgr := syncMock.Get(); mgr != nil {
+			p.logger.Info("DIAG/proxy-shutdown-closeout: calling SyncMock.CloseOutChan",
+				zap.Int64("ts_ms", time.Now().UnixMilli()))
 			mgr.CloseOutChan()
 		} else {
 			p.sessionMu.RLock()

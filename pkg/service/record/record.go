@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"time"
 
@@ -403,8 +404,21 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
+	// DIAG counters for the agent→host→disk pipeline. Used by the
+	// drain-arm and drain-end log to print the gap between mocks
+	// received from the agent stream and mocks actually written to
+	// mocks.yaml. A non-trivial gap at drain-end means the bottleneck
+	// is the host-side InsertMock writer (yaml-encode + fsync), not
+	// the gRPC stream or the agent-side syncMock buffer.
+	var (
+		mocksReceived atomic.Int64
+		mocksWritten  atomic.Int64
+		slowInserts   atomic.Int64
+	)
+
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			recv := mocksReceived.Add(1)
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -424,7 +438,23 @@ func (r *Recorder) Start(ctx context.Context) error {
 			// mock was then skipped (the continue below), orphaning its
 			// already-recorded test case at replay.
 			insertCtx := context.WithoutCancel(ctx)
+			insertStart := time.Now()
 			err := r.mockDB.InsertMock(insertCtx, mock, newTestSetID)
+			insertDur := time.Since(insertStart)
+			// Sampled slow-write log. Threshold 100ms is well above
+			// typical yaml-encode+fsync latency on the CI runner; firing
+			// repeatedly proves disk-side back-pressure.
+			if insertDur > 100*time.Millisecond {
+				n := slowInserts.Add(1)
+				if n == 1 || n%50 == 0 {
+					r.logger.Info("DIAG/insert-slow: InsertMock latency exceeded 100ms",
+						zap.Duration("insert_dur", insertDur),
+						zap.Int64("slow_inserts_so_far", n),
+						zap.String("mock_kind", mock.GetKind()),
+						zap.Int64("mocks_received", recv),
+						zap.Int64("mocks_written", mocksWritten.Load()))
+				}
+			}
 			if err != nil {
 				// During shutdown the error channels may already be closed by
 				// the deferred close above, so sending would panic. The insert
@@ -457,6 +487,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				written := mocksWritten.Add(1)
+				// Sampled progress log every 500 mocks written. Gives one
+				// line per 500 disk writes so we can correlate write rate
+				// with agent's mocks_added_so_far counter in pressure logs.
+				if written%500 == 0 {
+					r.logger.Info("DIAG/mock-progress: write pipeline snapshot",
+						zap.Int64("mocks_received", mocksReceived.Load()),
+						zap.Int64("mocks_written", written),
+						zap.Int64("in_flight_gap", mocksReceived.Load()-written),
+						zap.Int64("slow_inserts_so_far", slowInserts.Load()))
+				}
 			}
 		}
 		return nil
@@ -669,9 +710,28 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// stream when the deadline (not EOF) ended the drain. The deadline
 		// guarantees we always reach that deferred cancel, so dropping the
 		// old <-ctx.Done()->cancel() watchdog goroutine cannot leak mockCtx.
-		const drainGrace = 15 * time.Second
+		//
+		// Was 15 s; raised to 60 s after CI runs on the verify branch
+		// showed the host writer still flushing 800+ mongo mocks at the
+		// 15 s mark on heavy-load lanes (go-memory-load-mongo). At yaml-
+		// encode+fsync rates of ~60-80 writes/sec under sustained load,
+		// the old 15 s grace truncated the drain mid-flight and orphaned
+		// teardown TCs whose mocks were still in the agent → host queue.
+		const drainGrace = 60 * time.Second
 		var deadlineC <-chan time.Time // nil until the parent ctx cancels
 		var deadline *time.Timer
+		var drainStartTime time.Time
+
+		// Stream-side counters local to this forwarder goroutine. They
+		// track what flowed from the agent's gRPC stream into the host's
+		// outgoingChan — distinct from the InsertMock writer's
+		// receive/write counters in Start() (which live downstream of
+		// this channel). The drain-arm log reports streamForwarded at
+		// the moment of ctx cancel; the drain-end log reports how many
+		// extra mocks the agent flushed during the grace window.
+		var streamForwarded atomic.Int64
+		var drainStartForwarded int64
+
 		defer func() {
 			if deadline != nil {
 				deadline.Stop()
@@ -681,7 +741,28 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			if deadline == nil {
 				deadline = time.NewTimer(drainGrace)
 				deadlineC = deadline.C
+				drainStartTime = time.Now()
+				drainStartForwarded = streamForwarded.Load()
+				r.logger.Info("DIAG/drain-armed: ctx cancelled — entering bounded drain",
+					zap.Duration("drain_grace", drainGrace),
+					zap.Int64("mocks_forwarded_at_arm", drainStartForwarded))
 			}
+		}
+		// Single drain-end logger called from every return path below.
+		// Reports drain duration and how many mocks the agent flushed
+		// during the grace window. A large mocks_forwarded_during_drain
+		// proves the agent had a fat backlog at SIGINT — the smoking gun
+		// for "host writer can't keep up; teardown mocks orphaned".
+		logDrainEnd := func(reason string) {
+			if drainStartTime.IsZero() {
+				return // drain never armed; nothing to report
+			}
+			endForwarded := streamForwarded.Load()
+			r.logger.Info("DIAG/drain-end: shutdown drain finished",
+				zap.String("reason", reason),
+				zap.Duration("drain_duration", time.Since(drainStartTime)),
+				zap.Int64("mocks_forwarded_during_drain", endForwarded-drainStartForwarded),
+				zap.Int64("total_forwarded", endForwarded))
 		}
 
 		for {
@@ -695,10 +776,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			case <-ctxDone:
 				armDrain()
 			case <-deadlineC:
+				logDrainEnd("deadline-expired")
 				return ctx.Err()
 			case m, ok := <-outgoingStream:
 				if !ok {
 					// Agent closed the stream — every flushed mock forwarded.
+					logDrainEnd("stream-EOF")
 					return nil
 				}
 				if deadlineC != nil {
@@ -707,7 +790,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					// until close, so this normally never blocks.
 					select {
 					case outgoingChan <- m:
+						streamForwarded.Add(1)
 					case <-deadlineC:
+						logDrainEnd("deadline-expired-mid-send")
 						return ctx.Err()
 					}
 					continue
@@ -716,11 +801,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				// parent ctx cancels mid-send.
 				select {
 				case outgoingChan <- m:
+					streamForwarded.Add(1)
 				case <-ctx.Done():
 					armDrain()
 					select {
 					case outgoingChan <- m:
+						streamForwarded.Add(1)
 					case <-deadlineC:
+						logDrainEnd("deadline-expired-mid-send")
 						return ctx.Err()
 					}
 				}
