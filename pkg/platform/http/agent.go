@@ -1099,17 +1099,7 @@ func (a *AgentClient) requestAgentStop() error {
 		return fmt.Errorf("agent URI is not configured")
 	}
 
-	// Was 5 s; raised to 30 s because the agent's /stop handler now
-	// synchronously flushes the syncMock buffer via CloseOutChan
-	// before responding. On heavy-load lanes (go-memory-load-mongo)
-	// that buffer can hold 800-1,200 mocks at SIGINT time; pushing
-	// them through the live outgoing-mock stream takes 5-15 s on a
-	// 2-vCPU CI runner. A 5 s ceiling here would interrupt the flush
-	// mid-way (host gives up, host's drain ends via stream-EOF, agent
-	// continues flushing but with no consumer — same bug class we're
-	// fixing). 30 s is comfortably above the observed worst case
-	// while still bounding the wait if the agent has genuinely hung.
-	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
