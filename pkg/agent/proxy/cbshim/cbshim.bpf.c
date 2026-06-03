@@ -37,22 +37,64 @@ char LICENSE[] SEC("license") = "GPL";
 #define HASH_LEN           32      // SHA-256
 #define MAX_RANGES_PER_PID  4
 
-// target_namespace_pids — Stage-1 PID allowlist. Externally maintained
-// by the agent's existing PID discovery loop (in OSS standalone mode
-// by cbshim's own /proc walker; in enterprise by the shared
-// ensureAppPIDsRegistered ticker that already feeds the proxyless and
-// SSL/GoTLS uprobe filters). Single source of truth: if a tgid is not
-// in this map, NONE of cbshim's logic runs for it.
+// target_namespace_pids — Stage-1 PID allowlist, now a CACHE rather
+// than the source of truth. Populated lazily by the uprobe itself on
+// first X509_digest fire from a given tgid: if task_in_agent_ns()
+// returns true (current task is in the agent's PID namespace), the
+// tgid is added here so subsequent fires from the same tgid hit the
+// cheap one-lookup fast path. Eliminates the userspace polling loop
+// that previously had to /proc-walk descendants every 2s.
 //
-// Sized for K8s DaemonSet — ~500 pods × ~30 PIDs/pod + headroom. Same
-// shape and limits the enterprise proxyless code uses, so the map can
-// be unified later if we want a single shared instance.
+// Sized for K8s DaemonSet — ~500 pods × ~30 PIDs/pod + headroom.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 262144);
     __type(key, __u32);    // tgid
     __type(value, __u8);   // flag
 } target_namespace_pids SEC(".maps");
+
+// cbshim_agent_info — single-entry map carrying the keploy agent's
+// PID-namespace inode. Populated once at agent startup by reading
+// stat("/proc/self/ns/pid").Ino. Read by task_in_agent_ns() below
+// every time we need to classify a new tgid.
+//
+// Same shape and semantics as enterprise's
+// keploy_agent_registration_map but cbshim-private — no cross-BPF-
+// object coupling, no load-order dependency, no struct-version drift
+// when OSS hooks evolve. Pays one stat() at startup; in exchange
+// cbshim stays a self-contained BPF unit.
+struct cbshim_agent_info {
+    __u64 keploy_agent_inode;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct cbshim_agent_info);
+} cbshim_agent_info_map SEC(".maps");
+
+// task_in_agent_ns — mirrors the OSS hooks' check_and_register_agent
+// approach (headers/k_helpers.h:97 in the keploy/ebpf repo) but reads
+// our private cbshim_agent_info. Returns 1 if the calling task is in
+// or below the keploy agent's PID namespace.
+//
+// bpf_get_ns_current_pid_tgid is a Linux 5.7+ kernel helper. It looks
+// up the calling task's PID/TGID as seen FROM the specified PID
+// namespace (identified by dev + inode). Returns non-zero on error —
+// notably when the calling task is not in that namespace, which is
+// our "filter this out" signal.
+static __always_inline int task_in_agent_ns(void) {
+    __u32 key = 0;
+    struct cbshim_agent_info *info = bpf_map_lookup_elem(&cbshim_agent_info_map, &key);
+    if (!info || info->keploy_agent_inode == 0)
+        return 0;
+    struct bpf_pidns_info ns = {};
+    if (bpf_get_ns_current_pid_tgid(4, info->keploy_agent_inode,
+                                     &ns, sizeof(ns)) != 0)
+        return 0;
+    return 1;
+}
 
 // libpq_ranges — Stage-2 filter. For tgids that pass Stage 1, this
 // holds the libpq executable mapping ranges so we can verify the
@@ -135,11 +177,19 @@ int BPF_KPROBE(cb_x509_digest_entry,
     __u64 ptg = bpf_get_current_pid_tgid();
     __u32 tgid = ptg >> 32;
 
-    // Stage 1: cheap TGID allowlist gate. ~99% of host X509_digest
-    // calls (other tenants, system services, even keploy itself when
-    // it does telemetry TLS) get rejected here.
-    if (!bpf_map_lookup_elem(&target_namespace_pids, &tgid))
-        return 0;
+    // Stage 1: namespace membership gate with lazy classification.
+    // Fast path — already-classified tgid hits target_namespace_pids
+    // cache in ~30ns. Slow path — first fire from this tgid does the
+    // namespace check via task_in_agent_ns() (~500ns once) and caches
+    // the result. Rejects ~99% of host X509_digest calls (other
+    // tenants, system services, keploy's own telemetry TLS) at the
+    // namespace check — never poisons the cache for them.
+    if (!bpf_map_lookup_elem(&target_namespace_pids, &tgid)) {
+        if (!task_in_agent_ns())
+            return 0;
+        __u8 v = 1;
+        bpf_map_update_elem(&target_namespace_pids, &tgid, &v, BPF_ANY);
+    }
     bump(C_TGID_MATCHED);
 
     // Stage 2: is the caller actually libpq? Internal libcrypto

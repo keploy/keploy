@@ -13,6 +13,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type cbshimCbshimAgentInfo struct {
+	_                structs.HostLayout
+	KeployAgentInode uint64
+}
+
 type cbshimLibpqRangeKey struct {
 	_   structs.HostLayout
 	Pid uint32
@@ -76,6 +81,7 @@ type cbshimProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type cbshimMapSpecs struct {
 	Cbmap               *ebpf.MapSpec `ebpf:"cbmap"`
+	CbshimAgentInfoMap  *ebpf.MapSpec `ebpf:"cbshim_agent_info_map"`
 	Counters            *ebpf.MapSpec `ebpf:"counters"`
 	LibpqRanges         *ebpf.MapSpec `ebpf:"libpq_ranges"`
 	Pending             *ebpf.MapSpec `ebpf:"pending"`
@@ -109,6 +115,7 @@ func (o *cbshimObjects) Close() error {
 // It can be passed to loadCbshimObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cbshimMaps struct {
 	Cbmap               *ebpf.Map `ebpf:"cbmap"`
+	CbshimAgentInfoMap  *ebpf.Map `ebpf:"cbshim_agent_info_map"`
 	Counters            *ebpf.Map `ebpf:"counters"`
 	LibpqRanges         *ebpf.Map `ebpf:"libpq_ranges"`
 	Pending             *ebpf.Map `ebpf:"pending"`
@@ -118,6 +125,7 @@ type cbshimMaps struct {
 func (m *cbshimMaps) Close() error {
 	return _CbshimClose(
 		m.Cbmap,
+		m.CbshimAgentInfoMap,
 		m.Counters,
 		m.LibpqRanges,
 		m.Pending,

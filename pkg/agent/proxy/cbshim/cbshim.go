@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -52,12 +53,8 @@ type CBShim struct {
 	objs cbshimObjects
 
 	mu sync.Mutex
-	// registeredPIDs mirrors target_namespace_pids so UnregisterPID
-	// can clean up exactly what RegisterPID added.
-	registeredPIDs map[uint32]struct{}
 	// libpqRangesByPID mirrors libpq_ranges so we know what's
-	// registered per tgid (for replacement on re-register, or
-	// cleanup on UnregisterPID).
+	// registered per tgid (for replacement on re-register).
 	libpqRangesByPID map[uint32][]cbshimLibpqRangeVal
 	// attachedLibs holds the uprobe links per libcrypto file path.
 	// Attaches are idempotent — second call for the same path is a
@@ -109,7 +106,6 @@ func New(log *zap.Logger) (*CBShim, error) {
 
 	c := &CBShim{
 		log:              log,
-		registeredPIDs:   make(map[uint32]struct{}),
 		libpqRangesByPID: make(map[uint32][]cbshimLibpqRangeVal),
 		attachedLibs:     make(map[string][]link.Link),
 		pending:          make(map[string]*pendingHalf),
@@ -118,7 +114,42 @@ func New(log *zap.Logger) (*CBShim, error) {
 		return nil, fmt.Errorf("cbshim: load BPF object: %w", err)
 	}
 	log.Debug("cbshim: BPF program loaded")
+
+	// Populate the BPF-side cbshim_agent_info_map with the keploy
+	// agent's PID-namespace inode. The uprobe's Stage-1 filter
+	// (task_in_agent_ns in cbshim.bpf.c) reads this inode and calls
+	// bpf_get_ns_current_pid_tgid to verify the firing task is in the
+	// agent's PID namespace. Same pattern the OSS hooks use (see
+	// keploy/ebpf headers/k_helpers.h::check_and_register_agent), but
+	// cbshim-owned so we have no cross-BPF-object coupling.
+	//
+	// Failure here is logged but non-fatal: cbshim's BPF will reject
+	// every X509_digest fire because task_in_agent_ns returns 0 when
+	// keploy_agent_inode is 0, so the shim becomes a safe no-op.
+	if err := c.populateAgentInfo(); err != nil {
+		log.Warn("cbshim: failed to populate agent_info; shim will be a no-op",
+			zap.Error(err))
+	}
+
 	return c, nil
+}
+
+// populateAgentInfo writes the keploy agent's PID-namespace inode into
+// the BPF cbshim_agent_info_map. Called once at New(); the BPF program
+// reads it on every uprobe slow-path classification.
+func (c *CBShim) populateAgentInfo() error {
+	var st syscall.Stat_t
+	if err := syscall.Stat("/proc/self/ns/pid", &st); err != nil {
+		return fmt.Errorf("stat /proc/self/ns/pid: %w", err)
+	}
+	key := uint32(0)
+	info := cbshimCbshimAgentInfo{KeployAgentInode: st.Ino}
+	if err := c.objs.CbshimAgentInfoMap.Update(&key, &info, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update cbshim_agent_info_map: %w", err)
+	}
+	c.log.Info("cbshim: agent_info registered",
+		zap.Uint64("pid_ns_inode", st.Ino))
+	return nil
 }
 
 // Close detaches all probes and releases BPF resources.
@@ -154,81 +185,17 @@ func (c *CBShim) Close() error {
 	// Best-effort wipe of map state; the BPF Maps Close below would
 	// release the kernel-side maps anyway, but explicit deletes are
 	// cleaner under pinned-map scenarios that survive process exit.
-	for tgid := range c.registeredPIDs {
-		_ = c.objs.TargetNamespacePids.Delete(tgid)
-	}
+	// target_namespace_pids is now BPF-populated (lazy classification
+	// via task_in_agent_ns), so we don't track its entries from
+	// userspace — let kernel teardown handle it.
 	for tgid, ranges := range c.libpqRangesByPID {
 		for i := range ranges {
 			_ = c.objs.LibpqRanges.Delete(cbshimLibpqRangeKey{Pid: tgid, Idx: uint32(i)})
 		}
 	}
-	c.registeredPIDs = map[uint32]struct{}{}
 	c.libpqRangesByPID = map[uint32][]cbshimLibpqRangeVal{}
 
 	return c.objs.Close()
-}
-
-// -----------------------------------------------------------------
-// Stage 1 — PID membership (target_namespace_pids)
-// -----------------------------------------------------------------
-
-// RegisterPID adds tgid to the kernel-side allowlist. Idempotent;
-// safe to call repeatedly with the same tgid. Cheap (one map update).
-//
-// External PID sources call this:
-//   - OSS standalone: cbshim's own /proc walker, called from
-//     AttachToProcess / AttachToProcessTree / WatchProcessTree.
-//   - Enterprise: the agent's existing ensureAppPIDsRegistered ticker
-//     calls this directly so cbshim shares the same source of truth.
-func (c *CBShim) RegisterPID(tgid uint32) error {
-	if c == nil {
-		return errors.New("cbshim: nil instance")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.registeredPIDs[tgid]; ok {
-		return nil
-	}
-	var flag uint8 = 1
-	if err := c.objs.TargetNamespacePids.Update(tgid, flag, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("cbshim: target_namespace_pids[%d] update: %w", tgid, err)
-	}
-	c.registeredPIDs[tgid] = struct{}{}
-	return nil
-}
-
-// UnregisterPID removes tgid from the allowlist and drops its libpq
-// ranges. Called when the app process exits or is being deliberately
-// excluded.
-//
-// Uprobe attachments are NOT torn down — they stay in place because
-// the kernel-level cost is fixed once the inode is patched. They'll
-// be released on Close().
-func (c *CBShim) UnregisterPID(tgid uint32) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_ = c.objs.TargetNamespacePids.Delete(tgid)
-	delete(c.registeredPIDs, tgid)
-	if ranges, ok := c.libpqRangesByPID[tgid]; ok {
-		for i := range ranges {
-			_ = c.objs.LibpqRanges.Delete(cbshimLibpqRangeKey{Pid: tgid, Idx: uint32(i)})
-		}
-		delete(c.libpqRangesByPID, tgid)
-	}
-}
-
-// IsPIDRegistered reports whether tgid is currently in the allowlist.
-func (c *CBShim) IsPIDRegistered(tgid uint32) bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, ok := c.registeredPIDs[tgid]
-	return ok
 }
 
 // -----------------------------------------------------------------
@@ -384,16 +351,37 @@ func (c *CBShim) AttachToProcess(tgid int) error {
 		}
 	}
 
-	// Promote tgid into the allowlist only AFTER ranges + uprobes
-	// are in place. Until this returns, the BPF program's Stage-1
-	// gate ignores us; once it does, the next X509_digest call from
-	// libpq inside this tgid will be intercepted.
-	return c.RegisterPID(uint32(tgid))
+	// PID membership is now handled BPF-side via task_in_agent_ns
+	// (cbshim.bpf.c). Userspace no longer needs to call RegisterPID:
+	// the uprobe's first fire from this tgid lazily classifies it via
+	// the agent's PID-namespace inode and self-populates the cache.
+	// We still need this function for the per-PID work the kernel
+	// CANNOT do — libpq mapping ranges (Stage-2 filter) and
+	// libcrypto uprobe attach (per-file, but discovered per-PID).
+	return nil
 }
 
-// AttachToProcessTree calls AttachToProcess for rootPID and every
-// descendant currently visible in /proc. Picks up gunicorn-style
-// worker fanout in a single pass.
+// AttachToProcessTree does a ONE-SHOT scan of rootPID + descendants
+// at startup. Each PID's libcrypto files get uprobed and libpq ranges
+// registered. After this returns, the BPF program handles all
+// subsequent PID membership decisions via lazy namespace classification
+// (see cbshim.bpf.c::task_in_agent_ns). No userspace polling loop is
+// kept — the old WatchProcessTree pattern was replaced by the BPF
+// namespace check because:
+//
+//   - PID inheritance from namespace is automatic in the kernel; we
+//     no longer have to re-walk /proc every 2s to catch forks.
+//   - Late-spawned workers loading already-uprobed libraries get
+//     covered for free (uprobes are file-scoped, not PID-scoped).
+//
+// Remaining caveat: a late-spawned worker that lazy-dlopens a
+// NEVER-BEFORE-SEEN libcrypto/libpq file (e.g. a wheel-bundled
+// version no other process has loaded yet) is NOT covered. For the
+// canonical psycopg2-binary case this is rare in practice — the
+// bundled libs are loaded at Python import time, which happens during
+// worker fork-exec, well before any TLS handshake. Catching
+// truly-late dlopen would need a sched_process_exec ringbuf event
+// driving an on-demand walk; left as future work.
 func (c *CBShim) AttachToProcessTree(rootPID int) error {
 	pids := []int{rootPID}
 	pids = append(pids, discoverDescendantPIDs(rootPID)...)
@@ -410,25 +398,34 @@ func (c *CBShim) AttachToProcessTree(rootPID int) error {
 	return firstErr
 }
 
-// WatchProcessTree kicks off a background goroutine that periodically
-// re-scans rootPID's descendant tree and calls AttachToProcess for
-// each PID it finds. This is the cheap-when-quiet rescan loop that
-// catches:
-//   - late-fork worker processes (gunicorn, uwsgi, puma)
-//   - lazy dlopen of libpq / libcrypto (psycopg2-binary's bundled
-//     libssl is loaded only on the first psycopg2.connect() call)
+// WatchLibraryMappings periodically re-scans rootPID's descendant tree
+// and calls AttachToProcess for each PID it finds, refreshing libcrypto
+// uprobe attachments and libpq range registrations.
 //
-// The loop stops when:
-//   - the context is cancelled, or
+// PID MEMBERSHIP is NOT this loop's job — that's handled BPF-side via
+// task_in_agent_ns (cbshim.bpf.c). The loop exists ONLY to catch:
+//
+//   - Late-fork workers (gunicorn, uwsgi, puma) that map a BUNDLED
+//     libcrypto file no other process has loaded yet
+//   - psycopg2-binary's lazy dlopen of libcrypto-XXXXXX.so.1.1 on
+//     first connect — happens AFTER worker startup, after the initial
+//     AttachToProcessTree
+//
+// Because uprobes attach per FILE, once a process has mapped a given
+// libcrypto file AND we've attached the uprobe, all peers/children
+// mapping the same file are covered for free. The loop converges
+// quickly: typically 1-2 iterations to find and uprobe the bundled
+// libs gunicorn workers load.
+//
+// Loop stops when:
+//   - ctx is cancelled, or
 //   - rootPID no longer exists, or
-//   - the watchdog has seen no new mappings or PIDs for 10
-//     consecutive scans AND has attached to at least one libcrypto
-//     and one libpq range.
-func (c *CBShim) WatchProcessTree(ctx context.Context, rootPID int) {
-	go c.watchProcessTreeLoop(ctx, rootPID, 2*time.Second, 150)
+//   - 10 consecutive scans saw no new libs AND we've attached to ≥1.
+func (c *CBShim) WatchLibraryMappings(ctx context.Context, rootPID int) {
+	go c.watchLibraryMappingsLoop(ctx, rootPID, 2*time.Second, 150)
 }
 
-func (c *CBShim) watchProcessTreeLoop(ctx context.Context, rootPID int, interval time.Duration, maxIterations int) {
+func (c *CBShim) watchLibraryMappingsLoop(ctx context.Context, rootPID int, interval time.Duration, maxIterations int) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	consecutiveQuiet := 0
@@ -439,40 +436,34 @@ func (c *CBShim) watchProcessTreeLoop(ctx context.Context, rootPID int, interval
 		case <-tick.C:
 		}
 		if _, err := os.Stat(fmt.Sprintf("/proc/%d/status", rootPID)); err != nil {
-			c.log.Debug("cbshim: root pid gone, stopping watch",
+			c.log.Debug("cbshim: root pid gone, stopping library refresh",
 				zap.Int("rootPID", rootPID), zap.Error(err))
 			return
 		}
 
 		c.mu.Lock()
 		beforeLibs := len(c.attachedLibs)
-		beforePIDs := len(c.registeredPIDs)
 		c.mu.Unlock()
 
 		if err := c.AttachToProcessTree(rootPID); err != nil {
-			c.log.Debug("cbshim: AttachToProcessTree returned error",
+			c.log.Debug("cbshim: library refresh AttachToProcessTree returned error",
 				zap.Int("rootPID", rootPID), zap.Error(err))
 		}
 
 		c.mu.Lock()
 		afterLibs := len(c.attachedLibs)
-		afterPIDs := len(c.registeredPIDs)
 		c.mu.Unlock()
 
-		if afterLibs > beforeLibs || afterPIDs > beforePIDs {
+		if afterLibs > beforeLibs {
 			consecutiveQuiet = 0
-			c.log.Debug("cbshim: rescan found new state",
+			c.log.Debug("cbshim: library refresh found new lib mappings",
 				zap.Int("rootPID", rootPID),
-				zap.Int("libs_added", afterLibs-beforeLibs),
-				zap.Int("pids_added", afterPIDs-beforePIDs))
+				zap.Int("libs_added", afterLibs-beforeLibs))
 		} else {
 			consecutiveQuiet++
 		}
 
-		// Periodic counter dump — every 5 iterations (~10s at the
-		// default 2s tick) so we get a running view of probe activity
-		// without flooding the log. Crucial when the test harness
-		// kills keploy with a hard SIGKILL and Close() never runs.
+		// Periodic counter snapshot for diagnostics.
 		if i%5 == 4 {
 			cnt := c.Counters()
 			c.log.Info("cbshim: counter snapshot",
@@ -485,22 +476,12 @@ func (c *CBShim) watchProcessTreeLoop(ctx context.Context, rootPID int, interval
 				zap.Uint64("write_ok", cnt.WriteOK),
 				zap.Uint64("write_failed", cnt.WriteFailed))
 		}
-		if afterLibs > 0 && afterPIDs > 0 && consecutiveQuiet >= 10 {
-			c.log.Debug("cbshim: rescan converged, stopping watch",
-				zap.Int("rootPID", rootPID),
-				zap.Int("libs", afterLibs), zap.Int("pids", afterPIDs))
+
+		if afterLibs > 0 && consecutiveQuiet >= 10 {
+			c.log.Debug("cbshim: library refresh converged, stopping",
+				zap.Int("rootPID", rootPID), zap.Int("libs", afterLibs))
 			return
 		}
-	}
-}
-
-// DetachFromProcessTree removes rootPID and its descendants from the
-// allowlist, clearing libpq ranges along the way. Uprobe attachments
-// stay in place (cheap to keep, costly to repeatedly attach/detach).
-func (c *CBShim) DetachFromProcessTree(rootPID int) {
-	c.UnregisterPID(uint32(rootPID))
-	for _, pid := range discoverDescendantPIDs(rootPID) {
-		c.UnregisterPID(uint32(pid))
 	}
 }
 

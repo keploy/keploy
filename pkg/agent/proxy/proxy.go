@@ -906,14 +906,21 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// means we don't yet know the app PID — also a no-op; future
 	// session-bind paths can call this explicitly.
 	if p.cbshim != nil && p.appPID != 0 {
-		p.logger.Info("cbshim: attaching to process tree", zap.Uint32("appPID", p.appPID))
+		// PID membership is BPF-side via task_in_agent_ns (lazy
+		// namespace classification — see cbshim.bpf.c). No userspace
+		// PID-walking polling loop. The library-refresh loop below
+		// only handles late-loaded libcrypto files (bundled wheel
+		// libs that appear after worker fork-exec) — its job is
+		// per-file uprobe attach, NOT PID tracking.
+		p.logger.Info("cbshim: scanning process tree for libcrypto/libpq mappings",
+			zap.Uint32("appPID", p.appPID))
 		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
-			p.logger.Info("cbshim: initial AttachToProcessTree returned error (rescan loop will retry)",
+			p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
 				zap.Uint32("appPID", p.appPID), zap.Error(err))
 		} else {
-			p.logger.Info("cbshim: initial AttachToProcessTree succeeded", zap.Uint32("appPID", p.appPID))
+			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
 		}
-		p.cbshim.WatchProcessTree(ctx, int(p.appPID))
+		p.cbshim.WatchLibraryMappings(ctx, int(p.appPID))
 	} else if p.cbshim == nil {
 		p.logger.Info("cbshim: nil — skipping AttachToProcessTree (BPF load failed at proxy.New)")
 	} else {
