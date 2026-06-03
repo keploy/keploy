@@ -407,8 +407,6 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				PreamblePayload: preamblePayload,
 			}
 		}
-		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
-
 		// V2-relay equivalent of dialPostgresSSLUpstream's
 		// cb.RegisterReal call. Capture the real upstream cert here
 		// so the channel-binding shim can rendezvous it with the MITM
@@ -416,7 +414,19 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		// every parser that drives upstream TLS through the supervisor
 		// relay (Postgres V3, MySQL, Mongo, etc.) so wiring here
 		// covers all of them without per-parser changes.
+		//
+		// Order matters: must run BEFORE newReadTimeReportingConn
+		// below. That wrapper embeds net.Conn anonymously and does
+		// not implement Unwrap()/NetConn(), so unwrapToTLSConn cannot
+		// see through it to the underlying *tls.Conn — the hook
+		// would silently no-op and cbmap stays empty. Verified by
+		// running keploy record --debug locally with psycopg2-binary
+		// + channel_binding=require: with the hook in this position,
+		// "relay: RealCertHook fired" prints and SCRAM-PLUS succeeds;
+		// with the hook after the wrapper, it never logs.
 		publishRealCertFromUpgraded(r, upgradedDst, log)
+
+		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
 	}
 
 	if params.ClientTLSConfig != nil {
