@@ -238,6 +238,54 @@ func Get() *SyncMockManager {
 	return instance
 }
 
+// ShutdownProbe is a point-in-time snapshot of the SyncMockManager
+// returned by ShutdownSnapshot(). All fields are numeric so callers
+// can format it with fmt.Fprintf to stderr (bypassing zap) when they
+// need a SIGTERM-survivable log line.
+type ShutdownProbe struct {
+	BufferLen       int    // mocks parked in the windowing buffer
+	OutChanLen      int    // mocks queued for the live HTTP stream
+	OutChanCap      int    // outChan buffer capacity
+	OutChanBound    bool   // SetOutputChannel has fired
+	OutChanClosed   bool   // CloseOutChan has fired
+	TotalAdded      int64  // lifetime AddMock successes
+	PressureDropped int64  // mocks dropped by memory-pressure gate
+	SendDropsTotal  uint64 // mocks dropped by sendToOutChan overflow
+	FirstReqSeen    bool   // windowing has started
+	RecentWindows   int    // resolved windows still tracked
+}
+
+// ShutdownSnapshot returns a best-effort read of the manager's state.
+// Designed for the SIGTERM probe registered via
+// utils.RegisterPreCancelHook — must be cheap and never block. Takes
+// the manager's mutexes briefly; safe to call concurrently with
+// AddMock / sendToOutChan because all reads are guarded.
+//
+// Returns the zero value if m is nil.
+func (m *SyncMockManager) ShutdownSnapshot() ShutdownProbe {
+	if m == nil {
+		return ShutdownProbe{}
+	}
+	var snap ShutdownProbe
+	m.mu.Lock()
+	snap.BufferLen = len(m.buffer)
+	snap.FirstReqSeen = m.firstReqSeen
+	snap.RecentWindows = len(m.recentWindows)
+	m.mu.Unlock()
+	m.outChanMu.RLock()
+	if m.outChan != nil {
+		snap.OutChanLen = len(m.outChan)
+		snap.OutChanCap = cap(m.outChan)
+		snap.OutChanBound = true
+	}
+	snap.OutChanClosed = m.outChanClosed
+	m.outChanMu.RUnlock()
+	snap.TotalAdded = m.totalAdded.Load()
+	snap.PressureDropped = m.pressureDropped.Load()
+	snap.SendDropsTotal = m.dropCount.Load()
+	return snap
+}
+
 // SetOutputChannel plugs an outgoing mock channel into the manager.
 // Only resets outChanClosed when the channel pointer changes —
 // re-setting the same pointer after CloseOutChan must NOT reopen
