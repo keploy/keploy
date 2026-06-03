@@ -1362,13 +1362,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		// TRACE/proxy-destinfo-hit: eBPF lookup succeeded — only logged in record
 		// mode so replay runs (thousands of connections) stay fast.
-		// Shows dest port + session mode. Catches the case where eBPF works fine
-		// but the session is wrong (mode=none/test instead of record).
+		// Shows full TCP tuple: srcIP:srcPort → destIP:destPort so we can confirm
+		// the connection is from the app to the right backend (e.g. app→mongo:27017).
 		if s := p.getSession(); s != nil && s.Mode == models.MODE_RECORD {
-			p.logger.Info("TRACE/proxy-destinfo-hit: eBPF lookup succeeded",
-				zap.Int("srcPort", sourcePort),
-				zap.String("sourceIP", sourceIP),
-				zap.Uint32("destPort", destInfo.Port),
+			destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
+			p.logger.Info("TRACE/proxy-destinfo-hit: eBPF lookup succeeded — full TCP tuple known",
+				zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+				zap.String("dest", destAddr),
 				zap.String("session_mode", string(s.Mode)),
 				zap.Int64("ts_ms", time.Now().UnixMilli()),
 			)
@@ -1390,14 +1390,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {
-		// TRACE/proxy-session-nil: connection reached the proxy and eBPF lookup
-		// succeeded, but no recording/replay session is active. This fires when
-		// connections arrive after the session was torn down (e.g. teardown queries
-		// arriving while the recording session is being cleaned up).
+		// TRACE/proxy-session-nil: eBPF lookup succeeded but no active session.
+		// Full TCP tuple logged to confirm which connection this was.
+		destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Info("TRACE/proxy-session-nil: no active session — connection will be closed",
-			zap.Int("srcPort", sourcePort),
-			zap.String("sourceIP", sourceIP),
-			zap.Uint32("destPort", destInfo.Port),
+			zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+			zap.String("dest", destAddr),
 			zap.Int64("ts_ms", time.Now().UnixMilli()),
 		)
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
@@ -1508,10 +1506,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// In RECORD mode this firing means session unexpectedly changed to TEST
 		// or GlobalPassthrough was set, which would explain missing mocks.
 		if rule.Mode == models.MODE_RECORD {
+			// Full TCP tuple confirms which app→backend connection was silently skipped.
+			passthroughDestAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 			p.logger.Info("TRACE/proxy-passthrough: record-mode connection sent to passthrough — no mock will be created",
-				zap.Int("srcPort", sourcePort),
-				zap.String("sourceIP", sourceIP),
-				zap.Uint32("destPort", destInfo.Port),
+				zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+				zap.String("dest", passthroughDestAddr),
 				zap.Bool("global_passthrough", p.GlobalPassthrough),
 				zap.Bool("mocking", rule.Mocking),
 				zap.Int64("ts_ms", time.Now().UnixMilli()),
