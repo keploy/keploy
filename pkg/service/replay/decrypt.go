@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -123,7 +124,7 @@ func (c *kmsKeyCache) getKey(ctx context.Context, keyID string) ([]byte, error) 
 	c.mu.Unlock()
 
 	// Fetch from api-server /internal/kms/key/{keyId}.
-	fetchURL := fmt.Sprintf("%s/internal/kms/key/%s", c.apiURL, keyID)
+	fetchURL := fmt.Sprintf("%s/internal/kms/key/%s", c.apiURL, url.PathEscape(keyID))
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -141,7 +142,10 @@ func (c *kmsKeyCache) getKey(ctx context.Context, keyID string) ([]byte, error) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if readErr != nil {
+		return nil, fmt.Errorf("kms: read response: %w", readErr)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("kms: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -200,8 +204,11 @@ func (c *kmsKeyCache) decryptTestCaseRequest(ctx context.Context, tc *models.Tes
 		if isEncrypted(v) {
 			plain, err := c.decryptField(ctx, v)
 			if err != nil {
-				logger.Warn("failed to decrypt request header",
-					zap.String("header", k), zap.Error(err))
+				logger.Debug("skipping ENC decryption for request header",
+					zap.String("header", k),
+					zap.Error(err),
+					zap.String("hint", "ensure keploy is logged in and APIServerURL points to a reachable api-server"),
+				)
 				continue
 			}
 			tc.HTTPReq.Header[k] = plain
@@ -213,18 +220,25 @@ func (c *kmsKeyCache) decryptTestCaseRequest(ctx context.Context, tc *models.Tes
 		if isEncrypted(v) {
 			plain, err := c.decryptField(ctx, v)
 			if err != nil {
-				logger.Warn("failed to decrypt URL param", zap.String("param", k), zap.Error(err))
+				logger.Debug("skipping ENC decryption for URL param",
+					zap.String("param", k),
+					zap.Error(err),
+					zap.String("hint", "ensure keploy is logged in and APIServerURL points to a reachable api-server"),
+				)
 				continue
 			}
 			tc.HTTPReq.URLParams[k] = plain
 		}
 	}
 
-	// Decrypt body (may be an entire encrypted blob or a JSON with encrypted fields).
+	// Decrypt body if it is itself an ENC:... value (nested JSON fields are not decrypted here).
 	if isEncrypted(tc.HTTPReq.Body) {
 		plain, err := c.decryptField(ctx, tc.HTTPReq.Body)
 		if err != nil {
-			logger.Warn("failed to decrypt request body", zap.Error(err))
+			logger.Debug("skipping ENC decryption for request body",
+				zap.Error(err),
+				zap.String("hint", "ensure keploy is logged in and APIServerURL points to a reachable api-server"),
+			)
 		} else {
 			tc.HTTPReq.Body = plain
 		}
