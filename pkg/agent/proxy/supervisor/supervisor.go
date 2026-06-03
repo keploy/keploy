@@ -152,14 +152,36 @@ func (s *Supervisor) MarkPendingWork() {
 	// Bump so the hang budget starts fresh at the moment the request
 	// actually arrived, not from Supervisor construction.
 	s.BumpActivity()
-	s.pending.Store(true)
+	// TRACE/supervisor-pending-start: log only on false→true transition
+	// (start of a new idle-to-active window). This tells us WHEN the
+	// 60-second hang clock last reset. If the next log we see is
+	// TRACE/supervisor-hang 60 seconds later with no
+	// TRACE/supervisor-pending-cleared in between → proven: pending
+	// was stuck because ClearPendingWork was never called.
+	if !s.pending.Swap(true) {
+		if s.cfg.Logger != nil {
+			s.cfg.Logger.Info("TRACE/supervisor-pending-start: new in-flight request — hang clock reset",
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
+	}
 }
 
 // ClearPendingWork declares the outstanding request complete. The
 // watchdog disarms; subsequent inactivity is tolerated indefinitely
 // (matches invariant: long-poll, LLM response, pg_sleep(45) are OK).
 func (s *Supervisor) ClearPendingWork() {
-	s.pending.Store(false)
+	// TRACE/supervisor-pending-cleared: log on true→false transition.
+	// If TRACE/supervisor-hang fires WITHOUT a recent cleared log
+	// in between → proven: the exchange was never cleared (mock was
+	// dropped, pressure-suppressed, or OnPendingCleared was not called).
+	if s.pending.Swap(false) {
+		if s.cfg.Logger != nil {
+			s.cfg.Logger.Info("TRACE/supervisor-pending-cleared: request complete — hang clock disarmed",
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
+	}
 }
 
 // MarkMemCapExceeded is called by the relay when the per-connection
@@ -242,13 +264,22 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
-		// Debug-level: hang abort is a designed control-flow path —
-		// the dispatcher's FallthroughToPassthrough handling picks it
-		// up and the relay keeps forwarding bytes. Operators who want
-		// to tune behaviour have explicit knobs (see next_step).
-		s.cfg.Logger.Debug("parser hang detected; aborting",
+		// TRACE/supervisor-hang: promoted to Info so it is visible in CI.
+		// This is the definitive proof log for the hang-watchdog theory:
+		//   - If this fires → hang watchdog IS the cause of the drain
+		//   - inactive_for shows exactly how long pending was stuck (must be ~60s)
+		//   - last_activity_ts_ms shows when the last request arrived
+		//   - Pair with TRACE/supervisor-pending-start (same ts) and
+		//     absence of TRACE/supervisor-pending-cleared → proves
+		//     ClearPendingWork was never called for that request
+		lastActivity := time.Unix(0, s.lastProgressNano.Load())
+		inactiveDur := time.Since(lastActivity)
+		s.cfg.Logger.Info("TRACE/supervisor-hang: hang watchdog fired — aborting parser, relay falls through to passthrough",
 			zap.Duration("hang_budget", s.cfg.HangBudget),
-			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_NEW_RELAY=off to force the legacy parser path"),
+			zap.Duration("inactive_for", inactiveDur),
+			zap.Int64("last_activity_ts_ms", lastActivity.UnixMilli()),
+			zap.Int64("ts_ms", time.Now().UnixMilli()),
+			zap.String("next_step", "raise supervisor.Config.HangBudget or ensure ClearPendingWork is called after every request"),
 		)
 		s.fireOnAbort()
 		runCancel()
