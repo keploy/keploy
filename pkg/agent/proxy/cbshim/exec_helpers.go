@@ -157,7 +157,16 @@ func hasELFSymbol(path, symbolName string) bool {
 // Returns the /proc-bridged path when it's stat-able, the literal
 // path otherwise. The literal path is the right thing when the agent
 // and target share the namespace (the common case).
+//
+// Order matters: try the literal path FIRST. If we always preferred
+// /proc/<pid>/root/<path>, a path that's already absolute and visible
+// in the agent's mount ns would get double-prefixed when re-resolved
+// (e.g. an openat for "/proc/X/root/lib/libcrypto.so.3" by another
+// observer would become "/proc/Y/root/proc/X/root/lib/libcrypto.so.3").
 func hostVisiblePath(pid int, path string) string {
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
 	hostPath := fmt.Sprintf("/proc/%d/root%s", pid, path)
 	if _, err := os.Stat(hostPath); err == nil {
 		return hostPath

@@ -40,7 +40,7 @@ func (c *CBShim) RegisterLibpqRanges(_ uint32, _ []LibpqRange) error         { r
 func (c *CBShim) AttachToLibcrypto(_ string) error                           { return nil }
 func (c *CBShim) AttachToProcess(_ int) error                                { return nil }
 func (c *CBShim) AttachToProcessTree(_ int) error                            { return nil }
-func (c *CBShim) WatchLibraryMappings(_ context.Context, _ int)              {}
+func (c *CBShim) StartProcEventConsumer(_ context.Context)                   {}
 func (c *CBShim) RegisterMITM(_ string, _ []byte)                            {}
 func (c *CBShim) RegisterReal(_ string, _ []byte, _ x509.SignatureAlgorithm) {}
 func (c *CBShim) CleanupConnection(_ string)                                 {}

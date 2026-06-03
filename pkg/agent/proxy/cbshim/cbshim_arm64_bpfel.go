@@ -72,6 +72,7 @@ type cbshimSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cbshimProgramSpecs struct {
+	CbOpenatEnter      *ebpf.ProgramSpec `ebpf:"cb_openat_enter"`
 	CbX509DigestEntry  *ebpf.ProgramSpec `ebpf:"cb_x509_digest_entry"`
 	CbX509DigestReturn *ebpf.ProgramSpec `ebpf:"cb_x509_digest_return"`
 }
@@ -82,6 +83,7 @@ type cbshimProgramSpecs struct {
 type cbshimMapSpecs struct {
 	Cbmap               *ebpf.MapSpec `ebpf:"cbmap"`
 	CbshimAgentInfoMap  *ebpf.MapSpec `ebpf:"cbshim_agent_info_map"`
+	CbshimProcEvents    *ebpf.MapSpec `ebpf:"cbshim_proc_events"`
 	Counters            *ebpf.MapSpec `ebpf:"counters"`
 	LibpqRanges         *ebpf.MapSpec `ebpf:"libpq_ranges"`
 	Pending             *ebpf.MapSpec `ebpf:"pending"`
@@ -116,6 +118,7 @@ func (o *cbshimObjects) Close() error {
 type cbshimMaps struct {
 	Cbmap               *ebpf.Map `ebpf:"cbmap"`
 	CbshimAgentInfoMap  *ebpf.Map `ebpf:"cbshim_agent_info_map"`
+	CbshimProcEvents    *ebpf.Map `ebpf:"cbshim_proc_events"`
 	Counters            *ebpf.Map `ebpf:"counters"`
 	LibpqRanges         *ebpf.Map `ebpf:"libpq_ranges"`
 	Pending             *ebpf.Map `ebpf:"pending"`
@@ -126,6 +129,7 @@ func (m *cbshimMaps) Close() error {
 	return _CbshimClose(
 		m.Cbmap,
 		m.CbshimAgentInfoMap,
+		m.CbshimProcEvents,
 		m.Counters,
 		m.LibpqRanges,
 		m.Pending,
@@ -143,12 +147,14 @@ type cbshimVariables struct {
 //
 // It can be passed to loadCbshimObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cbshimPrograms struct {
+	CbOpenatEnter      *ebpf.Program `ebpf:"cb_openat_enter"`
 	CbX509DigestEntry  *ebpf.Program `ebpf:"cb_x509_digest_entry"`
 	CbX509DigestReturn *ebpf.Program `ebpf:"cb_x509_digest_return"`
 }
 
 func (p *cbshimPrograms) Close() error {
 	return _CbshimClose(
+		p.CbOpenatEnter,
 		p.CbX509DigestEntry,
 		p.CbX509DigestReturn,
 	)

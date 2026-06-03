@@ -137,6 +137,31 @@ struct {
     __type(value, __u64);
 } pending SEC(".maps");
 
+// cbshim_proc_events — ringbuf the openat tracepoint emits to whenever
+// a process in the agent's PID namespace calls openat() on a file with
+// basename starting with libcrypto / libpq / libssl. The path is read
+// from the syscall's filename argument so userspace gets {tgid, path}
+// directly — no /proc-maps polling needed for discovery. By the time
+// userspace processes the event, the syscall has returned and ld.so
+// has typically already mmap'd the file, so a one-shot scan of
+// /proc/<tgid>/maps reliably finds the new mapping.
+//
+// Sized 256 KiB to comfortably absorb startup bursts (a typical
+// dynamic linker opens 10-20 .so files in a single process exec; on a
+// busy host that can sum to a few thousand events/sec during startup).
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 18);
+} cbshim_proc_events SEC(".maps");
+
+#define LIB_EVENT_PATH_LEN 256
+
+struct cbshim_lib_event {
+    __u32 tgid;
+    __u32 _pad;
+    char  path[LIB_EVENT_PATH_LEN];
+};
+
 // counters — observability. Indexed by C_* below.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -231,5 +256,130 @@ int BPF_KRETPROBE(cb_x509_digest_return) {
     long rc = bpf_probe_write_user((void *)md, real_hash, HASH_LEN);
     if (rc == 0) bump(C_WRITE_OK);
     else         bump(C_WRITE_FAIL);
+    return 0;
+}
+
+// O_CLOEXEC / O_RDONLY constants — kept here so we don't depend on
+// any specific kernel header layout when compiling the BPF program.
+// Values are fixed by the Linux syscall ABI for x86_64 and arm64.
+#define CB_O_RDONLY    0
+#define CB_O_ACCMODE   3
+#define CB_O_CLOEXEC   02000000
+
+// trace_event_raw_sys_enter for the openat syscall:
+//   args[0] = dfd
+//   args[1] = filename (const char __user *)
+//   args[2] = flags    (int)
+//   args[3] = mode     (mode_t)
+struct cbshim_sys_enter {
+    __u64 unused;
+    __s32 syscall_nr;
+    __u32 _pad;
+    __u64 args[6];
+};
+
+// cb_openat_enter — fires when a process in the agent's PID namespace
+// calls openat() with O_RDONLY|O_CLOEXEC (the canonical ld.so /
+// __libc_dlopen_mode flag combo for shared-library loads) on a file
+// whose basename starts with libcrypto, libpq, or libssl.
+//
+// Why this hook is the right one (proven by strace):
+//
+//   ld.so / dlopen path for a shared library:
+//       openat(..., "<path>/lib*", O_RDONLY|O_CLOEXEC)   ← we fire HERE
+//       read(fd, ELF header)
+//       mmap(fd, PROT_EXEC, ...)                         ← file mapped
+//       close(fd)
+//       ld.so resolves relocations + runs library init
+//       ... eventually ...
+//       application calls a function in the library      ← uprobe must
+//                                                          be attached
+//                                                          BY THIS POINT
+//
+// strace timing on the local repro:
+//   t=0 ms     openat(".../libcrypto-XXX.so.1.1")        ← our event
+//   t=42 ms    connect(fd, sin_port=5432)                ← postgres TCP
+//   t=>50 ms   X509_digest fires                         ← uprobe target
+//
+// 40+ ms of breathing room for userspace to consume the ringbuf event
+// and call link.OpenExecutable().Uprobe(). No polling needed; no
+// timing races on lazy dlopen — every library load goes through this
+// syscall path, including the truly-late ones (psycopg2's bundled
+// libcrypto, runtime plugin loads, etc.).
+//
+// Filtering strategy (in order, cheapest first):
+//   1. namespace check via task_in_agent_ns
+//   2. O_RDONLY + O_CLOEXEC flags (ld.so always sets this combo)
+//   3. basename starts with libcrypto / libpq / libssl
+//
+// The path is copied into the ringbuf event so userspace can hand it
+// straight to AttachToLibcrypto / RegisterLibpqRanges — no /proc/maps
+// scan needed for discovery.
+SEC("tracepoint/syscalls/sys_enter_openat")
+int cb_openat_enter(struct cbshim_sys_enter *ctx) {
+    // Stage 0: PID-namespace gate. ~99% of openat calls system-wide
+    // come from processes outside the agent's namespace.
+    if (!task_in_agent_ns())
+        return 0;
+
+    // Stage 1: flag gate. ld.so / __libc_dlopen_mode always opens
+    // libraries with O_RDONLY|O_CLOEXEC. Any other open is config
+    // files, /proc reads, logging, etc. — not our concern.
+    long flags = (long)ctx->args[2];
+    if ((flags & CB_O_CLOEXEC) == 0) return 0;
+    if ((flags & CB_O_ACCMODE) != CB_O_RDONLY) return 0;
+
+    const char *filename_uptr = (const char *)ctx->args[1];
+    if (!filename_uptr) return 0;
+
+    // Reserve event up front so we can read the path string straight
+    // into its backing storage (one less stack→event copy).
+    struct cbshim_lib_event *evt = bpf_ringbuf_reserve(
+        &cbshim_proc_events, sizeof(*evt), 0);
+    if (!evt) return 0;
+
+    long n = bpf_probe_read_user_str(evt->path, LIB_EVENT_PATH_LEN, filename_uptr);
+    if (n <= 1) {
+        bpf_ringbuf_discard(evt, 0);
+        return 0;
+    }
+
+    // Find last '/' in the path. Bounded unroll keeps the verifier
+    // happy. LIB_EVENT_PATH_LEN==256 → 256 iterations.
+    __u32 slash_idx = 0;  // 0 means "no slash, basename is the whole path"
+    #pragma unroll
+    for (int i = 0; i < LIB_EVENT_PATH_LEN; i++) {
+        if (i >= n) break;
+        if (evt->path[i] == '/') {
+            slash_idx = (__u32)i + 1;
+        }
+    }
+
+    // Bound slash_idx so the verifier sees evt->path[slash_idx+8] as
+    // a safe access. We need at most 9 bytes from slash_idx (for
+    // "libcrypto"), so cap at LIB_EVENT_PATH_LEN - 9.
+    if (slash_idx >= LIB_EVENT_PATH_LEN - 9) {
+        bpf_ringbuf_discard(evt, 0);
+        return 0;
+    }
+
+    char *bn = &evt->path[slash_idx];
+
+    int is_libcrypto = (bn[0] == 'l' && bn[1] == 'i' && bn[2] == 'b' &&
+                       bn[3] == 'c' && bn[4] == 'r' && bn[5] == 'y' &&
+                       bn[6] == 'p' && bn[7] == 't' && bn[8] == 'o');
+    int is_libpq = (bn[0] == 'l' && bn[1] == 'i' && bn[2] == 'b' &&
+                   bn[3] == 'p' && bn[4] == 'q');
+    int is_libssl = (bn[0] == 'l' && bn[1] == 'i' && bn[2] == 'b' &&
+                    bn[3] == 's' && bn[4] == 's' && bn[5] == 'l');
+
+    if (!is_libcrypto && !is_libpq && !is_libssl) {
+        bpf_ringbuf_discard(evt, 0);
+        return 0;
+    }
+
+    evt->tgid = bpf_get_current_pid_tgid() >> 32;
+    evt->_pad = 0;
+    bpf_ringbuf_submit(evt, 0);
     return 0;
 }

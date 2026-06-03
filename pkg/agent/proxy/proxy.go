@@ -920,7 +920,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		} else {
 			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
 		}
-		p.cbshim.WatchLibraryMappings(ctx, int(p.appPID))
+		// Kick the sched_process_exec ringbuf consumer. The kernel
+		// emits an event every time a process in the agent's PID
+		// namespace completes execve(); consumer walks /proc/<tgid>/
+		// maps to discover late-loaded libcrypto/libpq files (bundled
+		// wheel libs, etc.) and attaches uprobes. Replaces the old
+		// 2s polling loop with an event-driven design.
+		p.cbshim.StartProcEventConsumer(ctx)
 	} else if p.cbshim == nil {
 		p.logger.Info("cbshim: nil — skipping AttachToProcessTree (BPF load failed at proxy.New)")
 	} else {

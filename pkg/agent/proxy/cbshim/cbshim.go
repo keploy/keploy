@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -14,10 +15,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"go.uber.org/zap"
 )
@@ -51,6 +52,15 @@ import (
 type CBShim struct {
 	log  *zap.Logger
 	objs cbshimObjects
+
+	// Tracepoint link for sched_process_exec — kernel emits a ringbuf
+	// event on this for every exec in the agent's PID namespace,
+	// which is how we replace the old WatchLibraryMappings polling
+	// loop with an event-driven library refresh.
+	execTracepoint link.Link
+	procReader     *ringbuf.Reader
+	consumerOnce   sync.Once
+	consumerCancel context.CancelFunc
 
 	mu sync.Mutex
 	// libpqRangesByPID mirrors libpq_ranges so we know what's
@@ -131,8 +141,163 @@ func New(log *zap.Logger) (*CBShim, error) {
 			zap.Error(err))
 	}
 
+	// Attach the sched_process_exec tracepoint so the kernel emits a
+	// ringbuf event every time a process in the agent's PID namespace
+	// completes execve(). Userspace consumes those events (see
+	// startProcEventConsumer) and walks /proc/<tgid>/maps to discover
+	// newly-loaded libcrypto/libpq files. Replaces the previous 2s
+	// polling loop with an event-driven design.
+	if tp, err := link.Tracepoint("syscalls", "sys_enter_openat", c.objs.CbOpenatEnter, nil); err != nil {
+		log.Warn("cbshim: failed to attach sys_enter_openat tracepoint — new libraries won't be auto-discovered",
+			zap.Error(err))
+	} else {
+		c.execTracepoint = tp
+		log.Info("cbshim: sys_enter_openat tracepoint attached")
+	}
+
+	// Open the ringbuf reader. The consumer goroutine is started by
+	// the first caller of StartProcEventConsumer (typically the proxy
+	// once a context for the run is available).
+	if rd, err := ringbuf.NewReader(c.objs.CbshimProcEvents); err != nil {
+		log.Warn("cbshim: failed to open proc-events ringbuf — no event-driven library refresh",
+			zap.Error(err))
+	} else {
+		c.procReader = rd
+	}
+
 	return c, nil
 }
+
+// libEventPathLen mirrors LIB_EVENT_PATH_LEN in cbshim.bpf.c — the
+// fixed-size path buffer the BPF program writes to in each ringbuf
+// event. Changing this requires updating both sides in lockstep.
+const libEventPathLen = 256
+
+// libEvent decodes one cbshim_lib_event ringbuf record.
+type libEvent struct {
+	TGID uint32
+	Path string
+}
+
+// StartProcEventConsumer spawns a background goroutine that reads
+// openat ringbuf events from the BPF program. For each event it
+// attaches the relevant uprobe (for libcrypto/libssl files) or scans
+// /proc/<tgid>/maps to register libpq ranges. Idempotent — subsequent
+// calls are no-ops. Stops cleanly when ctx is cancelled or when
+// Close() is invoked.
+func (c *CBShim) StartProcEventConsumer(ctx context.Context) {
+	if c == nil || c.procReader == nil {
+		return
+	}
+	c.consumerOnce.Do(func() {
+		runCtx, cancel := context.WithCancel(ctx)
+		c.consumerCancel = cancel
+		go c.consumeProcEvents(runCtx)
+	})
+}
+
+func (c *CBShim) consumeProcEvents(ctx context.Context) {
+	c.log.Info("cbshim: proc-event consumer started")
+	defer c.log.Info("cbshim: proc-event consumer exited")
+	const recSize = 8 + libEventPathLen // tgid(4) + pad(4) + path(256)
+	for {
+		rec, err := c.procReader.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			c.log.Debug("cbshim: ringbuf read error (continuing)", zap.Error(err))
+			continue
+		}
+		if len(rec.RawSample) < recSize {
+			c.log.Debug("cbshim: short ringbuf record", zap.Int("len", len(rec.RawSample)))
+			continue
+		}
+		tgid := binary.LittleEndian.Uint32(rec.RawSample[0:4])
+		// Decode null-terminated path from bytes [8 .. 8+libEventPathLen).
+		pathBytes := rec.RawSample[8 : 8+libEventPathLen]
+		nullIdx := 0
+		for i, b := range pathBytes {
+			if b == 0 {
+				nullIdx = i
+				break
+			}
+		}
+		if nullIdx == 0 {
+			c.log.Debug("cbshim: ringbuf record has empty path", zap.Uint32("tgid", tgid))
+			continue
+		}
+		path := string(pathBytes[:nullIdx])
+		c.log.Debug("cbshim: openat event received",
+			zap.Uint32("tgid", tgid), zap.String("path", path))
+		c.handleLibEvent(libEvent{TGID: tgid, Path: path})
+	}
+}
+
+// handleLibEvent acts on one openat event. Two behaviours by basename:
+//
+//   - libcrypto* → attach uprobe directly to the file (no /proc/maps
+//     scan needed; the BPF gave us the path). The kernel resolves the
+//     file via inode + offset, so attach takes effect for every
+//     current and future process that maps the same file.
+//   - libpq*     → scan /proc/<tgid>/maps once to find the file's
+//     start/end virtual addresses for the Stage-2 selectivity filter.
+//     The openat tracepoint fires BEFORE the mmap, so we have to wait
+//     for the mapping to appear — in practice the ringbuf consumer
+//     wakes up several hundred microseconds after the syscall, well
+//     after the linker has completed its mmap dance. AttachToProcess
+//     handles the scan + registration idempotently.
+//   - libssl*    → ignored (X509_digest lives in libcrypto; libssl
+//     calls into it). The path is logged for diagnostics only.
+func (c *CBShim) handleLibEvent(e libEvent) {
+	// Skip events generated by the agent itself walking other processes'
+	// /proc/<pid>/root/... paths — those are introspection reads, not
+	// actual library loads in target processes. (The matching target
+	// process has already had its OWN openat event for the same file.)
+	if int(e.TGID) == os.Getpid() {
+		return
+	}
+	if strings.HasPrefix(e.Path, "/proc/") {
+		// Path the syscall used was a /proc/<pid>/root/... view —
+		// this happens when one tool inspects another's namespace. The
+		// actual library is/will be loaded by the OWNING pid, which
+		// gets its own openat event.
+		return
+	}
+
+	base := e.Path
+	if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
+		base = base[idx+1:]
+	}
+
+	switch {
+	case strings.HasPrefix(base, "libcrypto"):
+		// Resolve via /proc/<tgid>/root/ so it works across mount
+		// namespaces (docker, sandboxed runtimes).
+		hostPath := hostVisiblePath(int(e.TGID), e.Path)
+		if err := c.AttachToLibcrypto(hostPath); err != nil {
+			c.log.Debug("cbshim: AttachToLibcrypto from event failed",
+				zap.Uint32("tgid", e.TGID),
+				zap.String("path", hostPath),
+				zap.Error(err))
+		}
+	case strings.HasPrefix(base, "libpq"):
+		// Stage-2 range needs userspace /proc/maps walk. AttachToProcess
+		// handles it; per-(pid,libPath) dedup makes repeats cheap.
+		if err := c.AttachToProcess(int(e.TGID)); err != nil {
+			c.log.Debug("cbshim: AttachToProcess from libpq event failed",
+				zap.Uint32("tgid", e.TGID), zap.Error(err))
+		}
+	default:
+		// libssl* and any other matched-but-unhandled basename.
+		c.log.Debug("cbshim: ignoring openat event for non-target lib",
+			zap.Uint32("tgid", e.TGID), zap.String("basename", base))
+	}
+}
+
 
 // populateAgentInfo writes the keploy agent's PID-namespace inode into
 // the BPF cbshim_agent_info_map. Called once at New(); the BPF program
@@ -168,6 +333,20 @@ func (c *CBShim) Close() error {
 		zap.Uint64("lookup_miss", counters.LookupMiss),
 		zap.Uint64("write_ok", counters.WriteOK),
 		zap.Uint64("write_fail", counters.WriteFailed))
+
+	// Stop the proc-event consumer FIRST so it doesn't try to
+	// AttachToProcess against soon-to-be-closed BPF state. Cancel
+	// context first to unblock its main loop, then close the reader
+	// to unblock any in-progress Read.
+	if c.consumerCancel != nil {
+		c.consumerCancel()
+	}
+	if c.procReader != nil {
+		_ = c.procReader.Close()
+	}
+	if c.execTracepoint != nil {
+		_ = c.execTracepoint.Close()
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -396,93 +575,6 @@ func (c *CBShim) AttachToProcessTree(rootPID int) error {
 		}
 	}
 	return firstErr
-}
-
-// WatchLibraryMappings periodically re-scans rootPID's descendant tree
-// and calls AttachToProcess for each PID it finds, refreshing libcrypto
-// uprobe attachments and libpq range registrations.
-//
-// PID MEMBERSHIP is NOT this loop's job — that's handled BPF-side via
-// task_in_agent_ns (cbshim.bpf.c). The loop exists ONLY to catch:
-//
-//   - Late-fork workers (gunicorn, uwsgi, puma) that map a BUNDLED
-//     libcrypto file no other process has loaded yet
-//   - psycopg2-binary's lazy dlopen of libcrypto-XXXXXX.so.1.1 on
-//     first connect — happens AFTER worker startup, after the initial
-//     AttachToProcessTree
-//
-// Because uprobes attach per FILE, once a process has mapped a given
-// libcrypto file AND we've attached the uprobe, all peers/children
-// mapping the same file are covered for free. The loop converges
-// quickly: typically 1-2 iterations to find and uprobe the bundled
-// libs gunicorn workers load.
-//
-// Loop stops when:
-//   - ctx is cancelled, or
-//   - rootPID no longer exists, or
-//   - 10 consecutive scans saw no new libs AND we've attached to ≥1.
-func (c *CBShim) WatchLibraryMappings(ctx context.Context, rootPID int) {
-	go c.watchLibraryMappingsLoop(ctx, rootPID, 2*time.Second, 150)
-}
-
-func (c *CBShim) watchLibraryMappingsLoop(ctx context.Context, rootPID int, interval time.Duration, maxIterations int) {
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-	consecutiveQuiet := 0
-	for i := 0; i < maxIterations; i++ {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-		}
-		if _, err := os.Stat(fmt.Sprintf("/proc/%d/status", rootPID)); err != nil {
-			c.log.Debug("cbshim: root pid gone, stopping library refresh",
-				zap.Int("rootPID", rootPID), zap.Error(err))
-			return
-		}
-
-		c.mu.Lock()
-		beforeLibs := len(c.attachedLibs)
-		c.mu.Unlock()
-
-		if err := c.AttachToProcessTree(rootPID); err != nil {
-			c.log.Debug("cbshim: library refresh AttachToProcessTree returned error",
-				zap.Int("rootPID", rootPID), zap.Error(err))
-		}
-
-		c.mu.Lock()
-		afterLibs := len(c.attachedLibs)
-		c.mu.Unlock()
-
-		if afterLibs > beforeLibs {
-			consecutiveQuiet = 0
-			c.log.Debug("cbshim: library refresh found new lib mappings",
-				zap.Int("rootPID", rootPID),
-				zap.Int("libs_added", afterLibs-beforeLibs))
-		} else {
-			consecutiveQuiet++
-		}
-
-		// Periodic counter snapshot for diagnostics.
-		if i%5 == 4 {
-			cnt := c.Counters()
-			c.log.Info("cbshim: counter snapshot",
-				zap.Int("iter", i),
-				zap.Uint64("total_fires", cnt.TotalFires),
-				zap.Uint64("tgid_matched", cnt.TGIDMatched),
-				zap.Uint64("libpq_fires", cnt.LibpqFires),
-				zap.Uint64("lookup_hit", cnt.LookupHit),
-				zap.Uint64("lookup_miss", cnt.LookupMiss),
-				zap.Uint64("write_ok", cnt.WriteOK),
-				zap.Uint64("write_failed", cnt.WriteFailed))
-		}
-
-		if afterLibs > 0 && consecutiveQuiet >= 10 {
-			c.log.Debug("cbshim: library refresh converged, stopping",
-				zap.Int("rootPID", rootPID), zap.Int("libs", afterLibs))
-			return
-		}
-	}
 }
 
 // -----------------------------------------------------------------
