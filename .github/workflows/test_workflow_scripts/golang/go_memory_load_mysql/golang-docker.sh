@@ -282,6 +282,59 @@ apply_keploy_memory_limit() {
     docker inspect --format 'Memory={{.HostConfig.Memory}} MemorySwap={{.HostConfig.MemorySwap}}' "$keploy_container" || true
 }
 
+# read_working_set_bytes echoes the container's working-set memory in bytes:
+#
+#     working_set = memory.current - inactive_file
+#
+# This matches what kubectl top, the Kubernetes eviction manager, and the
+# keploy in-process memoryguard use. Page cache (specifically inactive_file)
+# is reclaimable under memory pressure and not a real OOM risk, so excluding
+# it gives an apples-to-apples comparison with the keploy --memory-limit
+# pressure trigger (which also runs against working-set).
+#
+# docker stats --format '{{.MemUsage}}' reports total RSS + page cache and
+# routinely overshoots working-set by 100–200 MiB on a write-heavy recording
+# workload (mysql/mongo mocks.yaml file growth). The script previously killed
+# the container on that inflated number, producing false-positive failures
+# even when keploy's own pressure machinery was healthy and dropping zero mocks.
+#
+# Tries cgroup v2 first (the layout on ubuntu-latest GHA runners), falls back
+# to cgroup v1, and finally to docker stats MemUsage if both cgroup reads fail.
+read_working_set_bytes() {
+    local container="$1"
+    local current=""
+    local inactive=""
+
+    # cgroup v2: /sys/fs/cgroup/memory.current + /sys/fs/cgroup/memory.stat
+    if current="$(docker exec "$container" cat /sys/fs/cgroup/memory.current 2>/dev/null)" && [ -n "$current" ]; then
+        inactive="$(docker exec "$container" sh -c "awk '/^inactive_file /{print \$2; exit}' /sys/fs/cgroup/memory.stat" 2>/dev/null || true)"
+        if [ -n "$inactive" ]; then
+            local ws=$((current - inactive))
+            [ "$ws" -lt 0 ] && ws=0
+            echo "$ws"
+            return 0
+        fi
+    fi
+
+    # cgroup v1: /sys/fs/cgroup/memory/{memory.usage_in_bytes,memory.stat}
+    if current="$(docker exec "$container" cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null)" && [ -n "$current" ]; then
+        inactive="$(docker exec "$container" sh -c "awk '/^total_inactive_file /{print \$2; exit}' /sys/fs/cgroup/memory/memory.stat" 2>/dev/null || true)"
+        if [ -n "$inactive" ]; then
+            local ws=$((current - inactive))
+            [ "$ws" -lt 0 ] && ws=0
+            echo "$ws"
+            return 0
+        fi
+    fi
+
+    # Last resort: docker stats raw MemUsage (includes page cache; will
+    # overshoot working-set on write-heavy workloads).
+    local mem_raw mem_val
+    mem_raw="$(docker stats --no-stream --format '{{.MemUsage}}' "$container" 2>/dev/null | head -n 1 || true)"
+    mem_val="${mem_raw%% / *}"
+    bytes_from_human "$mem_val"
+}
+
 start_memory_monitor() {
     local keploy_container="$1"
     local phase_pid="$2"
@@ -291,15 +344,18 @@ start_memory_monitor() {
 
     threshold_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$keploy_container" 2>/dev/null || true)"
     if [ -z "$threshold_bytes" ] || [ "$threshold_bytes" = "0" ]; then
-        threshold_bytes="$((350 * 1024 * 1024))"
+        # Working-set threshold. Lower than the old MemUsage-based 350 MiB
+        # because we no longer count reclaimable page cache. Picked to give
+        # keploy headroom above its internal pressure trigger (160 MiB at
+        # --memory-limit 200) for Go-runtime overhead and goroutine stacks
+        # while still catching real leaks.
+        threshold_bytes="$((300 * 1024 * 1024))"
     fi
 
     threshold_mib="$(awk -v bytes="$threshold_bytes" 'BEGIN { printf "%.2f", bytes / 1024 / 1024 }')"
-    echo "Monitoring ${keploy_container} memory during ${phase_name}. Threshold: ${threshold_bytes} bytes (${threshold_mib} MiB)." | tee -a "$MEMORY_USAGE_LOG"
+    echo "Monitoring ${keploy_container} working-set memory during ${phase_name}. Threshold: ${threshold_bytes} bytes (${threshold_mib} MiB)." | tee -a "$MEMORY_USAGE_LOG"
 
     (
-        usage_raw=""
-        usage_value=""
         usage_bytes=""
         oom_killed=""
         running=""
@@ -310,13 +366,14 @@ start_memory_monitor() {
                 continue
             fi
 
-            usage_raw="$(docker stats --no-stream --format '{{.MemUsage}}' "$keploy_container" 2>/dev/null | head -n 1 || true)"
-            usage_value="${usage_raw%% / *}"
-            usage_bytes="$(bytes_from_human "$usage_value")"
+            usage_bytes="$(read_working_set_bytes "$keploy_container" 2>/dev/null || echo 0)"
             oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$keploy_container" 2>/dev/null || echo false)"
             running="$(docker inspect --format '{{.State.Running}}' "$keploy_container" 2>/dev/null || echo false)"
 
-            echo "[$(date -u +%FT%TZ)] phase=${phase_name} container=${keploy_container} usage=${usage_raw:-unknown} running=${running} oom_killed=${oom_killed}" >> "$MEMORY_USAGE_LOG"
+            # Human-readable usage in MiB for the log so operators don't
+            # have to divide by 1024^2.
+            usage_mib="$(awk -v bytes="$usage_bytes" 'BEGIN { printf "%.1f", bytes / 1024 / 1024 }')"
+            echo "[$(date -u +%FT%TZ)] phase=${phase_name} container=${keploy_container} working_set=${usage_mib}MiB (${usage_bytes}B) running=${running} oom_killed=${oom_killed}" >> "$MEMORY_USAGE_LOG"
 
             if [ "$oom_killed" = "true" ]; then
                 echo "Keploy container ${keploy_container} was OOM-killed during ${phase_name}." > "$MEMORY_VIOLATION_FILE"
@@ -324,8 +381,8 @@ start_memory_monitor() {
                 exit 0
             fi
 
-            if [ "$usage_bytes" -ge 0 ] && [ "$usage_bytes" -ge "$threshold_bytes" ]; then
-                echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB during ${phase_name}. Observed usage: ${usage_raw}." > "$MEMORY_VIOLATION_FILE"
+            if [ "$usage_bytes" -ge "$threshold_bytes" ]; then
+                echo "Keploy container ${keploy_container} exceeded ${threshold_mib} MiB working-set during ${phase_name}. Observed: ${usage_mib} MiB." > "$MEMORY_VIOLATION_FILE"
                 docker kill "$keploy_container" >/dev/null 2>&1 || true
                 kill -TERM "$phase_pid" 2>/dev/null || true
                 exit 0
