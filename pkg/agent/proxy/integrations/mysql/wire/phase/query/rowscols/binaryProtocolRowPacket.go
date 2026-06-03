@@ -4,7 +4,6 @@ package rowscols
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -267,15 +266,15 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 					return nil, err
 				}
 			case string:
-				// Try base64 (used by YAML !!binary). If that fails, write raw bytes of the string.
-				if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
-					if err := writeLenEncBytes(body, decoded); err != nil {
-						return nil, err
-					}
-				} else {
-					if err := writeLenEncBytes(body, []byte(v)); err != nil {
-						return nil, err
-					}
+				// Write the string's raw bytes. Do NOT try to base64-decode
+				// it: BLOB values are recorded as Go strings (readBinaryValue
+				// stores string(value)), and genuine binary round-trips
+				// through YAML !!binary as []byte (handled above). A plain
+				// text value that happens to be valid base64 (e.g. "high")
+				// would otherwise be silently decoded into garbage bytes,
+				// corrupting the replayed row.
+				if err := writeLenEncBytes(body, []byte(v)); err != nil {
+					return nil, err
 				}
 			default:
 				return nil, fmt.Errorf("blob-like field %q has unsupported type %T", col.Name, ce.Value)
