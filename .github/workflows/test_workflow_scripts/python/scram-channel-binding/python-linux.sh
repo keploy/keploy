@@ -272,10 +272,12 @@ if [ ! -d "$tests_dir" ]; then
 fi
 
 # Each successful endpoint call produces one HTTP test case YAML.
-# 6 endpoints driven (healthz, db/ping, users, users/1, POST users,
-# users/1/audit) → expect >= 6 test cases.
+# The warmup loop also produces test cases for its retries (most of
+# which return 500 until cbshim has attached + the cbmap rendezvous
+# fires for that connection). Once the actual endpoint sequence runs,
+# it produces 6 more 2xx test cases. So we expect >= 6 total.
 test_count=$(ls "$tests_dir"/*.yaml 2>/dev/null | wc -l)
-echo "captured HTTP test cases: $test_count"
+echo "captured HTTP test cases: $test_count (incl. warmup retries)"
 if [ "$test_count" -lt 6 ]; then
     echo "::error::expected >= 6 HTTP test cases (one per endpoint); got $test_count"
     ls -la "$tests_dir" || true
@@ -283,16 +285,16 @@ if [ "$test_count" -lt 6 ]; then
     exit 1
 fi
 
-# Cross-check: none of the captured test cases should be 500s — a 500
-# response means SCRAM-PLUS failed for that connection. The endpoint
-# driver already retried until /db/ping was healthy, so any residual
-# 500 in the recordings is a regression.
-err_count=$(grep -rE '^\s+status_code:\s*5[0-9][0-9]\s*$' "$tests_dir" | wc -l)
-if [ "$err_count" -gt 0 ]; then
-    echo "::error::captured $err_count HTTP test case(s) with 5xx status — SCRAM-PLUS regressed"
-    grep -rE '^\s+(status_code|body):' "$tests_dir" | grep -B1 -A1 -E '5[0-9][0-9]' | head -20
-    exit 1
-fi
+# Note: we deliberately do NOT scan tests_dir for 5xx statuses.
+# The warmup loop fires /db/ping retries until cbshim converges, and
+# each failing retry gets captured as a separate test case (e.g.
+# get-db-ping-1 through get-db-ping-N during warmup, then
+# get-db-ping-{N+1} as the actual endpoint-sequence 200). The
+# `curl --fail` checks inside drive_endpoints are the real gate —
+# they return nonzero if the actual endpoint sequence (run AFTER
+# warmup converged) sees any 5xx, and drive_rc was checked above.
+# A 5xx-in-recordings scan would punish the (expected) warmup retries
+# while telling us nothing the curl exit codes don't already.
 
 # Replay (keploy test) requires postgres mocks to be captured during
 # record, which OSS can't produce without the PostgresV3 parser
