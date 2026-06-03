@@ -1229,23 +1229,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// type assertion is safe. Capture it before any early return.
 	sourceIP := remoteAddr.IP.String()
 
-	// TRACE/proxy-accept: fires for EVERY connection that arrives at the proxy
-	// TCP listener — unconditional, no mode gate.
+	// TRACE/proxy-accept: fires for EVERY connection arriving at the proxy
+	// TCP listener.
 	//
-	// KEY diagnostic: shows the session mode at the moment the connection arrives.
-	// This answers two questions:
-	//   Q1. Do teardown connections reach the proxy at all?
-	//       YES → this log fires at teardown timestamp → eBPF IS redirecting.
-	//       NO  → this log is absent at teardown timestamp → eBPF is not redirecting
-	//             (or proxy stopped listening before teardown).
-	//   Q2. What is the session mode when teardown connections arrive?
-	//       "record" → proxy should be recording, bug is downstream.
-	//       "test"   → proxy is in replay mode, won't record.
-	//       "none"   → session was cleared, proxy is in passthrough.
-	//
-	// Power-of-2 sampler prevents flooding logs during replay
-	// (1089 tests × N connections each) while still catching every
-	// distinct connection at recording start and teardown.
+	// Shows session_mode so we know if proxy is in record/test/none mode.
+	// Logging strategy:
+	//   - MODE_RECORD: log EVERY connection — only ~15-20 total per run,
+	//     so no performance risk. This is critical: teardown opens only
+	//     3-4 new connections (counter 13-15). Power-of-2 sampling would
+	//     silently skip them all (next sample at 16), hiding whether they
+	//     arrived or not.
+	//   - Other modes (replay/none): power-of-2 sampling to avoid flooding
+	//     (1089 tests × N connections = thousands of connections per run).
 	{
 		n := p.acceptCounter.Add(1)
 		s := p.getSession()
@@ -1253,7 +1248,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if s != nil {
 			mode = string(s.Mode)
 		}
-		if n == 1 || n&(n-1) == 0 { // log at counts: 1,2,4,8,16,...
+		isRecord := s != nil && s.Mode == models.MODE_RECORD
+		if isRecord || n == 1 || n&(n-1) == 0 {
 			p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
 				zap.Int("srcPort", sourcePort),
 				zap.String("sourceIP", sourceIP),
