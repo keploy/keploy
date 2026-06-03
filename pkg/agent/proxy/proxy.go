@@ -1224,17 +1224,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// type assertion is safe. Capture it before any early return.
 	sourceIP := remoteAddr.IP.String()
 
-	// TRACE: proof log — fires for EVERY connection that arrives at the
-	// proxy TCP listener. If this fires at teardown timestamp (~get-orders TC
-	// capture time), the eBPF IS redirecting teardown connections and the
-	// failure is in the DestInfo lookup. If it DOESN'T fire at teardown time,
-	// the eBPF is not redirecting those connections at all (true bypass).
-	// One log per connection — no per-packet overhead.
-	p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
-		zap.Int("srcPort", sourcePort),
-		zap.String("sourceIP", sourceIP),
-		zap.Int64("ts_ms", time.Now().UnixMilli()),
-	)
+	// TRACE: proof log — fires for EVERY connection that arrives at the proxy
+	// TCP listener, but ONLY during MODE_RECORD. Gated on record mode to avoid
+	// flooding replay logs (1089 tests × N DB connections = thousands of Info
+	// lines that slow the agent and cause healthcheck timeouts in test mode).
+	// During recording: confirms whether teardown connections reach the proxy.
+	if s := p.getSession(); s != nil && s.Mode == models.MODE_RECORD {
+		p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
+			zap.Int("srcPort", sourcePort),
+			zap.String("sourceIP", sourceIP),
+			zap.Int64("ts_ms", time.Now().UnixMilli()),
+		)
+	}
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 
