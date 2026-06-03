@@ -160,6 +160,11 @@ type Proxy struct {
 	// not need references to force-close them.
 	activeConns sync.WaitGroup
 
+	// acceptCounter counts every connection accepted by the proxy TCP listener.
+	// Used to power-of-2 sample TRACE/proxy-accept logs so replay runs
+	// (potentially thousands of connections) don't flood the log output.
+	acceptCounter atomic.Uint64
+
 	// destCache is a fallback for when the eBPF redirectProxyMap lookup
 	// fails during an active recording session. Each successful DestInfo.Get
 	// stores the destination under the source IP key.
@@ -1224,17 +1229,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// type assertion is safe. Capture it before any early return.
 	sourceIP := remoteAddr.IP.String()
 
-	// TRACE: proof log — fires for EVERY connection that arrives at the proxy
-	// TCP listener, but ONLY during MODE_RECORD. Gated on record mode to avoid
-	// flooding replay logs (1089 tests × N DB connections = thousands of Info
-	// lines that slow the agent and cause healthcheck timeouts in test mode).
-	// During recording: confirms whether teardown connections reach the proxy.
-	if s := p.getSession(); s != nil && s.Mode == models.MODE_RECORD {
-		p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
-			zap.Int("srcPort", sourcePort),
-			zap.String("sourceIP", sourceIP),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-		)
+	// TRACE/proxy-accept: fires for EVERY connection that arrives at the proxy
+	// TCP listener — unconditional, no mode gate.
+	//
+	// KEY diagnostic: shows the session mode at the moment the connection arrives.
+	// This answers two questions:
+	//   Q1. Do teardown connections reach the proxy at all?
+	//       YES → this log fires at teardown timestamp → eBPF IS redirecting.
+	//       NO  → this log is absent at teardown timestamp → eBPF is not redirecting
+	//             (or proxy stopped listening before teardown).
+	//   Q2. What is the session mode when teardown connections arrive?
+	//       "record" → proxy should be recording, bug is downstream.
+	//       "test"   → proxy is in replay mode, won't record.
+	//       "none"   → session was cleared, proxy is in passthrough.
+	//
+	// Power-of-2 sampler prevents flooding logs during replay
+	// (1089 tests × N connections each) while still catching every
+	// distinct connection at recording start and teardown.
+	{
+		n := p.acceptCounter.Add(1)
+		s := p.getSession()
+		mode := "none"
+		if s != nil {
+			mode = string(s.Mode)
+		}
+		if n == 1 || n&(n-1) == 0 { // log at counts: 1,2,4,8,16,...
+			p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
+				zap.Int("srcPort", sourcePort),
+				zap.String("sourceIP", sourceIP),
+				zap.String("session_mode", mode),
+				zap.Uint64("conn_count", n),
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
 	}
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
@@ -1332,6 +1359,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		entry.mu.Lock()
 		entry.byPort[destInfo.Port] = destInfo
 		entry.mu.Unlock()
+
+		// TRACE/proxy-destinfo-hit: eBPF lookup succeeded — only logged in record
+		// mode so replay runs (thousands of connections) stay fast.
+		// Shows dest port + session mode. Catches the case where eBPF works fine
+		// but the session is wrong (mode=none/test instead of record).
+		if s := p.getSession(); s != nil && s.Mode == models.MODE_RECORD {
+			p.logger.Info("TRACE/proxy-destinfo-hit: eBPF lookup succeeded",
+				zap.Int("srcPort", sourcePort),
+				zap.String("sourceIP", sourceIP),
+				zap.Uint32("destPort", destInfo.Port),
+				zap.String("session_mode", string(s.Mode)),
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
@@ -1349,6 +1390,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {
+		// TRACE/proxy-session-nil: connection reached the proxy and eBPF lookup
+		// succeeded, but no recording/replay session is active. This fires when
+		// connections arrive after the session was torn down (e.g. teardown queries
+		// arriving while the recording session is being cleaned up).
+		p.logger.Info("TRACE/proxy-session-nil: no active session — connection will be closed",
+			zap.Int("srcPort", sourcePort),
+			zap.String("sourceIP", sourceIP),
+			zap.Uint32("destPort", destInfo.Port),
+			zap.Int64("ts_ms", time.Now().UnixMilli()),
+		)
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
 	}
@@ -1451,6 +1502,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
+		// TRACE/proxy-passthrough: only logged in MODE_RECORD so replay runs stay
+		// fast (in replay, passthrough is the normal expected path for non-mocked
+		// connections — logging it would flood CI).
+		// In RECORD mode this firing means session unexpectedly changed to TEST
+		// or GlobalPassthrough was set, which would explain missing mocks.
+		if rule.Mode == models.MODE_RECORD {
+			p.logger.Info("TRACE/proxy-passthrough: record-mode connection sent to passthrough — no mock will be created",
+				zap.Int("srcPort", sourcePort),
+				zap.String("sourceIP", sourceIP),
+				zap.Uint32("destPort", destInfo.Port),
+				zap.Bool("global_passthrough", p.GlobalPassthrough),
+				zap.Bool("mocking", rule.Mocking),
+				zap.Int64("ts_ms", time.Now().UnixMilli()),
+			)
+		}
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
