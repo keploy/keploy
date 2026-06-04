@@ -335,6 +335,21 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 		t.Errorf("Metadata mismatch:\n  v2=%+v\n  legacy=%+v",
 			v2Mock.Spec.Metadata, legacyMock.Spec.Metadata)
 	}
+
+	// TestModeInfo parity. Both paths must stamp LifetimePerTest +
+	// LifetimeDerived at build time: an unstamped V2 mock hits
+	// DeriveLifetime's lax-mode kind-fallback at AddMock ingest (its
+	// "HTTP_CLIENT" type tag is non-canonical), gets promoted to
+	// LifetimeSession, and syncMock's lifetime carve-out then persists it
+	// unconditionally — bypassing window resolution and dedup cleanup.
+	if !reflect.DeepEqual(v2Mock.TestModeInfo, legacyMock.TestModeInfo) {
+		t.Errorf("TestModeInfo mismatch:\n  v2=%+v\n  legacy=%+v",
+			v2Mock.TestModeInfo, legacyMock.TestModeInfo)
+	}
+	if v2Mock.TestModeInfo.Lifetime != models.LifetimePerTest || !v2Mock.TestModeInfo.LifetimeDerived {
+		t.Errorf("V2 mock must be stamped LifetimePerTest+LifetimeDerived at build time, got %+v",
+			v2Mock.TestModeInfo)
+	}
 }
 
 // runLegacyParseFinalHTTP invokes the legacy parseFinalHTTP on the given
