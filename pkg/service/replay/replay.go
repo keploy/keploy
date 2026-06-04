@@ -1094,6 +1094,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -1281,6 +1283,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Backdate:               testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:            headerNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -1787,14 +1791,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames),
 				zap.Any("mocks", consumedMocks))
 
+			// strictMockReject: under SchemaNoiseStrict, an expected mock that
+			// went unconsumed means strict req-body matching REJECTED it — a
+			// non-noise request field drifted. The app's response can still
+			// match (e.g. a deterministic dependency), so the response check
+			// alone won't catch it; treat it as a real test failure.
+			strictMockReject := false
 			if mockSetMismatch {
-				if testPass {
+				switch {
+				case testPass && r.config.Test.SchemaNoiseStrict:
+					r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
+						zap.String("testcase", testCase.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", filteredExpectedNames),
+						zap.Strings("actualMocks", filteredMockNames))
+					testPass = false
+					strictMockReject = true
+					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
+				case testPass:
 					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", filteredExpectedNames),
 						zap.Strings("actualMocks", filteredMockNames))
-				} else {
+				default:
 					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
@@ -1816,7 +1836,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch {
+			} else if mockSetMismatch && !strictMockReject {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
