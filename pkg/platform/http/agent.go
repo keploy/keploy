@@ -517,6 +517,37 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 
 		decoder := json.NewDecoder(res.Body)
 
+		// SAME FIX AS GetOutgoing — drain the mappings stream past
+		// ctx-cancel.
+		//
+		// Root cause proven by the full-accounting run on pipeline
+		// 26948829833 (mongo_rbrb): every mock reached disk
+		// (agent_has=2626 → cli_wrote=2629, zero loss), yet 7 teardown
+		// TCs still failed at replay with "socket unexpectedly closed:
+		// EOF". Those 7 TCs were on disk but ABSENT from mappings.yaml.
+		//
+		// The mappings travel on THIS separate HTTP stream, distinct
+		// from the mocks stream in GetOutgoing. This goroutine used to
+		// have `case <-ctx.Done(): return nil`, so on host SIGINT it
+		// exited within milliseconds and the deferred res.Body.Close()
+		// tore down the connection — dropping every teardown TC→mock
+		// mapping still queued on the wire. Fixing only GetOutgoing
+		// (the mocks stream) left this stream still cutting the
+		// teardown mappings, which is why the teardown TCs stayed
+		// flaky: their mocks were on disk but unmapped.
+		//
+		// Mirror the GetOutgoing drain: when ctx cancels, arm a 60-s
+		// deadline and keep reading + forwarding mappings until either
+		// the agent closes the stream (EOF) or the deadline expires.
+		const drainGrace = 60 * time.Second
+		var drainDeadline <-chan time.Time
+		var deadlineT *time.Timer
+		defer func() {
+			if deadlineT != nil {
+				deadlineT.Stop()
+			}
+		}()
+
 		for {
 			var mapping models.TestMockMapping
 			if err := decoder.Decode(&mapping); err != nil {
@@ -527,8 +558,21 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 				break
 			}
 
+			var ctxDone <-chan struct{}
+			if drainDeadline == nil {
+				ctxDone = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
+			case <-ctxDone:
+				deadlineT = time.NewTimer(drainGrace)
+				drainDeadline = deadlineT.C
+				select {
+				case mappingChan <- mapping:
+				case <-drainDeadline:
+					return nil
+				}
+			case <-drainDeadline:
 				return nil
 			case mappingChan <- mapping:
 			}
