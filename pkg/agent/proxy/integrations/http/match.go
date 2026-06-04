@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -114,7 +115,7 @@ type req struct {
 	raw    []byte
 }
 
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string) (bool, *models.Mock, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, ctx.Err()
@@ -185,7 +186,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
-			if !h.updateMock(ctx, bestMatch, mockDb) {
+			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
+			if !h.updateMock(ctx, bestMatch, mockDb, nil) {
 				continue
 			}
 			return true, bestMatch, nil
@@ -199,6 +201,16 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				return false, nil, err
 			}
 
+			// Strict enforcement (replay path): for any candidate that already
+			// carries learned req_body_noise, every request-body field must
+			// match except those learned-noise paths. A drift on a non-noise
+			// field rejects that candidate, so a changed-but-unmarked field
+			// fails the test instead of being silently served. Candidates with
+			// no learned noise keep the lenient schema/key behaviour.
+			if schemaNoiseStrict {
+				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, input.body)
+			}
+
 			if len(bodyMatched) == 0 {
 				h.Logger.Debug("No mock found with body schema match")
 				return false, nil, nil
@@ -206,7 +218,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
-				if !h.updateMock(ctx, bodyMatched[0], mockDb) {
+				detected := h.detectReqBodyNoise(schemaNoiseDetection, bodyMatched[0], input.body)
+				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected) {
 					continue
 				}
 				return true, bodyMatched[0], nil
@@ -221,7 +234,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
-			if !h.updateMock(ctx, bestMatch, mockDb) {
+			detected := h.detectReqBodyNoise(schemaNoiseDetection, bestMatch, input.body)
+			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
 				continue
 			}
 			return true, bestMatch, nil
@@ -915,10 +929,20 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // match.go:723-725). We build a fresh copy, mutate the copy, and pass
 // (old=matchedMock, new=&updatedMock) to the mock DB — which already
 // takes treesMu internally to swap the pointer atomically.
-func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+
+	// Attach any request-body noise detected this match onto a FRESH map on
+	// the copy (never the shared pooled mock's map — see the concurrency note
+	// above). flagMockAsUsed reads updatedMock.Spec.HTTPReq.ReqBodyNoise to
+	// carry it out on the MockState; mockdb.UpdateMocks persists it.
+	if len(detectedNoise) > 0 && updatedMock.Spec.HTTPReq != nil {
+		reqCopy := *updatedMock.Spec.HTTPReq
+		reqCopy.ReqBodyNoise = mergeReqBodyNoise(reqCopy.ReqBodyNoise, detectedNoise)
+		updatedMock.Spec.HTTPReq = &reqCopy
+	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -935,10 +959,214 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	// Per-test: consume via DeleteFilteredMock, with fallback to
 	// UpdateUnFilteredMock for mocks staged into the session pool
 	// during the initial pre-first-test window.
-	if mockDb.DeleteFilteredMock(*matchedMock) {
+	//
+	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
+	// delete-key mock MUST keep the original (unmutated) TestModeInfo —
+	// we pass a copy that retains it but carries the detected noise on a
+	// fresh HTTPReq, so flagMockAsUsed reports the noise on the consumed
+	// per-test mock (it would otherwise be lost: the original matchedMock
+	// has no noise, and updatedMock's mutated TestModeInfo wouldn't match
+	// the tree node).
+	deleteMock := *matchedMock
+	if len(detectedNoise) > 0 && deleteMock.Spec.HTTPReq != nil {
+		reqCopy := *deleteMock.Spec.HTTPReq
+		reqCopy.ReqBodyNoise = mergeReqBodyNoise(reqCopy.ReqBodyNoise, detectedNoise)
+		deleteMock.Spec.HTTPReq = &reqCopy
+	}
+	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
 	return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+}
+
+// filterStrictNoiseMatches enforces strict request-body matching on the
+// replay path. A candidate mock is dropped only when it already carries
+// learned req_body_noise AND a field OUTSIDE that learned-noise set drifted
+// from the recorded body — i.e. an unmarked field changed. Candidates with no
+// learned noise are kept unchanged (lenient schema/key behaviour), so this
+// never tightens matching for mocks the auto-replay never learned noise for.
+//
+// It reuses detectReqBodyNoise, which returns exactly the drifting field paths
+// that are NOT already known noise (and not obfuscator-covered): a non-empty
+// result means an unmarked field changed, so the candidate cannot match.
+func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, reqBody []byte) []*models.Mock {
+	var kept []*models.Mock
+	for _, m := range candidates {
+		if m == nil || m.Spec.HTTPReq == nil || len(m.Spec.HTTPReq.ReqBodyNoise) == 0 {
+			kept = append(kept, m)
+			continue
+		}
+		if drift := h.detectReqBodyNoise(true, m, reqBody); len(drift) > 0 {
+			h.Logger.Debug("strict req-body match rejected mock: non-noise field drift",
+				zap.String("mock name", m.Name), zap.Any("drift", drift))
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
+// detectReqBodyNoise diffs the recorded mock request body against the actual
+// (auto-replayed) request body and returns the changed field paths as
+// field-path noise (body.<path> -> empty regex list = "ignore this whole
+// field"), gated by the SchemaNoiseDetection flag. Fields already covered by
+// the mock's value-regex Mock.Noise (e.g. enterprise-obfuscated secrets) are
+// excluded so secrets aren't re-flagged as schema noise. Returns nil when the
+// flag is off, when the bodies are byte-identical, or when nothing meaningful
+// changed.
+func (h *HTTP) detectReqBodyNoise(enabled bool, mock *models.Mock, reqBody []byte) map[string][]string {
+	if !enabled || mock == nil || mock.Spec.HTTPReq == nil {
+		return nil
+	}
+	mockBody := mock.Spec.HTTPReq.Body
+	if mockBody == string(reqBody) {
+		return nil
+	}
+
+	nc := util.NewNoiseChecker(mock.Noise)
+	isObfuscated := func(v string) bool { return nc != nil && nc.IsNoisy(v) }
+
+	switch {
+	case pkg.IsJSON([]byte(mockBody)) && pkg.IsJSON(reqBody):
+		// The matcher matches noise paths root-relative; our stored keys carry
+		// a "body." prefix, so strip it for the already-known exclusion set.
+		known := stripBodyPrefix(mock.Spec.HTTPReq.ReqBodyNoise)
+		paths := matcher.ChangedJSONFieldPaths(mockBody, string(reqBody), known, isObfuscated)
+		if len(paths) == 0 {
+			return nil
+		}
+		out := make(map[string][]string, len(paths))
+		for _, p := range paths {
+			out["body."+p] = []string{}
+		}
+		return out
+
+	case isFormURLEncoded(mock.Spec.HTTPReq.Header):
+		return formReqBodyNoise(mockBody, string(reqBody), mock.Spec.HTTPReq.ReqBodyNoise, isObfuscated)
+
+	default:
+		// Non-JSON, non-form (binary, plain text) bodies have no meaningful
+		// field paths to diff — leave them to exact/fuzzy matching.
+		return nil
+	}
+}
+
+// stripBodyPrefix returns a copy of the noise map with the leading "body."
+// trimmed from each key, so the keys align with the matcher's root-relative
+// path convention used by ChangedJSONFieldPaths.
+func stripBodyPrefix(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[strings.TrimPrefix(k, "body.")] = v
+	}
+	return out
+}
+
+// isFormURLEncoded reports whether the request Content-Type is
+// application/x-www-form-urlencoded.
+func isFormURLEncoded(header map[string]string) bool {
+	for k, v := range header {
+		if strings.EqualFold(k, "Content-Type") &&
+			strings.Contains(strings.ToLower(v), "application/x-www-form-urlencoded") {
+			return true
+		}
+	}
+	return false
+}
+
+// formReqBodyNoise diffs two form-encoded bodies key-by-key and returns the
+// drifted/removed keys as body.<key> field-path noise. Keys already known or
+// covered by the obfuscator value-regexes are skipped.
+func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
+	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
+	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
+	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
+	// (^<raw_key>=[^&]+$) — exactly as formBodiesMatchModuloNoise does. Passing
+	// only the decoded value here would never match a key-anchored regex, so
+	// obfuscated form fields would be wrongly re-flagged as schema noise.
+	rawValuesByKey := func(body string) map[string][]string {
+		out := map[string][]string{}
+		for _, seg := range strings.Split(body, "&") {
+			if seg == "" {
+				continue
+			}
+			key, val := seg, ""
+			if i := strings.IndexByte(seg, '='); i >= 0 {
+				key, val = seg[:i], seg[i+1:]
+			}
+			out[key] = append(out[key], val)
+		}
+		return out
+	}
+	mockVals := rawValuesByKey(mockBody)
+	reqVals := rawValuesByKey(reqBody)
+
+	out := map[string][]string{}
+	for rawKey, mv := range mockVals {
+		key := "body." + rawKey
+		if _, ok := known[key]; ok {
+			continue
+		}
+		// Obfuscator exclusion is per-occurrence on the full raw key=value
+		// segment, matching how Mock.Noise is evaluated for form bodies.
+		obfuscated := false
+		for _, v := range mv {
+			if isObfuscated(rawKey + "=" + v) {
+				obfuscated = true
+				break
+			}
+		}
+		if obfuscated {
+			continue
+		}
+		rv, ok := reqVals[rawKey]
+		if !ok {
+			out[key] = []string{} // key dropped on replay
+			continue
+		}
+		// Compare occurrences element-wise (order-sensitive) rather than
+		// joining: a join is lossy when values embed the separator or the
+		// repeated-key cardinality differs (["a","bc"] vs ["a,bc"]), which
+		// would miss or falsely report drift. Mirrors formBodiesMatchModuloNoise.
+		drifted := len(rv) != len(mv)
+		for i := 0; !drifted && i < len(mv); i++ {
+			if rv[i] != mv[i] {
+				drifted = true
+			}
+		}
+		if drifted {
+			out[key] = []string{} // value drifted
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mergeReqBodyNoise returns a fresh map combining existing and newly-detected
+// request-body noise. Existing entries win on key collision (noise is
+// monotonic — once a field is flagged it stays flagged), and every slice is
+// copied so the result shares no backing storage with its inputs.
+func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(existing)+len(detected))
+	for k, v := range existing {
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	for k, v := range detected {
+		if _, ok := out[k]; ok {
+			continue
+		}
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	return out
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
