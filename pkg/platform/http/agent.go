@@ -85,6 +85,16 @@ type AgentClient struct {
 	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
 	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
+
+	// drainMu guards drainDone. drainDone is (re)created at the start of each
+	// GetOutgoing call and closed by that stream's reader goroutine once it
+	// has drained the agent's /outgoing wire to EOF. cmd.Cancel (the agent
+	// docker-teardown hook in startInDocker) reads it under drainMu and waits
+	// on it — bounded by a deadline — before hard-killing the agent, so the
+	// host finishes pulling the teardown tail off the wire before the
+	// connection is severed.
+	drainMu   sync.Mutex
+	drainDone chan struct{}
 }
 
 // var initStopScript []byte
@@ -315,12 +325,34 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	// BUFFERED (16384) so the gob-decode loop below can pull the agent's
+	// entire teardown tail off the wire into host RAM at network speed,
+	// instead of being throttled to the downstream disk-writer's ~160
+	// mocks/sec. hostMocksDecoded is incremented the instant a mock is
+	// decoded (before the send below), so a buffered channel means the whole
+	// stream is safely "received" the moment it is read off the wire — even
+	// if the agent is killed a millisecond later and even though the disk
+	// writer is still catching up. See the matching buffer + rationale on
+	// outgoingChan in pkg/service/record/record.go GetTestAndMockChans.
+	mockChan := make(chan *models.Mock, 16384)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, fmt.Errorf("failed to get errorgroup from the context")
 	}
+
+	// drainDone is closed by this stream's reader goroutine when it has
+	// pulled the wire to EOF (or hit its own drain deadline) — i.e. "every
+	// mock the agent will send has been received into host RAM". The agent
+	// teardown path (cmd.Cancel in startInDocker) waits on this before it
+	// hard-kills the agent docker process, so we never sever the connection
+	// while mocks are still in flight. Recreated per GetOutgoing call; the
+	// reader goroutine spawned just below is the sole closer of THIS dd, so
+	// a plain close in its defer is race-free (no sync.Once needed).
+	dd := make(chan struct{})
+	a.drainMu.Lock()
+	a.drainDone = dd
+	a.drainMu.Unlock()
 
 	grp.Go(func() error {
 		// exitReason records WHY the reader goroutine returned, so the
@@ -337,6 +369,13 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 		defer func() {
 			close(mockChan)
+
+			// Signal the agent-teardown gate (cmd.Cancel) that the host has
+			// pulled this stream to EOF / hit its drain deadline — every mock
+			// that will arrive is now in host RAM. Closing dd unblocks the
+			// gate so the agent docker process can be stopped safely. This
+			// reader goroutine is the sole closer of dd, so close is race-free.
+			close(dd)
 
 			err := res.Body.Close()
 			if err != nil {
@@ -1522,13 +1561,20 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 		containerName := opts.KeployContainer
 
+		// --time 30: give the agent 30s (vs docker's 10s default) to handle
+		// SIGTERM gracefully — its shutdown path flushes the SyncMock backlog
+		// onto the /outgoing wire (CloseOutChan -> FlushOwnedWindows) before
+		// the container is SIGKILL'd. Combined with the buffered mockChan
+		// (which lets the host drain that backlog at wire speed) and the
+		// drain gate below, this is what stops the teardown tail from being
+		// lost when recording is interrupted under load.
 		// Try stopping the container without sudo first (works if user is in docker group)
-		stopCmd := exec.Command("docker", "stop", containerName)
+		stopCmd := exec.Command("docker", "stop", "--time", "30", containerName)
 		if output, err := stopCmd.CombinedOutput(); err != nil {
 			// If that fails on Linux, try with sudo -n (non-interactive, won't prompt for password)
 			if runtime.GOOS == "linux" {
 				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
-				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
+				stopCmd = exec.Command("sudo", "-n", "docker", "stop", "--time", "30", containerName)
 				if output, err := stopCmd.CombinedOutput(); err != nil {
 					logger.Debug("Could not stop the docker container. It may have already stopped.",
 						zap.String("container", containerName),
@@ -1545,6 +1591,39 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			}
 		} else {
 			logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
+		}
+
+		// Drain-complete gate. `docker stop` above sent SIGTERM (the trigger
+		// for the agent's graceful flush) and blocks until the container
+		// exits, by which point the host's GetOutgoing reader has normally
+		// already pulled the wire to EOF and closed drainDone. We still wait
+		// on it explicitly — bounded by a deadline — so we never SIGKILL the
+		// local docker process while the host is mid-drain (e.g. if `docker
+		// stop` returned early because the container was already gone). The
+		// 30s deadline matches the stop grace and is < the GetOutgoing
+		// reader's 60s drain grace, so this can never outlive the goroutine
+		// that closes drainDone — no hang, no deadlock.
+		a.drainMu.Lock()
+		dd := a.drainDone
+		a.drainMu.Unlock()
+		if dd != nil {
+			gateReason := "drain-complete"
+			select {
+			case <-dd:
+			case <-time.After(30 * time.Second):
+				gateReason = "timeout"
+			}
+			// Write via os.Stderr (not the zap logger): cmd.Cancel runs at
+			// the very tail of shutdown, after the logger is typically torn
+			// down, so logger.Info here is silently dropped — the same reason
+			// PROBE/host-recv-final uses Fprintf. host_decoded is the
+			// ground-truth count of mocks received off the wire; reconcile it
+			// against the agent's outgoing_forwarded (the agent process's own
+			// PROBE/agent-state line) to confirm zero loss at the gate.
+			fmt.Fprintf(os.Stderr,
+				"DIAG/drain-gate: reason=%s host_decoded=%d ts_ms=%d\n",
+				gateReason, HostMocksDecodedTotal(), time.Now().UnixMilli())
+			_ = os.Stderr.Sync()
 		}
 
 		if cmd.Process != nil {

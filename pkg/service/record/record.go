@@ -633,9 +633,25 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		Filters: r.config.Record.Filters,
 	}
 
-	// Create channels to receive incoming and outgoing data
+	// Create channels to receive incoming and outgoing data.
+	//
+	// outgoingChan is BUFFERED (16384) to decouple wire-receipt from the
+	// host-side disk writer. The mock consumer (the `for mock := range
+	// frames.Outgoing` loop) calls InsertMock synchronously, and the yaml
+	// InsertMock path open+encode+flush+closes the mocks file per mock under
+	// a per-file lock (~160 mocks/sec). With an unbuffered channel that disk
+	// rate back-pressured all the way up the wire reader, so the host could
+	// only pull ~160 mocks/sec off the agent's /outgoing stream. At shutdown
+	// the agent flushes its whole teardown tail onto the wire but the host
+	// could not drain it before `docker stop` severed the connection, losing
+	// the buffered tail (proven: agent outgoing_forwarded=4213 vs host
+	// host_decoded=2782). Buffering lets the wire reader pull the entire tail
+	// into host RAM at network speed; the slow disk writer then drains the
+	// buffer afterwards (InsertMock already uses a detached ctx so writes
+	// survive shutdown). The matching buffer on the upstream hop is mockChan
+	// in pkg/platform/http/agent.go GetOutgoing.
 	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	outgoingChan := make(chan *models.Mock, 16384)
 	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
