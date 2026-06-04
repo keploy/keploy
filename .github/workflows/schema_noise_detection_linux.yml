@@ -80,7 +80,10 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-          ref: main
+          # The mux-elasticsearch schema-noise demo mode (env STAMP_CREATED_AT)
+          # lives on this branch until keploy/samples-go#234 merges. Switch back
+          # to `main` once that PR is merged.
+          ref: feat/mux-elasticsearch-schema-noise
 
       - name: Run schema-noise-detection test (mux-elasticsearch)
         env:

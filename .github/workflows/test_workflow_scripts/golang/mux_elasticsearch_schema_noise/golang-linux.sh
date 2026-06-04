@@ -15,7 +15,12 @@
 #
 # Runs inside samples-go/mux-elasticsearch. Expects: $KEPLOY_BIN (named
 # "keploy"), an Elasticsearch reachable at 127.0.0.1:9200, passwordless sudo, Go.
-set -uo pipefail
+# GitHub runs the `run:` step as `bash -e` and this file is sourced into it.
+# This script does its own error handling (a FAILURES counter + explicit exit)
+# and deliberately runs commands that return non-zero by design (pkill with no
+# match, grep with no match, startup curl retries), so disable errexit here.
+set +e
+set -o pipefail
 
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
