@@ -417,6 +417,24 @@ func (r *Recorder) Start(ctx context.Context) error {
 	)
 
 	errGrp.Go(func() error {
+		// CLI-side final summary: when frames.Outgoing closes, the host
+		// has received and processed every mock the agent will ever
+		// send this session. Logging the final received/written totals
+		// here — at the exact close of the receive pipeline — gives the
+		// authoritative "how many the CLI got and how many it wrote"
+		// numbers to reconcile against the agent's PROBE/agent-state-final
+		// (agent_has / agent_sent) and the host PROBE/host-recv-final
+		// (cli_decoded). The chain that proves where any loss happens:
+		//   agent_sent (wire)  ==  cli_decoded  ==  cli_received  ==  cli_written
+		// any inequality localizes the loss to that exact hop.
+		defer func() {
+			r.logger.Info("DIAG/cli-write-final: receive pipeline closed",
+				zap.Int64("cli_received", mocksReceived.Load()),
+				zap.Int64("cli_written", mocksWritten.Load()),
+				zap.Int64("received_minus_written", mocksReceived.Load()-mocksWritten.Load()),
+				zap.Int64("slow_inserts_total", slowInserts.Load()),
+				zap.Int64("ts_ms", time.Now().UnixMilli()))
+		}()
 		for mock := range frames.Outgoing {
 			recv := mocksReceived.Add(1)
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))

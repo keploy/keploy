@@ -200,6 +200,16 @@ type SyncMockManager struct {
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
 
+	// outChanClosedDrops counts mocks that were already counted in
+	// totalAdded (they passed the pressure gate) but were then dropped
+	// because the outChan was already closed by CloseOutChan — i.e.
+	// the mock arrived AFTER shutdown sealed the stream. This is a
+	// real post-count drop, so without this counter totalAdded would
+	// over-report deliverable mocks. Accounting identity at shutdown:
+	//   totalAdded = forwarded + still_in_buffer + outChanClosedDrops
+	//                + sendBudget drops (dropCount)
+	outChanClosedDrops atomic.Int64
+
 	// pressureRanges records every [start, end] interval during which memory
 	// pressure was active. Appended on the false→true transition in
 	// SetMemoryPressure, closed on the true→false transition. The most recent
@@ -243,16 +253,17 @@ func Get() *SyncMockManager {
 // can format it with fmt.Fprintf to stderr (bypassing zap) when they
 // need a SIGTERM-survivable log line.
 type ShutdownProbe struct {
-	BufferLen       int    // mocks parked in the windowing buffer
-	OutChanLen      int    // mocks queued for the live HTTP stream
-	OutChanCap      int    // outChan buffer capacity
-	OutChanBound    bool   // SetOutputChannel has fired
-	OutChanClosed   bool   // CloseOutChan has fired
-	TotalAdded      int64  // lifetime AddMock successes
-	PressureDropped int64  // mocks dropped by memory-pressure gate
-	SendDropsTotal  uint64 // mocks dropped by sendToOutChan overflow
-	FirstReqSeen    bool   // windowing has started
-	RecentWindows   int    // resolved windows still tracked
+	BufferLen          int    // mocks parked in the windowing buffer
+	OutChanLen         int    // mocks queued for the live HTTP stream
+	OutChanCap         int    // outChan buffer capacity
+	OutChanBound       bool   // SetOutputChannel has fired
+	OutChanClosed      bool   // CloseOutChan has fired
+	TotalAdded         int64  // lifetime AddMock successes (post-dedup, post-pressure)
+	PressureDropped    int64  // mocks dropped by memory-pressure gate (BEFORE TotalAdded)
+	SendDropsTotal     uint64 // mocks dropped by sendToOutChan overflow (AFTER TotalAdded)
+	OutChanClosedDrops int64  // mocks dropped because outChan already closed (AFTER TotalAdded)
+	FirstReqSeen       bool   // windowing has started
+	RecentWindows      int    // resolved windows still tracked
 }
 
 // ShutdownSnapshot returns a best-effort read of the manager's state.
@@ -283,6 +294,7 @@ func (m *SyncMockManager) ShutdownSnapshot() ShutdownProbe {
 	snap.TotalAdded = m.totalAdded.Load()
 	snap.PressureDropped = m.pressureDropped.Load()
 	snap.SendDropsTotal = m.dropCount.Load()
+	snap.OutChanClosedDrops = m.outChanClosedDrops.Load()
 	return snap
 }
 
@@ -514,6 +526,10 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	switch {
 	case closed:
 		m.mu.Unlock()
+		// Count this post-totalAdded drop so the accounting identity
+		// holds and we can see exactly how many mocks were lost to the
+		// "arrived after outChan closed" race.
+		closedDrops := m.outChanClosedDrops.Add(1)
 		// Per-mock diagnostic: visible signal when AddMock drops a
 		// mock because the outChan has already been closed by
 		// CloseOutChan. This usually only fires during shutdown but
@@ -528,6 +544,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 				zap.String("connID", mock.ConnectionID),
 				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
 				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+				zap.Int64("outchan_closed_drops_total", closedDrops),
 			)
 		}
 		return

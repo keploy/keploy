@@ -50,20 +50,20 @@ const (
 //
 // Why this counter and not the agent's outgoing_forwarded:
 //
-//   The agent-side outgoing_forwarded counter is incremented after
-//   flusher.Flush(), which only pushes bytes into the LOCAL kernel
-//   TCP send buffer. Flush returns success even when the host has
-//   already closed the connection — those bytes sit in the buffer
-//   and are silently discarded when the socket tears down or the
-//   agent process is SIGKILL'd. So outgoing_forwarded measures
-//   "mocks the agent shoved at the socket", which OVER-reports
-//   delivery.
+//	The agent-side outgoing_forwarded counter is incremented after
+//	flusher.Flush(), which only pushes bytes into the LOCAL kernel
+//	TCP send buffer. Flush returns success even when the host has
+//	already closed the connection — those bytes sit in the buffer
+//	and are silently discarded when the socket tears down or the
+//	agent process is SIGKILL'd. So outgoing_forwarded measures
+//	"mocks the agent shoved at the socket", which OVER-reports
+//	delivery.
 //
-//   hostMocksDecoded measures "mocks that actually arrived and
-//   parsed on the host". gob.Decode only returns nil when it has
-//   read a full, valid object off the stream, so this count is
-//   exact. The gap (agent_forwarded - host_decoded) is the true
-//   network loss — mocks abandoned in the TCP buffer at shutdown.
+//	hostMocksDecoded measures "mocks that actually arrived and
+//	parsed on the host". gob.Decode only returns nil when it has
+//	read a full, valid object off the stream, so this count is
+//	exact. The gap (agent_forwarded - host_decoded) is the true
+//	network loss — mocks abandoned in the TCP buffer at shutdown.
 //
 // Package-level + atomic so the host-side periodic recorder (the
 // ticker goroutine in GetOutgoing) and any future caller can read

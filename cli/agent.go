@@ -36,41 +36,53 @@ func writeAgentStateLine(finalSnapshot bool) {
 	if finalSnapshot {
 		tag = "PROBE/agent-state-final"
 	}
-	// Compute the cross-stage gap that's the smoking gun for "mocks
-	// trapped between syncMock and the HTTP stream":
+	// FULL ACCOUNTING IDENTITY (this is what proves there is no
+	// hidden counter fault). Every mock counted in total_added must
+	// end up in exactly one of these buckets:
 	//
-	//   leak_total - bufferLen - outChanLen  =  mocks that vanished
-	//                                            between syncMock's
-	//                                            internal buffer/queue
-	//                                            and the wire
+	//   total_added = outgoing_forwarded   (made it onto the wire)
+	//               + buffer               (still parked in windowing buffer)
+	//               + outchan_len          (still queued for the handler)
+	//               + outchan_closed_drops (dropped: arrived after close)
+	//               + send_drops           (dropped: outChan full past budget)
+	//               + unaccounted          (← MUST be ~0; >0 = real leak/bug)
 	//
-	// where leak_total = syncMock.totalAdded - routes.OutgoingForwardedTotal
+	// If unaccounted is non-zero at a steady moment, a mock left
+	// total_added without landing in any known bucket — that is the
+	// counter fault / silent drop we are hunting. (Small transient
+	// non-zero is normal: a mock mid-flight between outChan and the
+	// handler's Encode. It must settle to 0 when production stops.)
+	//
+	// pressure_dropped is NOT in this identity: pressure drops happen
+	// BEFORE total_added is incremented, so they never enter the sum.
 	totalAdded := snap.TotalAdded
 	forwarded := routes.OutgoingForwardedTotal()
-	leakTotal := totalAdded - forwarded
-	leakStuckInternal := int64(snap.BufferLen + snap.OutChanLen)
-	leakOnTheWire := leakTotal - leakStuckInternal
+	accountedDrops := snap.OutChanClosedDrops + int64(snap.SendDropsTotal)
+	stuck := int64(snap.BufferLen + snap.OutChanLen)
+	unaccounted := totalAdded - forwarded - stuck - accountedDrops
 	fmt.Fprintf(os.Stderr,
 		"%s: ts_ms=%d "+
 			"syncmock_total_added=%d syncmock_buffer=%d "+
 			"syncmock_outchan_len=%d syncmock_outchan_cap=%d "+
 			"syncmock_outchan_bound=%v syncmock_outchan_closed=%v "+
 			"syncmock_pressure_dropped=%d syncmock_send_drops=%d "+
+			"syncmock_outchan_closed_drops=%d "+
 			"syncmock_first_req_seen=%v syncmock_recent_windows=%d "+
 			"outgoing_forwarded=%d outgoing_handler_inflight=%d "+
 			"outgoing_handler_started=%d outgoing_handler_exited=%d "+
 			"outgoing_last_forward_ms=%d "+
-			"leak_total=%d leak_stuck_internal=%d leak_on_the_wire=%d\n",
+			"accounting_unaccounted=%d\n",
 		tag, time.Now().UnixMilli(),
 		totalAdded, snap.BufferLen,
 		snap.OutChanLen, snap.OutChanCap,
 		snap.OutChanBound, snap.OutChanClosed,
 		snap.PressureDropped, snap.SendDropsTotal,
+		snap.OutChanClosedDrops,
 		snap.FirstReqSeen, snap.RecentWindows,
 		forwarded, routes.OutgoingHandlerInFlight(),
 		routes.OutgoingHandlerStartedTotal(), routes.OutgoingHandlerExitedTotal(),
 		routes.OutgoingLastForwardUnixMs(),
-		leakTotal, leakStuckInternal, leakOnTheWire,
+		unaccounted,
 	)
 	_ = os.Stderr.Sync()
 }
