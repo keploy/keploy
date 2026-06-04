@@ -53,11 +53,13 @@ type CBShim struct {
 	log  *zap.Logger
 	objs cbshimObjects
 
-	// Tracepoint link for sched_process_exec — kernel emits a ringbuf
-	// event on this for every exec in the agent's PID namespace,
-	// which is how we replace the old WatchLibraryMappings polling
-	// loop with an event-driven library refresh.
-	execTracepoint link.Link
+	// fentry link for security_mmap_file — kernel calls this LSM hook
+	// during every mmap() syscall; we filter PROT_EXEC mappings of
+	// libcrypto/libpq/libssl by processes in the agent's PID namespace
+	// and emit a ringbuf event userspace consumes to trigger a /proc
+	// scan + uprobe attach. Replaces the previous WatchLibraryMappings
+	// polling loop with an event-driven library refresh.
+	mmapTracing    link.Link
 	procReader     *ringbuf.Reader
 	consumerOnce   sync.Once
 	consumerCancel context.CancelFunc
@@ -141,18 +143,24 @@ func New(log *zap.Logger) (*CBShim, error) {
 			zap.Error(err))
 	}
 
-	// Attach the sched_process_exec tracepoint so the kernel emits a
-	// ringbuf event every time a process in the agent's PID namespace
-	// completes execve(). Userspace consumes those events (see
-	// startProcEventConsumer) and walks /proc/<tgid>/maps to discover
-	// newly-loaded libcrypto/libpq files. Replaces the previous 2s
-	// polling loop with an event-driven design.
-	if tp, err := link.Tracepoint("syscalls", "sys_enter_openat", c.objs.CbOpenatEnter, nil); err != nil {
-		log.Warn("cbshim: failed to attach sys_enter_openat tracepoint — new libraries won't be auto-discovered",
+	// Attach the fentry/security_mmap_file program. The kernel calls
+	// security_mmap_file from inside the mmap() syscall path; our
+	// program filters PROT_EXEC mappings of libcrypto/libpq/libssl by
+	// processes in the agent's PID namespace and emits a ringbuf event
+	// (see consumeProcEvents). One event per library load — no
+	// ENOENT-probe noise from glibc-hwcaps the old openat tracepoint
+	// had to filter out.
+	//
+	// security_mmap_file has existed since LSM was introduced (~2.6);
+	// CONFIG_SECURITY=y is the default in every mainline distro
+	// kernel. CONFIG_BPF_LSM is NOT required — fentry attaches to the
+	// kernel function directly, independent of the LSM framework.
+	if l, err := link.AttachTracing(link.TracingOptions{Program: c.objs.CbMmapFileEnter}); err != nil {
+		log.Warn("cbshim: failed to attach fentry/security_mmap_file — new libraries won't be auto-discovered",
 			zap.Error(err))
 	} else {
-		c.execTracepoint = tp
-		log.Info("cbshim: sys_enter_openat tracepoint attached")
+		c.mmapTracing = l
+		log.Info("cbshim: fentry/security_mmap_file attached")
 	}
 
 	// Open the ringbuf reader. The consumer goroutine is started by
@@ -180,11 +188,11 @@ type libEvent struct {
 }
 
 // StartProcEventConsumer spawns a background goroutine that reads
-// openat ringbuf events from the BPF program. For each event it
-// attaches the relevant uprobe (for libcrypto/libssl files) or scans
-// /proc/<tgid>/maps to register libpq ranges. Idempotent — subsequent
-// calls are no-ops. Stops cleanly when ctx is cancelled or when
-// Close() is invoked.
+// security_mmap_file ringbuf events from the BPF program. For each
+// event it calls AttachToProcess(tgid), which scans /proc/<tgid>/maps
+// and idempotently attaches uprobes + registers libpq ranges.
+// Idempotent — subsequent calls are no-ops. Stops cleanly when ctx is
+// cancelled or when Close() is invoked.
 func (c *CBShim) StartProcEventConsumer(ctx context.Context) {
 	if c == nil || c.procReader == nil {
 		return
@@ -231,70 +239,43 @@ func (c *CBShim) consumeProcEvents(ctx context.Context) {
 			continue
 		}
 		path := string(pathBytes[:nullIdx])
-		c.log.Debug("cbshim: openat event received",
-			zap.Uint32("tgid", tgid), zap.String("path", path))
+		c.log.Debug("cbshim: mmap event received",
+			zap.Uint32("tgid", tgid), zap.String("basename", path))
 		c.handleLibEvent(libEvent{TGID: tgid, Path: path})
 	}
 }
 
-// handleLibEvent acts on one openat event. Two behaviours by basename:
+// handleLibEvent acts on one mmap event. The BPF program emits the
+// library's basename (not its full path — kernel dentry chain walking
+// is verifier-tedious; userspace has /proc/<tgid>/maps anyway).
 //
-//   - libcrypto* → attach uprobe directly to the file (no /proc/maps
-//     scan needed; the BPF gave us the path). The kernel resolves the
-//     file via inode + offset, so attach takes effect for every
-//     current and future process that maps the same file.
-//   - libpq*     → scan /proc/<tgid>/maps once to find the file's
-//     start/end virtual addresses for the Stage-2 selectivity filter.
-//     The openat tracepoint fires BEFORE the mmap, so we have to wait
-//     for the mapping to appear — in practice the ringbuf consumer
-//     wakes up several hundred microseconds after the syscall, well
-//     after the linker has completed its mmap dance. AttachToProcess
-//     handles the scan + registration idempotently.
-//   - libssl*    → ignored (X509_digest lives in libcrypto; libssl
-//     calls into it). The path is logged for diagnostics only.
+// Action is uniform across libcrypto/libpq/libssl: call AttachToProcess
+// which scans /proc/<tgid>/maps for the canonical full paths, attaches
+// uprobes to every libcrypto found, and registers libpq mapping ranges
+// for the Stage-2 selectivity filter. AttachToProcess is idempotent —
+// repeated calls from the burst of mmap events emitted at library load
+// (libpq → libssl → libcrypto, all within microseconds for a typical
+// psycopg2.connect()) are cheap thanks to the per-libcrypto-path cache
+// in attachedLibs.
+//
+// libssl events are not actionable on their own (X509_digest lives in
+// libcrypto, not libssl) but trigger the /proc scan as a defensive
+// re-discovery — sometimes the bundled libcrypto's mmap event arrives
+// after libssl's, and the libssl-driven scan picks it up.
 func (c *CBShim) handleLibEvent(e libEvent) {
-	// Skip events generated by the agent itself walking other processes'
-	// /proc/<pid>/root/... paths — those are introspection reads, not
-	// actual library loads in target processes. (The matching target
-	// process has already had its OWN openat event for the same file.)
+	// Skip events generated by the agent itself. The agent process
+	// runs inside the same PID namespace as the target (task_in_agent_ns
+	// returns true for it), so its own library mmaps would otherwise
+	// trigger /proc walks against itself.
 	if int(e.TGID) == os.Getpid() {
 		return
 	}
-	if strings.HasPrefix(e.Path, "/proc/") {
-		// Path the syscall used was a /proc/<pid>/root/... view —
-		// this happens when one tool inspects another's namespace. The
-		// actual library is/will be loaded by the OWNING pid, which
-		// gets its own openat event.
-		return
-	}
 
-	base := e.Path
-	if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
-		base = base[idx+1:]
-	}
-
-	switch {
-	case strings.HasPrefix(base, "libcrypto"):
-		// Resolve via /proc/<tgid>/root/ so it works across mount
-		// namespaces (docker, sandboxed runtimes).
-		hostPath := hostVisiblePath(int(e.TGID), e.Path)
-		if err := c.AttachToLibcrypto(hostPath); err != nil {
-			c.log.Debug("cbshim: AttachToLibcrypto from event failed",
-				zap.Uint32("tgid", e.TGID),
-				zap.String("path", hostPath),
-				zap.Error(err))
-		}
-	case strings.HasPrefix(base, "libpq"):
-		// Stage-2 range needs userspace /proc/maps walk. AttachToProcess
-		// handles it; per-(pid,libPath) dedup makes repeats cheap.
-		if err := c.AttachToProcess(int(e.TGID)); err != nil {
-			c.log.Debug("cbshim: AttachToProcess from libpq event failed",
-				zap.Uint32("tgid", e.TGID), zap.Error(err))
-		}
-	default:
-		// libssl* and any other matched-but-unhandled basename.
-		c.log.Debug("cbshim: ignoring openat event for non-target lib",
-			zap.Uint32("tgid", e.TGID), zap.String("basename", base))
+	if err := c.AttachToProcess(int(e.TGID)); err != nil {
+		c.log.Debug("cbshim: AttachToProcess from mmap event failed",
+			zap.Uint32("tgid", e.TGID),
+			zap.String("basename", e.Path),
+			zap.Error(err))
 	}
 }
 
@@ -344,8 +325,8 @@ func (c *CBShim) Close() error {
 	if c.procReader != nil {
 		_ = c.procReader.Close()
 	}
-	if c.execTracepoint != nil {
-		_ = c.execTracepoint.Close()
+	if c.mmapTracing != nil {
+		_ = c.mmapTracing.Close()
 	}
 
 	c.mu.Lock()

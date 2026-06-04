@@ -31,6 +31,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -137,18 +138,18 @@ struct {
     __type(value, __u64);
 } pending SEC(".maps");
 
-// cbshim_proc_events — ringbuf the openat tracepoint emits to whenever
-// a process in the agent's PID namespace calls openat() on a file with
-// basename starting with libcrypto / libpq / libssl. The path is read
-// from the syscall's filename argument so userspace gets {tgid, path}
-// directly — no /proc-maps polling needed for discovery. By the time
-// userspace processes the event, the syscall has returned and ld.so
-// has typically already mmap'd the file, so a one-shot scan of
-// /proc/<tgid>/maps reliably finds the new mapping.
+// cbshim_proc_events — ringbuf the fentry/security_mmap_file program
+// emits to whenever a process in the agent's PID namespace mmap()s a
+// file with PROT_EXEC and a basename starting with libcrypto / libpq /
+// libssl. The basename is read from file->f_path.dentry->d_name.name so
+// userspace gets {tgid, basename} for free — no syscall-argument string
+// reads, no TOCTOU, no ENOENT noise from glibc-hwcaps probes. Userspace
+// then calls AttachToProcess(tgid) which scans /proc/<tgid>/maps for the
+// canonical full paths and attaches uprobes idempotently.
 //
 // Sized 256 KiB to comfortably absorb startup bursts (a typical
-// dynamic linker opens 10-20 .so files in a single process exec; on a
-// busy host that can sum to a few thousand events/sec during startup).
+// dynamic linker mmaps 10-20 .so files per process exec; on a busy host
+// that can sum to a few thousand events/sec during startup).
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 18);
@@ -259,36 +260,21 @@ int BPF_KRETPROBE(cb_x509_digest_return) {
     return 0;
 }
 
-// O_CLOEXEC / O_RDONLY constants — kept here so we don't depend on
-// any specific kernel header layout when compiling the BPF program.
-// Values are fixed by the Linux syscall ABI for x86_64 and arm64.
-#define CB_O_RDONLY    0
-#define CB_O_ACCMODE   3
-#define CB_O_CLOEXEC   02000000
+// PROT_EXEC value — fixed by Linux ABI on x86_64 and arm64. Defined
+// here so we don't have to depend on any specific kernel header layout.
+#define CB_PROT_EXEC 4
 
-// trace_event_raw_sys_enter for the openat syscall:
-//   args[0] = dfd
-//   args[1] = filename (const char __user *)
-//   args[2] = flags    (int)
-//   args[3] = mode     (mode_t)
-struct cbshim_sys_enter {
-    __u64 unused;
-    __s32 syscall_nr;
-    __u32 _pad;
-    __u64 args[6];
-};
-
-// cb_openat_enter — fires when a process in the agent's PID namespace
-// calls openat() with O_RDONLY|O_CLOEXEC (the canonical ld.so /
-// __libc_dlopen_mode flag combo for shared-library loads) on a file
-// whose basename starts with libcrypto, libpq, or libssl.
-//
-// Why this hook is the right one (proven by strace):
+// cb_mmap_file_enter — fentry hook on security_mmap_file, the LSM hook
+// the kernel invokes during every mmap() syscall (and brk-extension,
+// MAP_ANONYMOUS, etc.). For us the interesting case is the PROT_EXEC
+// mapping of a shared library by ld.so / __libc_dlopen_mode:
 //
 //   ld.so / dlopen path for a shared library:
-//       openat(..., "<path>/lib*", O_RDONLY|O_CLOEXEC)   ← we fire HERE
+//       openat(..., "<path>/lib*", O_RDONLY|O_CLOEXEC)
 //       read(fd, ELF header)
-//       mmap(fd, PROT_EXEC, ...)                         ← file mapped
+//       mmap(fd, PROT_READ, ...)                         ← read-only header map
+//       mmap(fd, PROT_READ|PROT_EXEC, ...)               ← we fire HERE
+//       mmap(fd, PROT_READ|PROT_WRITE, ...)              ← data section
 //       close(fd)
 //       ld.so resolves relocations + runs library init
 //       ... eventually ...
@@ -296,75 +282,53 @@ struct cbshim_sys_enter {
 //                                                          be attached
 //                                                          BY THIS POINT
 //
-// strace timing on the local repro:
-//   t=0 ms     openat(".../libcrypto-XXX.so.1.1")        ← our event
-//   t=42 ms    connect(fd, sin_port=5432)                ← postgres TCP
-//   t=>50 ms   X509_digest fires                         ← uprobe target
+// Why security_mmap_file beats sys_enter_openat as the discovery hook:
 //
-// 40+ ms of breathing room for userspace to consume the ringbuf event
-// and call link.OpenExecutable().Uprobe(). No polling needed; no
-// timing races on lazy dlopen — every library load goes through this
-// syscall path, including the truly-late ones (psycopg2's bundled
-// libcrypto, runtime plugin loads, etc.).
+//   - One event per library load, not one per openat: ENOENT probes
+//     from glibc-hwcaps (3 misses per library, every time) don't make
+//     it to userspace.
+//   - PROT_EXEC bit filters out non-library opens (config files,
+//     /proc reads, lock files) entirely in-kernel.
+//   - Path comes from the kernel-resolved dentry (no TOCTOU on the
+//     userspace string the syscall is about to dereference).
+//   - By the time the EXEC mapping is being installed the file has
+//     already been opened and the read-only header has been mapped,
+//     so /proc/<tgid>/maps reliably shows the file when userspace
+//     reads it.
 //
-// Filtering strategy (in order, cheapest first):
-//   1. namespace check via task_in_agent_ns
-//   2. O_RDONLY + O_CLOEXEC flags (ld.so always sets this combo)
-//   3. basename starts with libcrypto / libpq / libssl
+// Filtering strategy (cheapest first; ~99% of mmap traffic system-wide
+// is anonymous/data/etc., so PROT_EXEC is the dominant filter):
+//   1. file != NULL (anonymous mappings have file==NULL)
+//   2. prot & PROT_EXEC
+//   3. task_in_agent_ns (PID-namespace membership)
+//   4. basename starts with libcrypto / libpq / libssl
 //
-// The path is copied into the ringbuf event so userspace can hand it
-// straight to AttachToLibcrypto / RegisterLibpqRanges — no /proc/maps
-// scan needed for discovery.
-SEC("tracepoint/syscalls/sys_enter_openat")
-int cb_openat_enter(struct cbshim_sys_enter *ctx) {
-    // Stage 0: PID-namespace gate. ~99% of openat calls system-wide
-    // come from processes outside the agent's namespace.
-    if (!task_in_agent_ns())
-        return 0;
+// Only the basename is captured — full-path extraction from kernel
+// dentries requires walking d_parent and is verifier-tedious. Userspace
+// has /proc/<tgid>/maps anyway, where it can resolve full paths once
+// the event tells it which tgid to scan.
+SEC("fentry/security_mmap_file")
+int BPF_PROG(cb_mmap_file_enter, struct file *file, unsigned long prot, unsigned long flags) {
+    if (!file) return 0;
+    if ((prot & CB_PROT_EXEC) == 0) return 0;
+    if (!task_in_agent_ns()) return 0;
 
-    // Stage 1: flag gate. ld.so / __libc_dlopen_mode always opens
-    // libraries with O_RDONLY|O_CLOEXEC. Any other open is config
-    // files, /proc reads, logging, etc. — not our concern.
-    long flags = (long)ctx->args[2];
-    if ((flags & CB_O_CLOEXEC) == 0) return 0;
-    if ((flags & CB_O_ACCMODE) != CB_O_RDONLY) return 0;
+    struct dentry *d = BPF_CORE_READ(file, f_path.dentry);
+    if (!d) return 0;
+    const unsigned char *name = BPF_CORE_READ(d, d_name.name);
+    if (!name) return 0;
 
-    const char *filename_uptr = (const char *)ctx->args[1];
-    if (!filename_uptr) return 0;
-
-    // Reserve event up front so we can read the path string straight
-    // into its backing storage (one less stack→event copy).
     struct cbshim_lib_event *evt = bpf_ringbuf_reserve(
         &cbshim_proc_events, sizeof(*evt), 0);
     if (!evt) return 0;
 
-    long n = bpf_probe_read_user_str(evt->path, LIB_EVENT_PATH_LEN, filename_uptr);
+    long n = bpf_probe_read_kernel_str(evt->path, LIB_EVENT_PATH_LEN, name);
     if (n <= 1) {
         bpf_ringbuf_discard(evt, 0);
         return 0;
     }
 
-    // Find last '/' in the path. Bounded unroll keeps the verifier
-    // happy. LIB_EVENT_PATH_LEN==256 → 256 iterations.
-    __u32 slash_idx = 0;  // 0 means "no slash, basename is the whole path"
-    #pragma unroll
-    for (int i = 0; i < LIB_EVENT_PATH_LEN; i++) {
-        if (i >= n) break;
-        if (evt->path[i] == '/') {
-            slash_idx = (__u32)i + 1;
-        }
-    }
-
-    // Bound slash_idx so the verifier sees evt->path[slash_idx+8] as
-    // a safe access. We need at most 9 bytes from slash_idx (for
-    // "libcrypto"), so cap at LIB_EVENT_PATH_LEN - 9.
-    if (slash_idx >= LIB_EVENT_PATH_LEN - 9) {
-        bpf_ringbuf_discard(evt, 0);
-        return 0;
-    }
-
-    char *bn = &evt->path[slash_idx];
-
+    char *bn = evt->path;
     int is_libcrypto = (bn[0] == 'l' && bn[1] == 'i' && bn[2] == 'b' &&
                        bn[3] == 'c' && bn[4] == 'r' && bn[5] == 'y' &&
                        bn[6] == 'p' && bn[7] == 't' && bn[8] == 'o');

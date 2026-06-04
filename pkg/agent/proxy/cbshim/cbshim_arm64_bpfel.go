@@ -72,7 +72,7 @@ type cbshimSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type cbshimProgramSpecs struct {
-	CbOpenatEnter      *ebpf.ProgramSpec `ebpf:"cb_openat_enter"`
+	CbMmapFileEnter    *ebpf.ProgramSpec `ebpf:"cb_mmap_file_enter"`
 	CbX509DigestEntry  *ebpf.ProgramSpec `ebpf:"cb_x509_digest_entry"`
 	CbX509DigestReturn *ebpf.ProgramSpec `ebpf:"cb_x509_digest_return"`
 }
@@ -147,14 +147,14 @@ type cbshimVariables struct {
 //
 // It can be passed to loadCbshimObjects or ebpf.CollectionSpec.LoadAndAssign.
 type cbshimPrograms struct {
-	CbOpenatEnter      *ebpf.Program `ebpf:"cb_openat_enter"`
+	CbMmapFileEnter    *ebpf.Program `ebpf:"cb_mmap_file_enter"`
 	CbX509DigestEntry  *ebpf.Program `ebpf:"cb_x509_digest_entry"`
 	CbX509DigestReturn *ebpf.Program `ebpf:"cb_x509_digest_return"`
 }
 
 func (p *cbshimPrograms) Close() error {
 	return _CbshimClose(
-		p.CbOpenatEnter,
+		p.CbMmapFileEnter,
 		p.CbX509DigestEntry,
 		p.CbX509DigestReturn,
 	)
