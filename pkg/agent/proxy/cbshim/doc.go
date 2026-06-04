@@ -72,23 +72,18 @@
 // stock distributions; some hardened images restrict it).
 package cbshim
 
-// Regenerating the BPF objects (cbshim_x86_bpfel.{go,o} and
-// cbshim_arm64_bpfel.{go,o}) requires per-arch vmlinux.h BTF dumps that
-// are NOT checked into the repo (the amd64 dump alone is ~2.5 MB). The
-// generate step below fetches them into the package directory at build
-// time and removes them afterwards, leaving only the compiled artifacts
-// in tree.
+// The BPF source for this package lives in the keploy/ebpf repository
+// at keploy_cbshim.c, alongside the rest of keploy's BPF programs.
+// Only the compiled artifacts (cbshim_{x86,arm64}_bpfel.{go,o}) are
+// checked into this repo — they're embedded into the keploy binary via
+// the //go:embed directive in those generated files.
 //
-//   - vmlinux_amd64.h is produced from the local kernel BTF via
-//     `bpftool btf dump file /sys/kernel/btf/vmlinux format c`. Requires
-//     CAP_SYS_ADMIN to read /sys/kernel/btf/vmlinux on most distros.
-//   - vmlinux_arm64.h is pulled from libbpf/vmlinux.h (pinned to the
-//     6.19 dump for stability — bump as the kernel ABI evolves).
-//   - vmlinux.h is a tiny dispatcher that picks between the two based
-//     on the __TARGET_ARCH_* define bpf2go passes to clang per target.
+// To regenerate after editing keploy_cbshim.c:
 //
-// If you don't have bpftool or root, prefetch the dumps manually before
-// `go generate`; the generate command is idempotent and will skip fetch
-// when the headers already exist.
-
-//go:generate sh -c "set -e; cd $(dirname $0); test -f vmlinux_amd64.h || sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux_amd64.h; test -f vmlinux_arm64.h || curl -sLo vmlinux_arm64.h https://raw.githubusercontent.com/libbpf/vmlinux.h/main/include/aarch64/vmlinux_6.19.h; test -f vmlinux.h || printf '#if defined(__TARGET_ARCH_x86)\\n#include \"vmlinux_amd64.h\"\\n#elif defined(__TARGET_ARCH_arm64)\\n#include \"vmlinux_arm64.h\"\\n#else\\n#error unsupported target arch\\n#endif\\n' > vmlinux.h; GOPACKAGE=cbshim $(go env GOPATH)/bin/bpf2go -cc clang -target amd64,arm64 -type libpq_range_key -type libpq_range_val -type cbshim_agent_info cbshim cbshim.bpf.c; rm -f vmlinux.h vmlinux_amd64.h vmlinux_arm64.h"
+//   cd ../../../../../ebpf            # keploy/ebpf repo
+//   sh compile.sh                     # builds all BPF objects + Go bindings
+//   cp cbshim_*.{go,o} <keploy>/pkg/agent/proxy/cbshim/
+//
+// The compile.sh script handles vmlinux.h fetching, per-arch include
+// flags, and bpf2go invocation for all programs in one pass. The
+// keploy/ebpf README documents the full process.
