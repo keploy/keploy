@@ -279,7 +279,6 @@ func (c *CBShim) handleLibEvent(e libEvent) {
 	}
 }
 
-
 // populateAgentInfo writes the keploy agent's PID-namespace inode into
 // the BPF cbshim_agent_info_map. Called once at New(); the BPF program
 // reads it on every uprobe slow-path classification.
