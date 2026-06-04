@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,38 @@ const (
 	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
 )
+
+// hostMocksDecoded is the GROUND-TRUTH receive counter for the
+// agent→host mock stream. It is incremented exactly once per
+// successful gob.Decode in GetOutgoing's reader goroutine — i.e.
+// every time a COMPLETE mock has been physically pulled off the TCP
+// wire and deserialized in the host process.
+//
+// Why this counter and not the agent's outgoing_forwarded:
+//
+//   The agent-side outgoing_forwarded counter is incremented after
+//   flusher.Flush(), which only pushes bytes into the LOCAL kernel
+//   TCP send buffer. Flush returns success even when the host has
+//   already closed the connection — those bytes sit in the buffer
+//   and are silently discarded when the socket tears down or the
+//   agent process is SIGKILL'd. So outgoing_forwarded measures
+//   "mocks the agent shoved at the socket", which OVER-reports
+//   delivery.
+//
+//   hostMocksDecoded measures "mocks that actually arrived and
+//   parsed on the host". gob.Decode only returns nil when it has
+//   read a full, valid object off the stream, so this count is
+//   exact. The gap (agent_forwarded - host_decoded) is the true
+//   network loss — mocks abandoned in the TCP buffer at shutdown.
+//
+// Package-level + atomic so the host-side periodic recorder (the
+// ticker goroutine in GetOutgoing) and any future caller can read
+// it without plumbing a handle through the AgentClient struct.
+var hostMocksDecoded atomic.Int64
+
+// HostMocksDecodedTotal returns the lifetime count of mocks
+// successfully decoded off the agent→host stream in this process.
+func HostMocksDecodedTotal() int64 { return hostMocksDecoded.Load() }
 
 // TODO: Need to refactor this file
 type AgentClient struct {
@@ -290,12 +323,58 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	}
 
 	grp.Go(func() error {
+		// exitReason records WHY the reader goroutine returned, so the
+		// final PROBE/host-recv-final line tells us whether the stream
+		// ended cleanly (agent closed = stream-EOF), the host gave up
+		// (drain-deadline), or the gob stream broke mid-object
+		// (decode-error). Combined with host_decoded it pinpoints the
+		// loss boundary.
+		exitReason := "unknown"
+		// decodeBaseline lets the periodic recorder and the final log
+		// report how many mocks THIS stream decoded (the package
+		// counter is process-cumulative across reconnects).
+		decodeStart := hostMocksDecoded.Load()
+
 		defer func() {
 			close(mockChan)
 
 			err := res.Body.Close()
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
+			}
+
+			// GROUND-TRUTH final receive count. Written via the host
+			// logger; for the CI investigation we grep PROBE/host-recv-final
+			// and compare host_decoded against the agent's
+			// outgoing_forwarded at the same wall-clock moment.
+			fmt.Fprintf(os.Stderr,
+				"PROBE/host-recv-final: ts_ms=%d reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
+				time.Now().UnixMilli(), exitReason,
+				hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
+			_ = os.Stderr.Sync()
+		}()
+
+		// Periodic host-side receive recorder. Every 1 s it prints the
+		// ground-truth decode count to stderr so we can line it up
+		// against the agent's PROBE/agent-state (which prints
+		// outgoing_forwarded every 1 s). The divergence between the two
+		// timelines IS the network loss, measured accurately.
+		recvCtx, recvCancel := context.WithCancel(context.Background())
+		defer recvCancel()
+		go func() {
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-recvCtx.Done():
+					return
+				case <-ticker.C:
+					fmt.Fprintf(os.Stderr,
+						"PROBE/host-recv: ts_ms=%d host_decoded_total=%d host_decoded_this_stream=%d\n",
+						time.Now().UnixMilli(),
+						hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
+					_ = os.Stderr.Sync()
+				}
 			}
 		}()
 
@@ -351,11 +430,20 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			if err := decoder.Decode(&mock); err != nil {
 				if utils.IsShutdownError(err) {
 					// End of the stream or connection closed during shutdown
+					exitReason = "stream-EOF"
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")
+				exitReason = "decode-error"
 				break
 			}
+
+			// GROUND-TRUTH receive count: a complete mock has now been
+			// read off the wire and deserialized. Increment BEFORE the
+			// forward attempt so the counter reflects "arrived", even if
+			// the drain deadline below drops this one before record.go
+			// sees it.
+			hostMocksDecoded.Add(1)
 
 			// Once ctx cancels we arm the drain deadline ONCE and then
 			// stop checking ctx — drainDeadline becomes the new "give
@@ -377,9 +465,11 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				select {
 				case mockChan <- &mock:
 				case <-drainDeadline:
+					exitReason = "drain-deadline"
 					return nil
 				}
 			case <-drainDeadline:
+				exitReason = "drain-deadline"
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
