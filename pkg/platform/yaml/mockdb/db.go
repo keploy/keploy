@@ -312,6 +312,28 @@ func replaceFile(src, dst string) error {
 	return nil
 }
 
+// mergeReqBodyNoise returns a fresh map combining the existing on-disk
+// request-body noise with newly-detected noise carried on the MockState.
+// Existing entries win on key collision (noise is monotonic), and every slice
+// is copied so the result shares no backing storage with its inputs.
+func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(existing)+len(detected))
+	for k, v := range existing {
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	for k, v := range detected {
+		if _, ok := out[k]; ok {
+			continue
+		}
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	return out
+}
+
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
 // mockNames is a keep-set keyed by mock name (values carry models.MockState details).
@@ -420,7 +442,13 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		if _, ok := mockNames[mock.Name]; ok {
+		if st, ok := mockNames[mock.Name]; ok {
+			// Persist any request-body noise detected during schema-based
+			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
+			// disk-read mock before it is re-written.
+			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			}
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -532,7 +560,13 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		if _, ok := mockNames[mock.Name]; ok {
+		if st, ok := mockNames[mock.Name]; ok {
+			// Persist any request-body noise detected during schema-based
+			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
+			// disk-read mock before it is re-written.
+			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			}
 			newMocks = append(newMocks, mock)
 			continue
 		}
