@@ -290,7 +290,14 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// opportunistic-TLS hot path. Kept at Debug so high-throughput
 	// workloads don't flood operator-facing Info logs with cbshim
 	// internals — surface --debug if you need the rendezvous trail.
-	if p.cbshim != nil {
+	// Snapshot p.cbshim into a local once so the multiple reads below
+	// (nil check + RegisterReal + CleanupConnection defer) can't tear
+	// if a concurrent SetCBShim writes p.cbshim between them. The
+	// shutdown path is the only writer today (it deliberately skips
+	// the nil-write to avoid this race), but the snapshot also future-
+	// proofs against any other call site that might mutate the field.
+	cb := p.cbshim
+	if cb != nil {
 		state := tlsUpstream.ConnectionState()
 		if len(state.PeerCertificates) > 0 {
 			// tcpAddr.Port==0 means the wrapped conn surfaced an
@@ -314,7 +321,7 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 						zap.String("sigAlgo", leaf.SignatureAlgorithm.String()),
 					)
 				}
-				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+				cb.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
 				// Release the cbshim's per-connection rendezvous state
 				// when this hijack returns. If the MITM half (from
 				// CertForClient) was already published, Publish has
@@ -324,7 +331,7 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 				// for this connID, or the connection errored before
 				// rendezvous), CleanupConnection drops the half-state
 				// before it leaks to process exit.
-				defer p.cbshim.CleanupConnection(connID)
+				defer cb.CleanupConnection(connID)
 			} else if ce := p.logger.Check(zap.DebugLevel, "cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr"); ce != nil {
 				// Gated under Check so fmt.Sprintf + RemoteAddr().String()
 				// don't run on the hot path when debug is off — both

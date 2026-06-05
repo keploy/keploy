@@ -2332,25 +2332,32 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	// StopProxyServer; Close() is idempotent against an in-flight
 	// goroutine racing it.
 	if p.cbshim != nil {
-		// Detach the global tls.MITMPublishHook FIRST so NEW callers
-		// can't observe the handle. SetMITMPublishHook(nil) blocks
-		// until any in-flight publishMITM finishes — see
+		// Detach the global tls.MITMPublishHook so NEW CertForClient
+		// callers can't observe the handle. SetMITMPublishHook(nil)
+		// blocks until any in-flight publishMITM returns — see
 		// pkg/agent/proxy/tls/ca.go for the RWMutex drain — so no
 		// CertForClient → RegisterMITM call survives this point.
 		//
-		// dialPostgresSSLUpstream is the other direct cbshim consumer.
-		// It captures p.cbshim into a local at call time, so a
-		// concurrent SetCBShim(nil) doesn't reach it. Goroutines
-		// still in the postgres upstream-handshake phase when this
-		// runs are tracked by activeConns; we defer cb.Close() onto a
-		// goroutine that waits for them to drain naturally before
-		// pulling the BPF maps + uprobes out from under their call.
-		// Drain already had drainGrace seconds above; if connections
-		// outlast that, the deferred Close keeps cbshim alive until
-		// they're truly done — kernel reclaims any leaked BPF
-		// resources at process exit if the goroutine never returns.
+		// We deliberately do NOT mutate p.cbshim here. In-flight
+		// connection-scoped goroutines (notably the opportunistic-TLS
+		// path) read p.cbshim multiple times within one connection;
+		// a racing nil-write would tear those reads. Since shutdown
+		// is in progress (listener closed, parent ctx cancelled, no
+		// new accepts), leaving p.cbshim pointing at the (now-quiesced)
+		// handle is safe — its publisher-facing surface is already
+		// inert via the cleared global hook.
+		//
+		// The actual cb.Close() is deferred onto a goroutine that
+		// waits for activeConns to drain. dialPostgresSSLUpstream
+		// captures p.cbshim into a function-local at call time, so
+		// goroutines mid-pg-SSL-handshake when shutdown starts are
+		// covered by the WaitGroup. Drain already had drainGrace
+		// seconds above; the deferred Close keeps the BPF maps +
+		// uprobes alive until the last in-flight goroutine returns.
+		// Kernel reclaims any leaked BPF resources at process exit
+		// if Wait never returns.
 		cb := p.cbshim
-		p.SetCBShim(nil)
+		pTls.SetMITMPublishHook(nil)
 		go func() {
 			p.activeConns.Wait()
 			if err := cb.Close(); err != nil {
