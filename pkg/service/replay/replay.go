@@ -1554,7 +1554,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
 						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 							zap.String("testcase", testCase.Name),
-							zap.String("next_step", "check hook implementation or api-server connectivity"))
+							zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 					}
 				}
 			}
@@ -2128,7 +2128,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
 					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 						zap.String("testcase", tc.Name),
-						zap.String("next_step", "check hook implementation or api-server connectivity"))
+						zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 				}
 			}
 
