@@ -108,7 +108,7 @@ record:
     queueSize: 1024
 configPath: ""
 bypassRules: []
-disableMapping: true
+disableMapping: false
 contract:
   driven: "consumer"
   mappings:
