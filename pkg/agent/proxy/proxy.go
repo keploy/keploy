@@ -705,10 +705,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		} else if err != nil {
 			logger.Info("cbshim: factory returned an error — SCRAM-SHA-256-PLUS "+
 				"clients will fail across the MITM as today",
-				zap.Error(err))
+				zap.Error(err),
+				zap.String("next_step", "verify the agent has CAP_BPF + CAP_PERFMON (or CAP_SYS_ADMIN on older kernels), the kernel is >= 5.5 with bpf_probe_write_user permitted (not disabled by lockdown / hardened images), and clang/llvm BPF support is available. To opt out of cbshim entirely, set record.channelBindingShim: false (or unset) in keploy.yml; non-PLUS postgres clients work without it."))
 		} else {
-			logger.Info("cbshim: no implementation registered (OSS build) — " +
-				"SCRAM-SHA-256-PLUS clients will fail across the MITM as today")
+			logger.Info("cbshim: no implementation registered (OSS build) — "+
+				"SCRAM-SHA-256-PLUS clients will fail across the MITM as today",
+				zap.String("next_step", "this build does not include a cbshim implementation; the OSS binary cannot intercept SCRAM-SHA-256-PLUS across the TLS MITM. Run an enterprise build (which registers a cbshim factory at init()) to get the feature, or set record.channelBindingShim: false to silence this log if non-PLUS clients are sufficient."))
 		}
 	}
 
@@ -937,7 +939,8 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			zap.Uint32("appPID", p.appPID))
 		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
 			p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
-				zap.Uint32("appPID", p.appPID), zap.Error(err))
+				zap.Uint32("appPID", p.appPID), zap.Error(err),
+				zap.String("next_step", "the first-pass scan of /proc/<appPID>/maps + descendants failed to find or attach a uprobe for libcrypto/libpq; the BPF discovery hook (cbshim's security_mmap_file fentry) will catch them on the next library mmap, so this is non-fatal. If SCRAM-PLUS still fails after a few requests, rerun with --debug to see per-process scanProcessMaps results and confirm the agent has CAP_BPF + the kernel allows bpf_probe_write_user."))
 		} else {
 			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
 		}

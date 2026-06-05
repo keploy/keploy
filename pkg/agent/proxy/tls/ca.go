@@ -50,23 +50,37 @@ var caPKey []byte //private key
 // unset, CertForClient is a no-op on the cbshim side and works exactly
 // as it did before the shim existed.
 //
-// Storage is an atomic.Pointer so concurrent SetMITMPublishHook
-// (e.g. from StopProxyServer's cleanup) cannot race a publishMITM
-// read. Without atomic access, -race flags every CertForClient call
-// that observes a concurrent hook toggle, and a check-then-call
-// pattern on a bare global can nil-deref between the two reads.
-var mitmPublishHook atomic.Pointer[func(connID string, mitmCertDER []byte)]
+// Synchronisation: the read path (publishMITM) holds an RLock around
+// the nil-check + call, and SetMITMPublishHook holds the write Lock.
+// This serialises hook clears against in-flight invocations so the
+// cleanup sequence
+//
+//	SetMITMPublishHook(nil) → cb.Close()
+//
+// can't race a goroutine that already started publishMITM but hasn't
+// yet returned from the hook (which would dereference a closed
+// cbshim handle). Plain atomic.Pointer wasn't enough — it stops
+// nil-deref between Load and call, but doesn't fence Close against
+// the in-flight call body. RLock contention is in the noise next to
+// the cost of the cert mint / SCRAM handshake on the same path.
+var (
+	hookMu          sync.RWMutex
+	mitmPublishHook func(connID string, mitmCertDER []byte)
+)
 
 // SetMITMPublishHook installs (or clears, via nil) the hook the
 // proxy's CertForClient path invokes after every MITM-cert mint /
 // cache-hit. Callers MUST use this rather than touching the
-// underlying var — it's atomic and safe against concurrent toggles.
+// underlying var.
+//
+// When called with nil, blocks until any in-flight publishMITM call
+// has returned — so cleanup paths can safely close the resource the
+// hook closes over (e.g. StopProxyServer's cbshim handle) without
+// racing concurrent CertForClient invocations.
 func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
-	if h == nil {
-		mitmPublishHook.Store(nil)
-		return
-	}
-	mitmPublishHook.Store(&h)
+	hookMu.Lock()
+	mitmPublishHook = h
+	hookMu.Unlock()
 }
 
 // embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
@@ -1295,9 +1309,13 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // client connection. Nil-safe everywhere: a nil hook, a cert without
 // a usable leaf, or a zero-port source addr all silently no-op.
 func publishMITM(sourcePort int, cert *tls.Certificate) {
-	hp := mitmPublishHook.Load()
-	if hp == nil || cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
+	if cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
 		return
 	}
-	(*hp)(strconv.Itoa(sourcePort), cert.Certificate[0])
+	hookMu.RLock()
+	defer hookMu.RUnlock()
+	if mitmPublishHook == nil {
+		return
+	}
+	mitmPublishHook(strconv.Itoa(sourcePort), cert.Certificate[0])
 }

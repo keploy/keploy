@@ -10,7 +10,8 @@
 // MITM will fail with "SCRAM channel binding check failed". Users who
 // need PLUS support must run a build that registers a CBShim
 // implementation AND set config.Record.ChannelBindingShim to true
-// (record:channelBindingShim in keploy.yml); the agent subprocess
+// (record.channelBindingShim in keploy.yml — nested YAML, i.e.
+// `record:\n  channelBindingShim: true`); the agent subprocess
 // receives the same value via the hidden --channel-binding-shim flag
 // the orchestrator forwards on argv.
 package cbshim

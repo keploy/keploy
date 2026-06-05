@@ -183,13 +183,9 @@ func TestMITMPublishHook_RaceWithToggling(t *testing.T) {
 // package-level).
 func resetHookForTest(t *testing.T) {
 	t.Helper()
-	prev := mitmPublishHook.Load()
+	hookMu.RLock()
+	prev := mitmPublishHook
+	hookMu.RUnlock()
 	SetMITMPublishHook(nil)
-	t.Cleanup(func() {
-		if prev == nil {
-			SetMITMPublishHook(nil)
-		} else {
-			SetMITMPublishHook(*prev)
-		}
-	})
+	t.Cleanup(func() { SetMITMPublishHook(prev) })
 }

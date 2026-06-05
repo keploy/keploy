@@ -313,10 +313,16 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 				// rendezvous), CleanupConnection drops the half-state
 				// before it leaks to process exit.
 				defer p.cbshim.CleanupConnection(connID)
-			} else {
-				p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr",
+			} else if ce := p.logger.Check(zap.DebugLevel, "cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr"); ce != nil {
+				// Gated under Check so fmt.Sprintf + RemoteAddr().String()
+				// don't run on the hot path when debug is off — both
+				// allocate per call and this branch fires for every
+				// opportunistic-TLS connection whose src isn't a
+				// *net.TCPAddr (rare but not zero).
+				ce.Write(
 					zap.String("srcRemoteType", fmt.Sprintf("%T", srcConn.RemoteAddr())),
-					zap.String("srcRemote", srcConn.RemoteAddr().String()))
+					zap.String("srcRemote", srcConn.RemoteAddr().String()),
+				)
 			}
 		} else {
 			p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — no peer certs",
