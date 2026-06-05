@@ -131,6 +131,21 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 	Volumes = Volumes + tlsVolumeMount
 
+	// Base `docker run` capability set. The cbshim path needs
+	// CAP_SYS_ADMIN on top because bpf_probe_write_user is gated on
+	// sysadmin_capable() in the kernel (kernel/trace/bpf_trace.c::
+	// bpf_get_probe_write_proto). Without it cbshim's uretprobe on
+	// X509_digest fails verifier load and SCRAM-SHA-256-PLUS auth
+	// breaks at the channel-binding check. CAP_BPF + CAP_PERFMON
+	// alone aren't sufficient — the 5.8 BPF capability split kept
+	// probe_write_user behind SYS_ADMIN deliberately. Gated on
+	// ChannelBindingShim so non-cbshim users don't pay the extra
+	// privilege cost.
+	capAddFlags := " --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE "
+	if opts.ChannelBindingShim {
+		capAddFlags = " --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE --cap-add=SYS_ADMIN "
+	}
+
 	extraArgs := opts.ExtraArgs
 	// Skip publishing the proxy port when it's zero. Docker rejects
 	// `-p 0:0` outright, so a caller that intentionally sets
@@ -146,7 +161,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			proxyPortStr + appPortsStr +
-			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+			capAddFlags + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
@@ -221,7 +236,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				proxyPortStr + appPortsStr +
-				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+				capAddFlags + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -283,7 +298,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			proxyPortStr + appPortsStr +
-			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+			capAddFlags + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -360,7 +375,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				proxyPortStr + appPortsStr +
-				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+				capAddFlags + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -421,7 +436,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			proxyPortStr + appPortsStr +
-			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
+			capAddFlags + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"

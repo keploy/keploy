@@ -926,23 +926,41 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	//
 	// Nil-safe: if cbshim failed to load (no CAP_BPF, older kernel,
 	// etc.) p.cbshim is nil and these calls are no-ops. p.appPID==0
-	// means we don't yet know the app PID — also a no-op; future
-	// session-bind paths can call this explicitly.
-	if p.cbshim != nil && p.appPID != 0 {
-		// PID membership is BPF-side via task_in_agent_ns (lazy
-		// namespace classification — see cbshim.bpf.c). No userspace
-		// PID-walking polling loop. The library-refresh loop below
-		// only handles late-loaded libcrypto files (bundled wheel
-		// libs that appear after worker fork-exec) — its job is
-		// per-file uprobe attach, NOT PID tracking.
-		p.logger.Info("cbshim: scanning process tree for libcrypto/libpq mappings",
-			zap.Uint32("appPID", p.appPID))
-		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
-			p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
-				zap.Uint32("appPID", p.appPID), zap.Error(err),
-				zap.String("next_step", "the first-pass scan of /proc/<appPID>/maps + descendants failed to find or attach a uprobe for libcrypto/libpq; the BPF discovery hook (cbshim's security_mmap_file fentry) will catch them on the next library mmap, so this is non-fatal. If SCRAM-PLUS still fails after a few requests, rerun with --debug to see per-process scanProcessMaps results and confirm the agent has CAP_BPF + the kernel allows bpf_probe_write_user."))
+	// is the k8s sidecar shape — the agent shares a pidns with the
+	// app but doesn't own its PID, since the app runs in a sibling
+	// container. The mmap-event consumer (StartProcEventConsumer)
+	// still needs to run in that mode so the BPF fentry on
+	// security_mmap_file can drive uprobe attachments when the app
+	// eventually loads libcrypto/libpq; without it, fentry events
+	// land in the kernel ringbuf with no userspace reader, no uprobes
+	// get attached, and cbshim becomes a no-op even though it loaded.
+	if p.cbshim != nil {
+		if p.appPID != 0 {
+			// PID membership is BPF-side via task_in_agent_ns (lazy
+			// namespace classification — see cbshim.bpf.c). No userspace
+			// PID-walking polling loop. The library-refresh loop below
+			// only handles late-loaded libcrypto files (bundled wheel
+			// libs that appear after worker fork-exec) — its job is
+			// per-file uprobe attach, NOT PID tracking.
+			p.logger.Info("cbshim: scanning process tree for libcrypto/libpq mappings",
+				zap.Uint32("appPID", p.appPID))
+			if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
+				p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
+					zap.Uint32("appPID", p.appPID), zap.Error(err),
+					zap.String("next_step", "the first-pass scan of /proc/<appPID>/maps + descendants failed to find or attach a uprobe for libcrypto/libpq; the BPF discovery hook (cbshim's security_mmap_file fentry) will catch them on the next library mmap, so this is non-fatal. If SCRAM-PLUS still fails after a few requests, rerun with --debug to see per-process scanProcessMaps results and confirm the agent has CAP_BPF + the kernel allows bpf_probe_write_user."))
+			} else {
+				p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
+			}
 		} else {
-			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
+			// k8s sidecar / sandbox path: no appPID known at startup.
+			// AttachToProcessTree would have nothing to walk. The
+			// consumer below is the catch-all: every execve in the
+			// agent's pidns emits a sched_process_exec event, the
+			// consumer walks /proc/<tgid>/maps, and uprobes attach
+			// when libcrypto/libpq are observed. Logged at Debug
+			// because this is the normal k8s sidecar shape, not an
+			// error condition.
+			p.logger.Debug("cbshim: appPID==0 — skipping initial AttachToProcessTree; library discovery falls back to the BPF mmap-event consumer")
 		}
 		// Kick the sched_process_exec ringbuf consumer. The kernel
 		// emits an event every time a process in the agent's PID
@@ -950,15 +968,22 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		// maps to discover late-loaded libcrypto/libpq files (bundled
 		// wheel libs, etc.) and attaches uprobes. Replaces the old
 		// 2s polling loop with an event-driven design.
+		//
+		// MUST run regardless of whether AttachToProcessTree was
+		// invoked above: in k8s sidecar mode appPID is 0, so the
+		// initial walk is skipped, and the consumer is the *only*
+		// path that ever attaches uprobes to libcrypto. Gating this
+		// on appPID != 0 (the prior shape) silently broke cbshim
+		// for every sidecar deployment — the BPF fentry attached
+		// but no userspace reader was running, so attach events
+		// never fired and libpq_fires stayed at 0.
 		p.cbshim.StartProcEventConsumer(ctx)
-	} else if p.cbshim == nil {
+	} else {
 		// Neutral debug-level log — nil cbshim is the EXPECTED state
 		// when the feature flag is off or no implementation is
 		// registered (OSS builds), not just when BPF load failed.
 		// At Info this would spam every record-mode start.
 		p.logger.Debug("cbshim: not attached (feature disabled or no implementation registered)")
-	} else {
-		p.logger.Debug("cbshim: appPID==0 — skipping AttachToProcessTree (no app PID yet)")
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)

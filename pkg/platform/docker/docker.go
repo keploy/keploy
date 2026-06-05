@@ -656,6 +656,25 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
 		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
 	}
+	if opts.ChannelBindingShim {
+		// bpf_probe_write_user is gated on CAP_SYS_ADMIN by the kernel
+		// (see bpf_get_probe_write_proto in kernel/trace/bpf_trace.c —
+		// the helper proto is only returned when sysadmin_capable()).
+		// CAP_BPF + CAP_PERFMON are NOT sufficient: the 5.8 BPF
+		// capability split deliberately kept probe_write_user behind
+		// SYS_ADMIN because it lets a BPF program clobber arbitrary
+		// userspace memory of any traced process. The cbshim attaches a
+		// uretprobe on X509_digest that overwrites the cert-hash output
+		// buffer to swap the MITM hash for the upstream one — that
+		// rewrite is the entire point of the shim, so without SYS_ADMIN
+		// the BPF program fails verifier load and SCRAM-SHA-256-PLUS
+		// authentication breaks at the channel-binding check.
+		capAdd = append(capAdd, &yaml.Node{
+			Kind:        yaml.ScalarNode,
+			Value:       "SYS_ADMIN",
+			LineComment: "required by cbshim's bpf_probe_write_user (record.channelBindingShim=true)",
+		})
+	}
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
