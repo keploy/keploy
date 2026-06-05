@@ -336,13 +336,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Only the build→build leg is meaningful for Aerospike. Unlike
+        # mysql/postgres/etc., the Aerospike parser is brand-new and
+        # lives only on keploy/integrations@feat/aerospike-parser — it
+        # is NOT in any public keploy release yet. The `latest` artifact
+        # is the latest *released* binary (see upload-latest in
+        # prepare_and_run.yml), so it has no Aerospike parser and cannot
+        # record or replay Aerospike traffic. Cross-version legs against
+        # `latest` therefore fail for a spurious reason (missing parser),
+        # not a real regression. `build-no-race` is built with the
+        # private parser via setup-private-parsers, so recording and
+        # replaying with it mirrors the integrations aerospike-tls
+        # pipeline exactly and surfaces genuine parser bugs on both
+        # sides. Re-add the `latest` legs once the parser ships in a
+        # public release.
         config:
-          - job: record_latest_replay_build
-            record_src: latest
-            replay_src: build-no-race
-          - job: record_build_replay_latest
-            record_src: build-no-race
-            replay_src: latest
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
