@@ -233,6 +233,10 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 	return nil
 }
 
+func (h *Hooks) BeforeTestCaseRun(_ context.Context, _ *models.TestCase, _ string) error {
+	return nil
+}
+
 func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }

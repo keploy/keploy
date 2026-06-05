@@ -968,11 +968,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var totalConsumedMocks = map[string]models.MockState{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
 
-	// Build a per-run KMS key cache for decrypting ENC: values recorded with
-	// encryption_protection.enabled=true. Returns nil when not connected to
-	// api-server (offline mode) — decryption is silently skipped.
-	kmsCache := r.newKMSCacheForRun(runTestSetCtx)
-
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
 	var testSetStatusByErrChanMu sync.RWMutex
@@ -1599,10 +1594,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
-			// Decrypt any ENC: values in the request before sending. This
-			// is a no-op when kmsCache is nil (offline / non-encrypted recording).
-			if kmsCache != nil {
-				kmsCache.decryptTestCaseRequest(runTestSetCtx, testCase, r.logger)
+			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
+				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", testCase.Name))
 			}
 
 			started := time.Now().UTC()
@@ -2128,9 +2121,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
-			// Decrypt any ENC: values in the streaming request before sending.
-			if kmsCache != nil {
-				kmsCache.decryptTestCaseRequest(runTestSetCtx, tc, r.logger)
+			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
+				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", tc.Name))
 			}
 
 			// Proxy Monitor: Start a per-test proxy error monitor.

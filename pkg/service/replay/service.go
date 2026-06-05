@@ -112,6 +112,9 @@ type TestHooks interface {
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
+	// BeforeTestCaseRun is called just before each test case is replayed.
+	// Enterprise uses this to decrypt ENC: values in-place before SimulateRequest.
+	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
 type Storage interface {
