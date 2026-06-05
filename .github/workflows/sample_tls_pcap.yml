@@ -9,7 +9,11 @@ name: TLS pcap + keylog (sample-tls-app)
 #
 # Workload: ayush3160/sample-tls-app, which emits real outbound
 # TLS to:
-#   - HTTPS  (api.github.com / httpbin.org)
+#   - HTTPS  (a local TLS-1.3 upstream over two hostnames; replaces the
+#             former api.github.com / httpbin.org calls, which
+#             rate-limited and went down often enough to make this job
+#             flaky — the upstream fixture ships with the sample app at
+#             ci/tls-upstream)
 #   - MySQL  (TLS, brought up locally via docker compose)
 #   - Postgres (TLS, brought up locally via docker compose)
 #
