@@ -1536,7 +1536,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", testCase.Name))
+				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+					zap.String("testCase", testCase.Name),
+					zap.String("next_step", "check hook implementation or api-server connectivity"))
 			}
 
 			// replace the request URL's BasePath/origin if provided
@@ -2122,7 +2124,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", tc.Name))
+				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+					zap.String("testCase", tc.Name),
+					zap.String("next_step", "check hook implementation or api-server connectivity"))
 			}
 
 			// Proxy Monitor: Start a per-test proxy error monitor.

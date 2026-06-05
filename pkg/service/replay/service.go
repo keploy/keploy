@@ -112,8 +112,9 @@ type TestHooks interface {
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
-	// BeforeTestCaseRun is called just before each test case is replayed.
-	// Enterprise uses this to decrypt ENC: values in-place before SimulateRequest.
+	// BeforeTestCaseRun is called once per test case immediately before replay.
+	// Implementations may mutate tc in-place (e.g. decrypt protected fields,
+	// inject headers). The default no-op is suitable for standard OSS usage.
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
