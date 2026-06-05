@@ -295,6 +295,14 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
+		// Internal orchestrator→agent propagation flag. The user-
+		// facing surface for the channel-binding shim lives in the
+		// enterprise CLI provider; this flag exists on `keploy agent`
+		// so the agent subprocess can parse the argv the orchestrator
+		// forwards. OSS builds have no cbshim factory registered, so
+		// the value flows through but produces a no-op at proxy.New.
+		cmd.Flags().Bool("channel-binding-shim", c.cfg.Agent.ChannelBindingShim, "Internal: agent-side mirror of the channel-binding shim flag. Set by the orchestrator subprocess spawn; not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden("channel-binding-shim")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -1331,6 +1339,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
+		channelBindingShim, err := cmd.Flags().GetBool("channel-binding-shim")
+		if err != nil {
+			errMsg := "failed to read the channel-binding-shim flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.ChannelBindingShim = channelBindingShim
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {
