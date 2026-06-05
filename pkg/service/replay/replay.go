@@ -1535,7 +1535,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
-			// Stop early before any in-place mutations if an exit signal is
+			// Stop early before the hook and URL mutations if an exit signal is
 			// already pending — avoids mutating test cases that will never run.
 			select {
 			case <-exitLoopChan:
