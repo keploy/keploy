@@ -701,16 +701,10 @@ jobs:
     # bug — call-2 hits the 60s read_timeout, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/outbound-fin-stall-linux.yml
-  run_scram_channel_binding_linux:
-    # E2E for the BPF channel-binding shim (PR #4239) — verifies
-    # SCRAM-SHA-256-PLUS works through keploy's TLS MITM for
-    # auditwheel-bundled libcrypto (psycopg2-binary), the case that
-    # broke the legacy LD_PRELOAD cbshim. Matrix runs the standard
-    # 3-config record/replay grid; record_build_replay_build must
-    # pass, the latest-touching legs are continue-on-error until a
-    # release containing the cbshim ships.
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/scram_channel_binding_linux.yml
+  # NOTE: the SCRAM channel-binding shim e2e was moved to the
+  # enterprise repository's Woodpecker CI alongside the cbshim impl.
+  # OSS no longer carries the implementation so the e2e test no
+  # longer belongs here.
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml

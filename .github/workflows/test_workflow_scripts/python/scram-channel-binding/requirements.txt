@@ -1,8 +1,0 @@
-Flask==3.0.3
-gunicorn==23.0.0
-# psycopg2-binary (NOT psycopg2 from source). The binary wheel ships a
-# bundled libcrypto under a mangled SONAME with RTLD_LOCAL — the case
-# that defeats LD_PRELOAD-based channel-binding shims. The BPF cbshim
-# attaches via uprobe at the ELF-offset level and works regardless of
-# the wheel's RTLD scope, which is exactly what this e2e proves.
-psycopg2-binary==2.9.10

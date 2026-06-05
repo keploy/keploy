@@ -249,10 +249,11 @@ type Proxy struct {
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
 	// pairs into its BPF map so SCRAM-SHA-256-PLUS auth succeeds across
-	// keploy's TLS MITM. Nil on platforms where BPF is unavailable, or
-	// when the cbshim failed to load (missing CAP_BPF / older kernel);
-	// the proxy keeps working for non-PLUS clients in that case.
-	cbshim *cbshim.CBShim
+	// keploy's TLS MITM. Nil on OSS builds (no cbshim implementation
+	// registered), or when the enterprise impl failed to construct
+	// (missing CAP_BPF / older kernel / feature flag off); the proxy
+	// keeps working for non-PLUS clients in that case.
+	cbshim cbshim.CBShim
 }
 
 // SetCBShim wires the eBPF channel-binding shim handle into the proxy.
@@ -262,7 +263,7 @@ type Proxy struct {
 // Also installs the tls.MITMPublishHook so CertForClient publishes the
 // MITM half of every connection's cbshim rendezvous. Cleared (back to
 // nil) when called with a nil cbshim.
-func (p *Proxy) SetCBShim(c *cbshim.CBShim) {
+func (p *Proxy) SetCBShim(c cbshim.CBShim) {
 	p.cbshim = c
 	if c == nil {
 		pTls.MITMPublishHook = nil
@@ -416,7 +417,7 @@ func isPostgresSSLRequestPrefix(b []byte) bool {
 // upstream peer cert is published via cb.RegisterReal so channel-
 // binding substitution can rendezvous it with the MITM cert from
 // CertForClient. Pass nil to disable cbshim publishing (unit tests).
-func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger, cb *cbshim.CBShim) (net.Conn, error) {
+func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger, cb cbshim.CBShim) (net.Conn, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(10 * time.Second)
@@ -676,19 +677,28 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		mgr.SetLogger(logger)
 	}
 
-	// Channel-binding shim: best-effort BPF load. Failure (missing
-	// CAP_BPF, older kernel without uprobe support, bpf_probe_write_user
-	// disabled by the kernel hardener) is logged at Debug and the
-	// proxy keeps working for non-SCRAM-PLUS clients. The cbshim is
-	// nil-safe at every consumer site, so a nil instance silently
-	// disables the channel-binding fix without affecting anything else.
-	if cb, err := cbshim.New(logger); err == nil {
-		proxy.SetCBShim(cb)
-		logger.Info("cbshim: BPF-backed channel-binding shim enabled")
-	} else {
-		logger.Info("cbshim: disabled — SCRAM-SHA-256-PLUS clients "+
-			"will fail across the MITM as today",
-			zap.Error(err))
+	// Channel-binding shim: opt-in BPF-backed feature. Gate by the
+	// config flag AND on a registered factory — OSS builds have no
+	// factory and skip this branch entirely; enterprise builds
+	// register a factory via init() but still respect the flag, which
+	// defaults to false. Failure to construct (missing CAP_BPF, older
+	// kernel without uprobe support, bpf_probe_write_user disabled by
+	// the kernel hardener) is logged at Info and the proxy keeps
+	// working for non-SCRAM-PLUS clients. The cbshim is nil-safe at
+	// every consumer site, so a nil instance silently disables the
+	// channel-binding fix without affecting anything else.
+	if opts != nil && opts.Test.ChannelBindingShim {
+		if cb, err := cbshim.NewFromFactory(logger); err == nil && cb != nil {
+			proxy.SetCBShim(cb)
+			logger.Info("cbshim: BPF-backed channel-binding shim enabled")
+		} else if err != nil {
+			logger.Info("cbshim: factory returned an error — SCRAM-SHA-256-PLUS "+
+				"clients will fail across the MITM as today",
+				zap.Error(err))
+		} else {
+			logger.Info("cbshim: no implementation registered (OSS build) — " +
+				"SCRAM-SHA-256-PLUS clients will fail across the MITM as today")
+		}
 	}
 
 	return proxy
