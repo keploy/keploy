@@ -38,7 +38,7 @@ var caCrt []byte //certificate
 //go:embed asset/ca.key
 var caPKey []byte //private key
 
-// MITMPublishHook, if non-nil, is invoked by CertForClient once the
+// mitmPublishHook, if non-nil, is invoked by CertForClient once the
 // MITM cert for a connection is determined (whether freshly minted or
 // served from cache). The arguments are the connection-level identifier
 // — the client's source port as a decimal string, matching what
@@ -49,7 +49,25 @@ var caPKey []byte //private key
 // BPF map once both halves of the connection are known. Nil-safe: when
 // unset, CertForClient is a no-op on the cbshim side and works exactly
 // as it did before the shim existed.
-var MITMPublishHook func(connID string, mitmCertDER []byte)
+//
+// Storage is an atomic.Pointer so concurrent SetMITMPublishHook
+// (e.g. from StopProxyServer's cleanup) cannot race a publishMITM
+// read. Without atomic access, -race flags every CertForClient call
+// that observes a concurrent hook toggle, and a check-then-call
+// pattern on a bare global can nil-deref between the two reads.
+var mitmPublishHook atomic.Pointer[func(connID string, mitmCertDER []byte)]
+
+// SetMITMPublishHook installs (or clears, via nil) the hook the
+// proxy's CertForClient path invokes after every MITM-cert mint /
+// cache-hit. Callers MUST use this rather than touching the
+// underlying var — it's atomic and safe against concurrent toggles.
+func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
+	if h == nil {
+		mitmPublishHook.Store(nil)
+		return
+	}
+	mitmPublishHook.Store(&h)
+}
 
 // embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
 // https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
@@ -1277,8 +1295,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // client connection. Nil-safe everywhere: a nil hook, a cert without
 // a usable leaf, or a zero-port source addr all silently no-op.
 func publishMITM(sourcePort int, cert *tls.Certificate) {
-	if MITMPublishHook == nil || cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
+	hp := mitmPublishHook.Load()
+	if hp == nil || cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
 		return
 	}
-	MITMPublishHook(strconv.Itoa(sourcePort), cert.Certificate[0])
+	(*hp)(strconv.Itoa(sourcePort), cert.Certificate[0])
 }

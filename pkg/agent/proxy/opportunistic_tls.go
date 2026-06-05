@@ -303,6 +303,16 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 					zap.Int("peerCertCount", len(state.PeerCertificates)),
 					zap.String("sigAlgo", leaf.SignatureAlgorithm.String()))
 				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+				// Release the cbshim's per-connection rendezvous state
+				// when this hijack returns. If the MITM half (from
+				// CertForClient) was already published, Publish has
+				// fired and the pending entry is already cleared, so
+				// this defer is a no-op. If for any reason only one
+				// half arrived (e.g. CertForClient was never invoked
+				// for this connID, or the connection errored before
+				// rendezvous), CleanupConnection drops the half-state
+				// before it leaks to process exit.
+				defer p.cbshim.CleanupConnection(connID)
 			} else {
 				p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr",
 					zap.String("srcRemoteType", fmt.Sprintf("%T", srcConn.RemoteAddr())),

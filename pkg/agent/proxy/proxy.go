@@ -266,12 +266,12 @@ type Proxy struct {
 func (p *Proxy) SetCBShim(c cbshim.CBShim) {
 	p.cbshim = c
 	if c == nil {
-		pTls.MITMPublishHook = nil
+		pTls.SetMITMPublishHook(nil)
 		return
 	}
-	pTls.MITMPublishHook = func(connID string, mitmDER []byte) {
+	pTls.SetMITMPublishHook(func(connID string, mitmDER []byte) {
 		c.RegisterMITM(connID, mitmDER)
-	}
+	})
 }
 
 // SetSkipListener disables the TCP accept loop.
