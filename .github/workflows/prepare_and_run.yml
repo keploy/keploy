@@ -701,10 +701,6 @@ jobs:
     # bug — call-2 hits the 60s read_timeout, continue-on-error).
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/outbound-fin-stall-linux.yml
-  # NOTE: the SCRAM channel-binding shim e2e was moved to the
-  # enterprise repository's Woodpecker CI alongside the cbshim impl.
-  # OSS no longer carries the implementation so the e2e test no
-  # longer belongs here.
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
