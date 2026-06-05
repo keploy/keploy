@@ -12,8 +12,9 @@
 #   3. The keylog has at least one TLS-1.3 session block
 #      (CLIENT_TRAFFIC_SECRET_0 line).
 #   4. tshark + keylog decrypts the HTTP-over-TLS sessions —
-#      cleartext GETs to api.github.com /zen and to httpbin.org
-#      /anything?msg=ci-* are recovered, plus their HTTP 200 responses.
+#      cleartext GETs to the two local upstream hosts
+#      (quote.keploy.local /zen and echo.keploy.local /anything?msg=ci-*)
+#      are recovered, plus their HTTP 200 responses.
 #   5. MySQL TLS round-trip works through the proxy: POST inserts a
 #      row, GET reads back JSON containing that row's name. This is
 #      the strongest assert that the server-first capability flow
@@ -37,6 +38,8 @@ dump_state() {
   echo "::error::e2e failed (mode=${MODE_NAME:-?}, exit=$rc). Dumping context for triage…"
   echo "== keploy log (last 200 lines) =="
   [[ -f keploy-record.log ]] && tail -200 keploy-record.log || true
+  echo "== local TLS upstream log =="
+  [[ -f tls-upstream.log ]] && tail -40 tls-upstream.log || true
   echo "== test-set inventory =="
   sudo find keploy -maxdepth 5 -type f -print 2>/dev/null | sort || true
   echo "== keylog (head) =="
@@ -85,6 +88,31 @@ EOF
 openssl req -new -key server.key -out server.csr -config server.cnf >/dev/null 2>&1
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 1 -extfile server.cnf -extensions ext >/dev/null 2>&1
+
+# Upstream HTTPS cert — the sample app's /quote and /echo routes used to
+# proxy to live public services (api.github.com / httpbin.org), which
+# rate-limit and go down for minutes at a time and were the last source
+# of flakiness in this job. We now point both routes at a LOCAL TLS
+# upstream (ci/tls-upstream, shipped with the sample app) over two
+# hostnames so the two-distinct-host shape the assertions expect is
+# preserved. The cert is signed by the
+# same CI CA that gets installed into the OS trust store below, with
+# SANs for both hostnames, so the app's system-pool verification passes
+# directly and through keploy's MITM exactly as the public certs did.
+openssl genrsa -out upstream.key 2048 >/dev/null 2>&1
+cat > upstream.cnf <<EOF
+[req]
+distinguished_name=dn
+req_extensions=ext
+prompt=no
+[dn]
+CN=keploy-ci-upstream
+[ext]
+subjectAltName=DNS:quote.keploy.local,DNS:echo.keploy.local,DNS:localhost,IP:127.0.0.1
+EOF
+openssl req -new -key upstream.key -out upstream.csr -config upstream.cnf >/dev/null 2>&1
+openssl x509 -req -in upstream.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out upstream.crt -days 1 -extfile upstream.cnf -extensions ext >/dev/null 2>&1
 
 # Bind-mounts preserve host file ownership/perms inside the container,
 # but each DB image's daemon runs as a different non-root UID and
@@ -212,6 +240,44 @@ sudo cp .ci/certs/ca.crt /usr/local/share/ca-certificates/keploy-ci-db-ca.crt
 sudo update-ca-certificates >/dev/null
 endsec
 
+# ----- bring up the local HTTPS upstream for /quote and /echo -----
+#
+# Two hostnames, both resolving to loopback, served by one TLS-1.3
+# process (cert SANs cover both). keploy intercepts loopback the same
+# way it does for the MySQL/Postgres containers below, so these calls
+# still cross the proxy as real outbound TLS.
+QUOTE_HOST=quote.keploy.local
+ECHO_HOST=echo.keploy.local
+UPSTREAM_PORT=7443
+
+section "Start local TLS upstream (replaces api.github.com / httpbin.org)"
+echo "127.0.0.1 ${QUOTE_HOST} ${ECHO_HOST}" | sudo tee -a /etc/hosts >/dev/null
+# The upstream fixture ships with the sample app (ci/tls-upstream); build
+# and run it from the checked-out app repo. Pre-build so $! is the server
+# PID itself (not a `go run` wrapper), which the teardown kill relies on.
+go build -o tls-upstream ./ci/tls-upstream
+./tls-upstream .ci/certs/upstream.crt .ci/certs/upstream.key 127.0.0.1 "$UPSTREAM_PORT" \
+  > tls-upstream.log 2>&1 &
+UPSTREAM_PID=$!
+
+# Wait for the TLS listener to accept before we hand its URLs to the app.
+for _ in $(seq 1 30); do
+  if curl -fsS -o /dev/null --max-time 1 --cacert .ci/certs/ca.crt \
+       "https://${QUOTE_HOST}:${UPSTREAM_PORT}/zen"; then
+    break
+  fi
+  if ! kill -0 "$UPSTREAM_PID" 2>/dev/null; then
+    echo "::error::local TLS upstream exited during startup"
+    cat tls-upstream.log || true
+    false
+  fi
+  sleep 1
+done
+echo "== local TLS upstream sanity =="
+curl -fsS --cacert .ci/certs/ca.crt "https://${ECHO_HOST}:${UPSTREAM_PORT}/anything?msg=probe"
+echo
+endsec
+
 # ----- run keploy record with the matrix flags -----
 
 section "Start keploy record (mode=${MODE_NAME})"
@@ -219,11 +285,17 @@ echo "  flags: $KEPLOY_FLAGS"
 sudo rm -rf keploy
 export MYSQL_DSN="root:ci_root_pw@tcp(127.0.0.1:3306)/app?parseTime=true"
 export POSTGRES_DSN="postgres://app:ci_pg_pw@localhost:5433/app?sslmode=verify-ca"
+# Point the HTTP-over-TLS routes at the local upstream instead of the
+# flaky public services. The app defaults to api.github.com/httpbin.org
+# when these are unset, so this only affects CI.
+export QUOTE_URL="https://${QUOTE_HOST}:${UPSTREAM_PORT}/zen"
+export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 
 go build -o sample-tls-app .
 
 # shellcheck disable=SC2086
 sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
+  QUOTE_URL="$QUOTE_URL" ECHO_URL="$ECHO_URL" \
   "$RECORD_BIN" record \
   -c "./sample-tls-app" \
   $KEPLOY_FLAGS \
@@ -239,20 +311,19 @@ if ! wait_for_http "http://localhost:8080/" 120; then
   false
 fi
 
-# HTTP routes — outbound TLS to public APIs.
+# HTTP routes — outbound TLS to the LOCAL upstream.
 #
-# /quote and /echo proxy to live public services (api.github.com and
-# httpbin.org). httpbin in particular is frequently overloaded and
-# returns a transient 5xx, which the sample app forwards verbatim
-# (/echo mirrors the upstream status code) — turning an unrelated
-# upstream blip into a spurious e2e failure that has nothing to do
-# with keploy's TLS capture. Retry the transient codes: `curl --retry`
-# covers timeouts and 408/429/5xx responses, bounded by
-# --retry-max-time. A genuine keploy-side break (the proxy dropping
-# the outbound TLS connection → the app returns 502) still surfaces
-# once the retry budget is exhausted.
+# /quote and /echo now proxy to the local TLS-1.3 upstream started
+# above (QUOTE_URL / ECHO_URL), not to api.github.com / httpbin.org.
+# That removes the only remaining flaky dependency in this job — the
+# public services rate-limited and went down for minutes at a time,
+# which no amount of retrying can ride out. The retry wrapper is kept
+# as cheap insurance against the local listener being a beat slow to
+# accept right after the app starts; a genuine keploy-side break (the
+# proxy dropping the outbound TLS connection → the app returns 502)
+# still surfaces once the small retry budget is exhausted.
 retry_curl() {
-  curl -fsS --retry 5 --retry-delay 3 --retry-max-time 60 --retry-all-errors "$@"
+  curl -fsS --retry 5 --retry-delay 1 --retry-max-time 30 --retry-all-errors "$@"
 }
 
 retry_curl http://localhost:8080/quote >/dev/null
@@ -327,12 +398,12 @@ DECRYPTED_REQS=$(sudo tshark -r "$PCAP" -o "tls.keylog_file:$KEYLOG" \
 echo "decrypted HTTP requests:"
 echo "$DECRYPTED_REQS"
 
-echo "$DECRYPTED_REQS" | grep -q "api.github.com" || {
-  echo "::error::tshark did not see decrypted GET to api.github.com"
+echo "$DECRYPTED_REQS" | grep -q "$QUOTE_HOST" || {
+  echo "::error::tshark did not see decrypted GET to $QUOTE_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "httpbin.org" || {
-  echo "::error::tshark did not see decrypted GET to httpbin.org"
+echo "$DECRYPTED_REQS" | grep -q "$ECHO_HOST" || {
+  echo "::error::tshark did not see decrypted GET to $ECHO_HOST"
   exit 1
 }
 echo "$DECRYPTED_REQS" | grep -q "ci-${MODE_NAME}" || {
@@ -349,27 +420,46 @@ if [[ "$DECRYPTED_RESP_OK" -lt 2 ]]; then
 fi
 endsec
 
-section "Assert the captured pcap contains TLS handshakes for ALL three protocols"
-# At minimum the pcap should show ClientHello frames — proves all
-# three protocols actually crossed the proxy as TLS, not as a fall-
-# back to plain TCP.
+section "Assert the captured pcap contains the HTTP-over-TLS ClientHellos"
+# tshark only dissects a ClientHello when the TCP stream BEGINS with a
+# TLS record. That holds for the HTTP-over-TLS sessions, so we assert a
+# ClientHello carrying each upstream host's SNI actually crossed the
+# proxy (proving the traffic went out as TLS, not a fall-back to plain
+# TCP). We key on the SNI rather than a raw frame count: the app shares
+# one keep-alive client, so the two /echo calls collapse onto a single
+# connection — a count-based check is at the mercy of connection reuse
+# and was the real reason this step flaked (it silently leaned on the
+# old public endpoints NOT reusing connections to reach its threshold).
+#
+# MySQL/Postgres are deliberately NOT checked here: their streams open
+# with the protocol's STARTTLS preamble (MySQL server greeting /
+# Postgres SSLRequest) before the embedded ClientHello, so tshark's TLS
+# dissector can't latch onto them on keploy's proxy port. Their TLS is
+# proven instead by the openssl s_client sanity above and the
+# round-trip asserts (POST→GET through the proxy) earlier in this run.
+HELLO_SNIS=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" \
+  -T fields -e tls.handshake.extensions_server_name 2>/dev/null | sort -u)
 HELLO_COUNT=$(sudo tshark -r "$PCAP" -Y "tls.handshake.type==1" 2>/dev/null | wc -l)
 echo "TLS ClientHello frames in pcap: $HELLO_COUNT"
-if [[ "$HELLO_COUNT" -lt 3 ]]; then
-  echo "::error::expected >=3 ClientHello frames (HTTP + MySQL + Postgres); saw $HELLO_COUNT"
+echo "ClientHello SNIs:"; echo "$HELLO_SNIS"
+echo "$HELLO_SNIS" | grep -q "$QUOTE_HOST" || {
+  echo "::error::no captured ClientHello carried SNI $QUOTE_HOST — /quote did not cross the proxy as TLS"
   exit 1
-fi
+}
+echo "$HELLO_SNIS" | grep -q "$ECHO_HOST" || {
+  echo "::error::no captured ClientHello carried SNI $ECHO_HOST — /echo did not cross the proxy as TLS"
+  exit 1
+}
 endsec
 
 section "Assert mocks.yaml shape per mode"
-sudo test -s "$MOCKS" || { echo "::error::missing or empty $MOCKS"; exit 1; }
-
 case "$MODE_NAME" in
   capture-only)
-    # Default record path: HTTP parser dispatch fires, mocks.yaml
-    # must contain kind: Http entries for the outbound public-API
-    # calls. (MySQL/Postgres mocks may also appear depending on
-    # which integrations are linked into the build.)
+    # Default record path: HTTP parser dispatch fires, so mocks.yaml
+    # must exist and contain kind: Http entries — one per upstream host.
+    # (MySQL/Postgres mocks may also appear depending on which
+    # integrations are linked into the build.)
+    sudo test -s "$MOCKS" || { echo "::error::missing or empty $MOCKS"; exit 1; }
     HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     echo "Http mock records: $HTTP_MOCKS"
     if [[ "$HTTP_MOCKS" -lt 2 ]]; then
@@ -378,10 +468,20 @@ case "$MODE_NAME" in
     fi
     ;;
   with-opportunistic)
-    # Opportunistic intercept hijacks BEFORE parser dispatch — no
-    # Http mocks must appear. DNS mocks are still expected (DNS
-    # interception is independent of the passthrough path).
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    # Opportunistic intercept hijacks BEFORE parser dispatch, so NO Http
+    # mocks must appear — that's the whole invariant under test here.
+    #
+    # mocks.yaml itself may legitimately be absent or empty in this mode:
+    # the upstream hosts resolve via /etc/hosts (see the local-upstream
+    # setup), and the DB DSNs use 127.0.0.1 / localhost, so the workload
+    # issues no outbound DNS — there are no DNS mocks to write, and with
+    # parser dispatch bypassed there are no Http mocks either. Treat a
+    # missing/empty file as zero Http mocks rather than a failure.
+    if sudo test -s "$MOCKS"; then
+      HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    else
+      HTTP_MOCKS=0
+    fi
     echo "Http mock records (must be 0): $HTTP_MOCKS"
     if [[ "$HTTP_MOCKS" -gt 0 ]]; then
       echo "::error::found $HTTP_MOCKS 'kind: Http' mocks in with-opportunistic mode — parser dispatch should be bypassed"
@@ -391,8 +491,9 @@ case "$MODE_NAME" in
 esac
 endsec
 
-section "Tear down DB containers"
+section "Tear down DB containers + local upstream"
 docker compose -f .ci/compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
+[[ -n "${UPSTREAM_PID:-}" ]] && kill "$UPSTREAM_PID" 2>/dev/null || true
 endsec
 
 echo "All assertions passed (mode=${MODE_NAME}): pcap streamed, keylog populated, tshark decrypted HTTP, MySQL+Postgres TLS round-trips succeeded through keploy."
