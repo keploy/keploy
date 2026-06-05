@@ -10,27 +10,39 @@ import (
 )
 
 type Config struct {
-	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
-	StorageFormat         string              `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
-	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
-	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
-	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
-	Templatize            Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port                  uint32              `json:"port" yaml:"port" mapstructure:"port"`
-	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
-	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
-	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	JSONOutput            bool                `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
-	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
-	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
-	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
+	Path              string     `json:"path" yaml:"path" mapstructure:"path"`
+	StorageFormat     string     `json:"storageFormat" yaml:"storageFormat" mapstructure:"storageFormat"` // serialization format for testcases/mocks/reports: "yaml" (default) or "json"
+	AppName           string     `json:"appName" yaml:"appName" mapstructure:"appName"`
+	AppID             uint64     `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
+	Command           string     `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize        Templatize `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port              uint32     `json:"port" yaml:"port" mapstructure:"port"`
+	E2E               bool       `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
+	DNSPort           uint32     `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort         uint32     `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	IncomingProxyPort uint16     `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
+	Debug             bool       `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele       bool       `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI       bool       `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	JSONOutput        bool       `json:"jsonOutput" yaml:"jsonOutput" mapstructure:"jsonOutput"`
+	InDocker          bool       `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
+	ContainerName     string     `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName       string     `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay        uint64     `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test              Test       `json:"test" yaml:"test" mapstructure:"test"`
+	Record            Record     `json:"record" yaml:"record" mapstructure:"record"`
+	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
+	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
+	// cert-hash libpq folds into the SCRAM proof, so postgres clients running with
+	// channel_binding=require still authenticate through keploy's TLS MITM. The
+	// shim activates during both record (real upstream postgres) and replay (mock
+	// postgres also goes through MITM), so it lives at the top level rather than
+	// under record/test. OSS builds have no implementation registered and ignore
+	// this flag entirely; builds with a registered factory respect it. Defaults to
+	// false; flip to true in keploy.yml to opt in. Requires CAP_BPF + a kernel
+	// that allows bpf_probe_write_user; without those the factory returns an
+	// error and the proxy keeps working for non-PLUS clients.
+	ChannelBindingShim    bool                `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
@@ -214,7 +226,6 @@ type Test struct {
 	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
 	KeepAppAlive                bool                `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
-	ChannelBindingShim          bool                `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`                                                // Enable the SCRAM-SHA-256-PLUS channel-binding shim. The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the cert-hash libpq folds into the SCRAM proof, so postgres clients running with channel_binding=require still authenticate through keploy's TLS MITM. OSS builds have no implementation registered and ignore this flag entirely. Enterprise builds register a factory at init() time and respect this flag — defaulted FALSE in both OSS and enterprise, so users who need SCRAM-PLUS support must opt in explicitly via keploy.yml (test.channelBindingShim: true). Requires CAP_BPF + a kernel that allows bpf_probe_write_user; without those the factory returns an error and the proxy keeps working for non-PLUS clients.
 	CmdUsed                     string              `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 }
 

@@ -1,18 +1,15 @@
-// Package cbshim defines the OSS-side interface for the
-// SCRAM-SHA-256-PLUS channel-binding shim. The actual eBPF
-// implementation lives in the enterprise repository under
-// enterprise/pkg/agent/proxy/cbshim/ and registers itself via
-// RegisterFactory at init() time.
+// Package cbshim defines the interface for the SCRAM-SHA-256-PLUS
+// channel-binding shim. The implementation registers itself at init()
+// time via RegisterFactory — this package carries only the interface
+// and the factory hook so the proxy can depend on cbshim without
+// pulling in any eBPF code or BPF artifacts.
 //
-// The proxy package consumes cbshim only via the CBShim interface
-// declared here, so the OSS build has no eBPF dependency, no BPF
-// artifacts to embed, and no cbshim implementation. When the cbshim
-// implementation is not registered (i.e. on an OSS-only build, or in
-// an enterprise build with the feature disabled), the proxy operates
-// exactly as it did before cbshim existed: SCRAM-SHA-256-PLUS clients
-// connecting through keploy's TLS MITM will fail with
-// "SCRAM channel binding check failed", which is the documented
-// limitation for non-enterprise builds.
+// When no implementation is registered, NewFromFactory returns
+// (nil, nil) and the proxy operates exactly as it did before cbshim
+// existed: SCRAM-SHA-256-PLUS clients connecting through keploy's TLS
+// MITM will fail with "SCRAM channel binding check failed". Users who
+// need PLUS support must run a build that registers a CBShim
+// implementation AND set config.ChannelBindingShim to true.
 package cbshim
 
 import (
@@ -22,10 +19,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// CBShim is the subset of the channel-binding shim's behaviour the OSS
-// proxy actually consumes. Keep this surface minimal — the concrete
-// implementation in enterprise has additional methods (Counters,
-// AttachToProcess, RegisterLibpqRanges, etc.) but the OSS proxy only
+// CBShim is the subset of the channel-binding shim's behaviour the
+// proxy actually consumes. Keep this surface minimal — a concrete
+// implementation may carry additional methods (Counters,
+// AttachToProcess, RegisterLibpqRanges, etc.), but the proxy only
 // needs the cert-rendezvous + lifecycle pair below.
 //
 // All methods MUST be safe to call on a freshly-constructed value;
@@ -49,8 +46,9 @@ type CBShim interface {
 
 	// AttachToProcessTree performs a one-shot scan of rootPID and its
 	// descendants for libcrypto/libpq mappings and attaches uprobes.
-	// Subsequent late-loaded libraries are handled by the BPF-side
-	// discovery hook (see enterprise impl's StartProcEventConsumer).
+	// Subsequent late-loaded libraries are handled by the
+	// implementation's own BPF-side discovery hook (see
+	// StartProcEventConsumer below).
 	AttachToProcessTree(rootPID int) error
 
 	// StartProcEventConsumer spawns the ringbuf consumer goroutine
@@ -64,15 +62,15 @@ type CBShim interface {
 	Close() error
 }
 
-// Factory constructs a CBShim. Enterprise registers one via
-// RegisterFactory in an init() function; OSS builds leave it nil and
-// NewFromFactory returns (nil, nil).
+// Factory constructs a CBShim. Registered once at init() time by the
+// implementation package; nil otherwise, in which case NewFromFactory
+// returns (nil, nil).
 type Factory func(logger *zap.Logger) (CBShim, error)
 
 var registeredFactory Factory
 
 // RegisterFactory installs the concrete cbshim constructor. Intended
-// to be called from init() in the enterprise cbshim package. Calling
+// to be called from init() in the implementation package. Calling
 // twice silently overwrites — the last registration wins. Not safe
 // for concurrent registration, but init() ordering makes that a
 // non-issue in practice.
