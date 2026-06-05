@@ -2034,6 +2034,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					dialStart := time.Now()
 					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim)
 					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					// Release cbshim's per-connection rendezvous state
+					// at connection exit. dialPostgresSSLUpstream may
+					// have already called RegisterReal; if the matching
+					// MITM half from CertForClient never arrives
+					// (handshake fails, postgres rejects auth pre-SCRAM,
+					// client disconnects mid-handshake, etc.), Publish
+					// never fires and the pending entry would leak
+					// until process exit. Snapshot the handle so a
+					// concurrent SetCBShim(nil) during shutdown can't
+					// race the deferred call. No-op when Publish has
+					// already drained the entry.
+					if cb := p.cbshim; cb != nil {
+						connID := strconv.Itoa(sourcePort)
+						defer cb.CleanupConnection(connID)
+					}
 				} else if speculativeDial != nil && addr == speculativeDialAddr &&
 					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
 					// Fast path: the speculative dial targeted the
@@ -2317,17 +2332,32 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	// StopProxyServer; Close() is idempotent against an in-flight
 	// goroutine racing it.
 	if p.cbshim != nil {
-		// Detach the global tls.MITMPublishHook FIRST so any in-flight
-		// CertForClient call doesn't dereference a cbshim handle we're
-		// about to close. SetCBShim(nil) handles that — it also nils
-		// out p.cbshim, so we save the handle to close it explicitly
-		// after the hook is cleared.
+		// Detach the global tls.MITMPublishHook FIRST so NEW callers
+		// can't observe the handle. SetMITMPublishHook(nil) blocks
+		// until any in-flight publishMITM finishes — see
+		// pkg/agent/proxy/tls/ca.go for the RWMutex drain — so no
+		// CertForClient → RegisterMITM call survives this point.
+		//
+		// dialPostgresSSLUpstream is the other direct cbshim consumer.
+		// It captures p.cbshim into a local at call time, so a
+		// concurrent SetCBShim(nil) doesn't reach it. Goroutines
+		// still in the postgres upstream-handshake phase when this
+		// runs are tracked by activeConns; we defer cb.Close() onto a
+		// goroutine that waits for them to drain naturally before
+		// pulling the BPF maps + uprobes out from under their call.
+		// Drain already had drainGrace seconds above; if connections
+		// outlast that, the deferred Close keeps cbshim alive until
+		// they're truly done — kernel reclaims any leaked BPF
+		// resources at process exit if the goroutine never returns.
 		cb := p.cbshim
 		p.SetCBShim(nil)
-		if err := cb.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors,
-				fmt.Errorf("failed to close cbshim: %w", err))
-		}
+		go func() {
+			p.activeConns.Wait()
+			if err := cb.Close(); err != nil {
+				p.logger.Debug("cbshim deferred close error",
+					zap.Error(err))
+			}
+		}()
 	}
 
 	p.CloseErrorChannel()
