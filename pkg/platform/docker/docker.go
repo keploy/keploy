@@ -656,6 +656,14 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
 		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
 	}
+	if opts.ChannelBindingShim {
+		// The SCRAM-SHA-256-PLUS channel-binding shim rewrites the client's
+		// tls-server-end-point digest with bpf_probe_write_user, which the
+		// verifier gates behind CAP_SYS_ADMIN — CAP_BPF/CAP_PERFMON alone are
+		// insufficient. Only grant it when the shim is explicitly enabled.
+		capAdd = append(capAdd, &yaml.Node{Kind: yaml.ScalarNode, Value: "SYS_ADMIN",
+			LineComment: "required by the channel-binding shim (bpf_probe_write_user)"})
+	}
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
