@@ -112,9 +112,16 @@ type TestHooks interface {
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
-	// BeforeTestCaseRun is called once per test case immediately before replay.
+}
+
+// TestCaseMutator is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion; implementations that do not need
+// per-test-case mutations can safely omit it without breaking existing code.
+type TestCaseMutator interface {
+	// BeforeTestCaseRun is invoked once per test case, before SimulateRequest.
 	// Implementations may mutate tc in-place (e.g. decrypt protected fields,
-	// inject headers). The default no-op is suitable for standard OSS usage.
+	// inject headers). It is called at most once per test case even when
+	// RetryPassing is enabled.
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 

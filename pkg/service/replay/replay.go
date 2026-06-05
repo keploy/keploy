@@ -1535,10 +1535,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
-			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
-					zap.String("testCase", testCase.Name),
-					zap.String("next_step", "check hook implementation or api-server connectivity"))
+			// Run pre-test mutation hook once per test case (not on retries) to
+			// avoid compounding side effects from in-place mutations.
+			if replay == 0 {
+				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
+					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
+						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+							zap.String("testcase", testCase.Name),
+							zap.String("next_step", "check hook implementation or api-server connectivity"))
+					}
+				}
 			}
 
 			// replace the request URL's BasePath/origin if provided
@@ -2123,10 +2129,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
-			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
-					zap.String("testCase", tc.Name),
-					zap.String("next_step", "check hook implementation or api-server connectivity"))
+			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
+				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
+					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+						zap.String("testcase", tc.Name),
+						zap.String("next_step", "check hook implementation or api-server connectivity"))
+				}
 			}
 
 			// Proxy Monitor: Start a per-test proxy error monitor.
