@@ -19,6 +19,7 @@ package cbshim
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 
 	"go.uber.org/zap"
 )
@@ -86,9 +87,20 @@ func RegisterFactory(f Factory) {
 // Returns (nil, nil) when no factory is registered — that signals
 // "no cbshim available" to the caller, which must keep working
 // without it.
+//
+// Contract: a REGISTERED factory must return either (impl, nil) on
+// success or (nil, err) on construction failure. (nil, nil) from a
+// registered factory is treated as an error here, so callers don't
+// observe an ambiguous "no factory registered" state that's actually
+// "factory ran but produced nothing", and the proxy.New log branch
+// that points users at OSS-vs-enterprise stays accurate.
 func NewFromFactory(logger *zap.Logger) (CBShim, error) {
 	if registeredFactory == nil {
 		return nil, nil
 	}
-	return registeredFactory(logger)
+	cb, err := registeredFactory(logger)
+	if err == nil && cb == nil {
+		return nil, errors.New("cbshim: registered factory returned (nil, nil); a registered factory must produce a non-nil implementation or a non-nil error")
+	}
+	return cb, err
 }

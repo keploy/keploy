@@ -805,7 +805,13 @@ func publishRealCertFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
 		return
 	}
 	tcpAddr, ok := (*src).RemoteAddr().(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
+	if !ok || tcpAddr == nil || tcpAddr.Port == 0 {
+		// Port==0 means the addr resolution returned a sentinel /
+		// unspecified port (typically a wrapped conn that doesn't
+		// surface the underlying TCP port). connID "0" would
+		// rendezvous with every other Port==0 connection in cbshim's
+		// pending map, so skip — matches tls.publishMITM's
+		// sourcePort==0 guard.
 		return
 	}
 	r.cfg.RealCertHook(strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)

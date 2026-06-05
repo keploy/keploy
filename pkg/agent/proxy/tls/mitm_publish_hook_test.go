@@ -2,6 +2,7 @@ package tls
 
 import (
 	"net"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -134,6 +135,11 @@ func TestMITMPublishHook_RaceWithToggling(t *testing.T) {
 			}
 			SetMITMPublishHook(on)
 			SetMITMPublishHook(nil)
+			// Yield to the scheduler so the toggler doesn't starve
+			// the worker goroutines doing expensive cert mints.
+			// Without this, on a low-CPU CI runner the toggler can
+			// pin a core and bloat the test wall-clock.
+			runtime.Gosched()
 		}
 	}()
 

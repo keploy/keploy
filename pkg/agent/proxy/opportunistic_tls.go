@@ -293,15 +293,27 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	if p.cbshim != nil {
 		state := tlsUpstream.ConnectionState()
 		if len(state.PeerCertificates) > 0 {
-			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
+			// tcpAddr.Port==0 means the wrapped conn surfaced an
+			// unspecified port — connID "0" would collide with every
+			// other Port==0 connection in cbshim's rendezvous map.
+			// Skip, matching tls.publishMITM's sourcePort==0 guard.
+			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok && tcpAddr.Port != 0 {
 				leaf := state.PeerCertificates[0]
 				connID := strconv.Itoa(tcpAddr.Port)
-				p.logger.Debug("cbshim: opportunistic-TLS RegisterReal",
-					zap.String("connID", connID),
-					zap.String("srcRemote", srcConn.RemoteAddr().String()),
-					zap.String("dstAddr", dstAddr),
-					zap.Int("peerCertCount", len(state.PeerCertificates)),
-					zap.String("sigAlgo", leaf.SignatureAlgorithm.String()))
+				if ce := p.logger.Check(zap.DebugLevel, "cbshim: opportunistic-TLS RegisterReal"); ce != nil {
+					// RemoteAddr().String() allocates net.Addr's stringer
+					// each call, and leaf.SignatureAlgorithm.String()
+					// walks the algo enum table — neither is free on the
+					// opportunistic-TLS hot path. Gated so the format
+					// work only runs when debug logging is enabled.
+					ce.Write(
+						zap.String("connID", connID),
+						zap.String("srcRemote", srcConn.RemoteAddr().String()),
+						zap.String("dstAddr", dstAddr),
+						zap.Int("peerCertCount", len(state.PeerCertificates)),
+						zap.String("sigAlgo", leaf.SignatureAlgorithm.String()),
+					)
+				}
 				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
 				// Release the cbshim's per-connection rendezvous state
 				// when this hijack returns. If the MITM half (from
