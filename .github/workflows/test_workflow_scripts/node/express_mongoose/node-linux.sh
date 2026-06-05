@@ -128,7 +128,11 @@ do_record_iteration() {
     cat "${app_name}.txt"
     exit 1
   fi
-  if grep -q "ERROR" "${app_name}.txt"; then
+  # Filter out the harmless IPv6 dial failure that keploy logs when a GitHub
+  # Actions runner (IPv4-only) intercepts an outbound TLS connection to a
+  # Cloudflare IPv6 address. The recording still exits 0 and captures all
+  # test cases; the ERROR is purely cosmetic for this environment.
+  if grep -v "failed to dial the conn to destination server" "${app_name}.txt" | grep -q "ERROR"; then
     echo "::error::Error found during recording (iteration $i${label:+ json})"
     cat "${app_name}.txt"
     exit 1
@@ -206,7 +210,7 @@ run_replay() {
     echo "::error::Data race detected in replay #$idx"
     return 1
   fi
-  if grep -q "ERROR" "$logfile"; then
+  if grep -v "failed to dial the conn to destination server" "$logfile" | grep -q "ERROR"; then
     echo "::error::Error found in replay #$idx"
     return 1
   fi
@@ -315,7 +319,7 @@ if json_pass_supported; then
     echo "::error::Data race detected in json replay"
     exit 1
   fi
-  if grep -q "ERROR" "test_logs_json.txt"; then
+  if grep -v "failed to dial the conn to destination server" "test_logs_json.txt" | grep -q "ERROR"; then
     echo "::error::Error found in json replay"
     exit 1
   fi
