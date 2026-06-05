@@ -949,9 +949,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		// 2s polling loop with an event-driven design.
 		p.cbshim.StartProcEventConsumer(ctx)
 	} else if p.cbshim == nil {
-		p.logger.Info("cbshim: nil — skipping AttachToProcessTree (BPF load failed at proxy.New)")
+		// Neutral debug-level log — nil cbshim is the EXPECTED state
+		// when the feature flag is off or no implementation is
+		// registered (OSS builds), not just when BPF load failed.
+		// At Info this would spam every record-mode start.
+		p.logger.Debug("cbshim: not attached (feature disabled or no implementation registered)")
 	} else {
-		p.logger.Info("cbshim: appPID==0 — skipping AttachToProcessTree (no app PID yet)")
+		p.logger.Debug("cbshim: appPID==0 — skipping AttachToProcessTree (no app PID yet)")
 	}
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -2310,11 +2314,17 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	// StopProxyServer; Close() is idempotent against an in-flight
 	// goroutine racing it.
 	if p.cbshim != nil {
-		if err := p.cbshim.Close(); err != nil {
+		// Detach the global tls.MITMPublishHook FIRST so any in-flight
+		// CertForClient call doesn't dereference a cbshim handle we're
+		// about to close. SetCBShim(nil) handles that — it also nils
+		// out p.cbshim, so we save the handle to close it explicitly
+		// after the hook is cleared.
+		cb := p.cbshim
+		p.SetCBShim(nil)
+		if err := cb.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors,
 				fmt.Errorf("failed to close cbshim: %w", err))
 		}
-		p.cbshim = nil
 	}
 
 	p.CloseErrorChannel()

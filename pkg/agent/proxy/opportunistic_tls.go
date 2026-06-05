@@ -286,13 +286,17 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// the MITM half (RegisterMITM, fired from CertForClient inside
 	// HandleTLSConnection above) and the real half rendezvous on the
 	// same key.
+	// All cbshim logs here are per-connection diagnostics on the
+	// opportunistic-TLS hot path. Kept at Debug so high-throughput
+	// workloads don't flood operator-facing Info logs with cbshim
+	// internals — surface --debug if you need the rendezvous trail.
 	if p.cbshim != nil {
 		state := tlsUpstream.ConnectionState()
 		if len(state.PeerCertificates) > 0 {
 			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok {
 				leaf := state.PeerCertificates[0]
 				connID := strconv.Itoa(tcpAddr.Port)
-				p.logger.Info("cbshim: opportunistic-TLS RegisterReal",
+				p.logger.Debug("cbshim: opportunistic-TLS RegisterReal",
 					zap.String("connID", connID),
 					zap.String("srcRemote", srcConn.RemoteAddr().String()),
 					zap.String("dstAddr", dstAddr),
@@ -300,16 +304,16 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 					zap.String("sigAlgo", leaf.SignatureAlgorithm.String()))
 				p.cbshim.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
 			} else {
-				p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr",
+				p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr",
 					zap.String("srcRemoteType", fmt.Sprintf("%T", srcConn.RemoteAddr())),
 					zap.String("srcRemote", srcConn.RemoteAddr().String()))
 			}
 		} else {
-			p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — no peer certs",
+			p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — no peer certs",
 				zap.String("dstAddr", dstAddr))
 		}
 	} else {
-		p.logger.Info("cbshim: opportunistic-TLS RegisterReal SKIPPED — p.cbshim is nil",
+		p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — p.cbshim is nil",
 			zap.String("dstAddr", dstAddr))
 	}
 

@@ -1277,7 +1277,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // client connection. Nil-safe everywhere: a nil hook, a cert without
 // a usable leaf, or a zero-port source addr all silently no-op.
 func publishMITM(sourcePort int, cert *tls.Certificate) {
-	if MITMPublishHook == nil || cert == nil || len(cert.Certificate) == 0 {
+	if MITMPublishHook == nil || cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
 		return
 	}
 	MITMPublishHook(strconv.Itoa(sourcePort), cert.Certificate[0])

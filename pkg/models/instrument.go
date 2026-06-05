@@ -129,15 +129,15 @@ type SetupOptions struct {
 	// same propagation channel CapturePackets / OpportunisticTLSIntercept use,
 	// so containerised agents honour the user's choice without seeing the
 	// host's keploy.yml.
-	ChannelBindingShim        bool
-	AgentPort                 uint32
-	AppPorts                  []string
-	AppNetworks               []string
-	NetworkAliases            map[string][]string
-	BuildDelay                uint64
-	PassThroughPorts          []uint
-	MemoryLimit               uint64
-	ConfigPath                string
+	ChannelBindingShim bool
+	AgentPort          uint32
+	AppPorts           []string
+	AppNetworks        []string
+	NetworkAliases     map[string][]string
+	BuildDelay         uint64
+	PassThroughPorts   []uint
+	MemoryLimit        uint64
+	ConfigPath         string
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
