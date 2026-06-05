@@ -1535,6 +1535,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
+			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
+				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", testCase.Name))
+			}
+
 			// replace the request URL's BasePath/origin if provided
 			if r.config.Test.BasePath != "" {
 				newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
@@ -1593,10 +1597,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
-
-			if err := r.hookImpl.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-				utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed", zap.String("testCase", testCase.Name))
-			}
 
 			started := time.Now().UTC()
 
