@@ -1540,15 +1540,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; skipping pre-replay mutation for this test case",
 							zap.String("testcase", testCase.Name),
 							zap.String("next_step", "check hook implementation or api-server connectivity"))
 					}
 				}
 			}
 
-			// replace the request URL's BasePath/origin if provided
-			if r.config.Test.BasePath != "" {
+			// replace the request URL's BasePath/origin if provided — gated on
+			// replay==0 to prevent path.Join from doubling the prefix on retries.
+			if r.config.Test.BasePath != "" && replay == 0 {
 				newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
 				if err != nil {
 					r.logger.Error("failed to replace the request basePath",
@@ -2129,9 +2130,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
+			// Streaming Phase 2 has no retry loop so the replay==0 guard used
+			// in Phase 1 is not needed here — each tc is executed exactly once.
 			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with unmodified test case",
+					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; skipping pre-replay mutation for this test case",
 						zap.String("testcase", tc.Name),
 						zap.String("next_step", "check hook implementation or api-server connectivity"))
 				}
