@@ -1535,12 +1535,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
+			// Stop early before any in-place mutations if an exit signal is
+			// already pending — avoids mutating test cases that will never run.
+			select {
+			case <-exitLoopChan:
+				testSetStatus = getErrStatus()
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
+
 			// Run pre-test mutation hook once per test case (not on retries) to
 			// avoid compounding side effects from in-place mutations.
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
-						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; skipping pre-replay mutation for this test case",
+						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
 							zap.String("testcase", testCase.Name),
 							zap.String("next_step", "check hook implementation or api-server connectivity"))
 					}
@@ -1561,18 +1573,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCase.HTTPReq.URL = newURL
 				}
 				r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
-			}
-
-			// Checking for errors in the mocking and application
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
-				exitLoop = true
-			default:
-			}
-
-			if exitLoop {
-				break
 			}
 
 			var testStatus models.TestStatus
@@ -2120,6 +2120,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
+			// Run pre-test mutation before computing the mock window so that
+			// any timestamp fields decrypted by the mutator feed into the filter.
+			// Streaming Phase 2 has no retry loop so the replay==0 guard used
+			// in Phase 1 is not needed here — each tc is executed exactly once.
+			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
+				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
+					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+						zap.String("testcase", tc.Name),
+						zap.String("next_step", "check hook implementation or api-server connectivity"))
+				}
+			}
+
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
@@ -2128,16 +2140,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
 				break
-			}
-
-			// Streaming Phase 2 has no retry loop so the replay==0 guard used
-			// in Phase 1 is not needed here — each tc is executed exactly once.
-			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
-				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
-					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; skipping pre-replay mutation for this test case",
-						zap.String("testcase", tc.Name),
-						zap.String("next_step", "check hook implementation or api-server connectivity"))
-				}
 			}
 
 			// Proxy Monitor: Start a per-test proxy error monitor.
