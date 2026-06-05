@@ -17,6 +17,9 @@ import (
 )
 
 func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger) (interface{}, error) {
+	if cmd != "agent" {
+		return nil, errors.New("invalid command")
+	}
 
 	var client docker.Client
 	var err error
@@ -32,11 +35,5 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	ip := incoming.New(logger, h, cfg)
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
-
-	switch cmd {
-	case "agent":
-		return agent.New(logger, instrumentation.Hooks, instrumentation.Proxy, client, instrumentation.IncomingProxy, cfg), nil
-	default:
-		return nil, errors.New("invalid command")
-	}
+	return agent.New(logger, instrumentation.Hooks, instrumentation.Proxy, client, instrumentation.IncomingProxy, cfg), nil
 }
