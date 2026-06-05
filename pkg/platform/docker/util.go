@@ -164,6 +164,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.OpportunisticTLSIntercept {
 			alias += " --opportunistic-tls-intercept"
 		}
+		if opts.ChannelBindingShim {
+			alias += " --channel-binding-shim"
+		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
@@ -238,6 +241,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.OpportunisticTLSIntercept {
 				alias += " --opportunistic-tls-intercept"
 			}
+			if opts.ChannelBindingShim {
+				alias += " --channel-binding-shim"
+			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
@@ -296,6 +302,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.OpportunisticTLSIntercept {
 			alias += " --opportunistic-tls-intercept"
+		}
+		if opts.ChannelBindingShim {
+			alias += " --channel-binding-shim"
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
@@ -371,6 +380,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.OpportunisticTLSIntercept {
 				alias += " --opportunistic-tls-intercept"
 			}
+			if opts.ChannelBindingShim {
+				alias += " --channel-binding-shim"
+			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
@@ -428,6 +440,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.OpportunisticTLSIntercept {
 			alias += " --opportunistic-tls-intercept"
+		}
+		if opts.ChannelBindingShim {
+			alias += " --channel-binding-shim"
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)

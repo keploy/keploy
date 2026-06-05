@@ -624,6 +624,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.OpportunisticTLSIntercept {
 		command = append(command, "--opportunistic-tls-intercept")
 	}
+	if opts.ChannelBindingShim {
+		command = append(command, "--channel-binding-shim")
+	}
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))

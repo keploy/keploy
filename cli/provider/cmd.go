@@ -295,6 +295,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
+		cmd.Flags().Bool("channel-binding-shim", c.cfg.Agent.ChannelBindingShim, "Enable the SCRAM-SHA-256-PLUS channel-binding shim at record time. Forwarded by the orchestrator (keploy record --channel-binding-shim) → agent argv.")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -336,6 +337,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 		cmd.Flags().Bool("capture-packets", c.cfg.Record.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
+		cmd.Flags().Bool("channel-binding-shim", c.cfg.Record.ChannelBindingShim, "Enable the SCRAM-SHA-256-PLUS channel-binding shim. Attaches eBPF uprobes to libcrypto's X509_digest so postgres clients with channel_binding=require can authenticate through keploy's TLS MITM at record time. No-op on builds without a registered cbshim implementation; requires CAP_BPF + bpf_probe_write_user.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
 		// when the operator already knows they need to bump these (saw
 		// per_conn_cap / channel_full drops in agent logs). Env vars
@@ -1110,6 +1112,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.EnableSampling = enableSampling
 
+			// Only flip the config field if the user explicitly passed
+			// --channel-binding-shim. Without this guard the flag's
+			// default (false) would silently clobber a true value the
+			// user already set under record: in keploy.yml.
+			if cmd.Flags().Changed("channel-binding-shim") {
+				channelBindingShim, err := cmd.Flags().GetBool("channel-binding-shim")
+				if err != nil {
+					errMsg := "failed to get the channel-binding-shim flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.ChannelBindingShim = channelBindingShim
+			}
+
 			// Resolve record-buffer values: flag overrides yaml, env
 			// overrides flag. Range validation and clamping live in
 			// clampRecordBuffer (pkg/agent/proxy/proxy.go); only the
@@ -1331,6 +1347,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
+		channelBindingShim, err := cmd.Flags().GetBool("channel-binding-shim")
+		if err != nil {
+			errMsg := "failed to read the channel-binding-shim flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.ChannelBindingShim = channelBindingShim
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {

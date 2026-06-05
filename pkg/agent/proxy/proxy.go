@@ -687,7 +687,18 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// working for non-SCRAM-PLUS clients. The cbshim is nil-safe at
 	// every consumer site, so a nil instance silently disables the
 	// channel-binding fix without affecting anything else.
-	if opts != nil && opts.Record.ChannelBindingShim {
+	// proxy.New runs in one of two contexts:
+	//   - Docker / docker-compose: a dedicated `keploy agent`
+	//     subprocess receives --channel-binding-shim via argv (set
+	//     by the orchestrator from docker.go's command builder) and
+	//     populates cfg.Agent.ChannelBindingShim.
+	//   - Native (--cmd-type native): the orchestrator's own process
+	//     runs the proxy; only cfg.Record.ChannelBindingShim is set
+	//     by the CLI flag / keploy.yml.
+	// Honour either — same pattern other propagation-via-argv flags
+	// like CapturePackets use (read from whichever the current
+	// process saw populated).
+	if opts != nil && (opts.Agent.ChannelBindingShim || opts.Record.ChannelBindingShim) {
 		if cb, err := cbshim.NewFromFactory(logger); err == nil && cb != nil {
 			proxy.SetCBShim(cb)
 			logger.Info("cbshim: BPF-backed channel-binding shim enabled")
