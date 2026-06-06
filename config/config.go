@@ -74,7 +74,7 @@ type Config struct {
 	// bpf_probe_write_user (effectively CAP_SYS_ADMIN on Linux ≥ 5.8); without
 	// those the factory returns an error and the proxy keeps working for non-
 	// PLUS clients. Defaults to false.
-	ChannelBindingShim bool `json:"channelBindingShim,omitempty" yaml:"channelBindingShim,omitempty" mapstructure:"channelBindingShim"`
+	ChannelBindingShim bool `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 }
 
 type Agent struct {
