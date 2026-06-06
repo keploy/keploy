@@ -693,12 +693,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	//     by the orchestrator from docker.go's command builder) and
 	//     populates cfg.Agent.ChannelBindingShim.
 	//   - Native (--cmd-type native): the orchestrator's own process
-	//     runs the proxy; only cfg.Record.ChannelBindingShim is set
-	//     by the CLI flag / keploy.yml.
+	//     runs the proxy; only the top-level cfg.ChannelBindingShim
+	//     is set by the CLI flag / keploy.yml.
 	// Honour either — same pattern other propagation-via-argv flags
 	// like CapturePackets use (read from whichever the current
 	// process saw populated).
-	if opts != nil && (opts.Agent.ChannelBindingShim || opts.Record.ChannelBindingShim) {
+	if opts != nil && (opts.Agent.ChannelBindingShim || opts.ChannelBindingShim) {
 		if cb, err := cbshim.NewFromFactory(logger); err == nil && cb != nil {
 			proxy.SetCBShim(cb)
 			logger.Info("cbshim: BPF-backed channel-binding shim enabled")
@@ -706,11 +706,11 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 			logger.Info("cbshim: factory returned an error — SCRAM-SHA-256-PLUS "+
 				"clients will fail across the MITM as today",
 				zap.Error(err),
-				zap.String("next_step", "verify the agent has CAP_BPF + CAP_PERFMON (or CAP_SYS_ADMIN on older kernels), the kernel is >= 5.5 with bpf_probe_write_user permitted (not disabled by lockdown / hardened images), and clang/llvm BPF support is available. To opt out of cbshim entirely, set record.channelBindingShim: false (or unset) in keploy.yml; non-PLUS postgres clients work without it."))
+				zap.String("next_step", "verify the agent has CAP_BPF + CAP_PERFMON (or CAP_SYS_ADMIN on older kernels), the kernel is >= 5.5 with bpf_probe_write_user permitted (not disabled by lockdown / hardened images), and clang/llvm BPF support is available. To opt out of cbshim entirely, set channelBindingShim: false (or unset) in keploy.yml; non-PLUS postgres clients work without it."))
 		} else {
 			logger.Info("cbshim: no implementation registered (OSS build) — "+
 				"SCRAM-SHA-256-PLUS clients will fail across the MITM as today",
-				zap.String("next_step", "this build does not include a cbshim implementation; the OSS binary cannot intercept SCRAM-SHA-256-PLUS across the TLS MITM. Run an enterprise build (which registers a cbshim factory at init()) to get the feature, or set record.channelBindingShim: false to silence this log if non-PLUS clients are sufficient."))
+				zap.String("next_step", "this build does not include a cbshim implementation; the OSS binary cannot intercept SCRAM-SHA-256-PLUS across the TLS MITM. Run an enterprise build (which registers a cbshim factory at init()) to get the feature, or set channelBindingShim: false to silence this log if non-PLUS clients are sufficient."))
 		}
 	}
 
