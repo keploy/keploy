@@ -73,12 +73,25 @@ type Record struct {
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.
-	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
-	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
-	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
-	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	TestCaseNaming string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous    bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling int    `json:"enableSampling" yaml:"enableSampling"`
+	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
+	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
+	// cert-hash libpq folds into the SCRAM proof, so postgres clients running
+	// with channel_binding=require still authenticate through keploy's TLS MITM
+	// against the REAL upstream postgres at record time. Replay does not forward
+	// to the real database — postgres traffic is served from mocks, no SCRAM
+	// handshake actually completes against postgres — so the shim is record-only.
+	// OSS builds have no implementation registered and ignore this flag entirely;
+	// builds with a registered factory respect it. Defaults to false; flip to
+	// true in keploy.yml under record: to opt in. Requires CAP_BPF + a kernel
+	// that allows bpf_probe_write_user; without those the factory returns an
+	// error and the proxy keeps working for non-PLUS clients.
+	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
+	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a

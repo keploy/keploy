@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -272,6 +273,84 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 		return fmt.Errorf("upstream handshake to %s: %w", dstAddr, err)
 	}
 	defer tlsUpstream.Close()
+
+	// Publish the upstream's real leaf cert into the cbshim's
+	// rendezvous so SCRAM-SHA-256-PLUS clients get the real cert's
+	// hash substituted in place of the MITM cert's hash. Without this
+	// the opportunistic-TLS path is invisible to cbshim — only the
+	// parser-directive path (relay/directive_proc.go::handleUpgradeTLS)
+	// publishes today, so any postgres client whose protocol has no
+	// registered parser (OSS doesn't ship PostgresV3) falls through to
+	// hijackAndMITM and breaks SCRAM-PLUS. The connID matches the one
+	// CertForClient uses (client's source port as decimal string) so
+	// the MITM half (RegisterMITM, fired from CertForClient inside
+	// HandleTLSConnection above) and the real half rendezvous on the
+	// same key.
+	// All cbshim logs here are per-connection diagnostics on the
+	// opportunistic-TLS hot path. Kept at Debug so high-throughput
+	// workloads don't flood operator-facing Info logs with cbshim
+	// internals — surface --debug if you need the rendezvous trail.
+	// Snapshot p.cbshim into a local once so the multiple reads below
+	// (nil check + RegisterReal + CleanupConnection defer) can't tear
+	// if a concurrent SetCBShim writes p.cbshim between them. The
+	// shutdown path is the only writer today (it deliberately skips
+	// the nil-write to avoid this race), but the snapshot also future-
+	// proofs against any other call site that might mutate the field.
+	cb := p.cbshim
+	if cb != nil {
+		state := tlsUpstream.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			// tcpAddr.Port==0 means the wrapped conn surfaced an
+			// unspecified port — connID "0" would collide with every
+			// other Port==0 connection in cbshim's rendezvous map.
+			// Skip, matching tls.publishMITM's sourcePort==0 guard.
+			if tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr); ok && tcpAddr.Port != 0 {
+				leaf := state.PeerCertificates[0]
+				connID := strconv.Itoa(tcpAddr.Port)
+				if ce := p.logger.Check(zap.DebugLevel, "cbshim: opportunistic-TLS RegisterReal"); ce != nil {
+					// RemoteAddr().String() allocates net.Addr's stringer
+					// each call, and leaf.SignatureAlgorithm.String()
+					// walks the algo enum table — neither is free on the
+					// opportunistic-TLS hot path. Gated so the format
+					// work only runs when debug logging is enabled.
+					ce.Write(
+						zap.String("connID", connID),
+						zap.String("srcRemote", srcConn.RemoteAddr().String()),
+						zap.String("dstAddr", dstAddr),
+						zap.Int("peerCertCount", len(state.PeerCertificates)),
+						zap.String("sigAlgo", leaf.SignatureAlgorithm.String()),
+					)
+				}
+				cb.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+				// Release the cbshim's per-connection rendezvous state
+				// when this hijack returns. If the MITM half (from
+				// CertForClient) was already published, Publish has
+				// fired and the pending entry is already cleared, so
+				// this defer is a no-op. If for any reason only one
+				// half arrived (e.g. CertForClient was never invoked
+				// for this connID, or the connection errored before
+				// rendezvous), CleanupConnection drops the half-state
+				// before it leaks to process exit.
+				defer cb.CleanupConnection(connID)
+			} else if ce := p.logger.Check(zap.DebugLevel, "cbshim: opportunistic-TLS RegisterReal SKIPPED — srcConn.RemoteAddr is not *net.TCPAddr"); ce != nil {
+				// Gated under Check so fmt.Sprintf + RemoteAddr().String()
+				// don't run on the hot path when debug is off — both
+				// allocate per call and this branch fires for every
+				// opportunistic-TLS connection whose src isn't a
+				// *net.TCPAddr (rare but not zero).
+				ce.Write(
+					zap.String("srcRemoteType", fmt.Sprintf("%T", srcConn.RemoteAddr())),
+					zap.String("srcRemote", srcConn.RemoteAddr().String()),
+				)
+			}
+		} else {
+			p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — no peer certs",
+				zap.String("dstAddr", dstAddr))
+		}
+	} else {
+		p.logger.Debug("cbshim: opportunistic-TLS RegisterReal SKIPPED — p.cbshim is nil",
+			zap.String("dstAddr", dstAddr))
+	}
 
 	p.logger.Debug("opportunistic TLS intercept: hijacked, both sides MITM'd",
 		zap.String("upstream", dstAddr),

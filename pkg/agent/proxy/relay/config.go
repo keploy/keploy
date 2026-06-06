@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -97,6 +98,19 @@ type Config struct {
 	// KindUpgradeTLS directives. If nil, a KindUpgradeTLS directive
 	// is acked with OK=false and a wrapped ErrNoTLSUpgrader.
 	TLSUpgradeFn TLSUpgradeFn
+
+	// RealCertHook, if non-nil, is invoked after the V2 relay path
+	// completes the upstream TLS handshake (handleUpgradeTLS), with
+	// the source-port-derived connID and the DER bytes of the real
+	// upstream leaf certificate. Wired by the agent to
+	// cbshim.RegisterReal so the channel-binding shim can pair this
+	// real cert with the MITM cert minted by CertForClient.
+	//
+	// Symmetric to the dialPostgresSSLUpstream → cb.RegisterReal call
+	// for the legacy direct-dial postgres path; this is the
+	// equivalent for the V3 parser path that drives upstream TLS
+	// through the supervisor relay instead.
+	RealCertHook func(connID string, realCertDER []byte, sigAlgo x509.SignatureAlgorithm)
 
 	// BumpActivity is invoked after every successful forward. The
 	// supervisor's activity watchdog uses this to distinguish "parser
