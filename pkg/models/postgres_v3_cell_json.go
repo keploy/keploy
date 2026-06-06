@@ -1034,9 +1034,11 @@ func decodeJSONTimestamp(v any) (time.Time, error) {
 	}
 	// Go's RFC3339 layouts only accept a 4-digit year, but Postgres timestamps
 	// (and our RFC3339Nano encoder, which uses time.Time.Format) can carry years
-	// up to 6 digits — Postgres' max is 294276 — plus negative ("…-…-… BC")
-	// years. Such values fail the layouts above with "cannot parse … as \"-\"".
-	// Re-parse with the year normalized to 4 digits, then restore the real year.
+	// up to 6 digits — Postgres' max is 294276 — plus negative years, which
+	// time.Time.Format renders with a signed leading '-' (e.g.
+	// "-0753-04-21T00:00:00Z"), not a "BC" suffix. Such values fail the layouts
+	// above with "cannot parse … as \"-\"". Re-parse with the year normalized to
+	// 4 digits, then restore the real (possibly negative) year.
 	if t, err := parseWideYearRFC3339(s); err == nil {
 		return t, nil
 	}
@@ -1053,7 +1055,7 @@ func decodeJSONTimestamp(v any) (time.Time, error) {
 func parseWideYearRFC3339(s string) (time.Time, error) {
 	neg := false
 	body := s
-	if strings.HasPrefix(body, "-") { // leading '-' => negative (BC-era) year
+	if strings.HasPrefix(body, "-") { // signed leading '-' => negative year
 		neg = true
 		body = body[1:]
 	}
