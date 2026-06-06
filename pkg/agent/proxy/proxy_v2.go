@@ -196,6 +196,14 @@ func (p *Proxy) recordViaSupervisor(
 		// suppressed.
 		r.PauseTees()
 
+		// Abort the tees so any drain goroutine blocked sending to
+		// the FakeConn out chan releases. Without this, the
+		// FakeConn.Close calls below would unblock the parser's
+		// reads but leave drain stuck on `out <- c` because the
+		// consumer is gone. AbortTees is the V2-architecture
+		// counterpart to "parser is dead, drop the rest".
+		r.AbortTees()
+
 		// Then unblock the parser's ClientStream/DestStream reads so
 		// the supervisor's cancel-select can observe the parser
 		// goroutine exiting promptly.
