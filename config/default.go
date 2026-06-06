@@ -27,6 +27,13 @@ debug: false
 disableANSI: false
 disableTele: false
 generateGithubActions: false
+# channelBindingShim toggles the proxy's SCRAM-SHA-256-PLUS shim. When
+# true, the agent uprobes libcrypto X509_digest in RECORD mode to
+# rewrite the peer-cert hash to keploy's proxy cert, and in REPLAY mode
+# rewrites channel_binding=require connection options to disable so
+# tests replay through the MITM without the original cert. Default
+# false; enable only for workloads that use SCRAM channel binding.
+channelBindingShim: false
 containerName: ""
 networkName: ""
 buildDelay: 30
