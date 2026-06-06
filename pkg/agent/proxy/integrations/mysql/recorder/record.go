@@ -212,5 +212,6 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		mgr := syncMock.Get()
 		mgr.AddMock(mysqlMock)
 	}
+	mysqlMocksEmitted.Add(1)
 	return
 }

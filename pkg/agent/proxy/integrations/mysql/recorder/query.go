@@ -563,6 +563,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				pendingCommand = commandPkt
+				mysqlRequestsReceived.Add(1)
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.
