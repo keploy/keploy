@@ -82,18 +82,18 @@ type MockYaml struct {
 	// transition between "running" and "quiesced"; asyncRunning tracks
 	// which state we are in. Do not use sync.Once here — it cannot be
 	// reset, which was the original re-record bug.
-	asyncLifecycleMu sync.Mutex
-	asyncRunning     bool
-	asyncQueue       chan asyncWriteJob
-	asyncStop        chan struct{}
-	asyncDone        chan struct{}
+	asyncLifecycleMu  sync.Mutex
+	asyncRunning      bool
+	asyncQueue        chan asyncWriteJob
+	asyncStop         chan struct{}
+	asyncDone         chan struct{}
 	asyncNeedsYamlSep bool
-	asyncMu          sync.Mutex
-	asyncFilePath    string
-	asyncFile        *os.File
-	asyncBufw        *bufio.Writer
-	asyncGobEnc      *gob.Encoder
-	asyncOverflows   atomic.Uint64
+	asyncMu           sync.Mutex
+	asyncFilePath     string
+	asyncFile         *os.File
+	asyncBufw         *bufio.Writer
+	asyncGobEnc       *gob.Encoder
+	asyncOverflows    atomic.Uint64
 	// asyncStopClosed is true after Close() has invoked close(asyncStop).
 	// A subsequent Close() that arrives after the first one timed out
 	// waiting for asyncDone must not close the channel a second time
