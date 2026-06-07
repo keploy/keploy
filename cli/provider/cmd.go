@@ -215,6 +215,24 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
+		// `keploy record` needs --disable-mapping locally so the host
+		// CLI has an explicit override path. The resolved host value is
+		// forwarded to the spawned agent (docker / k8s sidecar / native
+		// subprocess) via the --disable-mapping arg the orchestrator
+		// appends. Without this flag here, the host can only inherit
+		// the value from keploy.yml or fall back to the default in
+		// config/default.go (mapping enabled). That's fine for fresh
+		// installs but leaves operators with no way to flip the value
+		// at runtime when an existing keploy.yml has it set the wrong
+		// way for their session. Mirrors the same flag on the `agent`
+		// and `test` subcommands.
+		// Gated on cmd.Name() == "record" — the parent case-block also
+		// covers `test`, which already registers its own
+		// --disable-mapping flag; double registration on the same
+		// cobra cmd panics with "flag redefined: disable-mapping".
+		if cmd.Name() == "record" {
+			cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during record")
+		}
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -1289,6 +1307,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
+			// Read --disable-mapping if the user explicitly passed it on
+			// `keploy record`, or if keploy.yml hasn't set the field at
+			// all (so we fall back to the flag's default). Matches the
+			// pattern at the `test` subcommand parser. The resolved value
+			// is forwarded into the spawned agent via the orchestrator's
+			// --disable-mapping arg (see docker / native agent launch
+			// paths in pkg/platform), so mappings.yaml production tracks
+			// the operator's intent end-to-end.
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
+			}
 		}
 
 	case "normalize":

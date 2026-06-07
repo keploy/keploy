@@ -43,6 +43,7 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -1028,11 +1029,56 @@ func decodeJSONTimestamp(v any) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 		return t, nil
 	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("$pgtype timestamp: %w", err)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
 	}
-	return t, nil
+	// Go's RFC3339 layouts only accept a 4-digit year, but Postgres timestamps
+	// (and our RFC3339Nano encoder, which uses time.Time.Format) can carry years
+	// up to 6 digits — Postgres' max is 294276 — plus negative years, which
+	// time.Time.Format renders with a signed leading '-' (e.g.
+	// "-0753-04-21T00:00:00Z"), not a "BC" suffix. Such values fail the layouts
+	// above with "cannot parse … as \"-\"". Re-parse with the year normalized to
+	// 4 digits, then restore the real (possibly negative) year.
+	if t, err := parseWideYearRFC3339(s); err == nil {
+		return t, nil
+	}
+	// Surface the standard-layout error — it's the most recognizable.
+	_, err = time.Parse(time.RFC3339Nano, s)
+	return time.Time{}, fmt.Errorf("$pgtype timestamp: %w", err)
+}
+
+// parseWideYearRFC3339 parses an RFC3339[Nano] timestamp whose year is not
+// exactly 4 digits (e.g. "149206-12-15T16:39:16.394721Z" or a negative year),
+// which time.Parse's "2006" layout token rejects. It splits off the year,
+// reparses the remainder with a 4-digit placeholder, and rebuilds via time.Date
+// so the fractional seconds and timezone offset are preserved exactly.
+func parseWideYearRFC3339(s string) (time.Time, error) {
+	neg := false
+	body := s
+	if strings.HasPrefix(body, "-") { // signed leading '-' => negative year
+		neg = true
+		body = body[1:]
+	}
+	dash := strings.IndexByte(body, '-') // first '-' terminates the year field
+	if dash <= 0 {
+		return time.Time{}, fmt.Errorf("no year separator in %q", s)
+	}
+	year, err := strconv.Atoi(body[:dash])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("bad year in %q: %w", s, err)
+	}
+	norm := "0000" + body[dash:] // placeholder 4-digit year for the std layout
+	t, err := time.Parse(time.RFC3339Nano, norm)
+	if err != nil {
+		if t, err = time.Parse(time.RFC3339, norm); err != nil {
+			return time.Time{}, err
+		}
+	}
+	if neg {
+		year = -year
+	}
+	return time.Date(year, t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(),
+		t.Nanosecond(), t.Location()), nil
 }
 
 func decodeJSONPrefix(v any) (netip.Prefix, error) {
