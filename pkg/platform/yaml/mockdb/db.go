@@ -3,6 +3,7 @@ package mockdb
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/gob"
 	"encoding/json"
@@ -132,6 +133,8 @@ type asyncWriteJob struct {
 	testSetPath string
 	filename    string
 	effFormat   yaml.Format
+	encodedData chan []byte
+	encodeErr   chan error
 }
 
 const mockFileLockStripeCount = 256
@@ -677,6 +680,38 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	return nil
 }
 
+func (ys *MockYaml) encodeMockData(job asyncWriteJob) ([]byte, error) {
+	if job.effFormat == yaml.FormatJSON {
+		jsonDoc, handled, err := EncodeMockJSON(job.mock, ys.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode mock (json): %w", err)
+		}
+		if !handled {
+			return nil, fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", job.mock.Kind)
+		}
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(jsonDoc); err != nil {
+			return nil, fmt.Errorf("failed to encode mock json: %w", err)
+		}
+		return buf.Bytes(), nil
+	}
+
+	mockYaml, err := EncodeMock(job.mock, ys.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode mock (yaml): %w", err)
+	}
+	var buf bytes.Buffer
+	encoder := yamlLib.NewEncoder(&buf)
+	if err := encoder.Encode(&mockYaml); err != nil {
+		_ = encoder.Close()
+		return nil, fmt.Errorf("failed to encode mock yaml: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close yaml encoder: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -802,19 +837,31 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		return ys.asyncGobEnc.Encode(job.mock)
 	}
 
-	switch job.effFormat {
-	case yaml.FormatJSON:
-		jsonDoc, handled, err := EncodeMockJSON(job.mock, ys.Logger)
+	var data []byte
+	if job.encodedData != nil {
+		select {
+		case err := <-job.encodeErr:
+			return err
+		case d := <-job.encodedData:
+			data = d
+		}
+	} else {
+		// Fallback for sync inserts or missing promise
+		d, err := ys.encodeMockData(job)
 		if err != nil {
-			return fmt.Errorf("failed to encode mock (json): %w", err)
+			return err
 		}
-		if !handled {
-			return fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", job.mock.Kind)
+		data = d
+	}
+
+	if job.effFormat == yaml.FormatJSON {
+		if _, err := ys.asyncBufw.Write(data); err != nil {
+			return err
 		}
-		if err := json.NewEncoder(ys.asyncBufw).Encode(jsonDoc); err != nil {
-			return fmt.Errorf("failed to encode mock json: %w", err)
+		if _, err := ys.asyncBufw.WriteString("\n"); err != nil {
+			return err
 		}
-	default:
+	} else {
 		stat, err := ys.asyncFile.Stat()
 		if err != nil {
 			return fmt.Errorf("stat yaml file: %w", err)
@@ -830,17 +877,8 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-		mockYaml, err := EncodeMock(job.mock, ys.Logger)
-		if err != nil {
-			return fmt.Errorf("failed to encode mock (yaml): %w", err)
-		}
-		encoder := yamlLib.NewEncoder(ys.asyncBufw)
-		if err := encoder.Encode(&mockYaml); err != nil {
-			_ = encoder.Close()
-			return fmt.Errorf("failed to encode mock yaml: %w", err)
-		}
-		if err := encoder.Close(); err != nil {
-			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		if _, err := ys.asyncBufw.Write(data); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -945,7 +983,7 @@ func (ys *MockYaml) Close() error {
 	}
 	select {
 	case <-ys.asyncDone:
-	case <-time.After(60 * time.Second):
+	case <-time.After(300 * time.Second):
 		// Leave asyncRunning=true + asyncStopClosed=true so a retry of
 		// Close enters this function, skips the already-closed stop,
 		// and just waits on asyncDone again.
