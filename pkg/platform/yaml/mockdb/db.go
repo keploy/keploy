@@ -90,7 +90,7 @@ type MockYaml struct {
 	asyncFilePath    string
 	asyncFile        *os.File
 	asyncBufw        *bufio.Writer
-	asyncGobEnc         *gob.Encoder
+	asyncGobEnc      *gob.Encoder
 	asyncOverflows   atomic.Uint64
 	// asyncStopClosed is true after Close() has invoked close(asyncStop).
 	// A subsequent Close() that arrives after the first one timed out
@@ -678,6 +678,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {

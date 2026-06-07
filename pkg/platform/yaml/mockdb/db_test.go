@@ -98,6 +98,7 @@ func TestInsertMock_FlushOnCtxCancel(t *testing.T) {
 		if err := ys.InsertMock(context.Background(), mock, "set-0"); err != nil {
 			t.Fatalf("InsertMock: %v", err)
 		}
+		ys.Close()
 
 		// The yaml file is written at <mockPath>/<testSetID>/<mockName>.yaml.
 		yamlPath := filepath.Join(dir, "set-0", "mocks.yaml")
@@ -164,6 +165,8 @@ func TestInsertMock_FlushOnCtxCancel(t *testing.T) {
 		if err := ys.InsertMock(context.Background(), first, "set-0"); err != nil {
 			t.Fatalf("first InsertMock: %v", err)
 		}
+		ys.Close()
+
 		yamlPath := filepath.Join(dir, "set-0", "mocks.yaml")
 		firstBytes, err := os.ReadFile(yamlPath)
 		if err != nil {

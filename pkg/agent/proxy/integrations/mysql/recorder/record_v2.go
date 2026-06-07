@@ -32,7 +32,6 @@ var (
 	mysqlProbeOnce        sync.Once
 )
 
-
 // RecordV2 is the V2 record path for MySQL. It consumes the supervisor
 // Session's FakeConns (ClientStream and DestStream) and uses the
 // directive channel for the CLIENT_SSL TLS upgrade. The relay is the
