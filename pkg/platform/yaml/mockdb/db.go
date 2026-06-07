@@ -740,7 +740,7 @@ func (ys *MockYaml) asyncWriterLoop() {
 					zap.String("mockName", job.mock.Name),
 					zap.String("mockOutputDir", ys.MockPath))
 			}
-			
+
 			// Batched flush: only flush to physical disk if the queue is currently empty.
 			// This avoids slow disk I/O when processing a massive backlog of fuzzer mocks.
 			if len(ys.asyncQueue) == 0 {
