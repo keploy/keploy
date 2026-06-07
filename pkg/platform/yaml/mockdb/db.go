@@ -678,6 +678,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
@@ -815,7 +819,7 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		if err != nil {
 			return fmt.Errorf("stat yaml file: %w", err)
 		}
-		if stat.Size() == 0 {
+		if stat.Size() == 0 && ys.asyncBufw.Buffered() == 0 {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := ys.asyncBufw.WriteString(version); err != nil {
 					return fmt.Errorf("failed to write version comment: %w", err)
