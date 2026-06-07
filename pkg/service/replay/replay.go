@@ -158,13 +158,21 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
-	// isFirstTestSet mirrors isLastTestSet — true while the test-set
-	// about to run is the first one of the current replay run. Read
-	// by the waitForAppReady gate so --delay applies only to the first
-	// test-set when --keep-app-alive is set (subsequent test-sets
-	// inherit a warm app and would otherwise pay --delay seconds of
-	// dead time per boundary).
-	isFirstTestSet     bool
+	// appReadyWaitDone latches true the first time waitForAppReady
+	// actually completes a readiness wait during the current replay
+	// run. Read by the waitForAppReady gate so that, under
+	// --keep-app-alive, --delay (or a HealthURL poll) is paid exactly
+	// once — on the first test-set that reaches the wait — and skipped
+	// thereafter (subsequent test-sets inherit a warm app).
+	//
+	// Keyed on "did the wait actually run" rather than the test-set
+	// loop index: a leading empty/ignored test-set returns before the
+	// wait (see the len(testCases)==0 / ignored early-returns in
+	// RunTestSet), so an index-based "first test-set" flag would let
+	// that empty set consume the first-set status and the next set —
+	// the first one that actually fires requests — would skip the wait
+	// against an app that has not finished booting.
+	appReadyWaitDone   bool
 	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
 	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
 	testRunID          string               // current test run ID (used by RunTestSet)
@@ -472,6 +480,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
+	// Reset the readiness latch for this run so the first test-set that
+	// reaches waitForAppReady pays --delay (or the HealthURL poll), even
+	// if a prior run on this reused Replayer already set it.
+	r.appReadyWaitDone = false
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -499,12 +511,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if i == len(testSets)-1 {
 			r.isLastTestSet = true
 		}
-		// Mirror of isLastTestSet but for the first-testset boundary.
-		// Set BEFORE the RunTestSet call so the waitForAppReady call
-		// sites in RunTestSet observe the right value. Reset only at
-		// the top of this iteration (so a flaky-retry attempt within
-		// the SAME iteration still observes the same value).
-		r.isFirstTestSet = (i == 0)
+		// The first-test-set readiness boundary is NOT tracked by loop
+		// index here (a leading empty/ignored test-set would consume it
+		// before the wait ever runs); it is latched in RunTestSet via
+		// r.appReadyWaitDone the first time waitForAppReady completes.
 
 		r.completeTestReportMu.RLock()
 		initTotal := r.totalTests
@@ -1174,25 +1184,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
 		//
 		// --keep-app-alive: the app was spawned ONCE in Start() and
-		// has already passed its readiness check during the first
-		// test-set; subsequent test-sets inherit the warm app, so
-		// paying --delay seconds (or another HealthURL poll round)
-		// per boundary is dead time. Skip when we're past the first
-		// test-set. The first test-set still runs the wait so the
-		// initial app startup can finish (build/boot/connect) before
-		// the first request fires.
+		// only needs its readiness wait paid once; subsequent test-sets
+		// inherit the warm app, so paying --delay seconds (or another
+		// HealthURL poll round) per boundary is dead time. Skip once the
+		// wait has actually completed. The first test-set that reaches
+		// here still runs the wait so the initial app startup can finish
+		// (build/boot/connect) before the first request fires.
 		//
-		// Gate keyed on `serveTest` (the parameter Start() computes
-		// as `effectiveKeepAlive`) rather than the raw config bool,
-		// so the skip ONLY arms when the one-shot spawn actually
-		// fired. If --keep-app-alive was set on a cmdType where the
-		// one-shot spawn was suppressed (cmdType == Empty / instrument
-		// off), serveTest will be false here and the readiness wait
-		// runs every test-set, matching the historical lifecycle.
-		if serveTest && !r.isFirstTestSet {
-			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
-			return models.TestSetStatusUserAbort, context.Canceled
+		// Gate keyed on `serveTest` (the parameter Start() computes as
+		// `effectiveKeepAlive`) AND on r.appReadyWaitDone — the latch set
+		// only after a wait completes — rather than on the test-set loop
+		// index. A leading empty/ignored test-set returns before this
+		// point (see the early-returns in RunTestSet) and so never sets
+		// the latch; the first test-set that actually fires requests
+		// therefore still pays the wait. If --keep-app-alive was set on a
+		// cmdType where the one-shot spawn was suppressed (cmdType ==
+		// Empty / instrument off), serveTest is false here and the
+		// readiness wait runs every test-set, matching the historical
+		// lifecycle.
+		if serveTest && r.appReadyWaitDone {
+			r.logger.Debug("--keep-app-alive: skipping waitForAppReady; app already warm")
+		} else {
+			if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
+			r.appReadyWaitDone = true
 		}
 	}
 
@@ -1344,13 +1360,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// spawn in Start() also fires when KeepAppAlive is set
 			// AND cmdType is non-empty AND instrument is enabled.
 			// Gate keyed on `serveTest` (the Start()-computed
-			// effectiveKeepAlive predicate) — identical to the compose
-			// branch above — so the readiness skip arms only when the
-			// one-shot spawn actually fired.
-			if serveTest && !r.isFirstTestSet {
-				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
-				return models.TestSetStatusUserAbort, context.Canceled
+			// effectiveKeepAlive predicate) AND r.appReadyWaitDone —
+			// identical to the compose branch above — so the readiness
+			// wait is paid once on the first test-set that reaches it
+			// and skipped thereafter, regardless of leading empty sets.
+			if serveTest && r.appReadyWaitDone {
+				r.logger.Debug("--keep-app-alive: skipping waitForAppReady; app already warm")
+			} else {
+				if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
+					return models.TestSetStatusUserAbort, context.Canceled
+				}
+				r.appReadyWaitDone = true
 			}
 
 		}
