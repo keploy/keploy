@@ -1825,7 +1825,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !strictMockReject {
+			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
@@ -2349,7 +2349,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
