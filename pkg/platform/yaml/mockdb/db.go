@@ -678,10 +678,6 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
@@ -743,6 +739,16 @@ func (ys *MockYaml) asyncWriterLoop() {
 					zap.String("testSetPath", job.testSetPath),
 					zap.String("mockName", job.mock.Name),
 					zap.String("mockOutputDir", ys.MockPath))
+			}
+			
+			// Batched flush: only flush to physical disk if the queue is currently empty.
+			// This avoids slow disk I/O when processing a massive backlog of fuzzer mocks.
+			if len(ys.asyncQueue) == 0 {
+				ys.asyncMu.Lock()
+				if ys.asyncBufw != nil {
+					_ = ys.asyncBufw.Flush()
+				}
+				ys.asyncMu.Unlock()
 			}
 		case <-ys.asyncStop:
 			ys.drainAndClose()
@@ -833,8 +839,7 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 			return fmt.Errorf("failed to close yaml encoder: %w", err)
 		}
 	}
-	// Flush immediately to buffer since yaml/json depend on it to hit disk correctly
-	return ys.asyncBufw.Flush()
+	return nil
 }
 
 func (ys *MockYaml) asyncReopenLocked(mockPath, mockFileName string, effFormat yaml.Format) error {
@@ -936,11 +941,11 @@ func (ys *MockYaml) Close() error {
 	}
 	select {
 	case <-ys.asyncDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second):
 		// Leave asyncRunning=true + asyncStopClosed=true so a retry of
 		// Close enters this function, skips the already-closed stop,
 		// and just waits on asyncDone again.
-		return fmt.Errorf("timed out waiting for gob writer to flush")
+		return fmt.Errorf("timed out waiting for background mock writer to flush")
 	}
 	ys.asyncRunning = false
 	ys.asyncStopClosed = false
