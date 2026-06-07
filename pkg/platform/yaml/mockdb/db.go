@@ -87,6 +87,7 @@ type MockYaml struct {
 	asyncQueue       chan asyncWriteJob
 	asyncStop        chan struct{}
 	asyncDone        chan struct{}
+	asyncNeedsYamlSep bool
 	asyncMu          sync.Mutex
 	asyncFilePath    string
 	asyncFile        *os.File
@@ -862,11 +863,8 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 			return err
 		}
 	} else {
-		stat, err := ys.asyncFile.Stat()
-		if err != nil {
-			return fmt.Errorf("stat yaml file: %w", err)
-		}
-		if stat.Size() == 0 && ys.asyncBufw.Buffered() == 0 {
+
+		if !ys.asyncNeedsYamlSep {
 			if version := utils.GetVersionAsComment(); version != "" {
 				if _, err := ys.asyncBufw.WriteString(version); err != nil {
 					return fmt.Errorf("failed to write version comment: %w", err)
@@ -880,6 +878,7 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		if _, err := ys.asyncBufw.Write(data); err != nil {
 			return err
 		}
+		ys.asyncNeedsYamlSep = true
 	}
 	return nil
 }
@@ -923,6 +922,9 @@ func (ys *MockYaml) asyncReopenLocked(mockPath, mockFileName string, effFormat y
 			return fmt.Errorf("write gob magic: %w", werr)
 		}
 		ys.asyncGobEnc = gob.NewEncoder(ys.asyncBufw)
+	} else {
+		info, err := ys.asyncFile.Stat()
+		ys.asyncNeedsYamlSep = err == nil && info.Size() > 0
 	}
 	ys.asyncFilePath = filePath
 	return nil
