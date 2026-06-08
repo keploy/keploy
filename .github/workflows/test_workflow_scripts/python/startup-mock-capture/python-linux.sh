@@ -93,7 +93,16 @@ drive_request() {
         sudo pkill -INT keploy 2>/dev/null || true
         return 1
     fi
-    curl -fsS --max-time 10 http://127.0.0.1:8000/value >/dev/null 2>&1
+    # The inbound request is mandatory: it is what makes this record
+    # session produce a test case alongside the startup mock. If it fails
+    # the guard is meaningless (the mocks grep could still pass on the
+    # startup mock alone), so propagate the failure to the caller and stop
+    # keploy.
+    if ! curl -fsS --max-time 10 http://127.0.0.1:8000/value >/dev/null 2>&1; then
+        echo "::error::inbound GET /value failed during record"
+        sudo pkill -INT keploy 2>/dev/null || true
+        return 1
+    fi
     sleep 5
     sudo pkill -INT keploy 2>/dev/null || true
 }
@@ -107,6 +116,11 @@ for i in 0 1; do
     sudo -E env PATH="$PATH" "$RECORD_BIN" record \
         -c "python3 app.py 127.0.0.1 9091" \
         > "record_logs_$i.txt" 2>&1
+    record_status=$?
+    # keploy is stopped via SIGINT by drive_request, so a non-zero status
+    # is expected and not itself a failure; report it for debuggability so
+    # a real record crash isn't misattributed to the later grep checks.
+    echo "=== record test-set-$i exit status: $record_status ==="
     if ! wait "$driver_pid"; then
         echo "::error::request driver failed while recording test-set-$i"
         tail -100 "record_logs_$i.txt"
