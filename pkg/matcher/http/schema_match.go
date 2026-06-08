@@ -103,6 +103,31 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		}
 	}
 
+	// Header existence check runs BEFORE the pass/fail print block so that:
+	// (a) the banner reflects the final result,
+	// (b) result.HeadersResult is populated for the report YAML, and
+	// (c) missing headers are surfaced in the diff printer output.
+	for k, v := range tc.HTTPResp.Header {
+		actualVal, ok := actualResponse.Header[k]
+		var actualVals []string
+		if ok {
+			actualVals = []string{actualVal}
+		}
+		result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
+			Normal:   ok,
+			Expected: models.Header{Key: k, Value: []string{v}},
+			Actual:   models.Header{Key: k, Value: actualVals},
+		})
+		if !ok {
+			pass = false
+			schemaErrors = append(schemaErrors, matcher.SchemaError{
+				Reason:   fmt.Sprintf("missing header %q in response", k),
+				Expected: k,
+				Actual:   "(missing)",
+			})
+		}
+	}
+
 	// Logging similar to Match() in match.go
 	if !pass {
 		printer := matcher.NewSchemaDiffPrinter(tc.Name)
@@ -121,13 +146,6 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		_, err := newLogger.Printf(log2)
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
-		}
-	}
-
-	// Check headers existence
-	for k := range tc.HTTPResp.Header {
-		if _, ok := actualResponse.Header[k]; !ok {
-			pass = false
 		}
 	}
 

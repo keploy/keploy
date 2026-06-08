@@ -344,4 +344,13 @@ type WindowAware interface {
 	// types.TierIndex.orderForCurrentState). The individual bool
 	// accessors are retained for legacy callers that read only one bit.
 	WindowSnapshot() models.WindowSnapshot
+
+	// CurrentTestWindow returns the [start, end] request-timestamp bounds of
+	// the outer test currently being replayed, or (zero, zero) when no window
+	// is active. Matchers that receive per-test data mocks via the session
+	// pool (the enterprise agent lax-promotes them and relies on the
+	// MockManager for strict windowing) use this to tell an in-window mock
+	// from a stale earlier-test mock when disambiguating repeated identical
+	// prepared-statement reads.
+	CurrentTestWindow() (time.Time, time.Time)
 }

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -141,12 +142,24 @@ func (p *Proxy) recordViaSupervisor(
 		preDispatchPause = pp.WantsPreDispatchPause()
 	}
 
+	// RealCertHook wires the V2-relay upstream-TLS chokepoint into
+	// the cbshim. The post-handshake upgradeDstConn carries the real
+	// upstream cert; we publish (connID = source-port-as-string,
+	// realDER, sigAlgo) so cbshim can pair it with the MITM cert from
+	// CertForClient. Nil-safe: p.cbshim is nil when BPF cbshim
+	// failed to load, in which case the relay just skips publishing.
+	var realCertHook func(connID string, realDER []byte, sigAlgo x509.SignatureAlgorithm)
+	if p.cbshim != nil {
+		realCertHook = p.cbshim.RegisterReal
+	}
+
 	r := relay.New(relay.Config{
 		Logger:               logger,
 		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
 		BumpActivity:         sv.BumpActivity,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
+		RealCertHook:         realCertHook,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
