@@ -180,6 +180,10 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		lifetime = models.LifetimeSession
 	case "connection":
 		lifetime = models.LifetimeConnection
+	default:
+		if models.IsMySQLSessionReusableCommandType(requestOperation) {
+			lifetime = models.LifetimeSession
+		}
 	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
@@ -207,8 +211,6 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		select {
 		case mocks <- mysqlMock:
 		case <-ctx.Done():
-			return
 		}
 	}
-	return
 }

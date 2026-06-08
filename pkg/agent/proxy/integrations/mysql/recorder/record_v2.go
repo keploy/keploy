@@ -857,6 +857,10 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		lifetime = models.LifetimeSession
 	case "connection":
 		lifetime = models.LifetimeConnection
+	default:
+		if models.IsMySQLSessionReusableCommandType(reqOp) {
+			lifetime = models.LifetimeSession
+		}
 	}
 	m := &models.Mock{
 		Version: models.GetVersion(),

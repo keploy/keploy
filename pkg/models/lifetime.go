@@ -369,7 +369,25 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 	if hdr == nil {
 		return false
 	}
-	switch hdr.Type {
+	return IsMySQLSessionReusableCommandType(hdr.Type)
+}
+
+// IsMySQLSessionReusableCommandType reports whether a MySQL command
+// packet type (the wire Header.Type string, e.g. "COM_PING") is a
+// connection-alive command whose response is input-independent and
+// therefore safe to treat as session-scoped regardless of the on-disk
+// "mocks" tag. It is the single source of truth shared by
+// DeriveLifetime's rule #1 (replay/disk-load ingest) and the MySQL
+// recorders (record.go / record_v2.go), which must stamp
+// LifetimeSession for these at emit time — otherwise, with
+// LifetimeDerived=true pinning the per-test classification, a keepalive
+// fired between test windows is window-filtered and stale-dropped
+// during recording and never makes it to disk.
+//
+// Deliberately narrow — COM_QUERY/COM_INIT_DB/COM_CHANGE_USER/
+// COM_SET_OPTION depend on input and must stay per-test.
+func IsMySQLSessionReusableCommandType(cmdType string) bool {
+	switch cmdType {
 	case "COM_PING", "COM_STATISTICS", "COM_DEBUG", "COM_RESET_CONNECTION":
 		return true
 	}
