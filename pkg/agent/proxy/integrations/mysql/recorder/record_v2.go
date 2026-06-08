@@ -871,6 +871,18 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 	if sess.Opts.DstCfg != nil && sess.Opts.DstCfg.Addr != "" {
 		meta["destAddr"] = sess.Opts.DstCfg.Addr
 	}
+
+	lifetime := models.LifetimePerTest
+	switch mockType {
+	case "config":
+		lifetime = models.LifetimeSession
+	case "connection":
+		lifetime = models.LifetimeConnection
+	default:
+		if models.IsMySQLSessionReusableCommandType(reqOp) {
+			lifetime = models.LifetimeSession
+		}
+	}
 	m := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,
@@ -883,7 +895,12 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
 		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        lifetime,
+			LifetimeDerived: true,
+		},
 	}
+
 	if err := sess.EmitMock(m); err != nil {
 		if sess.Logger != nil {
 			sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
