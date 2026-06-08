@@ -198,19 +198,17 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			LifetimeDerived: true,
 		},
 	}
-	// Send to the mocks channel for YAML output. Use either the direct
-	// mocks channel or syncMock.AddMock, but NOT both — AddMock also sends
-	// to outChan (which is the same channel in the sockmap proxy path),
-	// causing every mock to be written to YAML twice.
+
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.AddMock(mysqlMock)
+		return
+	}
 	if mocks != nil {
 		select {
 		case mocks <- mysqlMock:
 		case <-ctx.Done():
 			return
 		}
-	} else {
-		mgr := syncMock.Get()
-		mgr.AddMock(mysqlMock)
 	}
 	return
 }
