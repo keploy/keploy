@@ -73,12 +73,25 @@ type Record struct {
 	// TestCaseNaming controls how default test case filenames are generated.
 	// "descriptive" (default) derives a slug from the HTTP method+path or gRPC service/method.
 	// "sequential" preserves the legacy `test-N.yaml` numbering.
-	TestCaseNaming    string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
-	Synchronous       bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
-	EnableSampling    int    `json:"enableSampling" yaml:"enableSampling"`
-	MemoryLimit       uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
-	GlobalPassthrough bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	TestCaseNaming string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
+	Synchronous    bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	EnableSampling int    `json:"enableSampling" yaml:"enableSampling"`
+	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
+	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
+	// cert-hash libpq folds into the SCRAM proof, so postgres clients running
+	// with channel_binding=require still authenticate through keploy's TLS MITM
+	// against the REAL upstream postgres at record time. Replay does not forward
+	// to the real database — postgres traffic is served from mocks, no SCRAM
+	// handshake actually completes against postgres — so the shim is record-only.
+	// OSS builds have no implementation registered and ignore this flag entirely;
+	// builds with a registered factory respect it. Defaults to false; flip to
+	// true in keploy.yml under record: to opt in. Requires CAP_BPF + a kernel
+	// that allows bpf_probe_write_user; without those the factory returns an
+	// error and the proxy keeps working for non-PLUS clients.
+	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
+	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.
 	// "" or "yaml" (default) writes mocks.yaml — human-readable, the
 	// format all tooling expects. "gob" writes a binary mocks.gob — a
@@ -209,6 +222,9 @@ type Test struct {
 	SchemaMatch                 bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	UpdateTestMapping           bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise      bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"`                                    // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	SchemaNoiseDetection        bool                `json:"schemaNoiseDetection" yaml:"schemaNoiseDetection" mapstructure:"schemaNoiseDetection"`                                          // detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) on HTTP mocks during auto-replay matching
+	SchemaNoiseStrict           bool                `json:"schemaNoiseStrict" yaml:"schemaNoiseStrict" mapstructure:"schemaNoiseStrict"`                                                   // replay-path enforcement: for an HTTP mock that already carries learned req_body_noise, match strictly — every request-body field must match except the learned-noise paths, so a non-noise drift fails the match. Left false on the auto-replay path so it can still learn noise leniently.
+	StrictFailure               bool                `json:"strictFailure" yaml:"strictFailure" mapstructure:"strictFailure"`                                                               // when true, a response-failing test (testPass=false) is marked FAILED even if the consumed mock set diverged from the recorded mapping. Default false preserves the historical demotion: response failures with mock-set mismatch are marked OBSOLETE so the user can re-record without seeing the response diff as a hard failure. Set true to surface every response divergence as a real test failure for CI gating; the per-test OBSOLETE label is replaced by FAILED but the mappingDiff (expected vs actual mocks, missing calls) is still written to the report for diagnostics.
 	StrictMockWindow            bool                `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
 	KeepAppAlive                bool                `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration       `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.

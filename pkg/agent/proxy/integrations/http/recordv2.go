@@ -490,6 +490,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			ReqTimestampMock: m.ReqTimestampMock,
 			ResTimestampMock: m.ResTimestampMock,
 		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
 	}
 	return mock, nil
 }

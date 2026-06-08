@@ -2,9 +2,11 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -405,6 +407,25 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				PreamblePayload: preamblePayload,
 			}
 		}
+		// V2-relay equivalent of dialPostgresSSLUpstream's
+		// cb.RegisterReal call. Capture the real upstream cert here
+		// so the channel-binding shim can rendezvous it with the MITM
+		// cert minted by CertForClient. This is the chokepoint for
+		// every parser that drives upstream TLS through the supervisor
+		// relay (Postgres V3, MySQL, Mongo, etc.) so wiring here
+		// covers all of them without per-parser changes.
+		//
+		// Order matters: must run BEFORE newReadTimeReportingConn
+		// below. That wrapper embeds net.Conn anonymously and does
+		// not implement Unwrap()/NetConn(), so unwrapToTLSConn cannot
+		// see through it to the underlying *tls.Conn — the hook
+		// would silently no-op and cbmap stays empty. Verified by
+		// running keploy record --debug locally with psycopg2-binary
+		// + channel_binding=require: with the hook in this position,
+		// "relay: RealCertHook fired" prints and SCRAM-PLUS succeeds;
+		// with the hook after the wrapper, it never logs.
+		publishRealCertFromUpgraded(r, upgradedDst, log)
+
 		upgradedDst = newReadTimeReportingConn(upgradedDst, trackedDst)
 	}
 
@@ -752,4 +773,81 @@ func (r *Relay) teeFor(d fakeconn.Direction) *tee {
 	default:
 		return nil
 	}
+}
+
+// publishRealCertFromUpgraded extracts the real upstream peer cert
+// from the just-upgraded dest connection and notifies the configured
+// RealCertHook (typically cbshim.RegisterReal). Keyed by the app's
+// source-port (matching what tls.CertForClient registered as the
+// MITM half via MITMPublishHook).
+//
+// Best-effort: if the cfg has no hook, if the upgraded conn isn't a
+// *tls.Conn (defensive — should always be), if peer certs are empty,
+// or if the source-port can't be resolved, we silently skip — channel
+// binding then fails as it would without this feature for that
+// connection.
+func publishRealCertFromUpgraded(r *Relay, upgraded net.Conn, log *zap.Logger) {
+	if r.cfg.RealCertHook == nil {
+		return
+	}
+	tlsView, ok := unwrapToTLSConn(upgraded)
+	if !ok {
+		return
+	}
+	state := tlsView.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return
+	}
+	leaf := state.PeerCertificates[0]
+
+	src := r.src.Load()
+	if src == nil || *src == nil {
+		return
+	}
+	tcpAddr, ok := (*src).RemoteAddr().(*net.TCPAddr)
+	if !ok || tcpAddr == nil || tcpAddr.Port == 0 {
+		// Port==0 means the addr resolution returned a sentinel /
+		// unspecified port (typically a wrapped conn that doesn't
+		// surface the underlying TCP port). connID "0" would
+		// rendezvous with every other Port==0 connection in cbshim's
+		// pending map, so skip — matches tls.publishMITM's
+		// sourcePort==0 guard.
+		return
+	}
+	r.cfg.RealCertHook(strconv.Itoa(tcpAddr.Port), leaf.Raw, leaf.SignatureAlgorithm)
+	if log != nil {
+		// Gated under log.Check so leaf.Subject.String() (an x509
+		// pkix.Name format/escape walk) doesn't run on every TLS
+		// upgrade when debug is off. Fires per UpgradeTLS directive,
+		// so the cost is non-trivial under load.
+		if ce := log.Check(zap.DebugLevel, "relay: RealCertHook fired"); ce != nil {
+			ce.Write(
+				zap.String("conn_id", strconv.Itoa(tcpAddr.Port)),
+				zap.String("subject", leaf.Subject.String()),
+			)
+		}
+	}
+}
+
+// unwrapToTLSConn walks a small chain of net.Conn wrappers looking
+// for the underlying *tls.Conn. Mirrors the same pattern used by the
+// V1 parser path in util/tls_upgrader.go.
+func unwrapToTLSConn(c net.Conn) (*tls.Conn, bool) {
+	type unwrapper interface{ Unwrap() net.Conn }
+	type netConner interface{ NetConn() net.Conn }
+	for i := 0; i < 8 && c != nil; i++ {
+		if tc, ok := c.(*tls.Conn); ok {
+			return tc, true
+		}
+		if u, ok := c.(unwrapper); ok {
+			c = u.Unwrap()
+			continue
+		}
+		if w, ok := c.(netConner); ok {
+			c = w.NetConn()
+			continue
+		}
+		return nil, false
+	}
+	return nil, false
 }
