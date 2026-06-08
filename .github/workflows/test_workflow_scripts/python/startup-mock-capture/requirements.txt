@@ -1,0 +1,6 @@
+# Flask serves the inbound endpoint so each record session captures a
+# test case alongside the startup mock. urllib3 is botocore/boto3's HTTP
+# transport, so the startup secret fetch matches a real AWS Secret
+# Manager init call's shape. Pinned for reproducible CI behaviour.
+flask==3.0.3
+urllib3==2.3.0

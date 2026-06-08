@@ -1,0 +1,69 @@
+name: Startup Mock Capture Regression (Linux)
+# Regression guard: a once-per-boot outbound call (e.g. an AWS Secret
+# Manager fetch performed at application startup, before the app serves
+# any inbound request) must be captured as a mock in EVERY recorded test
+# set. The app fetches a secret at import time from a fake upstream; the
+# guard records two test sets and asserts the startup mock landed in both.
+#
+# Runs only the `build` (PR) binary: in the pure-OSS record path the
+# startup call is direct-sent to disk, so this guards the persistence
+# path end-to-end rather than demonstrating the bug on `latest` (the
+# deterministic trigger is the enterprise --static-dedup path). The
+# precise regression lives in the Go unit tests under
+# pkg/agent/proxy/syncMock.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  startup_mock_capture_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: startup-mock-capture (record_with_build)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run regression guard
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        # `bash <script>` (not `source`) so the script's intentional
+        # `set +e` is not overridden by the step's default `-eo pipefail`.
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/startup-mock-capture/python-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-mock-capture-logs
+          path: |
+            .github/workflows/test_workflow_scripts/python/startup-mock-capture/record_logs_0.txt
+            .github/workflows/test_workflow_scripts/python/startup-mock-capture/record_logs_1.txt
+            .github/workflows/test_workflow_scripts/python/startup-mock-capture/upstream_logs.txt
+            .github/workflows/test_workflow_scripts/python/startup-mock-capture/keploy/
+          if-no-files-found: warn
+          retention-days: 7
