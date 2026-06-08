@@ -9,10 +9,39 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap/zaptest"
 )
+
+// wireSyncMockOutput plugs the process-global syncMock singleton's
+// output channel into the test's mocks channel. recordMock routes every
+// emitted MySQL mock through syncMock.AddMock (mirroring the HTTP legacy
+// recorder), so the only way to observe emitted mocks from a unit test
+// is to bind the manager's outChan: when a channel is bound and
+// firstReqSeen is false (the default singleton state), AddMock forwards
+// synchronously. Cleanup unbinds by pointing the manager at a throwaway
+// channel (SetOutputChannel's same-pointer guard requires a distinct
+// channel to clear the closed flag).
+//
+// Tests using this MUST NOT call t.Parallel(): the syncMock singleton is
+// process-global, so two tests binding their own outChan concurrently
+// would interleave each other's mocks.
+func wireSyncMockOutput(t *testing.T, mocks chan *models.Mock) {
+	t.Helper()
+	mgr := syncMock.Get()
+	if mgr == nil {
+		return
+	}
+	mgr.SetOutputChannel(mocks)
+	t.Cleanup(func() {
+		// Restore the pristine unbound (nil) state so any later test in
+		// this package sees the default buffering behavior rather than a
+		// dangling reader-less channel.
+		mgr.SetOutputChannel(nil)
+	})
+}
 
 // pipeConn is a net.Conn-shaped wrapper around a unidirectional byte
 // pipe. Reads block until bytes are pushed or the conn is closed.
@@ -195,7 +224,8 @@ func prepareOkShort(seq byte, stmtID uint32) []byte {
 //     fast path so a successful Read can never lose its bytes to a
 //     concurrent ctx-cancel.
 func TestHandleClientQueries_DrainOnCtxCancel(t *testing.T) {
-	t.Parallel()
+	// Not parallel: recordMock routes through the process-global syncMock
+	// singleton (see wireSyncMockOutput).
 
 	clientConn := newPipeConn()
 	destConn := newPipeConn()
@@ -204,6 +234,7 @@ func TestHandleClientQueries_DrainOnCtxCancel(t *testing.T) {
 	decodeCtx.LastOp.Store(clientConn, wire.RESET)
 
 	mocks := make(chan *models.Mock, 8)
+	wireSyncMockOutput(t, mocks)
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), models.ClientConnectionIDKey, "test-conn-0"))
 
 	done := make(chan struct{})
@@ -291,7 +322,8 @@ collect:
 // column/param defs — that keeps the test focused on the cancel-race
 // boundary rather than the result-set decoder's state machine.
 func TestHandleClientQueries_PreparePlusExecute(t *testing.T) {
-	t.Parallel()
+	// Not parallel: recordMock routes through the process-global syncMock
+	// singleton (see wireSyncMockOutput).
 
 	clientConn := newPipeConn()
 	destConn := newPipeConn()
@@ -300,6 +332,7 @@ func TestHandleClientQueries_PreparePlusExecute(t *testing.T) {
 	decodeCtx.LastOp.Store(clientConn, wire.RESET)
 
 	mocks := make(chan *models.Mock, 8)
+	wireSyncMockOutput(t, mocks)
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), models.ClientConnectionIDKey, "test-conn-1"))
 
 	done := make(chan struct{})
