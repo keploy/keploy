@@ -16,7 +16,14 @@ func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*t
 	rec := &dropRecorder{}
 	t2 := newTee(fakeconn.FromClient, capBytes, buf, memCheck, rec.record, nil)
 	t.Cleanup(func() {
+		// close stops accepting new pushes and drain delivers any
+		// staged chunks. Tests in this file generally do NOT consume
+		// from t2.readCh() (they're asserting on push-side drop
+		// counters), so drain would block on out forever — abort
+		// releases it. Production analogue: proxy_v2.SessionOnAbort
+		// calling r.AbortTees() when the parser stops reading.
 		t2.close()
+		t2.abort()
 		t2.waitDone()
 	})
 	return t2, rec.record, rec
@@ -164,6 +171,11 @@ func TestTee_ClosePreventsSendPanic(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	tt.close()
 	wg.Wait()
+	// No consumer is reading the out channel in this test, so drain
+	// would block forever trying to deliver staged chunks. Abort to
+	// release it — the production analogue is proxy_v2.SessionOnAbort
+	// invoking r.AbortTees() once the parser is no longer reading.
+	tt.abort()
 	tt.waitDone()
 }
 

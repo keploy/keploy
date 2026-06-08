@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -228,6 +229,21 @@ func (r *Relay) PauseTees() {
 	r.teeD2C.setPaused(true)
 }
 
+// AbortTees releases any drain goroutine blocked sending to a
+// FakeConn whose consumer has stopped reading, by closing each tee's
+// shutdown channel. Used by the supervisor abort path before closing
+// the FakeConn streams — without this, the drain goroutines would
+// block on `out <- c` forever once FakeConn.Close has been called
+// (the consumer is gone, but drain still holds a chunk to deliver).
+// On the natural-close path the tees close staging only; drain
+// delivers everything and exits without needing this signal.
+//
+// Idempotent and safe to call from any goroutine.
+func (r *Relay) AbortTees() {
+	r.teeC2D.abort()
+	r.teeD2C.abort()
+}
+
 // Run starts the forwarder, drain, and directive-processor goroutines
 // and blocks until both forwarders exit. Exits happen on:
 //
@@ -365,15 +381,24 @@ func (r *Relay) run(ctx context.Context) error {
 
 	// Now it is safe to stop the tees: no more push() calls will
 	// fire. Close staging channels and wait for drain goroutines to
-	// flush what they already had buffered.
+	// deliver every chunk they had buffered. Drain naturally closes
+	// out when staging empties, which surfaces to the FakeConn
+	// consumer as a clean io.EOF — the parser sees every byte the
+	// forwarders teed before tearing down, then exits cleanly.
+	//
+	// We intentionally do NOT call clientStream.Close()/destStream.Close()
+	// here: that would set the FakeConn's closed flag and turn every
+	// subsequent Read into ErrClosed, even reads that would otherwise
+	// drain buffered chunks. The V2 record path relies on the parser
+	// being able to consume the full set of teed chunks after the
+	// forwarders exit — see the captureQueriesV2 lifecycle docs in
+	// integrations/pkg/postgres/v3/recorder. For the abort path
+	// (parser dead or stuck) callers explicitly close the FakeConn
+	// streams AND call AbortTees so drain doesn't deadlock on out.
 	r.teeC2D.close()
 	r.teeD2C.close()
 	r.teeC2D.waitDone()
 	r.teeD2C.waitDone()
-
-	// Close the FakeConns so any blocked parser Read returns ErrClosed.
-	_ = r.clientStream.Close()
-	_ = r.destStream.Close()
 
 	// Signal the directive processor to exit and wait for it. Use the
 	// idempotent closer because either forwarder's defer may have
@@ -614,6 +639,9 @@ func (r *Relay) forward(
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				log.Debug("relay forwarder exiting on src.Read EOF",
+					zap.String("dir", dir.String()),
+				)
 				return io.EOF
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
@@ -637,6 +665,11 @@ func (r *Relay) forward(
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
+			log.Debug("relay forwarder exiting on src.Read error",
+				zap.String("dir", dir.String()),
+				zap.String("errType", fmt.Sprintf("%T", err)),
+				zap.Error(err),
+			)
 			return err
 		}
 	}

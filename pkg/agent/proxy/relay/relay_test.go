@@ -79,6 +79,17 @@ func (h *relayHarness) shutdown() {
 	_ = h.clientApp.Close()
 	_ = h.destSvc.Close()
 
+	// Tests do not always read from ClientStream/DestStream (e.g. the
+	// backpressure tests intentionally leave the FakeConns unread to
+	// force DropChannelFull). With the V2-record drain semantics — where
+	// close() lets drain finish delivering staged chunks rather than
+	// drop them — the shutdown path must explicitly abort the tees,
+	// otherwise drain blocks on `out <- c` forever and waitDone (inside
+	// relay.run cleanup) never returns. Production code paths handle
+	// this via proxy_v2's SessionOnAbort hook; the test harness reaches
+	// the same outcome by calling AbortTees here.
+	h.r.AbortTees()
+
 	select {
 	case <-h.runDone:
 	case <-time.After(5 * time.Second):

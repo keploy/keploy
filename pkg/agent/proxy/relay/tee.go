@@ -78,14 +78,18 @@ type tee struct {
 	closeMu sync.RWMutex
 	// closeOnce guards the single close of staging.
 	closeOnce sync.Once
+	// abortOnce guards the single close of shutdown.
+	abortOnce sync.Once
 	// closed is set by close so concurrent push callers short-circuit
 	// before touching the channel.
 	closed atomic.Bool
 	// done is closed once the drain goroutine has exited so tests can
 	// wait for it deterministically.
 	done chan struct{}
-	// shutdown is closed by close() to unblock a drain goroutine
-	// stuck sending to a FakeConn that has stopped reading.
+	// shutdown is closed by abort() to release a drain goroutine
+	// stuck sending to a FakeConn whose consumer has stopped reading.
+	// close() does NOT close shutdown — see drain/close docs for the
+	// natural-vs-abort distinction.
 	shutdown chan struct{}
 }
 
@@ -208,7 +212,7 @@ func (t *tee) drop(reason string) {
 // decrementing the byte counter as it goes. When staging is closed —
 // either because the relay is shutting down or because close was
 // called explicitly — drain forwards any remaining buffered chunks
-// non-blockingly, then closes out and signals done.
+// to the consumer, then closes out and signals done.
 //
 // The FakeConn reader is the only receiver on out; under normal
 // operation it drains at roughly parser speed and sends complete
@@ -220,8 +224,13 @@ func (t *tee) drop(reason string) {
 //
 // Correctness under teardown: the staging send in push is guarded by
 // closeMu, so after close() returns no new values can be enqueued.
-// drain's send to out selects on shutdown to avoid a deadlock when
-// the FakeConn consumer has already stopped reading.
+// On natural close (close() called, parser still reading) drain
+// faithfully delivers every staged chunk, then closes out — the
+// consumer sees io.EOF on its next read. On abort (abort() called,
+// parser dead or stuck) drain releases its blocked send via the
+// shutdown branch and drops the remaining chunks; this prevents the
+// drain goroutine from leaking when the FakeConn has been Close()'d
+// out from under us.
 func (t *tee) drain() {
 	defer close(t.done)
 	defer close(t.out)
@@ -230,18 +239,26 @@ func (t *tee) drain() {
 		select {
 		case t.out <- c:
 		case <-t.shutdown:
-			// Consumer stopped reading before we could deliver;
-			// drop the chunk. The mock is being abandoned either
-			// way (close implies teardown), so suppress the usual
-			// onDrop notification to avoid double-counting.
+			// Abort path: consumer is gone, drop the chunk. close()
+			// does NOT take this path — only abort() does. The mock
+			// is being abandoned at that point, so suppress the
+			// usual onDrop notification to avoid double-counting.
 			t.drops.Add(1)
 		}
 	}
 }
 
 // close stops the tee. After close returns, push is a no-op (returns
-// false) and the drain goroutine will finish once staging is drained.
-// close is idempotent.
+// false) and the drain goroutine will deliver any remaining staged
+// chunks to the consumer before closing out and signalling done. The
+// consumer (FakeConn) sees io.EOF on its next read once out is empty
+// and closed. close is idempotent.
+//
+// close does NOT close the shutdown channel: drain must keep delivering
+// to honour the V2 record contract (the parser may still have work to
+// do on already-teed bytes even after the forwarders have exited). For
+// the abort path — parser dead or stuck, FakeConn closed from under
+// drain — use [tee.abort] to release any blocked drain send.
 func (t *tee) close() {
 	t.closeOnce.Do(func() {
 		// Write-lock fences any in-flight push send; setting closed
@@ -250,8 +267,22 @@ func (t *tee) close() {
 		t.closeMu.Lock()
 		t.closed.Store(true)
 		close(t.staging)
-		close(t.shutdown)
 		t.closeMu.Unlock()
+	})
+}
+
+// abort releases drain's blocked-on-out send by closing the shutdown
+// channel. Used by the supervisor abort path (SessionOnAbort) when the
+// FakeConn has been Close()'d and the parser is no longer reading —
+// without this, drain would block on `out <- c` forever and leak the
+// goroutine. abort is idempotent and safe to call from any goroutine.
+//
+// abort does NOT close staging — callers should invoke abort BEFORE
+// (or alongside) close() so that any chunks still in staging at abort
+// time are dropped rather than delivered to a dead consumer.
+func (t *tee) abort() {
+	t.abortOnce.Do(func() {
+		close(t.shutdown)
 	})
 }
 

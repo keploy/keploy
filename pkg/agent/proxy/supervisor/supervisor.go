@@ -259,7 +259,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		}
 
 	case <-ctx.Done():
-		s.cfg.Logger.Debug("supervisor: outer ctx cancelled")
+		s.cfg.Logger.Debug("supervisor: outer ctx cancelled",
+			zap.Error(ctx.Err()),
+			zap.Stack("stack"),
+		)
 		runCancel()
 		// Give the parser a short chance to return cleanly; if it
 		// does we surface that. Otherwise we classify as canceled.
