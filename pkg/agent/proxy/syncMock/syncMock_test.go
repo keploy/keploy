@@ -1358,3 +1358,173 @@ func TestFlushOwnedWindowsNoopWhenNothingOwned(t *testing.T) {
 	default:
 	}
 }
+
+// startupHTTPMock builds a once-per-boot outbound HTTP mock (e.g. an AWS
+// Secret Manager fetch at process startup): per-test lifetime, as the HTTP
+// recorder stamps it, with a request timestamp at app-boot time.
+func startupHTTPMock(reqTS time.Time) *models.Mock {
+	return &models.Mock{
+		Name: "mocks",
+		Kind: models.HTTP,
+		Spec: models.MockSpec{
+			ReqTimestampMock: reqTS,
+			ResTimestampMock: reqTS.Add(50 * time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+		},
+	}
+}
+
+// TestStartupMockSurvivesDedupDeleteWhenFirstRequestIsDuplicate reproduces
+// the flaky per-test-set capture bug (Rank 1). A once-per-boot outbound
+// call is captured before the first inbound request while the output
+// channel is not yet bound, so it lands in the buffer tagged IsStartup. If
+// the FIRST inbound request hashes as a dedup duplicate, ResolveJob calls
+// DeleteMocksStrictlyBefore with recentWindows still empty — so the
+// ownerWindow rescue cannot save it and the pre-fix code dropped it as
+// "duplicate debris". It must be flushed to disk instead.
+func TestStartupMockSurvivesDedupDeleteWhenFirstRequestIsDuplicate(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+
+	bootTS := time.Now().Add(-2 * time.Second)
+	mgr.AddMock(startupHTTPMock(bootTS)) // outChan nil → buffered, !firstReqSeen → tagged
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("init call should buffer before outChan binds; buffer=%d", len(mgr.buffer))
+	}
+	if !mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("a mock captured before firstReqSeen must be tagged IsStartup")
+	}
+
+	// Recorder wires the channel; the first inbound request is a duplicate.
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	mgr.DeleteMocksStrictlyBefore(time.Now())
+
+	select {
+	case got := <-out:
+		if !got.Spec.ReqTimestampMock.Equal(bootTS) {
+			t.Fatalf("flushed wrong mock: ts=%v want %v", got.Spec.ReqTimestampMock, bootTS)
+		}
+	default:
+		t.Fatalf("startup init mock was dropped by the dedup cleanup (Rank 1 regression)")
+	}
+}
+
+// TestStartupMockSurvivesStaleCutoffInResolveRange reproduces Rank 2: a
+// slow boot (>7 s between the init call and the first test window) makes
+// the buffered, window-less init mock older than the 7 s stale-cutoff, so
+// the pre-fix ResolveRange reaped it. It must be rescued and flushed.
+func TestStartupMockSurvivesStaleCutoffInResolveRange(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+
+	bootTS := time.Now().Add(-10 * time.Second)
+	mgr.AddMock(startupHTTPMock(bootTS)) // buffered (outChan nil), tagged IsStartup
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+
+	now := time.Now()
+	mgr.ResolveRange(now.Add(-50*time.Millisecond), now, "test-1", true, false)
+
+	select {
+	case got := <-out:
+		if !got.Spec.ReqTimestampMock.Equal(bootTS) {
+			t.Fatalf("flushed wrong mock: ts=%v want %v", got.Spec.ReqTimestampMock, bootTS)
+		}
+	default:
+		t.Fatalf("startup init mock was dropped by the 7s stale-cutoff (Rank 2 regression)")
+	}
+}
+
+// TestSetMemoryPressurePreservesStartupMocks pins the memory-wipe reaper:
+// SetMemoryPressure must drop ordinary buffered mocks to relieve pressure
+// but PRESERVE startup mocks, which own no window and rely on the later
+// FlushOwnedWindows drain to reach disk. Wiping them would reintroduce the
+// once-per-boot loss the IsStartup tag exists to prevent.
+func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
+	t.Parallel()
+
+	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	startup.TestModeInfo.IsStartup = true
+	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+
+	mgr := &SyncMockManager{buffer: []*models.Mock{perTest, startup}}
+
+	mgr.SetMemoryPressure(true)
+
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != startup {
+		t.Fatalf("expected only the startup mock preserved after memory wipe; buffer=%d", len(mgr.buffer))
+	}
+
+	// New non-startup mocks are still dropped while paused.
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("new mocks must still be dropped under memory pressure; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestStartupMockFlushedByFlushOwnedWindows asserts the proactive drain: the
+// per-session ticker flushes startup mocks straight to disk so they cannot
+// linger in the buffer where a later reaper (dedup/stale-cutoff/memory wipe)
+// would destroy them.
+func TestStartupMockFlushedByFlushOwnedWindows(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+
+	bootTS := time.Now().Add(-1 * time.Second)
+	mgr.AddMock(startupHTTPMock(bootTS)) // buffered (outChan nil), tagged IsStartup
+	mgr.SetOutputChannel(out)
+
+	mgr.FlushOwnedWindows()
+
+	select {
+	case got := <-out:
+		if !got.Spec.ReqTimestampMock.Equal(bootTS) {
+			t.Fatalf("flushed wrong mock")
+		}
+	default:
+		t.Fatalf("startup mock should be flushed proactively by FlushOwnedWindows")
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("startup mock should leave the buffer after flush; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestDuplicateDebrisStillDroppedAfterFirstReqSeen is the negative control:
+// an outbound mock captured AFTER firstReqSeen that owns no window is the
+// skipped duplicate's own debris — it is NOT a startup mock and the dedup
+// cleanup must still drop it, so the startup rescue does not over-rescue.
+func TestDuplicateDebrisStillDroppedAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled() // request-driven traffic, not startup
+
+	debris := startupHTTPMock(time.Now().Add(-1 * time.Second))
+	mgr.AddMock(debris)
+	if mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("a mock captured after firstReqSeen must NOT be tagged IsStartup")
+	}
+
+	mgr.DeleteMocksStrictlyBefore(time.Now())
+
+	select {
+	case got := <-out:
+		t.Fatalf("non-startup debris must be dropped, but it was flushed: ts=%v", got.Spec.ReqTimestampMock)
+	default:
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("debris must be dropped from the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
