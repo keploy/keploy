@@ -16,7 +16,6 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v3/config"
-	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -625,6 +624,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.OpportunisticTLSIntercept {
 		command = append(command, "--opportunistic-tls-intercept")
 	}
+	if opts.ChannelBindingShim {
+		command = append(command, "--channel-binding-shim")
+	}
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
@@ -653,6 +655,14 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
 		{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
 		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
+	}
+	if opts.ChannelBindingShim {
+		// The SCRAM-SHA-256-PLUS channel-binding shim rewrites the client's
+		// tls-server-end-point digest with bpf_probe_write_user, which the
+		// verifier gates behind CAP_SYS_ADMIN — CAP_BPF/CAP_PERFMON alone are
+		// insufficient. Only grant it when the shim is explicitly enabled.
+		capAdd = append(capAdd, &yaml.Node{Kind: yaml.ScalarNode, Value: "SYS_ADMIN",
+			LineComment: "required by the channel-binding shim (bpf_probe_write_user)"})
 	}
 
 	// Create the service YAML node structure
@@ -1035,21 +1045,6 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)
 			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)
-			// Channel-binding LD_PRELOAD shim. Loaded by libpq-based apps
-			// to make SCRAM-SHA-256-PLUS auth verify across keploy's TLS
-			// MITM. Safe to inject globally — the shim is a no-op for
-			// any X509_digest call whose computed hash isn't in
-			// /tmp/keploy-tls/cbmap.txt. Apps that don't reach OpenSSL
-			// (Java JSSE, Go-native, .NET) never invoke X509_digest.
-			//
-			// Gated on IsCBShimEmbedded: in OSS builds (no .so embedded),
-			// setupSharedVolume skips writing the file into the shared
-			// volume, so injecting LD_PRELOAD here would make ld.so print
-			// "cannot be preloaded" before every process in the container.
-			if pTls.IsCBShimEmbedded() {
-				cbshimPath := fmt.Sprintf("%s/cbshim.so", KeployTLSMountPath)
-				idc.addServiceEnvVar(serviceContentNode, "LD_PRELOAD", cbshimPath)
-			}
 
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)

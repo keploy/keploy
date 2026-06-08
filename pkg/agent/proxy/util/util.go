@@ -64,16 +64,6 @@ type Conn struct {
 	mu     sync.Mutex
 }
 
-// NetConn returns the underlying net.Conn that this wrapper embeds. Exists
-// so callers that need to reach a specific concrete type (e.g. *tls.Conn
-// for ConnectionState()) can unwrap without reflection.
-func (c *Conn) NetConn() net.Conn {
-	if c == nil {
-		return nil
-	}
-	return c.Conn
-}
-
 func (c *Conn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -29,7 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
+	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -245,6 +245,33 @@ type Proxy struct {
 	// own defaults via withDefaults().
 	recordBufferCap       int64
 	recordBufferQueueSize int
+
+	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
+	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
+	// pairs into its BPF map so SCRAM-SHA-256-PLUS auth succeeds across
+	// keploy's TLS MITM. Nil on OSS builds (no cbshim implementation
+	// registered), or when the enterprise impl failed to construct
+	// (missing CAP_BPF / older kernel / feature flag off); the proxy
+	// keeps working for non-PLUS clients in that case.
+	cbshim cbshim.CBShim
+}
+
+// SetCBShim wires the eBPF channel-binding shim handle into the proxy.
+// Typically called by the agent that owns the cbshim lifecycle, once
+// per proxy instance, before StartProxy. Pass nil to disable.
+//
+// Also installs the tls.MITMPublishHook so CertForClient publishes the
+// MITM half of every connection's cbshim rendezvous. Cleared (back to
+// nil) when called with a nil cbshim.
+func (p *Proxy) SetCBShim(c cbshim.CBShim) {
+	p.cbshim = c
+	if c == nil {
+		pTls.SetMITMPublishHook(nil)
+		return
+	}
+	pTls.SetMITMPublishHook(func(connID string, mitmDER []byte) {
+		c.RegisterMITM(connID, mitmDER)
+	})
 }
 
 // SetSkipListener disables the TCP accept loop.
@@ -385,12 +412,12 @@ func isPostgresSSLRequestPrefix(b []byte) bool {
 // from the passed-in context so a hung upstream does not block the
 // parser goroutine indefinitely; a 10 s default kicks in when the
 // context has no deadline (typical for record/replay mode).
-// dialPostgresSSLUpstream … (existing doc above). The connID argument is
-// the app-side source-port string used by the cbmap deferred-publish API
-// to rendezvous this upstream's real cert with the MITM cert minted by
-// CertForClient for the same source port. Pass "" to disable the cbmap
-// registration (only sensible in unit tests).
-func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger) (net.Conn, error) {
+//
+// connID is the app-side source-port string; if cb is non-nil the
+// upstream peer cert is published via cb.RegisterReal so channel-
+// binding substitution can rendezvous it with the MITM cert from
+// CertForClient. Pass nil to disable cbshim publishing (unit tests).
+func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.Config, logger *zap.Logger, cb cbshim.CBShim) (net.Conn, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(10 * time.Second)
@@ -435,14 +462,17 @@ func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.
 			zap.String("addr", addr),
 			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
 
-		// Register the real upstream cert with cbmap. If the MITM
-		// cert was already minted for this connID (CertForClient ran
-		// first — the parser-driven TLSUpgrader path), this triggers
-		// the deferred Publish. Otherwise the real half is stashed
-		// until CertForClient registers its MITM cert and Publish
-		// fires then. Either way the channel-binding shim sees the
-		// final (H_mitm, H_real) pair.
-		registerRealForCBMap(connID, tlsConn, logger)
+		// Publish the real upstream cert to the cbshim rendezvous.
+		// If CertForClient has already registered the MITM half for
+		// the same connID this triggers cbmap.Publish into the BPF
+		// map; otherwise the MITM half will publish when it arrives.
+		if cb != nil && connID != "" {
+			state := tlsConn.ConnectionState()
+			if len(state.PeerCertificates) > 0 {
+				leaf := state.PeerCertificates[0]
+				cb.RegisterReal(connID, leaf.Raw, leaf.SignatureAlgorithm)
+			}
+		}
 
 		return tlsConn, nil
 	case 'N':
@@ -452,30 +482,6 @@ func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("postgres SSL upstream %s returned unexpected byte 0x%02x as SSLRequest reply (expected 'S' or 'N'); check that the destination is actually a Postgres server and not something else listening on 5432", addr, reply[0])
 	}
-}
-
-// registerRealForCBMap captures the real upstream Postgres leaf cert
-// after the upstream TLS handshake has succeeded, and hands it to the
-// cbmap deferred-publish API. The MITM half is registered separately
-// by tls.CertForClient when the app-side handshake mints its cert;
-// once both halves arrive for the same connID, cbmap publishes the
-// (H_mitm, H_real) pair for the LD_PRELOAD shim to consume.
-//
-// Best-effort: any failure (no peer cert, empty connID) is logged at
-// Debug and swallowed — channel binding will still fail for SCRAM-PLUS
-// clients on that connection, matching pre-feature behavior.
-func registerRealForCBMap(connID string, tlsConn *tls.Conn, logger *zap.Logger) {
-	if connID == "" {
-		return
-	}
-	state := tlsConn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		logger.Debug("cbmap: no upstream peer certificate, skipping register",
-			zap.String("conn_id", connID))
-		return
-	}
-	realLeaf := state.PeerCertificates[0]
-	cbmap.RegisterReal(logger, connID, realLeaf.Raw, realLeaf.SignatureAlgorithm)
 }
 
 // speculativeUpstreamTLS holds the state of an upstream TLS dial that was
@@ -669,6 +675,43 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// how the overflow warning became invisible on customer runs.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetLogger(logger)
+	}
+
+	// Channel-binding shim: opt-in BPF-backed feature. Gate by the
+	// config flag AND on a registered factory — OSS builds have no
+	// factory and skip this branch entirely; enterprise builds
+	// register a factory via init() but still respect the flag, which
+	// defaults to false. Failure to construct (missing CAP_BPF, older
+	// kernel without uprobe support, bpf_probe_write_user disabled by
+	// the kernel hardener) is logged at Info and the proxy keeps
+	// working for non-SCRAM-PLUS clients. The cbshim is nil-safe at
+	// every consumer site, so a nil instance silently disables the
+	// channel-binding fix without affecting anything else.
+	// proxy.New runs in one of two contexts:
+	//   - Docker / docker-compose: a dedicated `keploy agent`
+	//     subprocess receives --channel-binding-shim via argv (set
+	//     by the orchestrator from docker.go's command builder) and
+	//     populates cfg.Agent.ChannelBindingShim.
+	//   - Native (--cmd-type native): the orchestrator's own process
+	//     runs the proxy; only cfg.Record.ChannelBindingShim is set
+	//     by the CLI flag / keploy.yml.
+	// Honour either — same pattern other propagation-via-argv flags
+	// like CapturePackets use (read from whichever the current
+	// process saw populated).
+	if opts != nil && (opts.Agent.ChannelBindingShim || opts.Record.ChannelBindingShim) {
+		if cb, err := cbshim.NewFromFactory(logger); err == nil && cb != nil {
+			proxy.SetCBShim(cb)
+			logger.Info("cbshim: BPF-backed channel-binding shim enabled")
+		} else if err != nil {
+			logger.Info("cbshim: factory returned an error — SCRAM-SHA-256-PLUS "+
+				"clients will fail across the MITM as today",
+				zap.Error(err),
+				zap.String("next_step", "verify the agent has CAP_BPF + CAP_PERFMON (or CAP_SYS_ADMIN on older kernels), the kernel is >= 5.5 with bpf_probe_write_user permitted (not disabled by lockdown / hardened images), and clang/llvm BPF support is available. To opt out of cbshim entirely, set record.channelBindingShim: false (or unset) in keploy.yml; non-PLUS postgres clients work without it."))
+		} else {
+			logger.Info("cbshim: no implementation registered (OSS build) — "+
+				"SCRAM-SHA-256-PLUS clients will fail across the MITM as today",
+				zap.String("next_step", "this build does not include a cbshim implementation; the OSS binary cannot intercept SCRAM-SHA-256-PLUS across the TLS MITM. Run an enterprise build (which registers a cbshim factory at init()) to get the feature, or set record.channelBindingShim: false to silence this log if non-PLUS clients are sufficient."))
+		}
 	}
 
 	return proxy
@@ -873,6 +916,51 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		)
 		pTls.MarkCAFailed(err)
 	}
+
+	// Channel-binding shim: now that appPID is known, walk the app's
+	// process tree, register every visible descendant in the BPF
+	// allowlist, attach uprobes to whatever libcryptos they map, and
+	// kick off a background rescan that picks up workers forked
+	// later (gunicorn/uwsgi) and lazy dlopen'd wheels (psycopg2-
+	// binary loads its bundled libssl only on the first connect).
+	//
+	// Nil-safe: if cbshim failed to load (no CAP_BPF, older kernel,
+	// etc.) p.cbshim is nil and these calls are no-ops. p.appPID==0
+	// means we don't yet know the app PID — also a no-op; future
+	// session-bind paths can call this explicitly.
+	if p.cbshim != nil && p.appPID != 0 {
+		// PID membership is BPF-side via task_in_agent_ns (lazy
+		// namespace classification — see cbshim.bpf.c). No userspace
+		// PID-walking polling loop. The library-refresh loop below
+		// only handles late-loaded libcrypto files (bundled wheel
+		// libs that appear after worker fork-exec) — its job is
+		// per-file uprobe attach, NOT PID tracking.
+		p.logger.Info("cbshim: scanning process tree for libcrypto/libpq mappings",
+			zap.Uint32("appPID", p.appPID))
+		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
+			p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
+				zap.Uint32("appPID", p.appPID), zap.Error(err),
+				zap.String("next_step", "the first-pass scan of /proc/<appPID>/maps + descendants failed to find or attach a uprobe for libcrypto/libpq; the BPF discovery hook (cbshim's security_mmap_file fentry) will catch them on the next library mmap, so this is non-fatal. If SCRAM-PLUS still fails after a few requests, rerun with --debug to see per-process scanProcessMaps results and confirm the agent has CAP_BPF + the kernel allows bpf_probe_write_user."))
+		} else {
+			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
+		}
+		// Kick the sched_process_exec ringbuf consumer. The kernel
+		// emits an event every time a process in the agent's PID
+		// namespace completes execve(); consumer walks /proc/<tgid>/
+		// maps to discover late-loaded libcrypto/libpq files (bundled
+		// wheel libs, etc.) and attaches uprobes. Replaces the old
+		// 2s polling loop with an event-driven design.
+		p.cbshim.StartProcEventConsumer(ctx)
+	} else if p.cbshim == nil {
+		// Neutral debug-level log — nil cbshim is the EXPECTED state
+		// when the feature flag is off or no implementation is
+		// registered (OSS builds), not just when BPF load failed.
+		// At Info this would spam every record-mode start.
+		p.logger.Debug("cbshim: not attached (feature disabled or no implementation registered)")
+	} else {
+		p.logger.Debug("cbshim: appPID==0 — skipping AttachToProcessTree (no app PID yet)")
+	}
+
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
@@ -1325,17 +1413,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	defer func() {
 		parserCtxCancel()
-
-		// Reap any half-arrived cbmap registration tied to this
-		// connection's source port. Without this, a connection that
-		// dies after only one of CertForClient / RegisterReal fired
-		// would leave an orphaned pending entry until the process
-		// restarts.
-		if initialSrcConn != nil {
-			if a, ok := initialSrcConn.RemoteAddr().(*net.TCPAddr); ok && a != nil {
-				cbmap.CleanupConnection(strconv.Itoa(a.Port))
-			}
-		}
 
 		if srcConn != nil {
 			err := srcConn.Close()
@@ -1955,8 +2032,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
 					dialStart := time.Now()
-					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger)
+					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim)
 					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					// Release cbshim's per-connection rendezvous state
+					// at connection exit. dialPostgresSSLUpstream may
+					// have already called RegisterReal; if the matching
+					// MITM half from CertForClient never arrives
+					// (handshake fails, postgres rejects auth pre-SCRAM,
+					// client disconnects mid-handshake, etc.), Publish
+					// never fires and the pending entry would leak
+					// until process exit. Snapshot the handle so a
+					// concurrent SetCBShim(nil) during shutdown can't
+					// race the deferred call. No-op when Publish has
+					// already drained the entry.
+					if cb := p.cbshim; cb != nil {
+						connID := strconv.Itoa(sourcePort)
+						defer cb.CleanupConnection(connID)
+					}
 				} else if speculativeDial != nil && addr == speculativeDialAddr &&
 					nextProtosSubset(cfg.NextProtos, speculativeDial.protos) {
 					// Fast path: the speculative dial targeted the
@@ -2231,6 +2323,48 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
 
 		}
+	}
+
+	// Channel-binding shim teardown — detach uprobes, drop allowlist
+	// entries, release BPF maps. Nil-safe so the no-BPF path doesn't
+	// trip a panic here. WatchProcessTree's goroutine has already
+	// exited via the proxy context being cancelled by the caller of
+	// StopProxyServer; Close() is idempotent against an in-flight
+	// goroutine racing it.
+	if p.cbshim != nil {
+		// Detach the global tls.MITMPublishHook so NEW CertForClient
+		// callers can't observe the handle. SetMITMPublishHook(nil)
+		// blocks until any in-flight publishMITM returns — see
+		// pkg/agent/proxy/tls/ca.go for the RWMutex drain — so no
+		// CertForClient → RegisterMITM call survives this point.
+		//
+		// We deliberately do NOT mutate p.cbshim here. In-flight
+		// connection-scoped goroutines (notably the opportunistic-TLS
+		// path) read p.cbshim multiple times within one connection;
+		// a racing nil-write would tear those reads. Since shutdown
+		// is in progress (listener closed, parent ctx cancelled, no
+		// new accepts), leaving p.cbshim pointing at the (now-quiesced)
+		// handle is safe — its publisher-facing surface is already
+		// inert via the cleared global hook.
+		//
+		// The actual cb.Close() is deferred onto a goroutine that
+		// waits for activeConns to drain. dialPostgresSSLUpstream
+		// captures p.cbshim into a function-local at call time, so
+		// goroutines mid-pg-SSL-handshake when shutdown starts are
+		// covered by the WaitGroup. Drain already had drainGrace
+		// seconds above; the deferred Close keeps the BPF maps +
+		// uprobes alive until the last in-flight goroutine returns.
+		// Kernel reclaims any leaked BPF resources at process exit
+		// if Wait never returns.
+		cb := p.cbshim
+		pTls.SetMITMPublishHook(nil)
+		go func() {
+			p.activeConns.Wait()
+			if err := cb.Close(); err != nil {
+				p.logger.Debug("cbshim deferred close error",
+					zap.Error(err))
+			}
+		}()
 	}
 
 	p.CloseErrorChannel()

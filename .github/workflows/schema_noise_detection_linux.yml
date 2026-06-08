@@ -1,0 +1,93 @@
+name: Schema Noise Detection On Linux
+
+# Exercises schema-based request-body noise detection end-to-end using the real
+# keploy/samples-go "mux-elasticsearch" app (patched to stamp a server-side
+# created_at, so the outgoing Elasticsearch request body drifts every run):
+#
+#   --schema-noise-detection -> detect the drifting field (body.created_at) and
+#                               persist it as req_body_noise on the ES mock.
+#   test.schemaNoiseStrict    -> a drift on a NON-noise field is rejected.
+
+on:
+  push:
+    branches:
+      - 'feat/schema-noise-detection-mocks'
+    paths:
+      - 'pkg/agent/proxy/integrations/http/**'
+      - 'pkg/matcher/**'
+      - 'pkg/models/http.go'
+      - 'pkg/models/mock.go'
+      - 'pkg/platform/yaml/mockdb/**'
+      - 'pkg/service/replay/**'
+      - 'cli/provider/cmd.go'
+      - 'config/config.go'
+      - '.github/workflows/schema_noise_detection_linux.yml'
+      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/**'
+  pull_request:
+    paths:
+      - 'pkg/agent/proxy/integrations/http/**'
+      - 'pkg/matcher/**'
+      - 'pkg/models/http.go'
+      - 'pkg/models/mock.go'
+      - 'pkg/platform/yaml/mockdb/**'
+      - 'pkg/service/replay/**'
+      - 'cli/provider/cmd.go'
+      - 'config/config.go'
+      - '.github/workflows/schema_noise_detection_linux.yml'
+      - '.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/**'
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+jobs:
+  schema_noise_detection_linux:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 20
+
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+
+    steps:
+      - name: Checkout keploy
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build keploy from this branch
+        run: |
+          go build -tags=viper_bind_struct -o /usr/local/bin/keploy .
+          keploy --version || true
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          # The mux-elasticsearch schema-noise demo mode (env STAMP_CREATED_AT)
+          # lives on this branch until keploy/samples-go#234 merges. Switch back
+          # to `main` once that PR is merged.
+          ref: feat/mux-elasticsearch-schema-noise
+
+      - name: Run schema-noise-detection test (mux-elasticsearch)
+        env:
+          KEPLOY_BIN: /usr/local/bin/keploy
+        run: |
+          cd samples-go/mux-elasticsearch
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mux_elasticsearch_schema_noise/golang-linux.sh

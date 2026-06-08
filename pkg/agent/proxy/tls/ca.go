@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"embed"
+	_ "embed"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,7 +27,6 @@ import (
 	"github.com/cloudflare/cfssl/signer/local"
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
-	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -37,6 +37,51 @@ var caCrt []byte //certificate
 
 //go:embed asset/ca.key
 var caPKey []byte //private key
+
+// mitmPublishHook, if non-nil, is invoked by CertForClient once the
+// MITM cert for a connection is determined (whether freshly minted or
+// served from cache). The arguments are the connection-level identifier
+// — the client's source port as a decimal string, matching what
+// dialPostgresSSLUpstream uses — and the DER bytes of the leaf cert.
+//
+// The agent wires this to cbshim.RegisterMITM so the eBPF channel-
+// binding shim can publish the (mitm_hash → real_hash) pair into the
+// BPF map once both halves of the connection are known. Nil-safe: when
+// unset, CertForClient is a no-op on the cbshim side and works exactly
+// as it did before the shim existed.
+//
+// Synchronisation: the read path (publishMITM) holds an RLock around
+// the nil-check + call, and SetMITMPublishHook holds the write Lock.
+// This serialises hook clears against in-flight invocations so the
+// cleanup sequence
+//
+//	SetMITMPublishHook(nil) → cb.Close()
+//
+// can't race a goroutine that already started publishMITM but hasn't
+// yet returned from the hook (which would dereference a closed
+// cbshim handle). Plain atomic.Pointer wasn't enough — it stops
+// nil-deref between Load and call, but doesn't fence Close against
+// the in-flight call body. RLock contention is in the noise next to
+// the cost of the cert mint / SCRAM handshake on the same path.
+var (
+	hookMu          sync.RWMutex
+	mitmPublishHook func(connID string, mitmCertDER []byte)
+)
+
+// SetMITMPublishHook installs (or clears, via nil) the hook the
+// proxy's CertForClient path invokes after every MITM-cert mint /
+// cache-hit. Callers MUST use this rather than touching the
+// underlying var.
+//
+// When called with nil, blocks until any in-flight publishMITM call
+// has returned — so cleanup paths can safely close the resource the
+// hook closes over (e.g. StopProxyServer's cbshim handle) without
+// racing concurrent CertForClient invocations.
+func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
+	hookMu.Lock()
+	mitmPublishHook = h
+	hookMu.Unlock()
+}
 
 // embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
 // https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
@@ -56,53 +101,6 @@ var caPKey []byte //private key
 //
 //go:embed data/mozilla_roots.pem
 var embeddedFallbackRoots []byte
-
-// cbshimAssets is the channel-binding LD_PRELOAD shim asset bundle.
-// `cbshim.c` (source) is in the tree; the per-arch `.so` files are
-// NOT committed — they're built fresh inside the enterprise Docker
-// build by the `RUN clang --target=...` clauses that
-// `.ci/scripts/prepare-dockerfile.sh` injects after `COPY . /app`.
-// Same pattern as `pkg/util/time/assets/` for time-freezing.
-//
-// OSS builds (no enterprise CI step) silently embed only the source +
-// build helpers — getCBShim() returns nil at runtime, and every caller
-// downgrades to today's "no shim, SCRAM-PLUS fails through MITM"
-// behaviour. See pkg/agent/proxy/tls/asset/README.md for the full
-// story and pkg/agent/proxy/cbmap/README.md for the runtime design.
-//
-//go:embed asset/*
-var cbshimAssets embed.FS
-
-// getCBShim returns the embedded shim variant matching the host arch,
-// or nil if no variant was staged at build time. Callers MUST handle
-// nil — it signals an OSS / unsupported-arch build path where the
-// shim is gracefully disabled.
-//
-// Variants follow the pkg/util/time/assets naming: cbshim_amd64.so /
-// cbshim_arm64.so. Additional arches/libcs can be added by extending
-// the build step and this switch without touching call sites.
-func getCBShim() []byte {
-	path := "asset/cbshim_" + runtime.GOARCH + ".so"
-	data, err := cbshimAssets.ReadFile(path)
-	if err != nil || len(data) == 0 {
-		return nil
-	}
-	return data
-}
-
-// IsCBShimEmbedded reports whether the channel-binding LD_PRELOAD shim
-// for the current host arch is baked into this build. Exported so the
-// docker / compose / native launchers can skip injecting LD_PRELOAD
-// pointing at a file that won't exist — otherwise ld.so prints
-// "object '...cbshim.so' from LD_PRELOAD cannot be preloaded" before
-// every child process the user app spawns, which is noisy in CI and
-// breaks tests that assert on clean stderr.
-func IsCBShimEmbedded() bool {
-	return getCBShim() != nil
-}
-
-//go:embed asset
-var _ embed.FS
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -288,19 +286,6 @@ func SetEnvForPath(logger *zap.Logger, path string) error {
 		"REQUESTS_CA_BUNDLE":  path,
 		"SSL_CERT_FILE":       path,
 		"CARGO_HTTP_CAINFO":   path,
-	}
-	// Channel-binding shim: stage cbshim.so next to the CA cert in
-	// /tmp so app processes launched as children of keploy can pick
-	// it up via LD_PRELOAD. The child inherits these env vars from
-	// keploy's process env (this function is also invoked on the
-	// native install path before app exec). Best-effort: a write
-	// failure leaves LD_PRELOAD unset and the shim never loads —
-	// SCRAM-PLUS clients then continue to fail under MITM as today.
-	if shimPath, err := extractCBShimToTemp(); err == nil {
-		envs["LD_PRELOAD"] = shimPath
-	} else {
-		logger.Debug("failed to stage cbshim.so for native LD_PRELOAD; channel-binding shim disabled for this process tree",
-			zap.Error(err))
 	}
 	return setEnvVars(logger, envs)
 }
@@ -658,28 +643,6 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 		return err
 	}
 
-	// Stage the channel-binding LD_PRELOAD shim next to the CA bundle.
-	// The shim is loaded by the app container (via LD_PRELOAD env var
-	// injected by the admission webhook) to make SCRAM-SHA-256-PLUS
-	// auth work across keploy's TLS MITM. Best-effort throughout: a
-	// missing variant (OSS build / unsupported arch) or a write failure
-	// only disables the channel-binding fix; the rest of the proxy
-	// keeps working for non-PLUS clients.
-	if shim := getCBShim(); shim != nil {
-		cbshimPath := filepath.Join(exportPath, "cbshim.so")
-		if err := os.WriteFile(cbshimPath, shim, 0o755); err != nil {
-			logger.Warn("failed to write cbshim.so to shared volume; SCRAM-SHA-256-PLUS clients will continue to fail under MITM",
-				zap.String("path", cbshimPath), zap.Error(err))
-		} else {
-			logger.Debug("wrote channel-binding shim to shared volume",
-				zap.String("path", cbshimPath),
-				zap.Int("bytes", len(shim)))
-		}
-	} else {
-		logger.Debug("channel-binding shim not embedded in this build (OSS or unsupported arch); SCRAM-SHA-256-PLUS clients will fail under MITM",
-			zap.String("goarch", runtime.GOARCH))
-	}
-
 	logger.Debug("TLS Certificates successfully exported to shared volume")
 	// Signal CA-bundle readiness to downstream consumers (e.g. the
 	// /agent/ready HTTP handler) only after the ca.crt + truststore
@@ -827,39 +790,6 @@ func extractCertToTemp() (string, error) {
 	}
 
 	return tempFile.Name(), nil
-}
-
-// extractCBShimToTemp writes the embedded channel-binding LD_PRELOAD
-// shim to a stable, world-readable+executable path under /tmp. Used by
-// native-mode SetEnvForPath to populate LD_PRELOAD on apps that keploy
-// launches as child processes (docker / docker-compose / k8s paths
-// have their own staging via setupSharedVolume + the corresponding
-// webhook / compose / run-command injectors).
-//
-// Returns the path to the staged shim. The file is idempotently
-// rewritten on each call: same path, fresh contents — guards against
-// stale bytes if a previous keploy run shipped an older shim build.
-func extractCBShimToTemp() (string, error) {
-	shim := getCBShim()
-	if shim == nil {
-		return "", fmt.Errorf("cbshim asset for %s not embedded — channel-binding shim unavailable in this build", runtime.GOARCH)
-	}
-	if err := os.WriteFile(NativeShimPath(), shim, 0o755); err != nil {
-		return "", fmt.Errorf("write cbshim to %s: %w", NativeShimPath(), err)
-	}
-	return NativeShimPath(), nil
-}
-
-// NativeShimPath returns the on-disk path the channel-binding LD_PRELOAD
-// shim is staged at in native (non-docker, non-k8s) mode. Stable —
-// repeated keploy runs reuse the same file — so the CLI can set
-// LD_PRELOAD to this path before launching the user app, knowing the
-// agent's extractCBShimToTemp will (or already has) written the file.
-//
-// Exported so pkg/client/app's CLI launcher can inject LD_PRELOAD into
-// the user app's env without duplicating the path string.
-func NativeShimPath() string {
-	return filepath.Join(os.TempDir(), "keploy-cbshim.so")
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block
@@ -1283,14 +1213,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		if cached, ok := getCertCache().Get(dstURL); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
 			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
-			// Register this MITM leaf against the new connection ID
-			// (the source port). The upstream-dial side will eventually
-			// call cbmap.RegisterReal with the same connID; when both
-			// halves are in, the pair is published for the
-			// channel-binding shim to consume.
-			if cached != nil && len(cached.Certificate) > 0 {
-				cbmap.RegisterMITM(logger, connIDFromPort(sourcePort), cached.Certificate[0])
-			}
+			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
 	}
@@ -1377,21 +1300,22 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		getCertCache().Add(dstURL, &serverTLSCert)
 	}
 
-	// Register the freshly-minted MITM leaf against this connection's
-	// source port. See cbmap.RegisterMITM doc for the rest of the
-	// rendezvous semantics with cbmap.RegisterReal.
-	if len(serverTLSCert.Certificate) > 0 {
-		cbmap.RegisterMITM(logger, connIDFromPort(sourcePort), serverTLSCert.Certificate[0])
-	}
-
+	publishMITM(sourcePort, &serverTLSCert)
 	return &serverTLSCert, nil
 }
 
-// connIDFromPort renders a TCP source port as the stable string identifier
-// used by the cbmap deferred-publish API. The port is the only identifier
-// that's available on both ends of the proxy without context plumbing:
-// CertForClient sees it via clientHello.Conn.RemoteAddr; dialPostgresSSL
-// Upstream sees it via the per-connection context the proxy carries.
-func connIDFromPort(port int) string {
-	return fmt.Sprintf("%d", port)
+// publishMITM notifies the registered MITMPublishHook (typically
+// cbshim.RegisterMITM) of the freshly-determined MITM cert for this
+// client connection. Nil-safe everywhere: a nil hook, a cert without
+// a usable leaf, or a zero-port source addr all silently no-op.
+func publishMITM(sourcePort int, cert *tls.Certificate) {
+	if cert == nil || len(cert.Certificate) == 0 || sourcePort == 0 {
+		return
+	}
+	hookMu.RLock()
+	defer hookMu.RUnlock()
+	if mitmPublishHook == nil {
+		return
+	}
+	mitmPublishHook(strconv.Itoa(sourcePort), cert.Certificate[0])
 }

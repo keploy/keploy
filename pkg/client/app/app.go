@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -18,8 +17,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
-	"go.keploy.io/server/v3/pkg/agent/proxy/cbmap"
-	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 
@@ -138,21 +135,6 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e CARGO_HTTP_CAINFO=%s ", certPath)
-	// Channel-binding LD_PRELOAD shim: loaded by libpq-based apps to
-	// make SCRAM-SHA-256-PLUS auth verify across keploy's TLS MITM.
-	// Safe to inject globally — the shim is a no-op for any X509_digest
-	// call whose computed hash isn't in /tmp/keploy-tls/cbmap.txt. Apps
-	// that don't reach OpenSSL (Java JSSE, Go-native, .NET) never invoke
-	// X509_digest. The shim file is written by keploy-agent's
-	// setupSharedVolume into the same volume the cert paths come from.
-	//
-	// Gated on IsCBShimEmbedded: in OSS builds (no .so embedded), the
-	// agent skips writing the file into the shared volume, so injecting
-	// LD_PRELOAD here would make ld.so print "cannot be preloaded" for
-	// every process in the user container.
-	if pTls.IsCBShimEmbedded() {
-		tlsFlags += fmt.Sprintf("-e LD_PRELOAD=%s/cbshim.so ", keployTLSMountPath)
-	}
 	// For Java, we append to existing options if possible, or just set it.
 	// In CLI args, setting it blindly is usually safe as it overrides or adds.
 	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
@@ -316,50 +298,6 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 }
 
 func (a *App) Run(ctx context.Context) models.AppError {
-	// Native-mode channel-binding shim wiring. Docker / Compose modes
-	// inject the env via Setup / SetupCompose's tlsFlags + compose
-	// rewrite. For native (kind != docker / docker-compose), keploy
-	// spawns the user app via os/exec — the child inherits keploy's
-	// env, so setting LD_PRELOAD here on the CLI process is sufficient
-	// to make ld.so load the shim before any libcrypto-using code in
-	// the app.
-	//
-	// The shim file at /tmp/keploy-cbshim.so is written by the
-	// agent's setupNativeForApp (see pkg/agent/proxy/tls/ca.go::
-	// extractCBShimToTemp) — by the time we reach ExecuteCommand the
-	// agent has signalled readiness so the file is on disk. We only
-	// inject the env var; we do NOT re-write the asset here.
-	a.logger.Info("App.Run: native-shim hook entered",
-		zap.String("kind", string(a.kind)),
-		zap.Bool("is_docker", utils.IsDockerCmd(a.kind)))
-	if !utils.IsDockerCmd(a.kind) {
-		// Only inject LD_PRELOAD when the shim is actually embedded in
-		// this build. Without this guard, OSS builds (which embed no
-		// .so file — see pTls.getCBShim) would still set LD_PRELOAD to
-		// the non-existent /tmp/keploy-cbshim.so, causing ld.so to print
-		// "cannot be preloaded" before every spawned process.
-		if pTls.IsCBShimEmbedded() {
-			shimPath := pTls.NativeShimPath()
-			if err := os.Setenv("LD_PRELOAD", shimPath); err != nil {
-				a.logger.Debug("failed to set LD_PRELOAD for native shim",
-					zap.String("shim", shimPath), zap.Error(err))
-			} else {
-				a.logger.Debug("LD_PRELOAD set for native channel-binding shim",
-					zap.String("shim", shimPath))
-			}
-		} else {
-			a.logger.Debug("channel-binding shim not embedded in this build; LD_PRELOAD not set")
-		}
-		// Tell the shim WHICH cbmap file to read. Without this it falls
-		// back to its compiled-in default (/tmp/keploy-tls/cbmap.txt),
-		// which matches cbmap.DefaultPath but doesn't honour
-		// KEPLOY_CBMAP_PATH. Setting CBSHIM_HASHMAP keeps the shim and
-		// the publisher in sync no matter how the path is configured.
-		if err := os.Setenv("CBSHIM_HASHMAP", cbmap.Path()); err != nil {
-			a.logger.Debug("failed to set CBSHIM_HASHMAP env",
-				zap.String("path", cbmap.Path()), zap.Error(err))
-		}
-	}
 	return a.run(ctx)
 }
 

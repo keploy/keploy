@@ -107,6 +107,67 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	return assess, nil
 }
 
+// ChangedJSONFieldPaths returns the set of dot-delimited field paths that
+// differ between two JSON bodies — value changes, type changes, and removed
+// fields (pure additions are NOT returned, since a brand-new field is not
+// "noise" the way a drifting value is). Array elements normalize to a "[]"
+// suffix (collectJSON's convention), so per-index churn collapses to a single
+// path. `known` is the already-flagged noise (path -> regex list): any path
+// matched by it is excluded from the diff so re-runs don't re-report it.
+// Returns nil if either side isn't valid JSON. Paths are root-relative (no
+// "body." prefix) — callers add the prefix to match the testcase convention.
+// excludeRecordedValue, when non-nil, is consulted with the recorded
+// (expected) scalar value of each changed path — returning true drops that
+// path. This lets the proxy exclude fields the enterprise obfuscator already
+// redacted (recorded value matches a Mock.Noise regex) so secret fields are
+// not re-flagged as schema noise.
+func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, excludeRecordedValue func(string) bool) []string {
+	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
+		return nil
+	}
+
+	var exp, act interface{}
+	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+		return nil
+	}
+
+	idx := buildNoiseIndex(known)
+
+	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
+	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
+
+	collectJSON(exp, "", idx, &expMaps)
+	collectJSON(act, "", idx, &actMaps)
+
+	_, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
+
+	keep := func(path string) bool {
+		if excludeRecordedValue == nil {
+			return true
+		}
+		if v, ok := expMaps.values[path]; ok && excludeRecordedValue(v) {
+			return false
+		}
+		return true
+	}
+
+	out := make([]string, 0, len(valueChanges)+len(typeChanges)+len(removed))
+	for _, group := range [][]string{valueChanges, typeChanges, removed} {
+		for _, p := range group {
+			if keep(p) {
+				out = append(out, p)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 	keyLower := strings.ToLower(path)
 	if regs, noisy := ni.match(keyLower); noisy && len(regs) == 0 {
