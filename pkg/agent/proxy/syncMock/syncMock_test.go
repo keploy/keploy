@@ -1669,26 +1669,43 @@ func TestStartupMockSurvivesStaleCutoffInResolveRange(t *testing.T) {
 }
 
 // TestSetMemoryPressurePreservesStartupMocks pins the memory-wipe reaper:
-// SetMemoryPressure must drop ordinary buffered mocks to relieve pressure
-// but PRESERVE startup mocks, which own no window and rely on the later
-// FlushOwnedWindows drain to reach disk. Wiping them would reintroduce the
-// once-per-boot loss the IsStartup tag exists to prevent.
+// under pressure SyncMockManager drops a buffered mock whose request happened
+// DURING a pressure window (it never had a TC captured at the ingress, so
+// dropping it orphans nothing), but it must PRESERVE a startup mock EVEN WHEN
+// that startup mock's request timestamp also falls inside a pressure window.
+// Startup mocks own no test window and rely on the later FlushOwnedWindows
+// drain to reach disk; wiping them would reintroduce the once-per-boot loss
+// the IsStartup tag exists to prevent. (The calm-captured-vs-pressure-request
+// distinction for ordinary mocks is covered by
+// TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks.)
 func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	t.Parallel()
 
-	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
-	startup.TestModeInfo.IsStartup = true
-	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	// A closed pressure window in the recent past. Both buffered mocks below
+	// carry a request timestamp INSIDE it, so the request-time filter alone
+	// would drop both — only the IsStartup tag rescues the startup mock.
+	now := time.Now()
+	inPressure := now.Add(-15 * time.Second)
 
-	mgr := &SyncMockManager{buffer: []*models.Mock{perTest, startup}}
+	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
+	startup.TestModeInfo.IsStartup = true
+	pressureCaptured := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
+
+	mgr := &SyncMockManager{
+		buffer:         []*models.Mock{pressureCaptured, startup},
+		pressureRanges: []pressureRange{{start: now.Add(-20 * time.Second), end: now.Add(-10 * time.Second)}},
+	}
 
 	mgr.SetMemoryPressure(true)
 
+	// The pressure-window mock is dropped; the startup mock survives despite
+	// its request also landing inside the pressure window.
 	if len(mgr.buffer) != 1 || mgr.buffer[0] != startup {
 		t.Fatalf("expected only the startup mock preserved after memory wipe; buffer=%d", len(mgr.buffer))
 	}
 
-	// New non-startup mocks are still dropped while paused.
+	// New non-startup mocks whose request is during the now-active pressure
+	// are still dropped.
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	if len(mgr.buffer) != 1 {
 		t.Fatalf("new mocks must still be dropped under memory pressure; buffer=%d", len(mgr.buffer))
