@@ -131,3 +131,69 @@ jobs:
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
+
+  tidb_stmt_cache:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+    name: tidb-stmt-cache (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/tidb-stmt-cache/pom.xml
+
+      - name: Run tidb-stmt-cache app
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-java/tidb-stmt-cache
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/tidb_stmt_cache/java-linux.sh
+
+      - name: Upload tidb-stmt-cache recordings and replay logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidb-stmt-cache-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/tidb-stmt-cache/keploy/
+            samples-java/tidb-stmt-cache/test_logs_*.txt
+            samples-java/tidb-stmt-cache/record.txt
+            samples-java/tidb-stmt-cache/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
