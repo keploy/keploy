@@ -308,21 +308,43 @@ func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
 	return cloned
 }
 
-// PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
-// It merges global and test-set specific noise, then extracts only the header noise.
-func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
+// PrepareMockNoiseConfig builds the noise configuration handed to the proxy
+// integrations (OutgoingOptions.NoiseConfig) for mock matching. It carries
+// the "header" noise (HTTP outgoing header matching) AND the "body" noise:
+// parsers that compare outgoing payloads — e.g. the Pulsar SEND payload
+// matcher — strip these body-noise field names so non-deterministic fields
+// (emit timestamps, generated event ids) don't false-reject a replay.
+func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
 	noiseConfig := CloneGlobalNoise(globalNoise)
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
-	// Extract only header noise for mock matching
-	headerNoiseConfig := map[string]map[string][]string{}
+	// Extract header + body noise for mock matching.
+	mockNoiseConfig := map[string]map[string][]string{}
 	if headerNoise, ok := noiseConfig["header"]; ok {
-		headerNoiseConfig["header"] = headerNoise
+		mockNoiseConfig["header"] = headerNoise
+	}
+	if bodyNoise, ok := noiseConfig["body"]; ok {
+		mockNoiseConfig["body"] = bodyNoise
 	}
 
-	return headerNoiseConfig
+	return mockNoiseConfig
+}
+
+// PrepareHeaderNoiseConfig is retained for backward compatibility with
+// downstream importers of pkg/service/replay. It preserves the original
+// header-only behavior.
+//
+// Deprecated: use PrepareMockNoiseConfig, which also carries body noise for
+// outgoing-payload matchers (e.g. the Pulsar SEND matcher).
+func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
+	mockNoiseConfig := PrepareMockNoiseConfig(globalNoise, testSetNoise, testSetID)
+	headerOnly := map[string]map[string][]string{}
+	if headerNoise, ok := mockNoiseConfig["header"]; ok {
+		headerOnly["header"] = headerNoise
+	}
+	return headerOnly
 }
 
 // ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
