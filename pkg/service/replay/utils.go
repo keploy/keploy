@@ -332,6 +332,21 @@ func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.
 	return mockNoiseConfig
 }
 
+// PrepareHeaderNoiseConfig is retained for backward compatibility with
+// downstream importers of pkg/service/replay. It preserves the original
+// header-only behavior.
+//
+// Deprecated: use PrepareMockNoiseConfig, which also carries body noise for
+// outgoing-payload matchers (e.g. the Pulsar SEND matcher).
+func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
+	mockNoiseConfig := PrepareMockNoiseConfig(globalNoise, testSetNoise, testSetID)
+	headerOnly := map[string]map[string][]string{}
+	if headerNoise, ok := mockNoiseConfig["header"]; ok {
+		headerOnly["header"] = headerNoise
+	}
+	return headerOnly
+}
+
 // ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
 func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	parsedOldURL, err := url.Parse(oldURL)

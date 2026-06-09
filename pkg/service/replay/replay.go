@@ -1072,7 +1072,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, stopReason)
 		}
 		r.firstRun = false
-		// Prepare header noise configuration for mock matching
+		// Prepare header + body noise configuration for mock matching
 		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
@@ -1261,7 +1261,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-		// Prepare header noise configuration for mock matching
+		// Prepare header + body noise configuration for mock matching
 		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
