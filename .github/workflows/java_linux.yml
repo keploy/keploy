@@ -138,13 +138,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # NOTE: this job intentionally OMITS the record_build_replay_latest
+        # cell (record with this build, replay with the latest *release*).
+        # tidb-stmt-cache exercises the COM_QUERY stateful read-back fix this PR
+        # introduces; the latest released binary does not have it yet, so
+        # replaying these recordings with it reproduces the very bug being fixed
+        # (read-back returns the first row — e.g. 100 for every test) and the
+        # cell can never be green until the fix ships in a release. The two
+        # remaining cells both replay with the fixed build binary and fully
+        # validate the fix (record_latest_replay_build also confirms the new
+        # binary replays mocks recorded by the previous release). Re-add
+        # record_build_replay_latest for forward-compat once the fix is released.
         config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build-no-race
-          - job: record_build_replay_latest
-            record_src: build-no-race
-            replay_src: latest
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
