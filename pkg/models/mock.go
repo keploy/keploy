@@ -115,6 +115,25 @@ type TestModeInfo struct {
 	// used?" observability — non-zero helps confirm tagging; zero for
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
+
+	// IsStartup marks app-bootstrap traffic captured before the first
+	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
+	// Such an outbound call can never claim a per-test window — it ran
+	// before any test — so the record-side syncMock reapers (dedup
+	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
+	// instead of dropping it as debris.
+	//
+	// This is a RECORD-side cleanup signal only, with no replay-time
+	// meaning, which is why it is NOT modelled as a Lifetime value:
+	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
+	// replay-time pool routing, whereas IsStartup is set live at ingest in
+	// SyncMockManager.AddMock and is only ever read on buffered, live-
+	// captured mocks before they are persisted. Like the sibling
+	// runtime-only fields, the json/bson tags keep it out of the text
+	// formats; gob (which ignores struct tags) does encode it, but a value
+	// carried on a reloaded mock is inert — the reapers run only on the
+	// live record buffer, never on disk-loaded mocks.
+	IsStartup bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -691,6 +710,7 @@ func (m *Mock) DeepCopy() *Mock {
 	sortOrder := m.TestModeInfo.SortOrder
 	lifetime := m.TestModeInfo.Lifetime
 	lifetimeDerived := m.TestModeInfo.LifetimeDerived
+	isStartup := m.TestModeInfo.IsStartup
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
@@ -702,6 +722,7 @@ func (m *Mock) DeepCopy() *Mock {
 			SortOrder:       sortOrder,
 			Lifetime:        lifetime,
 			LifetimeDerived: lifetimeDerived,
+			IsStartup:       isStartup,
 		},
 		ConnectionID: m.ConnectionID,
 	}
