@@ -60,12 +60,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			resp.Body.Close()
 		}
 		if n := traceTCDroppedByPressure.Add(1); n&(n-1) == 0 {
-			logger.Info("TRACE/tc-drop: TC DROPPED at capture — memory pressure active (whole TC discarded: request AND response)",
-				zap.Int64("req_ms", reqTimeTest.UnixMilli()),
-				zap.Int64("resp_ms", resTimeTest.UnixMilli()),
-				zap.Int64("total_TCs_dropped_by_pressure", n),
-				zap.Int64("total_TCs_passed_gate_so_far", traceTCPassedPressureGate.Load()),
-			)
+			_ = n
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// logger.Info("TRACE/tc-drop: TC DROPPED at capture — memory pressure active (whole TC discarded: request AND response)",
+			// 	zap.Int64("req_ms", reqTimeTest.UnixMilli()),
+			// 	zap.Int64("resp_ms", resTimeTest.UnixMilli()),
+			// 	zap.Int64("total_TCs_dropped_by_pressure", n),
+			// 	zap.Int64("total_TCs_passed_gate_so_far", traceTCPassedPressureGate.Load()),
+			// )
 		}
 		return
 	}

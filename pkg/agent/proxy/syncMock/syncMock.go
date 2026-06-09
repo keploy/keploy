@@ -484,14 +484,15 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	if added%500 == 0 {
 		// Best-effort logger fetch — dropLogger may return nil during
 		// teardown when the parent logger is being torn down.
-		if logger := m.dropLogger(); logger != nil {
-			logger.Info("DIAG/syncmock-snapshot: agent producer state",
-				zap.Int64("totalAdded", added),
-				zap.Uint64("send_drops_total", m.dropCount.Load()),
-				zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
-		}
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// if logger := m.dropLogger(); logger != nil {
+		// 	logger.Info("DIAG/syncmock-snapshot: agent producer state",
+		// 		zap.Int64("totalAdded", added),
+		// 		zap.Uint64("send_drops_total", m.dropCount.Load()),
+		// 		zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
+		// 		zap.Int64("ts_ms", time.Now().UnixMilli()),
+		// 	)
+		// }
 	}
 
 	// Tag app-bootstrap traffic. Any mock captured before the first
@@ -626,29 +627,30 @@ func (m *SyncMockManager) CloseOutChan() {
 	// TRACE (Bug-0 shutdown-loss proof): snapshot what is STILL buffered after
 	// the drain — mocks we could not attribute (the residual loss risk).
 	// buffered_pending should be ~0 when the drain succeeds.
-	m.mu.Lock()
-	bufferedPending := len(m.buffer)
-	recentWin := len(m.recentWindows)
-	bufSnapshot := make([]*models.Mock, len(m.buffer))
-	copy(bufSnapshot, m.buffer)
-	m.mu.Unlock()
-	if logger := m.dropLogger(); logger != nil {
-		kindBreakdown := mockKindSlice(bufSnapshot)
-		logger.Info("TRACE/syncmock-shutdown: outChan closing — buffered mocks left after final drain",
-			zap.Int("buffered_pending", bufferedPending),
-			zap.String("buffered_kinds", kindBreakdown),
-			zap.Int("recent_windows", recentWin),
-			zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
-			zap.Int64("added_total", m.totalAdded.Load()),
-		)
-		for i, mock := range bufSnapshot {
-			logger.Info("TRACE/syncmock-shutdown: pending mock (not attributable — left unflushed)",
-				zap.Int("index", i),
-				zap.String("mock", mockSummary(mock)),
-				zap.String("tc_correlation", tcCorrHint(mock)),
-			)
-		}
-	}
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// m.mu.Lock()
+	// bufferedPending := len(m.buffer)
+	// recentWin := len(m.recentWindows)
+	// bufSnapshot := make([]*models.Mock, len(m.buffer))
+	// copy(bufSnapshot, m.buffer)
+	// m.mu.Unlock()
+	// if logger := m.dropLogger(); logger != nil {
+	// 	kindBreakdown := mockKindSlice(bufSnapshot)
+	// 	logger.Info("TRACE/syncmock-shutdown: outChan closing — buffered mocks left after final drain",
+	// 		zap.Int("buffered_pending", bufferedPending),
+	// 		zap.String("buffered_kinds", kindBreakdown),
+	// 		zap.Int("recent_windows", recentWin),
+	// 		zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
+	// 		zap.Int64("added_total", m.totalAdded.Load()),
+	// 	)
+	// 	for i, mock := range bufSnapshot {
+	// 		logger.Info("TRACE/syncmock-shutdown: pending mock (not attributable — left unflushed)",
+	// 			zap.Int("index", i),
+	// 			zap.String("mock", mockSummary(mock)),
+	// 			zap.String("tc_correlation", tcCorrHint(mock)),
+	// 		)
+	// 	}
+	// }
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {

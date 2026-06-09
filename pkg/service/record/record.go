@@ -428,15 +428,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 		//   agent_sent (wire)  ==  cli_decoded  ==  cli_received  ==  cli_written
 		// any inequality localizes the loss to that exact hop.
 		defer func() {
-			r.logger.Info("DIAG/cli-write-final: receive pipeline closed",
-				zap.Int64("cli_received", mocksReceived.Load()),
-				zap.Int64("cli_written", mocksWritten.Load()),
-				zap.Int64("received_minus_written", mocksReceived.Load()-mocksWritten.Load()),
-				zap.Int64("slow_inserts_total", slowInserts.Load()),
-				zap.Int64("ts_ms", time.Now().UnixMilli()))
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// r.logger.Info("DIAG/cli-write-final: receive pipeline closed",
+			// 	zap.Int64("cli_received", mocksReceived.Load()),
+			// 	zap.Int64("cli_written", mocksWritten.Load()),
+			// 	zap.Int64("received_minus_written", mocksReceived.Load()-mocksWritten.Load()),
+			// 	zap.Int64("slow_inserts_total", slowInserts.Load()),
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()))
 		}()
 		for mock := range frames.Outgoing {
-			recv := mocksReceived.Add(1)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// recv := mocksReceived.Add(1)
+			mocksReceived.Add(1)
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -465,12 +468,14 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if insertDur > 100*time.Millisecond {
 				n := slowInserts.Add(1)
 				if n == 1 || n%50 == 0 {
-					r.logger.Info("DIAG/insert-slow: InsertMock latency exceeded 100ms",
-						zap.Duration("insert_dur", insertDur),
-						zap.Int64("slow_inserts_so_far", n),
-						zap.String("mock_kind", mock.GetKind()),
-						zap.Int64("mocks_received", recv),
-						zap.Int64("mocks_written", mocksWritten.Load()))
+					_ = n
+					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+					// r.logger.Info("DIAG/insert-slow: InsertMock latency exceeded 100ms",
+					// 	zap.Duration("insert_dur", insertDur),
+					// 	zap.Int64("slow_inserts_so_far", n),
+					// 	zap.String("mock_kind", mock.GetKind()),
+					// 	zap.Int64("mocks_received", recv),
+					// 	zap.Int64("mocks_written", mocksWritten.Load()))
 				}
 			}
 			if err != nil {
@@ -510,11 +515,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 				// line per 500 disk writes so we can correlate write rate
 				// with agent's mocks_added_so_far counter in pressure logs.
 				if written%500 == 0 {
-					r.logger.Info("DIAG/mock-progress: write pipeline snapshot",
-						zap.Int64("mocks_received", mocksReceived.Load()),
-						zap.Int64("mocks_written", written),
-						zap.Int64("in_flight_gap", mocksReceived.Load()-written),
-						zap.Int64("slow_inserts_so_far", slowInserts.Load()))
+					_ = written
+					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+					// r.logger.Info("DIAG/mock-progress: write pipeline snapshot",
+					// 	zap.Int64("mocks_received", mocksReceived.Load()),
+					// 	zap.Int64("mocks_written", written),
+					// 	zap.Int64("in_flight_gap", mocksReceived.Load()-written),
+					// 	zap.Int64("slow_inserts_so_far", slowInserts.Load()))
 				}
 			}
 		}
@@ -764,7 +771,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// the moment of ctx cancel; the drain-end log reports how many
 		// extra mocks the agent flushed during the grace window.
 		var streamForwarded atomic.Int64
-		var drainStartForwarded int64
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// var drainStartForwarded int64
 
 		defer func() {
 			if deadline != nil {
@@ -776,10 +784,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				deadline = time.NewTimer(drainGrace)
 				deadlineC = deadline.C
 				drainStartTime = time.Now()
-				drainStartForwarded = streamForwarded.Load()
-				r.logger.Info("DIAG/drain-armed: ctx cancelled — entering bounded drain",
-					zap.Duration("drain_grace", drainGrace),
-					zap.Int64("mocks_forwarded_at_arm", drainStartForwarded))
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// drainStartForwarded = streamForwarded.Load()
+				// r.logger.Info("DIAG/drain-armed: ctx cancelled — entering bounded drain",
+				// 	zap.Duration("drain_grace", drainGrace),
+				// 	zap.Int64("mocks_forwarded_at_arm", drainStartForwarded))
 			}
 		}
 		// Single drain-end logger called from every return path below.
@@ -791,12 +800,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			if drainStartTime.IsZero() {
 				return // drain never armed; nothing to report
 			}
-			endForwarded := streamForwarded.Load()
-			r.logger.Info("DIAG/drain-end: shutdown drain finished",
-				zap.String("reason", reason),
-				zap.Duration("drain_duration", time.Since(drainStartTime)),
-				zap.Int64("mocks_forwarded_during_drain", endForwarded-drainStartForwarded),
-				zap.Int64("total_forwarded", endForwarded))
+			_ = reason
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// endForwarded := streamForwarded.Load()
+			// r.logger.Info("DIAG/drain-end: shutdown drain finished",
+			// 	zap.String("reason", reason),
+			// 	zap.Duration("drain_duration", time.Since(drainStartTime)),
+			// 	zap.Int64("mocks_forwarded_during_drain", endForwarded-drainStartForwarded),
+			// 	zap.Int64("total_forwarded", endForwarded))
 		}
 
 		for {

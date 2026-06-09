@@ -70,13 +70,14 @@ func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Fi
 	if !probeOn() {
 		return
 	}
-	base := []zap.Field{
-		zap.String("probe", "proxy"),
-		zap.String("phase", phase),
-		zap.Int64("connID", connID),
-		zap.Int64("ts_ns", time.Now().UnixNano()),
-	}
-	logger.Info("[PROBE/proxy]", append(base, fields...)...)
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// base := []zap.Field{
+	// 	zap.String("probe", "proxy"),
+	// 	zap.String("phase", phase),
+	// 	zap.Int64("connID", connID),
+	// 	zap.Int64("ts_ns", time.Now().UnixNano()),
+	// }
+	// logger.Info("[PROBE/proxy]", append(base, fields...)...)
 }
 
 var defaultMysqlPorts = []uint32{3306, 4000}
@@ -99,15 +100,16 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 	if !probeOn() {
 		return
 	}
-	base := []zap.Field{
-		zap.String("probe", "dial"),
-		zap.String("phase", phase),
-		zap.Int64("connID", connID),
-		zap.String("addr", addr),
-		zap.Int64("dur_ns", durNs),
-		zap.Int64("ts_ns", time.Now().UnixNano()),
-	}
-	logger.Info("[PROBE/dial]", append(base, fields...)...)
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// base := []zap.Field{
+	// 	zap.String("probe", "dial"),
+	// 	zap.String("phase", phase),
+	// 	zap.Int64("connID", connID),
+	// 	zap.String("addr", addr),
+	// 	zap.Int64("dur_ns", durNs),
+	// 	zap.Int64("ts_ns", time.Now().UnixNano()),
+	// }
+	// logger.Info("[PROBE/dial]", append(base, fields...)...)
 }
 
 // destCacheEntry holds all recently-seen destinations from a single source IP.
@@ -1230,8 +1232,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// TRACE/syncmock-shutdown that fires from CloseOutChan
 		// reports the residual unattributable mocks left in the
 		// buffer at close.
-		p.logger.Info("DIAG/proxy-shutdown-begin: entering shutdown defer chain",
-			zap.Int64("ts_ms", time.Now().UnixMilli()))
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// p.logger.Info("DIAG/proxy-shutdown-begin: entering shutdown defer chain",
+		// 	zap.Int64("ts_ms", time.Now().UnixMilli()))
 
 		clientConnCancel()
 
@@ -1260,8 +1263,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// CloseOutChan takes an RWMutex that AddMock holds for read,
 		// guaranteeing every send completes before close runs.
 		if mgr := syncMock.Get(); mgr != nil {
-			p.logger.Info("DIAG/proxy-shutdown-closeout: calling SyncMock.CloseOutChan",
-				zap.Int64("ts_ms", time.Now().UnixMilli()))
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// p.logger.Info("DIAG/proxy-shutdown-closeout: calling SyncMock.CloseOutChan",
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()))
 			mgr.CloseOutChan()
 		} else {
 			p.sessionMu.RLock()
@@ -1389,19 +1393,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	{
 		n := p.acceptCounter.Add(1)
 		s := p.getSession()
-		mode := "none"
-		if s != nil {
-			mode = string(s.Mode)
-		}
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// mode := "none"
+		// if s != nil {
+		// 	mode = string(s.Mode)
+		// }
 		isRecord := s != nil && s.Mode == models.MODE_RECORD
 		if isRecord || n == 1 || n&(n-1) == 0 {
-			p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
-				zap.Int("srcPort", sourcePort),
-				zap.String("sourceIP", sourceIP),
-				zap.String("session_mode", mode),
-				zap.Uint64("conn_count", n),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// p.logger.Info("TRACE/proxy-accept: connection arrived at proxy listener",
+			// 	zap.Int("srcPort", sourcePort),
+			// 	zap.String("sourceIP", sourceIP),
+			// 	zap.String("session_mode", mode),
+			// 	zap.Uint64("conn_count", n),
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
 		}
 	}
 
@@ -1419,21 +1425,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// 2. eBPF fired but this lookup raced with a deletion elsewhere
 		// 3. Connection opened after recording/test-set completed (health check etc.)
 		rule := p.getSession()
-		sessionMode := "none"
-		if rule != nil {
-			sessionMode = string(rule.Mode)
-		}
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// sessionMode := "none"
+		// if rule != nil {
+		// 	sessionMode = string(rule.Mode)
+		// }
 
 		// TRACE: eBPF lookup failed. sessionMode tells us whether this happened
 		// during active recording (critical) or normal passthrough (expected).
 		// In MODE_RECORD this is the drop-site for teardown mocks.
-		p.logger.Info("TRACE/proxy-destinfo-miss: eBPF lookup failed — original destination unknown",
-			zap.Int("srcPort", sourcePort),
-			zap.String("sourceIP", sourceIP),
-			zap.String("sessionMode", sessionMode),
-			zap.Error(err),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-		)
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// p.logger.Info("TRACE/proxy-destinfo-miss: eBPF lookup failed — original destination unknown",
+		// 	zap.Int("srcPort", sourcePort),
+		// 	zap.String("sourceIP", sourceIP),
+		// 	zap.String("sessionMode", sessionMode),
+		// 	zap.Error(err),
+		// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+		// )
 
 		// Fallback: during an active recording session, recover the destination
 		// from the per-sourceIP cache populated by previous successful lookups.
@@ -1454,33 +1462,36 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				switch {
 				case numDests == 1 && fallbackDest != nil:
 					// Exactly one known destination — safe to use as fallback.
-					p.logger.Info("TRACE/proxy-destinfo-fallback: recovered destination from cache for eBPF-missed recording connection",
-						zap.Int("srcPort", sourcePort),
-						zap.String("sourceIP", sourceIP),
-						zap.Uint32("cached_dest_port", fallbackDest.Port),
-						zap.Uint32("cached_dest_ipv4", fallbackDest.IPv4Addr),
-						zap.Int64("ts_ms", time.Now().UnixMilli()),
-					)
+					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+					// p.logger.Info("TRACE/proxy-destinfo-fallback: recovered destination from cache for eBPF-missed recording connection",
+					// 	zap.Int("srcPort", sourcePort),
+					// 	zap.String("sourceIP", sourceIP),
+					// 	zap.Uint32("cached_dest_port", fallbackDest.Port),
+					// 	zap.Uint32("cached_dest_ipv4", fallbackDest.IPv4Addr),
+					// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+					// )
 					destInfo = fallbackDest
 					usedFallback = true
 					// Fall through to the normal recording path below.
 
 				default:
 					// Multiple destinations cached — cannot safely pick one.
-					p.logger.Info("TRACE/proxy-destinfo-fallback-ambiguous: multiple cached destinations, cannot recover — closing connection",
-						zap.Int("srcPort", sourcePort),
-						zap.String("sourceIP", sourceIP),
-						zap.Int("cached_dest_count", numDests),
-						zap.Int64("ts_ms", time.Now().UnixMilli()),
-					)
+					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+					// p.logger.Info("TRACE/proxy-destinfo-fallback-ambiguous: multiple cached destinations, cannot recover — closing connection",
+					// 	zap.Int("srcPort", sourcePort),
+					// 	zap.String("sourceIP", sourceIP),
+					// 	zap.Int("cached_dest_count", numDests),
+					// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+					// )
 				}
 			} else {
 				// No cache entry for this source IP yet (first missed connection).
-				p.logger.Info("TRACE/proxy-destinfo-fallback-no-cache: no cached destination for source IP, closing connection",
-					zap.Int("srcPort", sourcePort),
-					zap.String("sourceIP", sourceIP),
-					zap.Int64("ts_ms", time.Now().UnixMilli()),
-				)
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// p.logger.Info("TRACE/proxy-destinfo-fallback-no-cache: no cached destination for source IP, closing connection",
+				// 	zap.Int("srcPort", sourcePort),
+				// 	zap.String("sourceIP", sourceIP),
+				// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+				// )
 			}
 		}
 
@@ -1506,13 +1517,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Shows full TCP tuple: srcIP:srcPort → destIP:destPort so we can confirm
 		// the connection is from the app to the right backend (e.g. app→mongo:27017).
 		if s := p.getSession(); s != nil && s.Mode == models.MODE_RECORD {
-			destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-			p.logger.Info("TRACE/proxy-destinfo-hit: eBPF lookup succeeded — full TCP tuple known",
-				zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
-				zap.String("dest", destAddr),
-				zap.String("session_mode", string(s.Mode)),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
+			// p.logger.Info("TRACE/proxy-destinfo-hit: eBPF lookup succeeded — full TCP tuple known",
+			// 	zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+			// 	zap.String("dest", destAddr),
+			// 	zap.String("session_mode", string(s.Mode)),
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
+			_ = s
 		}
 	}
 
@@ -1533,12 +1546,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if rule == nil {
 		// TRACE/proxy-session-nil: eBPF lookup succeeded but no active session.
 		// Full TCP tuple logged to confirm which connection this was.
-		destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Info("TRACE/proxy-session-nil: no active session — connection will be closed",
-			zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
-			zap.String("dest", destAddr),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-		)
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// destAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
+		// p.logger.Info("TRACE/proxy-session-nil: no active session — connection will be closed",
+		// 	zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+		// 	zap.String("dest", destAddr),
+		// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+		// )
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
 	}
@@ -1597,10 +1611,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// exits. During normal recording this happens when the connection closes
 		// naturally. If this fires at unexpected times (e.g. teardown window),
 		// the subsequent TRACE/conn-errgroup-failed will show the root cause.
-		p.logger.Info("TRACE/conn-teardown: handleConnection returning — parserCtx will be cancelled",
-			zap.Int64("clientConnID", int64(clientConnID)),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-		)
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// p.logger.Info("TRACE/conn-teardown: handleConnection returning — parserCtx will be cancelled",
+		// 	zap.Int64("clientConnID", int64(clientConnID)),
+		// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+		// )
 		parserCtxCancel()
 
 		if srcConn != nil {
@@ -1629,11 +1644,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// an error, which cancelled parserCtx and caused the decoders to
 			// drain. The error message identifies exactly which goroutine failed
 			// and why — this is the root cause of unexpected connection teardowns.
-			p.logger.Info("TRACE/conn-errgroup-failed: parserErrGrp error cancelled parserCtx — this is why decoders drained",
-				zap.Int64("clientConnID", int64(clientConnID)),
-				zap.Error(err),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// p.logger.Info("TRACE/conn-errgroup-failed: parserErrGrp error cancelled parserCtx — this is why decoders drained",
+			// 	zap.Int64("clientConnID", int64(clientConnID)),
+			// 	zap.Error(err),
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
@@ -1665,14 +1681,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// or GlobalPassthrough was set, which would explain missing mocks.
 		if rule.Mode == models.MODE_RECORD {
 			// Full TCP tuple confirms which app→backend connection was silently skipped.
-			passthroughDestAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-			p.logger.Info("TRACE/proxy-passthrough: record-mode connection sent to passthrough — no mock will be created",
-				zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
-				zap.String("dest", passthroughDestAddr),
-				zap.Bool("global_passthrough", p.GlobalPassthrough),
-				zap.Bool("mocking", rule.Mocking),
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// passthroughDestAddr := fmt.Sprintf("%s:%d", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
+			// p.logger.Info("TRACE/proxy-passthrough: record-mode connection sent to passthrough — no mock will be created",
+			// 	zap.String("src", fmt.Sprintf("%s:%d", sourceIP, sourcePort)),
+			// 	zap.String("dest", passthroughDestAddr),
+			// 	zap.Bool("global_passthrough", p.GlobalPassthrough),
+			// 	zap.Bool("mocking", rule.Mocking),
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
 		}
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {

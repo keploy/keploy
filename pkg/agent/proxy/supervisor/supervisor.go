@@ -160,9 +160,10 @@ func (s *Supervisor) MarkPendingWork() {
 	// was stuck because ClearPendingWork was never called.
 	if !s.pending.Swap(true) {
 		if s.cfg.Logger != nil {
-			s.cfg.Logger.Info("TRACE/supervisor-pending-start: new in-flight request — hang clock reset",
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// s.cfg.Logger.Info("TRACE/supervisor-pending-start: new in-flight request — hang clock reset",
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
 		}
 	}
 }
@@ -177,9 +178,10 @@ func (s *Supervisor) ClearPendingWork() {
 	// dropped, pressure-suppressed, or OnPendingCleared was not called).
 	if s.pending.Swap(false) {
 		if s.cfg.Logger != nil {
-			s.cfg.Logger.Info("TRACE/supervisor-pending-cleared: request complete — hang clock disarmed",
-				zap.Int64("ts_ms", time.Now().UnixMilli()),
-			)
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// s.cfg.Logger.Info("TRACE/supervisor-pending-cleared: request complete — hang clock disarmed",
+			// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+			// )
 		}
 	}
 }
@@ -272,15 +274,16 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		//   - Pair with TRACE/supervisor-pending-start (same ts) and
 		//     absence of TRACE/supervisor-pending-cleared → proves
 		//     ClearPendingWork was never called for that request
-		lastActivity := time.Unix(0, s.lastProgressNano.Load())
-		inactiveDur := time.Since(lastActivity)
-		s.cfg.Logger.Info("TRACE/supervisor-hang: hang watchdog fired — aborting parser, relay falls through to passthrough",
-			zap.Duration("hang_budget", s.cfg.HangBudget),
-			zap.Duration("inactive_for", inactiveDur),
-			zap.Int64("last_activity_ts_ms", lastActivity.UnixMilli()),
-			zap.Int64("ts_ms", time.Now().UnixMilli()),
-			zap.String("next_step", "raise supervisor.Config.HangBudget or ensure ClearPendingWork is called after every request"),
-		)
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// lastActivity := time.Unix(0, s.lastProgressNano.Load())
+		// inactiveDur := time.Since(lastActivity)
+		// s.cfg.Logger.Info("TRACE/supervisor-hang: hang watchdog fired — aborting parser, relay falls through to passthrough",
+		// 	zap.Duration("hang_budget", s.cfg.HangBudget),
+		// 	zap.Duration("inactive_for", inactiveDur),
+		// 	zap.Int64("last_activity_ts_ms", lastActivity.UnixMilli()),
+		// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+		// 	zap.String("next_step", "raise supervisor.Config.HangBudget or ensure ClearPendingWork is called after every request"),
+		// )
 		s.fireOnAbort()
 		runCancel()
 		return Result{

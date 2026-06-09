@@ -362,10 +362,13 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		// (decode-error). Combined with host_decoded it pinpoints the
 		// loss boundary.
 		exitReason := "unknown"
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		_ = exitReason
 		// decodeBaseline lets the periodic recorder and the final log
 		// report how many mocks THIS stream decoded (the package
 		// counter is process-cumulative across reconnects).
-		decodeStart := hostMocksDecoded.Load()
+		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+		// decodeStart := hostMocksDecoded.Load()
 
 		defer func() {
 			close(mockChan)
@@ -386,11 +389,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			// logger; for the CI investigation we grep PROBE/host-recv-final
 			// and compare host_decoded against the agent's
 			// outgoing_forwarded at the same wall-clock moment.
-			fmt.Fprintf(os.Stderr,
-				"PROBE/host-recv-final: ts_ms=%d reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
-				time.Now().UnixMilli(), exitReason,
-				hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
-			_ = os.Stderr.Sync()
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			// fmt.Fprintf(os.Stderr,
+			// 	"PROBE/host-recv-final: ts_ms=%d reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
+			// 	time.Now().UnixMilli(), exitReason,
+			// 	hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
+			// _ = os.Stderr.Sync()
 		}()
 
 		// Periodic host-side receive recorder. Every 1 s it prints the
@@ -408,11 +412,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				case <-recvCtx.Done():
 					return
 				case <-ticker.C:
-					fmt.Fprintf(os.Stderr,
-						"PROBE/host-recv: ts_ms=%d host_decoded_total=%d host_decoded_this_stream=%d\n",
-						time.Now().UnixMilli(),
-						hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
-					_ = os.Stderr.Sync()
+					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+					// fmt.Fprintf(os.Stderr,
+					// 	"PROBE/host-recv: ts_ms=%d host_decoded_total=%d host_decoded_this_stream=%d\n",
+					// 	time.Now().UnixMilli(),
+					// 	hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
+					// _ = os.Stderr.Sync()
 				}
 			}
 		}()
@@ -1623,10 +1628,12 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			// ground-truth count of mocks received off the wire; reconcile it
 			// against the agent's outgoing_forwarded (the agent process's own
 			// PROBE/agent-state line) to confirm zero loss at the gate.
-			fmt.Fprintf(os.Stderr,
-				"DIAG/drain-gate: reason=%s host_decoded=%d ts_ms=%d\n",
-				gateReason, HostMocksDecodedTotal(), time.Now().UnixMilli())
-			_ = os.Stderr.Sync()
+			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+			_ = gateReason
+			// fmt.Fprintf(os.Stderr,
+			// 	"DIAG/drain-gate: reason=%s host_decoded=%d ts_ms=%d\n",
+			// 	gateReason, HostMocksDecodedTotal(), time.Now().UnixMilli())
+			// _ = os.Stderr.Sync()
 		}
 
 		if cmd.Process != nil {

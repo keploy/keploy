@@ -78,10 +78,11 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		go func() {
 			for {
 				time.Sleep(1 * time.Second)
-				logger.Info("PROBE/mysql-decode-accounting-periodic:",
-					zap.Uint64("mysql_requests_received", mysqlRequestsReceived.Load()),
-					zap.Uint64("mysql_mocks_emitted", mysqlMocksEmitted.Load()),
-					zap.Int64("ts_ms", time.Now().UnixMilli()))
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// logger.Info("PROBE/mysql-decode-accounting-periodic:",
+				// 	zap.Uint64("mysql_requests_received", mysqlRequestsReceived.Load()),
+				// 	zap.Uint64("mysql_mocks_emitted", mysqlMocksEmitted.Load()),
+				// 	zap.Int64("ts_ms", time.Now().UnixMilli()))
 			}
 		}()
 	})

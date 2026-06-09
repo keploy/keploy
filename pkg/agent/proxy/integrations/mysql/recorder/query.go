@@ -182,27 +182,29 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				// One final snapshot right when ctx cancels (recording stops).
 				// This races Docker shutdown but is worth trying; the periodic
 				// logs above are the reliable alternative.
-				logger.Info("TRACE/mysql-shutdown: recording ctx cancelled — final decode pipeline snapshot",
-					zap.Int("decodeChan_pending", len(decodeChan)),
-					zap.Int("decodeChan_cap", cap(decodeChan)),
-					zap.Int64("pressure_kept_req", traceMySQLPressureKeptReq.Load()),
-					zap.Int64("pressure_kept_resp", traceMySQLPressureKeptResp.Load()),
-					zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
-					zap.Int64("ts_ms", time.Now().UnixMilli()),
-				)
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// logger.Info("TRACE/mysql-shutdown: recording ctx cancelled — final decode pipeline snapshot",
+				// 	zap.Int("decodeChan_pending", len(decodeChan)),
+				// 	zap.Int("decodeChan_cap", cap(decodeChan)),
+				// 	zap.Int64("pressure_kept_req", traceMySQLPressureKeptReq.Load()),
+				// 	zap.Int64("pressure_kept_resp", traceMySQLPressureKeptResp.Load()),
+				// 	zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
+				// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+				// )
 				return
 			case <-ticker.C:
-				pending := len(decodeChan)
-				capChan := cap(decodeChan)
-				pctFull := (pending * 100) / capChan
-				logger.Info("TRACE/mysql-pipeline-hb: decode pipeline heartbeat",
-					zap.Int("decodeChan_pending", pending),
-					zap.Int("decodeChan_cap", capChan),
-					zap.Int("fill_pct", pctFull),
-					zap.Int64("pressure_kept", traceMySQLPressureKeptReq.Load()+traceMySQLPressureKeptResp.Load()),
-					zap.Int64("chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
-					zap.Int64("ts_ms", time.Now().UnixMilli()),
-				)
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// pending := len(decodeChan)
+				// capChan := cap(decodeChan)
+				// pctFull := (pending * 100) / capChan
+				// logger.Info("TRACE/mysql-pipeline-hb: decode pipeline heartbeat",
+				// 	zap.Int("decodeChan_pending", pending),
+				// 	zap.Int("decodeChan_cap", capChan),
+				// 	zap.Int("fill_pct", pctFull),
+				// 	zap.Int64("pressure_kept", traceMySQLPressureKeptReq.Load()+traceMySQLPressureKeptResp.Load()),
+				// 	zap.Int64("chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
+				// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
+				// )
 			}
 		}
 	}()

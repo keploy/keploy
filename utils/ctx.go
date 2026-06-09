@@ -78,7 +78,9 @@ func NewCtx() context.Context {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						fmt.Fprintf(os.Stderr, "PROBE/pre-cancel-hook-panic: %v\n", r)
+						_ = r
+						// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+						// fmt.Fprintf(os.Stderr, "PROBE/pre-cancel-hook-panic: %v\n", r)
 					}
 				}()
 				fn()

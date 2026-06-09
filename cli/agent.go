@@ -2,14 +2,16 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// "fmt"
+	// "os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -31,11 +33,12 @@ func init() {
 // agent's abrupt death — zap is async-buffered and routinely drops
 // the last few hundred ms of output when the process is SIGKILL'd.
 func writeAgentStateLine(finalSnapshot bool) {
-	snap := syncMock.Get().ShutdownSnapshot()
-	tag := "PROBE/agent-state"
-	if finalSnapshot {
-		tag = "PROBE/agent-state-final"
-	}
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// snap := syncMock.Get().ShutdownSnapshot()
+	// tag := "PROBE/agent-state"
+	// if finalSnapshot {
+	// 	tag = "PROBE/agent-state-final"
+	// }
 	// FULL ACCOUNTING IDENTITY (this is what proves there is no
 	// hidden counter fault). Every mock counted in total_added must
 	// end up in exactly one of these buckets:
@@ -55,36 +58,38 @@ func writeAgentStateLine(finalSnapshot bool) {
 	//
 	// pressure_dropped is NOT in this identity: pressure drops happen
 	// BEFORE total_added is incremented, so they never enter the sum.
-	totalAdded := snap.TotalAdded
-	forwarded := routes.OutgoingForwardedTotal()
-	accountedDrops := snap.OutChanClosedDrops + int64(snap.SendDropsTotal)
-	stuck := int64(snap.BufferLen + snap.OutChanLen)
-	unaccounted := totalAdded - forwarded - stuck - accountedDrops
-	fmt.Fprintf(os.Stderr,
-		"%s: ts_ms=%d "+
-			"syncmock_total_added=%d syncmock_buffer=%d "+
-			"syncmock_outchan_len=%d syncmock_outchan_cap=%d "+
-			"syncmock_outchan_bound=%v syncmock_outchan_closed=%v "+
-			"syncmock_pressure_dropped=%d syncmock_send_drops=%d "+
-			"syncmock_outchan_closed_drops=%d "+
-			"syncmock_first_req_seen=%v syncmock_recent_windows=%d "+
-			"outgoing_forwarded=%d outgoing_handler_inflight=%d "+
-			"outgoing_handler_started=%d outgoing_handler_exited=%d "+
-			"outgoing_last_forward_ms=%d "+
-			"accounting_unaccounted=%d\n",
-		tag, time.Now().UnixMilli(),
-		totalAdded, snap.BufferLen,
-		snap.OutChanLen, snap.OutChanCap,
-		snap.OutChanBound, snap.OutChanClosed,
-		snap.PressureDropped, snap.SendDropsTotal,
-		snap.OutChanClosedDrops,
-		snap.FirstReqSeen, snap.RecentWindows,
-		forwarded, routes.OutgoingHandlerInFlight(),
-		routes.OutgoingHandlerStartedTotal(), routes.OutgoingHandlerExitedTotal(),
-		routes.OutgoingLastForwardUnixMs(),
-		unaccounted,
-	)
-	_ = os.Stderr.Sync()
+	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+	// totalAdded := snap.TotalAdded
+	// forwarded := routes.OutgoingForwardedTotal()
+	// accountedDrops := snap.OutChanClosedDrops + int64(snap.SendDropsTotal)
+	// stuck := int64(snap.BufferLen + snap.OutChanLen)
+	// unaccounted := totalAdded - forwarded - stuck - accountedDrops
+	// fmt.Fprintf(os.Stderr,
+	// 	"%s: ts_ms=%d "+
+	// 		"syncmock_total_added=%d syncmock_buffer=%d "+
+	// 		"syncmock_outchan_len=%d syncmock_outchan_cap=%d "+
+	// 		"syncmock_outchan_bound=%v syncmock_outchan_closed=%v "+
+	// 		"syncmock_pressure_dropped=%d syncmock_send_drops=%d "+
+	// 		"syncmock_outchan_closed_drops=%d "+
+	// 		"syncmock_first_req_seen=%v syncmock_recent_windows=%d "+
+	// 		"outgoing_forwarded=%d outgoing_handler_inflight=%d "+
+	// 		"outgoing_handler_started=%d outgoing_handler_exited=%d "+
+	// 		"outgoing_last_forward_ms=%d "+
+	// 		"accounting_unaccounted=%d\n",
+	// 	tag, time.Now().UnixMilli(),
+	// 	totalAdded, snap.BufferLen,
+	// 	snap.OutChanLen, snap.OutChanCap,
+	// 	snap.OutChanBound, snap.OutChanClosed,
+	// 	snap.PressureDropped, snap.SendDropsTotal,
+	// 	snap.OutChanClosedDrops,
+	// 	snap.FirstReqSeen, snap.RecentWindows,
+	// 	forwarded, routes.OutgoingHandlerInFlight(),
+	// 	routes.OutgoingHandlerStartedTotal(), routes.OutgoingHandlerExitedTotal(),
+	// 	routes.OutgoingLastForwardUnixMs(),
+	// 	unaccounted,
+	// )
+	// _ = os.Stderr.Sync()
+	_ = finalSnapshot
 }
 
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
@@ -168,20 +173,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// Keep the SIGTERM-instant probe too — it's a more precise
 			// "moment of death" marker IF the signal handler runs.
 			utils.RegisterPreCancelHook(func() {
-				snap := syncMock.Get().ShutdownSnapshot()
-				fmt.Fprintf(os.Stderr,
-					"PROBE/syncmock-at-sigterm: ts_ms=%d "+
-						"bufferLen=%d outChanLen=%d outChanCap=%d "+
-						"outChanBound=%v outChanClosed=%v "+
-						"totalAdded=%d pressureDropped=%d sendDropsTotal=%d "+
-						"firstReqSeen=%v recentWindows=%d\n",
-					time.Now().UnixMilli(),
-					snap.BufferLen, snap.OutChanLen, snap.OutChanCap,
-					snap.OutChanBound, snap.OutChanClosed,
-					snap.TotalAdded, snap.PressureDropped, snap.SendDropsTotal,
-					snap.FirstReqSeen, snap.RecentWindows,
-				)
-				_ = os.Stderr.Sync()
+				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
+				// snap := syncMock.Get().ShutdownSnapshot()
+				// fmt.Fprintf(os.Stderr,
+				// 	"PROBE/syncmock-at-sigterm: ts_ms=%d "+
+				// 		"bufferLen=%d outChanLen=%d outChanCap=%d "+
+				// 		"outChanBound=%v outChanClosed=%v "+
+				// 		"totalAdded=%d pressureDropped=%d sendDropsTotal=%d "+
+				// 		"firstReqSeen=%v recentWindows=%d\n",
+				// 	time.Now().UnixMilli(),
+				// 	snap.BufferLen, snap.OutChanLen, snap.OutChanCap,
+				// 	snap.OutChanBound, snap.OutChanClosed,
+				// 	snap.TotalAdded, snap.PressureDropped, snap.SendDropsTotal,
+				// 	snap.FirstReqSeen, snap.RecentWindows,
+				// )
+				// _ = os.Stderr.Sync()
 			})
 
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
