@@ -34,6 +34,26 @@ func TestCloneGlobalNoise_DeepCopy_324(t *testing.T) {
 	assert.False(t, hasNewHeaderField)
 }
 
+// TestPrepareMockNoiseConfig_IncludesBodyNoise guards that the mock-matching
+// noise config handed to the proxy integrations (OutgoingOptions.NoiseConfig)
+// carries BOTH header and body noise. Body noise was previously dropped, which
+// left outgoing-payload matchers (e.g. the Pulsar SEND matcher) with no way to
+// ignore non-deterministic fields and made noise-only differences fail replay.
+func TestPrepareMockNoiseConfig_IncludesBodyNoise(t *testing.T) {
+	global := config.GlobalNoise{
+		"header": {"date": []string{".*"}},
+		"body":   {"eventTs": []string{}, "eventId": []string{}},
+	}
+
+	got := PrepareMockNoiseConfig(global, config.TestsetNoise{}, "test-set-0")
+
+	require.Contains(t, got, "header", "header noise must still flow")
+	require.Contains(t, got, "body", "body noise must now flow (regression guard)")
+	_, hasTs := got["body"]["eventTs"]
+	_, hasID := got["body"]["eventId"]
+	assert.True(t, hasTs && hasID, "expected eventTs and eventId body-noise fields to be carried")
+}
+
 func TestLeftJoinNoise_DoesNotMutateGlobal_325(t *testing.T) {
 	global := config.GlobalNoise{
 		"body": {

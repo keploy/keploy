@@ -222,6 +222,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		sCOM_PING       = mysql.CommandStatusToString(mysql.COM_PING)
 		sCOM_RESET_CONN = mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION)
 		sCOM_STMT_RESET = mysql.CommandStatusToString(mysql.COM_STMT_RESET)
+		sCOM_STMT_SLD   = mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA)
 	)
 
 	// Fast path: QUIT may have no mock
@@ -403,6 +404,22 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// reusable read still resolves while an in-window row always wins.
 		defExecResp *mysql.Response
 		defExecMock *models.Mock
+
+		// COM_QUERY in-window preference (parity with the COM_STMT_EXECUTE
+		// branch from #4235). A parameterless statement (Spring
+		// JdbcTemplate without bind args → COM_QUERY, not a prepared
+		// statement) that issues the SAME SQL text across tests but returns
+		// a DIFFERENT row each time — e.g. an INSERT read-back
+		// "SELECT v FROM kv ORDER BY id DESC LIMIT 1" — records one data
+		// mock per call. The matcher used to take the FIRST exact-text
+		// match in pool order and (because lax-promoted data mocks live in
+		// the reusable session tier and are never consumed by updateMock)
+		// served that same first row to every later test. We instead prefer
+		// the exact-text match recorded INSIDE the current test window, and
+		// keep the first out-of-window exact match only as a fallback for a
+		// genuinely reusable single-recording query.
+		queryExactResp *mysql.Response
+		queryExactMock *models.Mock
 	)
 
 	// Single pass: filter & match on the fly. Iterates the merged pool
@@ -446,7 +463,21 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 			case sCOM_QUERY:
 				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
-					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+					// Exact query-text match. Prefer the candidate recorded
+					// inside the current test window so a repeated stateful
+					// read-back (same SQL, different row per call) resolves to
+					// THIS test's row instead of the first one recorded. An
+					// out-of-window exact match is kept only as a fallback for
+					// a genuinely reusable single-recording query. When no
+					// window is active (windowActive==false) this collapses to
+					// the previous first-exact-match-wins behaviour.
+					if windowActive && !mockInCurrentWindow(mock) {
+						if queryExactMock == nil {
+							queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
+						}
+					} else {
+						matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+					}
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 					bestPartialMock = mock
@@ -581,6 +612,16 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}
 	}
 
+	// COM_QUERY in-window fallback. The scan above takes an in-window
+	// exact-text match eagerly (queryMatched=true, loop broken). If it
+	// found ONLY an out-of-window exact-text match (a reusable
+	// single-recording query, or a stateful read whose matching row was
+	// recorded in a different test's window), serve that recorded
+	// candidate rather than dropping to the score-based partial pick.
+	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
+		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
+	}
+
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
 	// param-exact match (stmtMatched stays false) but did find a per-test
 	// data mock whose prepared query matched exactly, prefer that
@@ -675,6 +716,61 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					return generic, true, "", "", nil
 				}
 			}
+		}
+
+		// COM_STMT_SEND_LONG_DATA streams a single parameter value to the
+		// server ahead of COM_STMT_EXECUTE and, per the MySQL protocol, has
+		// NO server response. Connector/J emits it for stream-bound
+		// parameters (setBinaryStream / setBlob / setCharacterStream / large
+		// setBytes), so any Java app writing a BLOB/CLOB hits this path. The
+		// matcher has no per-mock comparison for it (the payload is just the
+		// streamed bytes, already reflected in the subsequent EXECUTE's
+		// recorded response), and the record window may legitimately not hold
+		// a mock for it. Without graceful handling matchCommand falls through
+		// to matchedResp==nil and query.go drops the connection with
+		// "no matching mock" BEFORE its IsNoResponseCommand check — surfacing
+		// to the client as SQLSTATE 08S01. Acknowledge it here: query.go sees
+		// ok==true, runs no prepared-stmt cleanup, then its
+		// IsNoResponseCommand branch continues without sending anything.
+		if req.Header.Type == sCOM_STMT_SLD {
+			// Consume the first recorded SEND_LONG_DATA mock (in-window
+			// preferred, recorded order otherwise) so the recorder's
+			// no-response SLD mocks are marked used instead of being flagged
+			// unused / pruned. Fall back to plain synthetic acceptance when
+			// the record window captured none.
+			var sldMock, sldMockWindow *models.Mock
+			for _, mock := range pool {
+				if mock.Kind != models.MySQL {
+					continue
+				}
+				isSLD := false
+				for _, mr := range mock.Spec.MySQLRequests {
+					if mr.PacketBundle.Header != nil && mr.PacketBundle.Header.Type == sCOM_STMT_SLD {
+						isSLD = true
+						break
+					}
+				}
+				if !isSLD {
+					continue
+				}
+				if windowActive && mockInCurrentWindow(mock) {
+					if sldMockWindow == nil {
+						sldMockWindow = mock
+					}
+				} else if sldMock == nil {
+					sldMock = mock
+				}
+			}
+			chosen := sldMockWindow
+			if chosen == nil {
+				chosen = sldMock
+			}
+			if chosen != nil {
+				updateMock(ctx, logger, chosen, mockDb)
+			}
+			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
+				zap.Bool("consumed_recorded_mock", chosen != nil))
+			return &mysql.Response{}, true, "", "", nil
 		}
 
 		// COM_STMT_RESET clears the cursor / long-data state of a server
