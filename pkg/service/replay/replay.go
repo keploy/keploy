@@ -1073,7 +1073,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.firstRun = false
 		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1087,7 +1087,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
@@ -1262,7 +1262,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1276,7 +1276,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
