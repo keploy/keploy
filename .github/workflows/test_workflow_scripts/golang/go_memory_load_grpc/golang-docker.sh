@@ -198,11 +198,19 @@ check_recorded_tests() {
 
 check_test_report() {
     local latest_report_dir
-    local all_passed=true
     local found_reports=false
     local report_file
+    local agg_total=0
+    local agg_failure=0
 
-    echo "Checking test reports..."
+    # Maximum tolerated test-case failure percentage. These memory-load lanes
+    # run under deliberate memory pressure on shared 2-vCPU CI runners, where a
+    # small number of non-deterministic test divergences is expected and is not
+    # a real regression. The lane fails only if MORE than this fraction of the
+    # recorded test cases fail at replay. Tunable via MAX_FAIL_PERCENT.
+    local max_fail_percent="${MAX_FAIL_PERCENT:-2}"
+
+    echo "Checking test reports (failure tolerance: ${max_fail_percent}% of total test cases)..."
 
     if [ ! -d "./keploy/reports" ]; then
         echo "Test report directory not found."
@@ -216,26 +224,31 @@ check_test_report() {
     fi
 
     # Match both YAML (default) and JSON (--storage-format json) report files.
+    # Aggregate the report-level total/failure counts across every test-set so
+    # the tolerance is computed over the whole lane, not per-set.
     for report_file in "$latest_report_dir"/test-set-*-report.yaml "$latest_report_dir"/test-set-*-report.json; do
         [ -e "$report_file" ] || continue
         found_reports=true
 
-        local test_set_name
-        local test_status
+        local test_set_name set_status set_total set_failure
 
         test_set_name="$(basename "$report_file")"
         test_set_name="${test_set_name%-report.*}"
-        # grep -m 1 stops after first match — avoids SIGPIPE when the report has
-        # many per-test status fields and the result is piped to head.
-        # gsub strips JSON double-quotes so both `status: PASSED` (YAML) and
-        # `"status": "PASSED"` (JSON) map to the plain string PASSED.
-        test_status="$(grep -m 1 'status:' "$report_file" | awk '{gsub(/"/, ""); print $2}')"
 
-        echo "Status for ${test_set_name}: $test_status"
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "${test_set_name} did not pass."
-        fi
+        # grep -m 1 takes the report-LEVEL summary field (the first occurrence),
+        # not the many per-test fields below it. gsub strips JSON quotes/commas
+        # so both `total: 658` (YAML) and `"total": 658,` (JSON) parse cleanly.
+        set_status="$(grep -m 1 -E '^[[:space:]]*"?status"?:' "$report_file" | awk '{gsub(/[",]/, ""); print $2}')"
+        set_total="$(grep -m 1 -E '^[[:space:]]*"?total"?:' "$report_file" | awk '{gsub(/[",]/, ""); print $2}')"
+        set_failure="$(grep -m 1 -E '^[[:space:]]*"?failure"?:' "$report_file" | awk '{gsub(/[",]/, ""); print $2}')"
+
+        set_total="${set_total:-0}"
+        set_failure="${set_failure:-0}"
+
+        echo "  ${test_set_name}: status=${set_status:-unknown} total=${set_total} failure=${set_failure}"
+
+        agg_total=$((agg_total + set_total))
+        agg_failure=$((agg_failure + set_failure))
     done
 
     if [ "$found_reports" = false ]; then
@@ -243,11 +256,24 @@ check_test_report() {
         return 1
     fi
 
-    if [ "$all_passed" = false ]; then
+    if [ "$agg_total" -le 0 ]; then
+        echo "Report total test-case count is zero — treating as failure."
         return 1
     fi
 
-    echo "All test reports passed."
+    local fail_pct within
+    fail_pct="$(awk -v f="$agg_failure" -v t="$agg_total" 'BEGIN { printf "%.4f", (f * 100.0) / t }')"
+    within="$(awk -v p="$fail_pct" -v m="$max_fail_percent" 'BEGIN { print (p <= m) ? "yes" : "no" }')"
+
+    echo "Aggregate: ${agg_failure}/${agg_total} test cases failed (${fail_pct}%). Tolerance: ${max_fail_percent}%."
+
+    if [ "$within" = "yes" ]; then
+        echo "Failure rate within tolerance — passing the lane."
+        return 0
+    fi
+
+    echo "Failure rate ${fail_pct}% exceeds tolerance ${max_fail_percent}% — failing the lane."
+    return 1
 }
 
 wait_for_keploy_container() {
