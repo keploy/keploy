@@ -733,7 +733,43 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// ok==true, runs no prepared-stmt cleanup, then its
 		// IsNoResponseCommand branch continues without sending anything.
 		if req.Header.Type == sCOM_STMT_SLD {
-			logger.Debug("Accepting unmocked COM_STMT_SEND_LONG_DATA (no-response command)")
+			// Consume the first recorded SEND_LONG_DATA mock (in-window
+			// preferred, recorded order otherwise) so the recorder's
+			// no-response SLD mocks are marked used instead of being flagged
+			// unused / pruned. Fall back to plain synthetic acceptance when
+			// the record window captured none.
+			var sldMock, sldMockWindow *models.Mock
+			for _, mock := range pool {
+				if mock.Kind != models.MySQL {
+					continue
+				}
+				isSLD := false
+				for _, mr := range mock.Spec.MySQLRequests {
+					if mr.PacketBundle.Header != nil && mr.PacketBundle.Header.Type == sCOM_STMT_SLD {
+						isSLD = true
+						break
+					}
+				}
+				if !isSLD {
+					continue
+				}
+				if windowActive && mockInCurrentWindow(mock) {
+					if sldMockWindow == nil {
+						sldMockWindow = mock
+					}
+				} else if sldMock == nil {
+					sldMock = mock
+				}
+			}
+			chosen := sldMockWindow
+			if chosen == nil {
+				chosen = sldMock
+			}
+			if chosen != nil {
+				updateMock(ctx, logger, chosen, mockDb)
+			}
+			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
+				zap.Bool("consumed_recorded_mock", chosen != nil))
 			return &mysql.Response{}, true, "", "", nil
 		}
 

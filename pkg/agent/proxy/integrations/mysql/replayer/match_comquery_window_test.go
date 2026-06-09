@@ -186,6 +186,51 @@ func TestMatchCommand_SendLongDataAcceptedGracefully(t *testing.T) {
 	}
 }
 
+// sldMock builds a per-test, no-response COM_STMT_SEND_LONG_DATA data mock.
+func sldMock(name string, reqTs time.Time) *models.Mock {
+	m := &models.Mock{Name: name, Kind: models.MySQL}
+	m.TestModeInfo.Lifetime = models.LifetimePerTest
+	m.Spec.Metadata = map[string]string{"type": "mocks"}
+	m.Spec.ReqTimestampMock = reqTs
+	m.Spec.MySQLRequests = []mysql.Request{{
+		PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12, SequenceID: 0}, Type: "COM_STMT_SEND_LONG_DATA"},
+			Message: &mysql.StmtSendLongDataPacket{StatementID: 3, ParameterID: 0},
+		},
+	}}
+	return m
+}
+
+// TestMatchCommand_SendLongDataConsumesRecordedMock verifies the SEND_LONG_DATA
+// fallback consumes a recorded SLD mock when one exists (so it isn't flagged
+// unused / pruned), while still returning the no-response acceptance.
+func TestMatchCommand_SendLongDataConsumesRecordedMock(t *testing.T) {
+	logger := zap.NewNop()
+	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	db := &fakeMockDb{
+		session:  []*models.Mock{sldMock("sld-1", base)},
+		winStart: base.Add(-time.Second),
+		winEnd:   base.Add(time.Second), // sld-1 is in-window
+	}
+	req := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12, SequenceID: 0}, Type: "COM_STMT_SEND_LONG_DATA"},
+		Message: &mysql.StmtSendLongDataPacket{StatementID: 3},
+	}}
+	_, ok, _, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx())
+	if err != nil || !ok {
+		t.Fatalf("SLD must be accepted, got ok=%v err=%v", ok, err)
+	}
+	consumed := false
+	for _, n := range db.deletedFil {
+		if n == "sld-1" {
+			consumed = true
+		}
+	}
+	if !consumed {
+		t.Errorf("expected the recorded SLD mock to be consumed (DeleteFilteredMock), deletedFil=%v", db.deletedFil)
+	}
+}
+
 // TestMatchCommand_ComQueryStatefulReadInWindow is the regression guard for the
 // TiDB/Connector-J stateful read-back bug: a
 // parameterless statement that issues the SAME SQL text across tests but
