@@ -19,6 +19,7 @@ import (
 // are reusable, never consumed) — which is exactly the condition that made the
 // COM_QUERY matcher serve the first recorded row to every test.
 type fakeMockDb struct {
+	perTest    []*models.Mock
 	session    []*models.Mock
 	winStart   time.Time
 	winEnd     time.Time
@@ -26,7 +27,7 @@ type fakeMockDb struct {
 }
 
 func (f *fakeMockDb) GetSessionMocks() ([]*models.Mock, error)         { return f.session, nil }
-func (f *fakeMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
+func (f *fakeMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return f.perTest, nil }
 func (f *fakeMockDb) GetConnectionMocks(string) ([]*models.Mock, error) {
 	return nil, nil
 }
@@ -48,7 +49,18 @@ func (f *fakeMockDb) UpdateUnFilteredMock(*models.Mock, *models.Mock) bool {
 }
 func (f *fakeMockDb) DeleteFilteredMock(m models.Mock) bool {
 	f.deletedFil = append(f.deletedFil, m.Name)
-	return false // not a per-test mock; mirrors the real "staged in session" path
+	// Real semantics: a per-test mock present in the filtered pool is consumed
+	// (removed) and returns true; a per-test mock that has been lax-staged into
+	// the session pool is not in the filtered tree, so DeleteFilteredMock misses
+	// (returns false) and updateMock falls back to UpdateUnFilteredMock — which
+	// is exactly the un-consumed condition the COM_QUERY in-window fix targets.
+	for i, pm := range f.perTest {
+		if pm.Name == m.Name {
+			f.perTest = append(f.perTest[:i], f.perTest[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 func (f *fakeMockDb) DeleteUnFilteredMock(models.Mock) bool     { return false }
 func (f *fakeMockDb) DeleteStartupMock(models.Mock) bool        { return false }
@@ -208,7 +220,7 @@ func TestMatchCommand_SendLongDataConsumesRecordedMock(t *testing.T) {
 	logger := zap.NewNop()
 	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 	db := &fakeMockDb{
-		session:  []*models.Mock{sldMock("sld-1", base)},
+		perTest:  []*models.Mock{sldMock("sld-1", base)}, // per-test mock routed to the per-test pool
 		winStart: base.Add(-time.Second),
 		winEnd:   base.Add(time.Second), // sld-1 is in-window
 	}
