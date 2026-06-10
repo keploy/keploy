@@ -1249,7 +1249,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
+		// Failsafe ceiling only — the ticker below unblocks the instant the
+		// agent reports ready, so a healthy agent never waits near this.
+		// Configurable via KEPLOY_AGENT_READY_TIMEOUT for heavily-loaded hosts.
+		readyTimeout := pkg.AgentReadyTimeout(a.logger)
+		agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1260,7 +1264,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
+			return fmt.Errorf("keploy-agent did not become ready in time (waited %s; if this host is heavily loaded, raise KEPLOY_AGENT_READY_TIMEOUT)", readyTimeout)
 		case <-agentReadyCh:
 		}
 	}
