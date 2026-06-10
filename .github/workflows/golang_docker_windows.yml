@@ -125,6 +125,18 @@ jobs:
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
+      # download-image's `docker load` (and the sample app afterwards) need the
+      # Docker Desktop Linux engine up. The self-hosted Windows runner does not
+      # guarantee it is running, so start it and wait for readiness here — same
+      # helper/pattern used by prepare_and_run.yml's "Ensure Docker is running"
+      # step. Without this the job fails on "failed to connect to the docker API
+      # at npipe:////./pipe/dockerDesktopLinuxEngine".
+      - name: Ensure Docker is running
+        shell: 'powershell -ExecutionPolicy Bypass -NoProfile -Command "& ''{0}''"'
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+          if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+
       - id: image
         uses: ./.github/actions/download-image
         with:
