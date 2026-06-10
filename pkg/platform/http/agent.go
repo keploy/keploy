@@ -1795,9 +1795,14 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
 	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
+	// Low-volume: success logs once; failures log once per 2s retry (bounded by
+	// the 2-min timeout, so ≤60 lines worst case) — does not slow the pipeline.
 	a.logger.Info("RTRACE/cli: posting agent-ready", zap.String("url", url), zap.Duration("timeout", agentReadyTimeout))
+	rtraceStart := time.Now()
+	attempt := 0
 
 	for {
+		attempt++
 		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 		if err != nil {
 			return err
@@ -1808,17 +1813,22 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				a.logger.Debug("Successfully marked agent as ready")
+				// RTRACE: TEMP diagnostic — remove before merge.
+				a.logger.Info("RTRACE/cli: agent-ready OK", zap.Int("attempt", attempt), zap.Duration("waited", time.Since(rtraceStart)))
 				return nil
 			}
-			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+			// RTRACE: TEMP diagnostic — remove before merge.
+			a.logger.Info("RTRACE/cli: agent-ready non-200 (retrying)", zap.Int("attempt", attempt), zap.Int("status", resp.StatusCode))
 		} else {
-			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
+			// RTRACE: TEMP diagnostic — remove before merge.
+			a.logger.Info("RTRACE/cli: agent-ready attempt failed (retrying)", zap.Int("attempt", attempt), zap.Error(err))
 		}
 
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				// RTRACE: TEMP diagnostic — remove before merge.
+				a.logger.Info("RTRACE/cli: agent-ready TIMEOUT", zap.Int("attempts", attempt), zap.Duration("waited", time.Since(rtraceStart)))
 				return fmt.Errorf("timeout waiting for agent to become ready")
 			}
 			return ctx.Err()

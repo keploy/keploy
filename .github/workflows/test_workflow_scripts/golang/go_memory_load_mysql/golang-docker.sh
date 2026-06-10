@@ -555,8 +555,7 @@ section "Preparing Replay"
 cleanup_compose
 
 section "Replaying recorded test cases"
-# RTRACE: TEMP --debug to surface agent-ready/storemocks/health-poll traces (replay-hang investigation) — remove before merge.
-run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --debug --generate-github-actions=false 2>&1 | tee test.txt &
+run_with_keploy_privileges "$REPLAY_BIN" test -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --api-timeout 120 --delay 20 --generate-github-actions=false 2>&1 | tee test.txt &
 replay_pid=$!
 echo "Started Keploy test process with PID: $replay_pid"
 
