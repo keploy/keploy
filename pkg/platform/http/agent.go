@@ -893,6 +893,8 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
 	}
 
+	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
+	a.logger.Info("RTRACE/cli: StoreMocks POST", zap.String("url", fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI)), zap.Int("bytes", buf.Len()))
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -1792,6 +1794,8 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 	defer ticker.Stop()
 
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
+	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
+	a.logger.Info("RTRACE/cli: posting agent-ready", zap.String("url", url), zap.Duration("timeout", agentReadyTimeout))
 
 	for {
 		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)

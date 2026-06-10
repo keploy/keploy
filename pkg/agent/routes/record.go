@@ -799,7 +799,8 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
+	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
+	a.logger.Info("RTRACE/agent: wrote readiness file (agent now healthy)", zap.String("file", agentReadyFilePath))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
