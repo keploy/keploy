@@ -362,13 +362,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		// (decode-error). Combined with host_decoded it pinpoints the
 		// loss boundary.
 		exitReason := "unknown"
-		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-		_ = exitReason
-		// decodeBaseline lets the periodic recorder and the final log
-		// report how many mocks THIS stream decoded (the package
-		// counter is process-cumulative across reconnects).
-		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-		// decodeStart := hostMocksDecoded.Load()
+		// decodeStart lets the final parity log report how many mocks THIS
+		// stream decoded (the package counter is process-cumulative across
+		// reconnects).
+		decodeStart := hostMocksDecoded.Load()
 
 		defer func() {
 			close(mockChan)
@@ -385,16 +382,16 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
 
-			// GROUND-TRUTH final receive count. Written via the host
-			// logger; for the CI investigation we grep PROBE/host-recv-final
-			// and compare host_decoded against the agent's
-			// outgoing_forwarded at the same wall-clock moment.
-			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-			// fmt.Fprintf(os.Stderr,
-			// 	"PROBE/host-recv-final: ts_ms=%d reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
-			// 	time.Now().UnixMilli(), exitReason,
-			// 	hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
-			// _ = os.Stderr.Sync()
+			// GROUND-TRUTH final receive count. One-shot at stream end.
+			// host_decoded_this_stream is how many mocks the CLI pulled off
+			// the wire this recording — if it equals the agent's forwarded
+			// count (and the mocks.yaml count), the single-buffer drain lost
+			// nothing. RTRACE: TEMP diagnostic (one-buffer verification) —
+			// remove before merge.
+			fmt.Fprintf(os.Stderr,
+				"RTRACE/host-recv-final: reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
+				exitReason, hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
+			_ = os.Stderr.Sync()
 		}()
 
 		// Periodic host-side receive recorder. Every 1 s it prints the
