@@ -642,17 +642,19 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	// Create channels to receive incoming and outgoing data.
 	//
-	// outgoingChan is UNBUFFERED. The single network buffer that decouples
-	// wire-receipt from the disk writer lives one hop upstream — mockChan in
-	// pkg/platform/http/agent.go GetOutgoing (buffered 16384). This consumer
-	// just forwards each mock to InsertMock, which hands it to the async
-	// background writer (a fast, non-blocking enqueue), so this hop never
-	// back-pressures the upstream buffer. A second 16384 buffer here was
-	// redundant (it only duplicated mockChan's job), so it was removed: one
-	// buffer, positioned at the wire reader, is sufficient to absorb the
-	// teardown tail at shutdown.
+	// outgoingChan is BUFFERED (16384) — and this is NOT redundant with the
+	// upstream mockChan buffer, despite looking like it. Both buffers do real
+	// work at shutdown, proven by experiment (CI run 27310557135): unbuffering
+	// this channel made the wire reader still receive everything
+	// (host_decoded=11396) but 33% of test cases then failed with EOF at
+	// replay, because the teardown tail could not cross this hop to the disk
+	// writer once recording stopped. mockChan absorbs the tail OFF THE WIRE;
+	// this buffer holds it so the detached-ctx InsertMock consumer can drain
+	// it to disk AFTER shutdown. With this channel unbuffered, the bridge that
+	// feeds it stalls at stop and the tail buffered in mockChan never reaches
+	// disk -> orphan TCs. Keep both buffers.
 	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	outgoingChan := make(chan *models.Mock, 16384)
 	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
