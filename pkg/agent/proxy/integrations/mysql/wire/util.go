@@ -32,7 +32,7 @@ type DecodeContext struct {
 	NextStmtID uint32
 }
 
-const CLIENT_DEPRECATE_EOF = 0x01000000
+const CLIENT_DEPRECATE_EOF = 0x00200000
 
 func (d *DecodeContext) effectiveClientCaps() uint32 {
 	if d.PreferRecordedCaps && d.RecordedClientCaps != 0 {
