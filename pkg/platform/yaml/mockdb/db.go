@@ -134,8 +134,6 @@ type asyncWriteJob struct {
 	testSetPath string
 	filename    string
 	effFormat   yaml.Format
-	encodedData chan []byte
-	encodeErr   chan error
 }
 
 const mockFileLockStripeCount = 256
@@ -838,21 +836,14 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		return ys.asyncGobEnc.Encode(job.mock)
 	}
 
-	var data []byte
-	if job.encodedData != nil {
-		select {
-		case err := <-job.encodeErr:
-			return err
-		case d := <-job.encodedData:
-			data = d
-		}
-	} else {
-		// Fallback for sync inserts or missing promise
-		d, err := ys.encodeMockData(job)
-		if err != nil {
-			return err
-		}
-		data = d
+	// Encode the mock to its on-disk bytes inline. A single background
+	// writer goroutine (asyncWriterLoop) owns this path, so encoding is
+	// serialized here — simple and race-free. (An earlier revision carried
+	// a parallel-encode promise via per-job channels; it was never wired up,
+	// so it has been removed in favour of this single-worker inline encode.)
+	data, err := ys.encodeMockData(job)
+	if err != nil {
+		return err
 	}
 
 	if job.effFormat == yaml.FormatJSON {
