@@ -795,6 +795,11 @@ func (ys *MockYaml) asyncWriterLoop() {
 	}
 }
 
+// asyncMocksWrittenTotal is a process-cumulative count of mocks the single
+// background writer has successfully encoded to its file buffer (W in the
+// single-buffer experiment). RTRACE: TEMP — remove before merge.
+var asyncMocksWrittenTotal atomic.Int64
+
 func (ys *MockYaml) drainAndClose() {
 	for {
 		select {
@@ -810,6 +815,10 @@ func (ys *MockYaml) drainAndClose() {
 			}
 		default:
 			ys.asyncFlushAndClose()
+			// RTRACE: TEMP single-buffer experiment — W (mocks written to disk
+			// at shutdown drain). Compare with host_decoded. Remove before merge.
+			fmt.Fprintf(os.Stderr, "RTRACE/mockdb-written: async_mocks_written_total=%d\n", asyncMocksWrittenTotal.Load())
+			_ = os.Stderr.Sync()
 			return
 		}
 	}
@@ -833,7 +842,11 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 
 	isGob := useGobMockFormat()
 	if isGob && ys.asyncGobEnc != nil {
-		return ys.asyncGobEnc.Encode(job.mock)
+		if err := ys.asyncGobEnc.Encode(job.mock); err != nil {
+			return err
+		}
+		asyncMocksWrittenTotal.Add(1) // RTRACE: TEMP single-buffer experiment — remove before merge.
+		return nil
 	}
 
 	// Encode the mock to its on-disk bytes inline. A single background
@@ -871,6 +884,7 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		}
 		ys.asyncNeedsYamlSep = true
 	}
+	asyncMocksWrittenTotal.Add(1) // RTRACE: TEMP single-buffer experiment — remove before merge.
 	return nil
 }
 

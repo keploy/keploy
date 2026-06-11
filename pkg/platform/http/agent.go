@@ -329,12 +329,16 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	// entire teardown tail off the wire into host RAM at network speed,
 	// instead of being throttled to the downstream disk-writer's ~160
 	// mocks/sec. hostMocksDecoded is incremented the instant a mock is
-	// decoded (before the send below), so a buffered channel means the whole
-	// stream is safely "received" the moment it is read off the wire — even
-	// if the agent is killed a millisecond later and even though the disk
-	// writer is still catching up. See the matching buffer + rationale on
-	// outgoingChan in pkg/service/record/record.go GetTestAndMockChans.
-	mockChan := make(chan *models.Mock, 16384)
+	// decoded (before the send below).
+	//
+	// EXPERIMENT (single-buffer test): this channel is UNBUFFERED on purpose,
+	// to test whether the downstream outgoingChan buffer (in record.go) alone
+	// is sufficient. The reader still tightly forwards each decoded mock into
+	// the buffered outgoingChan, so the wire should still drain fast. The
+	// RTRACE counters (agent forwarded -> host_decoded -> disk written) will
+	// confirm whether anything is lost with only one buffer. Revert to
+	// buffered(16384) if the counters show host-side loss.
+	mockChan := make(chan *models.Mock)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {

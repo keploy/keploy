@@ -565,6 +565,13 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	// account for every exit, including early returns below.
 	outgoingHandlerStarted.Add(1)
 	defer outgoingHandlerExited.Add(1)
+	// RTRACE: TEMP single-buffer experiment — N (agent forwarded). Compare
+	// against host_decoded (RTRACE/host-recv-final) and disk-written
+	// (RTRACE/mockdb-written) to locate any loss. Remove before merge.
+	defer func() {
+		fmt.Fprintf(os.Stderr, "RTRACE/agent-forwarded-final: outgoing_forwarded_total=%d\n", outgoingForwardedTotal.Load())
+		_ = os.Stderr.Sync()
+	}()
 
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
