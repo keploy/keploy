@@ -4,7 +4,6 @@ import (
 	"encoding/gob"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/models/aerospike"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -42,14 +41,12 @@ const (
 	DNS         Kind = "DNS"
 
 	// Aerospike covers all Aerospike traffic — info text frames,
-	// AS_MSG binary frames, and their compressed wrapper. The frame
-	// type is carried per request/response on
-	// Request.Header.Type / Response.Header.Type (a uint8 wire byte)
-	// and on the parallel PacketInfo.Type string (one of
-	// aerospike.FrameInfo / FrameAdmin / FrameMessage /
-	// FrameMessageCompressed); consumers discriminate there rather
-	// than on Kind so a single Mock can carry a tend handshake plus
-	// the follow-on data ops without needing distinct Kinds.
+	// AS_MSG binary frames, and their compressed wrapper. It is an
+	// ENTERPRISE-ONLY parser (enterprise-native tier, like Redis/Kafka):
+	// OSS core carries only this Kind string. The enterprise parser
+	// stores its captured frames in the generic GenericRequests /
+	// GenericResponses payload slices and owns the typed frame model +
+	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
 )
 
@@ -161,13 +158,9 @@ type MockSpec struct {
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
 
-	// Aerospike carries one or more request/response pairs captured from
-	// an Aerospike client connection. The frame type (info / AS_MSG /
-	// AS_MSG_COMPRESSED) is encoded per request via PacketInfo.Type so
-	// a single Mock can group an info-protocol exchange and the
-	// follow-on data ops without needing distinct Kinds.
-	AerospikeRequests  []aerospike.Request  `json:"AerospikeRequests,omitempty" bson:"aerospike_requests,omitempty"`
-	AerospikeResponses []aerospike.Response `json:"AerospikeResponses,omitempty" bson:"aerospike_responses,omitempty"`
+	// Aerospike (enterprise-only) stores its captured frames in the
+	// generic GenericRequests / GenericResponses payload slices above,
+	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
