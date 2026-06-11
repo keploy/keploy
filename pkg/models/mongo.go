@@ -166,6 +166,22 @@ func init() {
 	gob.Register(&MongoOpQuery{})
 	gob.Register(&MongoOpReply{})
 	gob.Register(&MongoOpUnknown{})
+	// Register the remaining wire-message structs that MongoRequest/
+	// MongoResponse can hold in their interface{} Message field. The
+	// Unmarshal switches above decode frames into these types, so gob-based
+	// mock persistence must be able to encode them too. Without these, a
+	// recorded OP_COMPRESSED frame (or any legacy opcode) failed gob encoding
+	// with "gob: type not registered for interface: models.MongoOpCompressed"
+	// and the mock was silently DROPPED at record time, leaving replay with no
+	// candidate. (The mongo/v2 parser now decompresses OP_COMPRESSED into its
+	// inner opcode, so this is the safety net for unsupported-compressor
+	// fallbacks and legacy frames.)
+	gob.Register(&MongoOpCompressed{})
+	gob.Register(&MongoOpUpdate{})
+	gob.Register(&MongoOpInsert{})
+	gob.Register(&MongoOpDelete{})
+	gob.Register(&MongoOpGetMore{})
+	gob.Register(&MongoOpKillCursors{})
 }
 
 // UnmarshalBSON implements bson.Unmarshaler for mongoRequests because of interface typeof field
