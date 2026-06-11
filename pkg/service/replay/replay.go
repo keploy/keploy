@@ -811,7 +811,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -1072,8 +1072,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, stopReason)
 		}
 		r.firstRun = false
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		// Prepare header + body noise configuration for mock matching
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1087,7 +1087,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
@@ -1261,8 +1261,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		// Prepare header + body noise configuration for mock matching
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1276,7 +1276,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
@@ -1825,7 +1825,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !strictMockReject {
+			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
@@ -2349,7 +2349,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
