@@ -3,7 +3,6 @@ package manager
 import (
 	"fmt"
 	"math/rand"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,24 +95,6 @@ func tcCorrHint(mock *models.Mock) string {
 	}
 	return fmt.Sprintf("TC correlation: check mappings.yaml for TCs around now (ts_ms=%d)",
 		time.Now().UnixMilli())
-}
-
-// mockKindSlice counts mocks by kind in a slice (used for teardown snapshots).
-func mockKindSlice(buf []*models.Mock) string {
-	if len(buf) == 0 {
-		return "none"
-	}
-	counts := map[string]int{}
-	for _, m := range buf {
-		if m != nil {
-			counts[string(m.Kind)]++
-		}
-	}
-	parts := make([]string, 0, len(counts))
-	for k, v := range counts {
-		parts = append(parts, fmt.Sprintf("%s×%d", k, v))
-	}
-	return strings.Join(parts, " ")
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -472,28 +453,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// → keep this mock; fall through to the normal buffer/forward path.
 	}
 	// Mock is being kept — count it as successfully added.
-	added := m.totalAdded.Add(1)
-
-	// DIAG: every 500th mock, log the lock-free atomic counters so we
-	// can correlate agent-side throughput with host-side InsertMock
-	// rate. We avoid touching m.buffer or m.outChan here (both would
-	// require taking a lock already held by AddMock or a sibling mutex
-	// that could deadlock under load); a periodic snapshot at this
-	// granularity is enough to confirm the agent stayed alive and was
-	// producing while the host writer fell behind.
-	if added%500 == 0 {
-		// Best-effort logger fetch — dropLogger may return nil during
-		// teardown when the parent logger is being torn down.
-		// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-		// if logger := m.dropLogger(); logger != nil {
-		// 	logger.Info("DIAG/syncmock-snapshot: agent producer state",
-		// 		zap.Int64("totalAdded", added),
-		// 		zap.Uint64("send_drops_total", m.dropCount.Load()),
-		// 		zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
-		// 		zap.Int64("ts_ms", time.Now().UnixMilli()),
-		// 	)
-		// }
-	}
+	m.totalAdded.Add(1)
 
 	// Tag app-bootstrap traffic. Any mock captured before the first
 	// inbound request is startup/init traffic (e.g. an AWS Secret Manager
@@ -624,33 +584,6 @@ func (m *SyncMockManager) CloseOutChan() {
 	// discarded here and orphan its test case.
 	m.FlushOwnedWindows()
 
-	// TRACE (Bug-0 shutdown-loss proof): snapshot what is STILL buffered after
-	// the drain — mocks we could not attribute (the residual loss risk).
-	// buffered_pending should be ~0 when the drain succeeds.
-	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-	// m.mu.Lock()
-	// bufferedPending := len(m.buffer)
-	// recentWin := len(m.recentWindows)
-	// bufSnapshot := make([]*models.Mock, len(m.buffer))
-	// copy(bufSnapshot, m.buffer)
-	// m.mu.Unlock()
-	// if logger := m.dropLogger(); logger != nil {
-	// 	kindBreakdown := mockKindSlice(bufSnapshot)
-	// 	logger.Info("TRACE/syncmock-shutdown: outChan closing — buffered mocks left after final drain",
-	// 		zap.Int("buffered_pending", bufferedPending),
-	// 		zap.String("buffered_kinds", kindBreakdown),
-	// 		zap.Int("recent_windows", recentWin),
-	// 		zap.Int64("pressure_dropped_total", m.pressureDropped.Load()),
-	// 		zap.Int64("added_total", m.totalAdded.Load()),
-	// 	)
-	// 	for i, mock := range bufSnapshot {
-	// 		logger.Info("TRACE/syncmock-shutdown: pending mock (not attributable — left unflushed)",
-	// 			zap.Int("index", i),
-	// 			zap.String("mock", mockSummary(mock)),
-	// 			zap.String("tc_correlation", tcCorrHint(mock)),
-	// 		)
-	// 	}
-	// }
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {

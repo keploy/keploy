@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
@@ -27,24 +26,6 @@ type mysqlDecodeItem struct {
 	data       []byte
 	ts         time.Time
 }
-
-// TRACE (temporary, Bug-1 investigation): count/sample MySQL recording-copy
-// skips at the decode-feed gate caused by memory pressure. The real bytes are
-// still forwarded to the peer; only the recorded copy is skipped, so a mock
-// may end up missing or mid-stream-truncated. Sampled power-of-2 to stay
-// flood-safe in the hot forwarding path.
-var (
-	// pressure-active-fed: bytes fed to the decoder while memory pressure
-	// was active (connection started in calm, pressure hit mid-connection).
-	// Under the old code these would have been silently dropped → orphan TC.
-	// Now they are always forwarded; this counter is diagnostic only.
-	traceMySQLPressureKeptReq  atomic.Int64
-	traceMySQLPressureKeptResp atomic.Int64
-	// channel-full drops: decoder fell behind, decodeChan was full, the
-	// recording copy was dropped (real bytes still forwarded).
-	traceMySQLChanFullReq  atomic.Int64
-	traceMySQLChanFullResp atomic.Int64
-)
 
 // handleClientQueries handles the MySQL command phase with non-blocking
 // forwarding. Raw bytes are relayed at wire speed in the main select loop.
@@ -167,48 +148,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
-	// Periodic decode-pipeline heartbeat: log decodeChan fill level every 5 s.
-	// This fires WHILE the container is alive, so Docker captures it even when
-	// the final cleanup() snapshot races the container shutdown.
-	// A rising fill % through the teardown phase confirms the decoder is falling
-	// behind and mocks will be lost — the last heartbeat before recording stops
-	// is the key line to search for: "TRACE/mysql-pipeline-hb".
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				// One final snapshot right when ctx cancels (recording stops).
-				// This races Docker shutdown but is worth trying; the periodic
-				// logs above are the reliable alternative.
-				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-				// logger.Info("TRACE/mysql-shutdown: recording ctx cancelled — final decode pipeline snapshot",
-				// 	zap.Int("decodeChan_pending", len(decodeChan)),
-				// 	zap.Int("decodeChan_cap", cap(decodeChan)),
-				// 	zap.Int64("pressure_kept_req", traceMySQLPressureKeptReq.Load()),
-				// 	zap.Int64("pressure_kept_resp", traceMySQLPressureKeptResp.Load()),
-				// 	zap.Int64("total_chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
-				// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
-				// )
-				return
-			case <-ticker.C:
-				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-				// pending := len(decodeChan)
-				// capChan := cap(decodeChan)
-				// pctFull := (pending * 100) / capChan
-				// logger.Info("TRACE/mysql-pipeline-hb: decode pipeline heartbeat",
-				// 	zap.Int("decodeChan_pending", pending),
-				// 	zap.Int("decodeChan_cap", capChan),
-				// 	zap.Int("fill_pct", pctFull),
-				// 	zap.Int64("pressure_kept", traceMySQLPressureKeptReq.Load()+traceMySQLPressureKeptResp.Load()),
-				// 	zap.Int64("chanfull_drops", traceMySQLChanFullReq.Load()+traceMySQLChanFullResp.Load()),
-				// 	zap.Int64("ts_ms", time.Now().UnixMilli()),
-				// )
-			}
-		}
-	}()
-
 	// forwardClient/forwardDest: always feed bytes to the decoder for
 	// connections that started in recording mode. The entry-point check
 	// above handles new connections under pressure (passthrough); once
@@ -225,9 +164,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
 			default:
 			}
-			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureKeptReq.Add(1)
-			}
 		}
 	}
 	forwardDest := func(buf []byte) {
@@ -241,9 +177,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			select {
 			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
 			default:
-			}
-			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureKeptResp.Add(1)
 			}
 		}
 	}
@@ -365,18 +298,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// Non-blocking send to async decode. Check channel capacity
 			// before copying to avoid allocation/GC churn when the decoder
 			// can't keep up (the copy would just be dropped).
-			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureKeptReq.Add(1)
-			}
-			if len(decodeChan) >= cap(decodeChan) {
-				traceMySQLChanFullReq.Add(1)
-			} else {
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
 				default:
-					traceMySQLChanFullReq.Add(1)
 				}
 			}
 
@@ -398,18 +325,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			}
 
 			// Non-blocking send to async decode.
-			if memoryguard.IsRecordingPaused() {
-				traceMySQLPressureKeptResp.Add(1)
-			}
-			if len(decodeChan) >= cap(decodeChan) {
-				traceMySQLChanFullResp.Add(1)
-			} else {
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
 				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
 				default:
-					traceMySQLChanFullResp.Add(1)
 				}
 			}
 
@@ -565,7 +486,6 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				pendingCommand = commandPkt
-				mysqlRequestsReceived.Add(1)
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.

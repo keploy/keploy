@@ -20,7 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,38 +40,6 @@ const (
 	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
 )
-
-// hostMocksDecoded is the GROUND-TRUTH receive counter for the
-// agent→host mock stream. It is incremented exactly once per
-// successful gob.Decode in GetOutgoing's reader goroutine — i.e.
-// every time a COMPLETE mock has been physically pulled off the TCP
-// wire and deserialized in the host process.
-//
-// Why this counter and not the agent's outgoing_forwarded:
-//
-//	The agent-side outgoing_forwarded counter is incremented after
-//	flusher.Flush(), which only pushes bytes into the LOCAL kernel
-//	TCP send buffer. Flush returns success even when the host has
-//	already closed the connection — those bytes sit in the buffer
-//	and are silently discarded when the socket tears down or the
-//	agent process is SIGKILL'd. So outgoing_forwarded measures
-//	"mocks the agent shoved at the socket", which OVER-reports
-//	delivery.
-//
-//	hostMocksDecoded measures "mocks that actually arrived and
-//	parsed on the host". gob.Decode only returns nil when it has
-//	read a full, valid object off the stream, so this count is
-//	exact. The gap (agent_forwarded - host_decoded) is the true
-//	network loss — mocks abandoned in the TCP buffer at shutdown.
-//
-// Package-level + atomic so the host-side periodic recorder (the
-// ticker goroutine in GetOutgoing) and any future caller can read
-// it without plumbing a handle through the AgentClient struct.
-var hostMocksDecoded atomic.Int64
-
-// HostMocksDecodedTotal returns the lifetime count of mocks
-// successfully decoded off the agent→host stream in this process.
-func HostMocksDecodedTotal() int64 { return hostMocksDecoded.Load() }
 
 // TODO: Need to refactor this file
 type AgentClient struct {
@@ -325,19 +292,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	// BUFFERED (16384) so the gob-decode loop below can pull the agent's
-	// entire teardown tail off the wire into host RAM at network speed,
-	// instead of being throttled to the downstream disk-writer's ~160
-	// mocks/sec. hostMocksDecoded is incremented the instant a mock is
-	// decoded (before the send below).
-	//
-	// EXPERIMENT (single-buffer test): this channel is UNBUFFERED on purpose,
-	// to test whether the downstream outgoingChan buffer (in record.go) alone
-	// is sufficient. The reader still tightly forwards each decoded mock into
-	// the buffered outgoingChan, so the wire should still drain fast. The
-	// RTRACE counters (agent forwarded -> host_decoded -> disk written) will
-	// confirm whether anything is lost with only one buffer. Revert to
-	// buffered(16384) if the counters show host-side loss.
+	// This channel is UNBUFFERED on purpose: the downstream outgoingChan
+	// buffer (in record.go) alone is sufficient. The reader tightly forwards
+	// each decoded mock into the buffered outgoingChan, so the wire still
+	// drains fast.
 	mockChan := make(chan *models.Mock)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -359,18 +317,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	a.drainMu.Unlock()
 
 	grp.Go(func() error {
-		// exitReason records WHY the reader goroutine returned, so the
-		// final PROBE/host-recv-final line tells us whether the stream
-		// ended cleanly (agent closed = stream-EOF), the host gave up
-		// (drain-deadline), or the gob stream broke mid-object
-		// (decode-error). Combined with host_decoded it pinpoints the
-		// loss boundary.
-		exitReason := "unknown"
-		// decodeStart lets the final parity log report how many mocks THIS
-		// stream decoded (the package counter is process-cumulative across
-		// reconnects).
-		decodeStart := hostMocksDecoded.Load()
-
 		defer func() {
 			close(mockChan)
 
@@ -384,42 +330,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			err := res.Body.Close()
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
-			}
-
-			// GROUND-TRUTH final receive count. One-shot at stream end.
-			// host_decoded_this_stream is how many mocks the CLI pulled off
-			// the wire this recording — if it equals the agent's forwarded
-			// count (and the mocks.yaml count), the single-buffer drain lost
-			// nothing. RTRACE: TEMP diagnostic (one-buffer verification) —
-			// remove before merge.
-			fmt.Fprintf(os.Stderr,
-				"RTRACE/host-recv-final: reason=%s host_decoded_total=%d host_decoded_this_stream=%d\n",
-				exitReason, hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
-			_ = os.Stderr.Sync()
-		}()
-
-		// Periodic host-side receive recorder. Every 1 s it prints the
-		// ground-truth decode count to stderr so we can line it up
-		// against the agent's PROBE/agent-state (which prints
-		// outgoing_forwarded every 1 s). The divergence between the two
-		// timelines IS the network loss, measured accurately.
-		recvCtx, recvCancel := context.WithCancel(context.Background())
-		defer recvCancel()
-		go func() {
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-recvCtx.Done():
-					return
-				case <-ticker.C:
-					// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-					// fmt.Fprintf(os.Stderr,
-					// 	"PROBE/host-recv: ts_ms=%d host_decoded_total=%d host_decoded_this_stream=%d\n",
-					// 	time.Now().UnixMilli(),
-					// 	hostMocksDecoded.Load(), hostMocksDecoded.Load()-decodeStart)
-					// _ = os.Stderr.Sync()
-				}
 			}
 		}()
 
@@ -475,20 +385,11 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			if err := decoder.Decode(&mock); err != nil {
 				if utils.IsShutdownError(err) {
 					// End of the stream or connection closed during shutdown
-					exitReason = "stream-EOF"
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")
-				exitReason = "decode-error"
 				break
 			}
-
-			// GROUND-TRUTH receive count: a complete mock has now been
-			// read off the wire and deserialized. Increment BEFORE the
-			// forward attempt so the counter reflects "arrived", even if
-			// the drain deadline below drops this one before record.go
-			// sees it.
-			hostMocksDecoded.Add(1)
 
 			// Once ctx cancels we arm the drain deadline ONCE and then
 			// stop checking ctx — drainDeadline becomes the new "give
@@ -510,11 +411,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				select {
 				case mockChan <- &mock:
 				case <-drainDeadline:
-					exitReason = "drain-deadline"
 					return nil
 				}
 			case <-drainDeadline:
-				exitReason = "drain-deadline"
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
@@ -894,8 +793,6 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
 	}
 
-	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-	a.logger.Info("RTRACE/cli: StoreMocks POST", zap.String("url", fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI)), zap.Int("bytes", buf.Len()))
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -1618,25 +1515,10 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		dd := a.drainDone
 		a.drainMu.Unlock()
 		if dd != nil {
-			gateReason := "drain-complete"
 			select {
 			case <-dd:
 			case <-time.After(30 * time.Second):
-				gateReason = "timeout"
 			}
-			// Write via os.Stderr (not the zap logger): cmd.Cancel runs at
-			// the very tail of shutdown, after the logger is typically torn
-			// down, so logger.Info here is silently dropped — the same reason
-			// PROBE/host-recv-final uses Fprintf. host_decoded is the
-			// ground-truth count of mocks received off the wire; reconcile it
-			// against the agent's outgoing_forwarded (the agent process's own
-			// PROBE/agent-state line) to confirm zero loss at the gate.
-			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-			_ = gateReason
-			// fmt.Fprintf(os.Stderr,
-			// 	"DIAG/drain-gate: reason=%s host_decoded=%d ts_ms=%d\n",
-			// 	gateReason, HostMocksDecodedTotal(), time.Now().UnixMilli())
-			// _ = os.Stderr.Sync()
 		}
 
 		if cmd.Process != nil {
@@ -1795,15 +1677,8 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 	defer ticker.Stop()
 
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
-	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-	// Low-volume: success logs once; failures log once per 2s retry (bounded by
-	// the 2-min timeout, so ≤60 lines worst case) — does not slow the pipeline.
-	a.logger.Info("RTRACE/cli: posting agent-ready", zap.String("url", url), zap.Duration("timeout", agentReadyTimeout))
-	rtraceStart := time.Now()
-	attempt := 0
 
 	for {
-		attempt++
 		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 		if err != nil {
 			return err
@@ -1814,22 +1689,13 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				// RTRACE: TEMP diagnostic — remove before merge.
-				a.logger.Info("RTRACE/cli: agent-ready OK", zap.Int("attempt", attempt), zap.Duration("waited", time.Since(rtraceStart)))
 				return nil
 			}
-			// RTRACE: TEMP diagnostic — remove before merge.
-			a.logger.Info("RTRACE/cli: agent-ready non-200 (retrying)", zap.Int("attempt", attempt), zap.Int("status", resp.StatusCode))
-		} else {
-			// RTRACE: TEMP diagnostic — remove before merge.
-			a.logger.Info("RTRACE/cli: agent-ready attempt failed (retrying)", zap.Int("attempt", attempt), zap.Error(err))
 		}
 
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				// RTRACE: TEMP diagnostic — remove before merge.
-				a.logger.Info("RTRACE/cli: agent-ready TIMEOUT", zap.Int("attempts", attempt), zap.Duration("waited", time.Since(rtraceStart)))
 				return fmt.Errorf("timeout waiting for agent to become ready")
 			}
 			return ctx.Err()

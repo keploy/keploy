@@ -203,8 +203,6 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		},
 	}
 
-	mysqlMocksEmitted.Add(1)
-
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.AddMock(mysqlMock)
 		return

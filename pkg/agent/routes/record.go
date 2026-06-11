@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,62 +27,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
-
-// OutgoingHandlerStats are package-level atomic counters that the
-// black-box recorder in cli/agent.go reads every second to track the
-// /outgoing HTTP stream handler's state without needing to thread a
-// handle through the cobra command graph. All fields are monotonic
-// counters that can be safely read concurrently.
-//
-// These together with syncMock.ShutdownSnapshot() answer the question
-// "where in the agent-side pipeline are mocks being lost?":
-//
-//	syncmock.totalAdded - outgoingForwardedTotal  =  mocks that entered
-//	                                                 syncMock but never
-//	                                                 reached the host
-//	                                                 HTTP stream
-//
-//	outgoingHandlerStarted - outgoingHandlerExited  =  number of
-//	                                                 /outgoing stream
-//	                                                 handlers currently
-//	                                                 in flight (= 1 in
-//	                                                 normal recording, 0
-//	                                                 when the host has
-//	                                                 disconnected)
-var (
-	outgoingForwardedTotal atomic.Int64
-	outgoingHandlerStarted atomic.Int64
-	outgoingHandlerExited  atomic.Int64
-	outgoingLastForwardMs  atomic.Int64 // wall-clock UnixMilli of last successful gob.Encode
-)
-
-// OutgoingForwardedTotal returns the lifetime count of mocks
-// successfully gob-encoded onto the /outgoing HTTP response stream
-// across every handler invocation in this process.
-func OutgoingForwardedTotal() int64 { return outgoingForwardedTotal.Load() }
-
-// OutgoingHandlerInFlight returns the number of currently-active
-// /outgoing stream handlers (started minus exited). Normal value is
-// 1 while the host is recording, 0 when the host has disconnected
-// and not yet reconnected.
-func OutgoingHandlerInFlight() int64 {
-	return outgoingHandlerStarted.Load() - outgoingHandlerExited.Load()
-}
-
-// OutgoingHandlerStartedTotal returns the lifetime count of
-// /outgoing stream handler invocations.
-func OutgoingHandlerStartedTotal() int64 { return outgoingHandlerStarted.Load() }
-
-// OutgoingHandlerExitedTotal returns the lifetime count of
-// /outgoing stream handler returns.
-func OutgoingHandlerExitedTotal() int64 { return outgoingHandlerExited.Load() }
-
-// OutgoingLastForwardUnixMs returns the wall-clock millisecond
-// timestamp of the most recent successful mock forward, or 0 if
-// none has happened yet. The recorder uses this to flag "stream is
-// alive but stalled" — when the value stops advancing while the
-// host is still recording.
-func OutgoingLastForwardUnixMs() int64 { return outgoingLastForwardMs.Load() }
 
 type Agent struct {
 	logger *zap.Logger
@@ -399,8 +342,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
-	// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-	// var diagRangesDumped bool  // DIAG: ensure the pressure-ranges snapshot is logged only once
 	for {
 		select {
 		case <-r.Context().Done():
@@ -438,34 +379,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				tcRespTime = t.HTTPReq.Timestamp.Add(30 * time.Second)
 			}
 			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
-
-			// DIAG (temporary): once any pressure range exists, log every TC's
-			// window check in plain Unix-ms integers (the Docker log renderer
-			// garbles zap.Time but not int64). On the FIRST such TC, also dump
-			// every recorded pressure range so overlap can be verified by hand.
-			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-			// if rangeCount := syncmgr.Get().PressureRangeCount(); rangeCount > 0 {
-			// 	if !diagRangesDumped {
-			// 		diagRangesDumped = true
-			// 		ranges := syncmgr.Get().PressureRangesUnixMilli()
-			// 		rf := make([]zap.Field, 0, len(ranges)+1)
-			// 		rf = append(rf, zap.Int("range_count", len(ranges)))
-			// 		for i, r := range ranges {
-			// 			rf = append(rf, zap.Int64s(fmt.Sprintf("range_%d_start_end_ms", i), []int64{r[0], r[1]}))
-			// 		}
-			// 		a.logger.Info("DIAG/pressure-ranges-snapshot", rf...)
-			// 	}
-			// 	a.logger.Info("DIAG/window-check",
-			// 		zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
-			// 		zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
-			// 		zap.Int64("tc_window_ms", tcRespTime.Sub(t.HTTPReq.Timestamp).Milliseconds()),
-			// 		zap.Bool("req_is_zero", t.HTTPReq.Timestamp.IsZero()),
-			// 		zap.Bool("resp_is_zero", t.HTTPResp.Timestamp.IsZero()),
-			// 		zap.Int("range_count", rangeCount),
-			// 		zap.Int("overlap_count", overlapCount),
-			// 		zap.Bool("would_suppress", hasOverlap),
-			// 	)
-			// }
 
 			if hasOverlap {
 				tcsSuppressedSoFar++
@@ -559,20 +472,6 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Received request to handle outgoing mocks")
 
-	// Track handler lifetime for the black-box recorder (cli/agent.go).
-	// Started/Exited are monotonic counters; (Started - Exited) gives the
-	// current in-flight count. Deferred Exited increment guarantees we
-	// account for every exit, including early returns below.
-	outgoingHandlerStarted.Add(1)
-	defer outgoingHandlerExited.Add(1)
-	// RTRACE: TEMP single-buffer experiment — N (agent forwarded). Compare
-	// against host_decoded (RTRACE/host-recv-final) and disk-written
-	// (RTRACE/mockdb-written) to locate any loss. Remove before merge.
-	defer func() {
-		fmt.Fprintf(os.Stderr, "RTRACE/agent-forwarded-final: outgoing_forwarded_total=%d\n", outgoingForwardedTotal.Load())
-		_ = os.Stderr.Sync()
-	}()
-
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -657,13 +556,6 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			flusher.Flush()
-			// Track successful forward for the black-box recorder.
-			// Bump after Flush so the counter reflects "host has at
-			// least had this mock pushed at it", not "encoded into
-			// the response buffer but maybe still trapped behind a
-			// blocked write".
-			outgoingForwardedTotal.Add(1)
-			outgoingLastForwardMs.Store(time.Now().UnixMilli())
 		}
 	}
 }
@@ -806,8 +698,6 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-	a.logger.Info("RTRACE/agent: wrote readiness file (agent now healthy)", zap.String("file", agentReadyFilePath))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))

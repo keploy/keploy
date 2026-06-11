@@ -726,11 +726,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	return ys.asyncWriteOne(job)
 }
 
-// asyncMocksWrittenTotal is a process-cumulative count of mocks successfully
-// encoded to the file buffer (W in the single-buffer verification). RTRACE:
-// TEMP — remove before merge.
-var asyncMocksWrittenTotal atomic.Int64
-
 func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 	ys.asyncMu.Lock()
 	defer ys.asyncMu.Unlock()
@@ -752,7 +747,6 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		if err := ys.asyncGobEnc.Encode(job.mock); err != nil {
 			return err
 		}
-		asyncMocksWrittenTotal.Add(1) // RTRACE: TEMP single-buffer experiment — remove before merge.
 		return nil
 	}
 
@@ -790,7 +784,6 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		}
 		ys.asyncNeedsYamlSep = true
 	}
-	asyncMocksWrittenTotal.Add(1) // RTRACE: TEMP single-buffer experiment — remove before merge.
 	return nil
 }
 
@@ -881,10 +874,6 @@ func (ys *MockYaml) FlushMocks() error {
 // and a second Close is a no-op flush.
 func (ys *MockYaml) Close() error {
 	err := ys.asyncFlushAndClose()
-	// RTRACE: TEMP single-buffer verification — W (mocks written to disk).
-	// Compare with host_decoded (M). Remove before merge.
-	fmt.Fprintf(os.Stderr, "RTRACE/mockdb-written: async_mocks_written_total=%d\n", asyncMocksWrittenTotal.Load())
-	_ = os.Stderr.Sync()
 	if err != nil {
 		return fmt.Errorf("mock writer flush/close during shutdown: %w", err)
 	}

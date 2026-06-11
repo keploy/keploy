@@ -8,8 +8,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -24,12 +22,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-)
-
-var (
-	mysqlRequestsReceived atomic.Uint64
-	mysqlMocksEmitted     atomic.Uint64
-	mysqlProbeOnce        sync.Once
 )
 
 // RecordV2 is the V2 record path for MySQL. It consumes the supervisor
@@ -73,19 +65,6 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	if logger == nil {
 		logger = sess.Logger
 	}
-
-	mysqlProbeOnce.Do(func() {
-		go func() {
-			for {
-				time.Sleep(1 * time.Second)
-				// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-				// logger.Info("PROBE/mysql-decode-accounting-periodic:",
-				// 	zap.Uint64("mysql_requests_received", mysqlRequestsReceived.Load()),
-				// 	zap.Uint64("mysql_mocks_emitted", mysqlMocksEmitted.Load()),
-				// 	zap.Int64("ts_ms", time.Now().UnixMilli()))
-			}
-		}()
-	})
 
 	decodeCtx := &wire.DecodeContext{
 		Mode:               models.MODE_RECORD,
@@ -586,7 +565,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if err != nil {
 			return err
 		}
-		mysqlRequestsReceived.Add(1)
 		// Chunk-derived timestamp: ReadPacketBuffer succeeded, so at
 		// least one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
@@ -906,8 +884,6 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		if sess.Logger != nil {
 			sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
 		}
-	} else {
-		mysqlMocksEmitted.Add(1)
 	}
 	// Note: EmitMock auto-clears the incomplete flag when it drops a
 	// partial mock (see supervisor.Session.EmitMock). On the healthy-

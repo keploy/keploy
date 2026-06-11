@@ -1072,8 +1072,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, stopReason)
 		}
 		r.firstRun = false
-		// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-		r.logger.Info("RTRACE/cli: test-set setup begin", zap.String("testSet", testSetID))
 		// Prepare header + body noise configuration for mock matching
 		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -1151,11 +1149,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
-		// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-		rtraceStoreStart := time.Now()
-		r.logger.Info("RTRACE/cli: StoreMocks begin", zap.Int("filtered", len(filteredMocks)), zap.Int("unfiltered", len(unfilteredMocks)), zap.String("testSet", testSetID))
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
-		r.logger.Info("RTRACE/cli: StoreMocks end", zap.Duration("dur", time.Since(rtraceStoreStart)), zap.Error(err))
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
@@ -1171,10 +1165,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		// RTRACE: TEMP diagnostic (agent-ready/replay-hang investigation) — remove before merge.
-		r.logger.Info("RTRACE/cli: MakeAgentReady begin", zap.String("testSet", testSetID))
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
-		r.logger.Info("RTRACE/cli: MakeAgentReady end", zap.Error(err))
 		if err != nil {
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}

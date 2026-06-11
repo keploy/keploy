@@ -77,11 +77,7 @@ func NewCtx() context.Context {
 		for _, fn := range hooks {
 			func() {
 				defer func() {
-					if r := recover(); r != nil {
-						_ = r
-						// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-						// fmt.Fprintf(os.Stderr, "PROBE/pre-cancel-hook-panic: %v\n", r)
-					}
+					_ = recover()
 				}()
 				fn()
 			}()

@@ -43,13 +43,6 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
-// TRACE (temporary, Bug-1 investigation): confirm whether HTTP TCs are dropped
-// at capture time under memory pressure, and the dropped/kept ratio. Atomic
-// because Capture runs on a goroutine pool; logging is sampled (power-of-2) so
-// a long pressure burst can't flood the Docker log buffer (see BUG 5).
-var traceTCDroppedByPressure atomic.Int64
-var traceTCPassedPressureGate atomic.Int64
-
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	if memoryguard.IsRecordingPaused() {
 		// Close bodies even when skipping capture to avoid resource leaks.
@@ -59,19 +52,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		if resp.Body != nil {
 			resp.Body.Close()
 		}
-		if n := traceTCDroppedByPressure.Add(1); n&(n-1) == 0 {
-			_ = n
-			// TEMP-DEBUG(PR-4220): commented out for review; remove before merge.
-			// logger.Info("TRACE/tc-drop: TC DROPPED at capture — memory pressure active (whole TC discarded: request AND response)",
-			// 	zap.Int64("req_ms", reqTimeTest.UnixMilli()),
-			// 	zap.Int64("resp_ms", resTimeTest.UnixMilli()),
-			// 	zap.Int64("total_TCs_dropped_by_pressure", n),
-			// 	zap.Int64("total_TCs_passed_gate_so_far", traceTCPassedPressureGate.Load()),
-			// )
-		}
 		return
 	}
-	traceTCPassedPressureGate.Add(1)
 
 	var reqBody []byte
 	if req.Body != nil { // Read
