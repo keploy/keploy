@@ -335,25 +335,14 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 		decoder := gob.NewDecoder(res.Body)
 
-		// FIX FOR CHRONIC MONGO TEARDOWN-TC ORPHANS
+		// Teardown-tail drain (fixes orphaned teardown test cases).
 		//
-		// Root cause proven by the comprehensive black-box recorder on
-		// pipeline 26909575767:
-		//
-		//   agent  syncmock.totalAdded   = 1899
-		//   agent  outgoing_forwarded    = 1901   (wire-side)
-		//   host   total_forwarded       = 1243   (drain-end)
-		//   host   mocks.yaml on disk    ≈ 1243
-		//
-		// The agent flushes everything onto the wire; the host receives
-		// only 65%. The host's gob-decoder goroutine (this one) used to
-		// have `case <-ctx.Done(): return nil` in its inner select. When
-		// the host received SIGINT, ctx cancelled, this goroutine
-		// exited within milliseconds, the deferred res.Body.Close()
-		// closed the HTTP connection to the agent, and every still-
-		// queued mock on the TCP wire was discarded. The outer 60-s
-		// drainGrace in pkg/service/record/record.go was useless
-		// because mockChan was already closed by this defer.
+		// At shutdown the agent flushes its remaining mocks onto the wire,
+		// but this host-side gob-decoder goroutine used to exit the instant
+		// ctx cancelled (`case <-ctx.Done(): return nil`): on SIGINT it
+		// returned within milliseconds, the deferred res.Body.Close() severed
+		// the HTTP connection, and every mock still in flight on the wire was
+		// discarded — orphaning the test cases that depended on them at replay.
 		//
 		// New behavior — mirrors the drain pattern in
 		// record.go::GetTestAndMockChans:

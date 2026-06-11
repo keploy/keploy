@@ -261,10 +261,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	//      under normal operation; it exists only to release the
 	//      context resources cleanly.
 	cleanup := func() {
-		// The periodic TRACE/mysql-pipeline-hb goroutine already logged the
-		// decode pipeline state every 5 s. Its ctx.Done arm also fires a
-		// final snapshot at this exact moment. cleanup() itself just needs
-		// to drain + close + wait so no ordering is lost.
+		// Drain any chunks the read-relays still hold, close the decode
+		// channel, and wait for the decoder to finish so no ordering is lost.
 		drainBuffChans()
 		close(decodeChan)
 		<-decodeDone
