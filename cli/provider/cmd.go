@@ -775,7 +775,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
+	// Redact the DB password before dumping the whole config at Debug — it would
+	// otherwise leak test.mongoPassword into any -debug capture.
+	redactedCfg := *c.cfg
+	if redactedCfg.Test.MongoPassword != "" {
+		redactedCfg.Test.MongoPassword = "****"
+	}
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
 
 	switch cmd.Name() {
 
