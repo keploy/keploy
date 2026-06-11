@@ -70,36 +70,20 @@ type MockYaml struct {
 	idCounter int64
 	Format    yaml.Format
 
-	// Async gob writer: background goroutine drains asyncQueue and
-	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
-	// goroutines never block on disk or gob encoding. Sync fallback
-	// activates when the queue is full so no mock is dropped.
-	//
-	// The writer lifecycle is restartable across Close/InsertMock
-	// cycles so that re-record flows (same Recorder / same mockDB,
-	// multiple Start calls) flush+close between sessions but still
-	// accept mocks for the next session. asyncLifecycleMu guards the
-	// transition between "running" and "quiesced"; asyncRunning tracks
-	// which state we are in. Do not use sync.Once here — it cannot be
-	// reset, which was the original re-record bug.
-	asyncLifecycleMu  sync.Mutex
-	asyncRunning      bool
-	asyncQueue        chan asyncWriteJob
-	asyncStop         chan struct{}
-	asyncDone         chan struct{}
+	// Synchronous mock writer. The recording consumer calls InsertMock
+	// (encode + append to the file's in-memory buffer, NO flush) and drives
+	// batching itself: it flushes via FlushMocks when its source channel
+	// momentarily empties, then Close does the final flush + close. A single
+	// consumer goroutine owns this path, so writes are serialized — there is
+	// no background goroutine and no intermediate queue. asyncMu guards the
+	// file-state fields below against the (rare) overlap of a write and the
+	// final Close.
 	asyncNeedsYamlSep bool
 	asyncMu           sync.Mutex
 	asyncFilePath     string
 	asyncFile         *os.File
 	asyncBufw         *bufio.Writer
 	asyncGobEnc       *gob.Encoder
-	asyncOverflows    atomic.Uint64
-	// asyncStopClosed is true after Close() has invoked close(asyncStop).
-	// A subsequent Close() that arrives after the first one timed out
-	// waiting for asyncDone must not close the channel a second time
-	// (that would panic). Cleared when the writer finally exits and
-	// we transition back to asyncRunning=false.
-	asyncStopClosed bool
 	// asyncFlushErr holds the terminal flush/close error from
 	// asyncFlushAndClose so that Close() can surface it to its caller
 	// (and therefore to the Recorder.Start deferred-cleanup logger)
@@ -723,19 +707,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 
-	ys.asyncLifecycleMu.Lock()
-	if ys.asyncStopClosed {
-		ys.asyncLifecycleMu.Unlock()
-		return fmt.Errorf("mock writer is closing; the recording session must complete its shutdown before new mocks can be accepted")
-	}
-	if !ys.asyncRunning {
-		ys.asyncQueue = make(chan asyncWriteJob, 4096)
-		ys.asyncStop = make(chan struct{})
-		ys.asyncDone = make(chan struct{})
-		ys.asyncRunning = true
-		go ys.asyncWriterLoop()
-	}
-
 	effFormat := ys.Format
 	isGob := useGobMockFormat()
 	if !isGob {
@@ -744,85 +715,21 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		}
 	}
 
+	// Synchronous write: encode + append the mock to the file's in-memory
+	// buffer NOW (asyncWriteOne takes asyncMu and opens/rotates the file as
+	// needed). We deliberately do NOT flush here — the recording consumer
+	// batches flushes via FlushMocks when its source channel momentarily
+	// empties, and Close does the final flush. This replaces the old
+	// queue+background-goroutine writer: one consumer goroutine drives the
+	// whole write path, so there is no separate buffer and no parallelism.
 	job := asyncWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName, effFormat: effFormat}
-	select {
-	case ys.asyncQueue <- job:
-		ys.asyncLifecycleMu.Unlock()
-		return nil
-	case <-ctx.Done():
-		ys.asyncLifecycleMu.Unlock()
-		return ctx.Err()
-	default:
-		ys.asyncOverflows.Add(1)
-		err := ys.asyncWriteSync(ctx, mock, mockPath, mockFileName, effFormat)
-		ys.asyncLifecycleMu.Unlock()
-		return err
-	}
+	return ys.asyncWriteOne(job)
 }
 
-func (ys *MockYaml) asyncWriterLoop() {
-	defer close(ys.asyncDone)
-	for {
-		select {
-		case job, ok := <-ys.asyncQueue:
-			if !ok {
-				ys.asyncFlushAndClose()
-				return
-			}
-			if err := ys.asyncWriteOne(job); err != nil {
-				ys.asyncMu.Lock()
-				ys.asyncFlushErr = errors.Join(ys.asyncFlushErr, err)
-				ys.asyncMu.Unlock()
-				utils.LogError(ys.Logger, err, "async mock writer failed for one mock - continuing with the rest",
-					zap.String("testSetPath", job.testSetPath),
-					zap.String("mockName", job.mock.Name),
-					zap.String("mockOutputDir", ys.MockPath))
-			}
-
-			// Batched flush: only flush to physical disk if the queue is currently empty.
-			// This avoids slow disk I/O when processing a massive backlog of fuzzer mocks.
-			if len(ys.asyncQueue) == 0 {
-				ys.asyncMu.Lock()
-				if ys.asyncBufw != nil {
-					_ = ys.asyncBufw.Flush()
-				}
-				ys.asyncMu.Unlock()
-			}
-		case <-ys.asyncStop:
-			ys.drainAndClose()
-			return
-		}
-	}
-}
-
-// asyncMocksWrittenTotal is a process-cumulative count of mocks the single
-// background writer has successfully encoded to its file buffer (W in the
-// single-buffer experiment). RTRACE: TEMP — remove before merge.
+// asyncMocksWrittenTotal is a process-cumulative count of mocks successfully
+// encoded to the file buffer (W in the single-buffer verification). RTRACE:
+// TEMP — remove before merge.
 var asyncMocksWrittenTotal atomic.Int64
-
-func (ys *MockYaml) drainAndClose() {
-	for {
-		select {
-		case job := <-ys.asyncQueue:
-			if err := ys.asyncWriteOne(job); err != nil {
-				ys.asyncMu.Lock()
-				ys.asyncFlushErr = errors.Join(ys.asyncFlushErr, err)
-				ys.asyncMu.Unlock()
-				utils.LogError(ys.Logger, err, "failed to persist a queued mock while shutting down",
-					zap.String("testSetPath", job.testSetPath),
-					zap.String("mockName", job.mock.Name),
-					zap.String("mockOutputDir", ys.MockPath))
-			}
-		default:
-			ys.asyncFlushAndClose()
-			// RTRACE: TEMP single-buffer experiment — W (mocks written to disk
-			// at shutdown drain). Compare with host_decoded. Remove before merge.
-			fmt.Fprintf(os.Stderr, "RTRACE/mockdb-written: async_mocks_written_total=%d\n", asyncMocksWrittenTotal.Load())
-			_ = os.Stderr.Sync()
-			return
-		}
-	}
-}
 
 func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 	ys.asyncMu.Lock()
@@ -849,11 +756,10 @@ func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
 		return nil
 	}
 
-	// Encode the mock to its on-disk bytes inline. A single background
-	// writer goroutine (asyncWriterLoop) owns this path, so encoding is
-	// serialized here — simple and race-free. (An earlier revision carried
-	// a parallel-encode promise via per-job channels; it was never wired up,
-	// so it has been removed in favour of this single-worker inline encode.)
+	// Encode the mock to its on-disk bytes inline and append to the buffer.
+	// Called synchronously by the single recording consumer (via InsertMock),
+	// so encoding is serialized — simple and race-free. No flush here; the
+	// consumer batches flushes via FlushMocks.
 	data, err := ys.encodeMockData(job)
 	if err != nil {
 		return err
@@ -953,76 +859,34 @@ func (ys *MockYaml) asyncFlushAndClose() error {
 	return ys.asyncFlushErr
 }
 
-func (ys *MockYaml) asyncWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	job := asyncWriteJob{mock: mock, testSetPath: mockPath, filename: mockFileName, effFormat: effFormat}
-	if err := ys.asyncWriteOne(job); err != nil {
-		return err
-	}
+// FlushMocks pushes everything written so far from the in-memory file buffer
+// to physical disk. The recording consumer calls it to BATCH writes: it keeps
+// calling InsertMock (which only buffers) and then FlushMocks once its source
+// channel momentarily empties — so one disk flush covers a whole batch instead
+// of one flush per mock. Safe to call concurrently with InsertMock (asyncMu).
+func (ys *MockYaml) FlushMocks() error {
 	ys.asyncMu.Lock()
 	defer ys.asyncMu.Unlock()
-	return ys.asyncBufw.Flush()
+	if ys.asyncBufw != nil {
+		return ys.asyncBufw.Flush()
+	}
+	return nil
 }
 
+// Close does the final flush + close of the mocks file. With the synchronous
+// writer there is no background goroutine to wait on — asyncFlushAndClose
+// flushes the buffer, closes the file, and resets the file-state fields so a
+// subsequent recording session (re-record) reopens cleanly on the next
+// InsertMock. Idempotent: once the file is closed, asyncBufw/asyncFile are nil
+// and a second Close is a no-op flush.
 func (ys *MockYaml) Close() error {
-	// Hold the lifecycle lock for the entire teardown. While we wait
-	// for the writer goroutine to drain, no concurrent InsertMock
-	// can start a new writer — ys.asyncRunning stays true and
-	// ys.asyncQueue / ys.asyncStop / ys.asyncDone cannot be reassigned out
-	// from under the draining goroutine. A second concurrent Close()
-	// blocks on this same lock and observes asyncRunning=false after
-	// the first Close completes, so close(asyncStop) is never called
-	// twice.
-	ys.asyncLifecycleMu.Lock()
-	defer ys.asyncLifecycleMu.Unlock()
-	if !ys.asyncRunning {
-		return nil
-	}
-	// Signal the writer to exit. Guarded by asyncStopClosed so a retry
-	// after a timeout cannot double-close the channel (which would
-	// panic). The writer's stopClosed+running combination is the
-	// "teardown in progress" state.
-	if !ys.asyncStopClosed {
-		close(ys.asyncStop)
-		ys.asyncStopClosed = true
-	}
-	select {
-	case <-ys.asyncDone:
-	case <-time.After(300 * time.Second):
-		// Leave asyncRunning=true + asyncStopClosed=true so a retry of
-		// Close enters this function, skips the already-closed stop,
-		// and just waits on asyncDone again.
-		return fmt.Errorf("timed out waiting for background mock writer to flush")
-	}
-	ys.asyncRunning = false
-	ys.asyncStopClosed = false
-	// Operator visibility: if the async queue filled up during the
-	// session and the sync fallback fired, report the count so disk
-	// stalls / undersized queues are caught at post-run review
-	// instead of requiring the user to notice slower rps.
-	// Swap the overflow counter to zero atomically so re-record cycles
-	// (next Start on the same MockYaml) don't count this session's
-	// overflows again on their own Close.
-	if overflows := ys.asyncOverflows.Swap(0); overflows > 0 {
-		if ys.Logger != nil {
-			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
-				zap.Uint64("overflowedMocks", overflows),
-				zap.Int("queueCapacity", cap(ys.asyncQueue)),
-				zap.String("hint", "queue capacity is the hard-coded channel size inlined in insertMockGob's writer-init block; raise it in code if disk/encoding is the bottleneck"))
-		}
-	}
-	// Surface the final flush/close error from the writer goroutine so
-	// the Recorder.Start deferred-cleanup log makes a disk-full / perm
-	// change at shutdown visible to the operator instead of silently
-	// dropping the tail of mocks.gob.
-	ys.asyncMu.Lock()
-	flushErr := ys.asyncFlushErr
-	ys.asyncFlushErr = nil
-	ys.asyncMu.Unlock()
-	if flushErr != nil {
-		return fmt.Errorf("gob writer flush/close during shutdown: %w", flushErr)
+	err := ys.asyncFlushAndClose()
+	// RTRACE: TEMP single-buffer verification — W (mocks written to disk).
+	// Compare with host_decoded (M). Remove before merge.
+	fmt.Fprintf(os.Stderr, "RTRACE/mockdb-written: async_mocks_written_total=%d\n", asyncMocksWrittenTotal.Load())
+	_ = os.Stderr.Sync()
+	if err != nil {
+		return fmt.Errorf("mock writer flush/close during shutdown: %w", err)
 	}
 	return nil
 }

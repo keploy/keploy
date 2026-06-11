@@ -524,6 +524,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 					// 	zap.Int64("slow_inserts_so_far", slowInserts.Load()))
 				}
 			}
+			// Batched flush: when the source channel is momentarily empty, push
+			// this batch from the writer's buffer to physical disk. This replaces
+			// the removed background writer's "flush when queue empty" — the
+			// consumer now drives batching directly. FlushMocks is an optional
+			// method (type-asserted like Close), so non-yaml mockDB impls are
+			// unaffected.
+			if len(frames.Outgoing) == 0 {
+				if fm, ok := r.mockDB.(interface{ FlushMocks() error }); ok {
+					_ = fm.FlushMocks()
+				}
+			}
 		}
 		return nil
 	})
