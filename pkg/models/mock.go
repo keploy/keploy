@@ -115,6 +115,25 @@ type TestModeInfo struct {
 	// used?" observability — non-zero helps confirm tagging; zero for
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
+
+	// IsStartup marks app-bootstrap traffic captured before the first
+	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
+	// Such an outbound call can never claim a per-test window — it ran
+	// before any test — so the record-side syncMock reapers (dedup
+	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
+	// instead of dropping it as debris.
+	//
+	// This is a RECORD-side cleanup signal only, with no replay-time
+	// meaning, which is why it is NOT modelled as a Lifetime value:
+	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
+	// replay-time pool routing, whereas IsStartup is set live at ingest in
+	// SyncMockManager.AddMock and is only ever read on buffered, live-
+	// captured mocks before they are persisted. Like the sibling
+	// runtime-only fields, the json/bson tags keep it out of the text
+	// formats; gob (which ignores struct tags) does encode it, but a value
+	// carried on a reloaded mock is inert — the reapers run only on the
+	// live record buffer, never on disk-loaded mocks.
+	IsStartup bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -142,8 +161,8 @@ type MockSpec struct {
 	// HTTP/2
 	HTTP2Req         *HTTP2Req  `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
 	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
-	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	ReqTimestampMock time.Time  `json:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time  `json:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
@@ -663,6 +682,12 @@ type MockState struct {
 	// workloads whose recorder classifies handshake / pool-warmup /
 	// catalog probes as session-tier (#empty-mapping bug).
 	Lifetime Lifetime `json:"lifetime,omitempty"`
+	// ReqBodyNoise carries field-path request-body noise detected during
+	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
+	// back from the agent to the replay service so UpdateMocks can persist
+	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
+	// -> regex list; empty list means "ignore the whole field".
+	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
@@ -685,6 +710,7 @@ func (m *Mock) DeepCopy() *Mock {
 	sortOrder := m.TestModeInfo.SortOrder
 	lifetime := m.TestModeInfo.Lifetime
 	lifetimeDerived := m.TestModeInfo.LifetimeDerived
+	isStartup := m.TestModeInfo.IsStartup
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
@@ -696,6 +722,7 @@ func (m *Mock) DeepCopy() *Mock {
 			SortOrder:       sortOrder,
 			Lifetime:        lifetime,
 			LifetimeDerived: lifetimeDerived,
+			IsStartup:       isStartup,
 		},
 		ConnectionID: m.ConnectionID,
 	}
@@ -743,6 +770,16 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
+		// Deep copy the request-body noise map so a clone's detected noise
+		// can't mutate the shared pooled mock's map (and vice versa).
+		if m.Spec.HTTPReq.ReqBodyNoise != nil {
+			httpReqCopy.ReqBodyNoise = make(map[string][]string, len(m.Spec.HTTPReq.ReqBodyNoise))
+			for k, v := range m.Spec.HTTPReq.ReqBodyNoise {
+				vc := make([]string, len(v))
+				copy(vc, v)
+				httpReqCopy.ReqBodyNoise[k] = vc
+			}
+		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {

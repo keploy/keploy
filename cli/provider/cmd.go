@@ -215,6 +215,24 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
+		// `keploy record` needs --disable-mapping locally so the host
+		// CLI has an explicit override path. The resolved host value is
+		// forwarded to the spawned agent (docker / k8s sidecar / native
+		// subprocess) via the --disable-mapping arg the orchestrator
+		// appends. Without this flag here, the host can only inherit
+		// the value from keploy.yml or fall back to the default in
+		// config/default.go (mapping enabled). That's fine for fresh
+		// installs but leaves operators with no way to flip the value
+		// at runtime when an existing keploy.yml has it set the wrong
+		// way for their session. Mirrors the same flag on the `agent`
+		// and `test` subcommands.
+		// Gated on cmd.Name() == "record" — the parent case-block also
+		// covers `test`, which already registers its own
+		// --disable-mapping flag; double registration on the same
+		// cobra cmd panics with "flag redefined: disable-mapping".
+		if cmd.Name() == "record" {
+			cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable test-mock mapping production during record")
+		}
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -264,6 +282,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().String("storage-format", c.cfg.StorageFormat, "Serialization format for testcases/mocks/reports/mappings: yaml (default) or json")
 		cmd.PersistentFlags().Bool("json", c.cfg.JSONOutput, "Print output in JSON format")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
@@ -301,6 +320,14 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
+		// Internal orchestrator→agent propagation flag. The user-
+		// facing surface for the channel-binding shim lives in the
+		// enterprise CLI provider; this flag exists on `keploy agent`
+		// so the agent subprocess can parse the argv the orchestrator
+		// forwards. OSS builds have no cbshim factory registered, so
+		// the value flows through but produces a no-op at proxy.New.
+		cmd.Flags().Bool("channel-binding-shim", c.cfg.Agent.ChannelBindingShim, "Internal: agent-side mirror of the channel-binding shim flag. Set by the orchestrator subprocess spawn; not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden("channel-binding-shim")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -394,6 +421,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
+		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) on HTTP mocks during auto-replay matching")
+		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
@@ -470,6 +499,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableMapping":            "disable-mapping",
 		"compareAll":                "compare-all",
 		"schemaMatch":               "schema-match",
+		"schemaNoiseDetection":      "schema-noise-detection",
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
@@ -730,6 +760,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.logger.Info("Color encoding is disabled")
+	}
+
+	// Validate --storage-format flag (applies to all commands via persistent flag)
+	c.cfg.StorageFormat = strings.ToLower(strings.TrimSpace(c.cfg.StorageFormat))
+	if c.cfg.StorageFormat == "" {
+		c.cfg.StorageFormat = "yaml"
+	}
+	switch c.cfg.StorageFormat {
+	case "yaml", "json":
+		// valid
+	default:
+		return fmt.Errorf("invalid --storage-format value %q: allowed values are 'yaml' and 'json'", c.cfg.StorageFormat)
 	}
 
 	if cmd.Name() == "test" {
@@ -1184,6 +1226,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
+			c.cfg.Test.SchemaNoiseDetection, err = cmd.Flags().GetBool("schema-noise-detection")
+			if err != nil {
+				errMsg := "failed to read the --schema-noise-detection flag; check the flag name with --help and confirm this command supports it"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
 			// enforce that the test-sets are provided when --must-pass is set to true
 			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
 			// and not due to flakiness or our internal issue.
@@ -1266,6 +1315,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
+			// Read --disable-mapping if the user explicitly passed it on
+			// `keploy record`, or if keploy.yml hasn't set the field at
+			// all (so we fall back to the flag's default). Matches the
+			// pattern at the `test` subcommand parser. The resolved value
+			// is forwarded into the spawned agent via the orchestrator's
+			// --disable-mapping arg (see docker / native agent launch
+			// paths in pkg/platform), so mappings.yaml production tracks
+			// the operator's intent end-to-end.
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
+			}
 		}
 
 	case "normalize":
@@ -1316,6 +1383,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.OpportunisticTLSIntercept = opportunisticTLSIntercept
+
+		channelBindingShim, err := cmd.Flags().GetBool("channel-binding-shim")
+		if err != nil {
+			errMsg := "failed to read the channel-binding-shim flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.ChannelBindingShim = channelBindingShim
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {
@@ -1591,5 +1666,6 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
+	defaultCfg.StorageFormat = c.cfg.StorageFormat
 	return defaultCfg
 }

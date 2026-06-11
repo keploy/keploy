@@ -7,6 +7,89 @@ import (
 	"go.uber.org/zap"
 )
 
+// TestSchemaMatch_HeadersResult verifies that result.HeadersResult is populated
+// correctly and the pass/fail return value is consistent with header existence
+// (regression for issue #4221).
+func TestSchemaMatch_HeadersResult(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	tests := []struct {
+		name            string
+		recordedHeaders map[string]string
+		actualHeaders   map[string]string
+		wantPass        bool
+		wantHeadersLen  int
+		wantMissingKey  string
+	}{
+		{
+			name:            "all recorded headers present — pass, HeadersResult populated",
+			recordedHeaders: map[string]string{"Content-Type": "application/json", "X-Service": "svc"},
+			actualHeaders:   map[string]string{"Content-Type": "application/json", "X-Service": "svc"},
+			wantPass:        true,
+			wantHeadersLen:  2,
+			wantMissingKey:  "",
+		},
+		{
+			name:            "recorded header missing in actual — fail, HeadersResult populated",
+			recordedHeaders: map[string]string{"Content-Type": "application/json", "X-Service": "schema-match-bug-repro"},
+			actualHeaders:   map[string]string{"Content-Type": "application/json"},
+			wantPass:        false,
+			wantHeadersLen:  2,
+			wantMissingKey:  "X-Service",
+		},
+		{
+			name:            "actual has extra headers — pass, only recorded headers in HeadersResult",
+			recordedHeaders: map[string]string{"Content-Type": "application/json"},
+			actualHeaders:   map[string]string{"Content-Type": "application/json", "X-Extra": "bonus"},
+			wantPass:        true,
+			wantHeadersLen:  1,
+			wantMissingKey:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				HTTPResp: models.HTTPResp{
+					StatusCode: 200,
+					Header:     tt.recordedHeaders,
+					Body:       `{}`,
+				},
+			}
+			actualResp := &models.HTTPResp{
+				StatusCode: 200,
+				Header:     tt.actualHeaders,
+				Body:       `{}`,
+			}
+
+			got, result := MatchSchema(tc, actualResp, logger)
+
+			if got != tt.wantPass {
+				t.Errorf("pass = %v, want %v", got, tt.wantPass)
+			}
+
+			if len(result.HeadersResult) != tt.wantHeadersLen {
+				t.Errorf("len(HeadersResult) = %d, want %d; got: %+v",
+					len(result.HeadersResult), tt.wantHeadersLen, result.HeadersResult)
+			}
+
+			if tt.wantMissingKey != "" {
+				found := false
+				for _, hr := range result.HeadersResult {
+					if hr.Expected.Key == tt.wantMissingKey && !hr.Normal {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected HeadersResult to contain Normal=false entry for key %q, got: %+v",
+						tt.wantMissingKey, result.HeadersResult)
+				}
+			}
+		})
+	}
+}
+
 func TestSchemaMatch(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 

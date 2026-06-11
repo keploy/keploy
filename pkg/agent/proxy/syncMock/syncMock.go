@@ -13,6 +13,23 @@ import (
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
 
+// maxRecentWindows bounds the recently-resolved-window ring (see
+// SyncMockManager.recentWindows). The ring is also time-pruned to the
+// 7 s staleness horizon, so this cap only matters under a burst of very
+// short test windows; 256 covers far more than the ~7 s of history the
+// staleness cutoff keeps reachable, while staying O(1) memory.
+const maxRecentWindows = 256
+
+// resolvedWindow is one already-resolved per-test window retained so a
+// late-arriving mock (decoded after the window closed) can still be
+// attributed to the test that actually owns its ReqTimestampMock.
+type resolvedWindow struct {
+	start    time.Time
+	end      time.Time
+	testName string
+	mapping  bool
+}
+
 // nopLogger is the fallback when no logger has been installed via
 // SetLogger. zap.L() is NOT safe here — it returns a Nop until the
 // host process has called zap.ReplaceGlobals, and syncMock is a
@@ -29,12 +46,32 @@ func generateRandomString(n int) string {
 }
 
 type SyncMockManager struct {
-	// mu guards buffer, firstReqSeen, memoryPause, mappingChan.
+	// mu guards buffer, firstReqSeen, memoryPause, mappingChan,
+	// recentWindows.
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
+
+	// recentWindows is a bounded, time-pruned ring of the most recently
+	// RESOLVED per-test windows. It exists to close the async-emit vs
+	// window-bin race: a parser decodes/emits a mock a few ms after the
+	// real wire event (the presaved ReqTimestampMock is correct, but the
+	// mock lands in the buffer late). If that mock's ReqTimestampMock
+	// falls inside a window whose ResolveRange already fired — the
+	// classic case is a Mongo cursor getMore that the app issued WHILE
+	// producing a response, but whose decode finished after the response
+	// was captured and the window closed — the direct [start,end] match
+	// in ResolveRange misses it, and since every FUTURE window starts
+	// after the previous one ended, it can never match again and is
+	// stale-dropped. By remembering recent windows we retroactively bin
+	// such late arrivals into the window that actually owns them, so the
+	// recorder persists them with their (correct, in-window) timestamps
+	// and replay's timestamp filter picks them up for the right test.
+	// Pruned to the same staleness horizon as the buffer cutoff so it
+	// can't reattach ancient mocks or grow without bound.
+	recentWindows []resolvedWindow
 
 	// outChanMu guards outChan and outChanClosed together. Senders
 	// RLock across the whole read+send; the closer Locks across the
@@ -220,6 +257,18 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		return
 	}
 
+	// Tag app-bootstrap traffic. Any mock captured before the first
+	// inbound request is startup/init traffic (e.g. an AWS Secret Manager
+	// fetch at boot) that ran before any test window exists. It can never
+	// claim a per-test window, so the reapers below (dedup DeleteMocks-
+	// StrictlyBefore, the ResolveRange stale-cutoff, FlushOwnedWindows and
+	// the memory-pressure wipe) would otherwise drop it. firstReqSeen,
+	// flipped on the first inbound request, is the boot-vs-test boundary;
+	// tagging here is the sole signal isStartupMock keys off.
+	if mock != nil && !m.firstReqSeen {
+		mock.TestModeInfo.IsStartup = true
+	}
+
 	// Decide forward vs buffer vs drop under a single snapshot of
 	// (outChan, outChanClosed). The trio has three legal outcomes:
 	//
@@ -319,6 +368,106 @@ func (m *SyncMockManager) CloseOutChan() {
 	m.outChanClosed = true
 }
 
+// FlushOwnedWindows forwards every buffered mock that can be attributed
+// right now — session/connection mocks (reusable, never window-bound) and
+// per-test mocks whose ReqTimestampMock falls inside an already-resolved
+// window — leaving only not-yet-attributable per-test mocks in the buffer
+// for a future window match. It is the request-independent twin of
+// ResolveRange's flush branches: the proxy calls it on a ticker for the
+// life of a recording session (see proxy.go) so a mock that lands AFTER
+// its HTTP window resolved (a multi-MB Mongo document still decoding when
+// the response was captured) is persisted WHILE recording is live. The
+// only other drains are request-driven, so after the final request such a
+// mock would otherwise wait until shutdown — by which point the recorder
+// ctx is cancelled and the relay, consumer, and InsertMock all drop it.
+// Order within the buffer is preserved for the mocks left behind.
+func (m *SyncMockManager) FlushOwnedWindows() {
+	if m == nil {
+		return
+	}
+
+	var mocksToSend []*models.Mock
+	var lateMappings map[string][]string
+
+	m.mu.Lock()
+	outChanBound, _ := m.outChanStatus()
+	if !outChanBound {
+		m.mu.Unlock()
+		return
+	}
+	mappingChan := m.mappingChan
+
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
+
+	keepIdx := 0
+	for i := 0; i < len(m.buffer); i++ {
+		mock := m.buffer[i]
+		if mock == nil {
+			continue
+		}
+		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			// Reusable across tests; flush verbatim (never renamed),
+			// matching ResolveRange's lifetime carve-out.
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+			mock.Name = "mock-" + generateRandomString(8)
+			if w.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+			}
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+		// STARTUP RESCUE: app-bootstrap traffic owns no window (it ran
+		// before any test) so the ownerWindow check above never claims it.
+		// Flush it to disk proactively on the ticker rather than leaving it
+		// parked in the buffer where a dedup cleanup, stale-cutoff, or
+		// memory-pressure wipe could reap it before it is ever persisted.
+		if isStartupMock(mock) {
+			mock.Name = "mock-" + generateRandomString(8)
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+		// Not attributable yet — a future (possibly out-of-order) request
+		// may still claim it. Keep it buffered in place.
+		m.buffer[keepIdx] = mock
+		keepIdx++
+	}
+	for i := keepIdx; i < len(m.buffer); i++ {
+		m.buffer[i] = nil
+	}
+	m.buffer = m.buffer[:keepIdx]
+	m.mu.Unlock()
+
+	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
+	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	for _, mock := range mocksToSend {
+		m.sendToOutChan(mock)
+	}
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
+}
+
 func (m *SyncMockManager) SetFirstRequestSignaled() {
 	m.mu.Lock()
 	m.firstReqSeen = true
@@ -344,10 +493,39 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		return
 	}
 
+	// Drop buffered mocks to relieve memory pressure, but PRESERVE startup
+	// mocks. They were captured before the first inbound request, own no
+	// test window, and the periodic FlushOwnedWindows drain is their only
+	// remaining route to disk — wiping them here would silently lose the
+	// once-per-boot startup mock, the exact data loss the IsStartup tag
+	// exists to prevent (mirrors the rescues in DeleteMocksStrictlyBefore,
+	// ResolveRange and FlushOwnedWindows). They are few (typically one per
+	// boot), so the memory relief is effectively unchanged.
+	var kept []*models.Mock
 	for i := range m.buffer {
+		if isStartupMock(m.buffer[i]) {
+			kept = append(kept, m.buffer[i])
+		}
 		m.buffer[i] = nil
 	}
-	m.buffer = make([]*models.Mock, 0, defaultMockBufferCapacity)
+	// Re-home survivors into a fresh, small backing array so the (possibly
+	// large) old one is released to the GC.
+	m.buffer = append(make([]*models.Mock, 0, defaultMockBufferCapacity), kept...)
+}
+
+// isStartupMock reports whether a buffered per-test mock is app-bootstrap
+// traffic that can never legitimately claim a test window: it was captured
+// before the first inbound request (tagged IsStartup at ingest in AddMock).
+// Such mocks (e.g. an AWS Secret Manager fetch at boot) must be flushed to
+// disk so replay's startup tier can serve them, NOT reaped as duplicate
+// debris or stale-cutoff. The tag — rather than a "request pre-dates the
+// first window" timestamp test — is deliberately the only signal: a mock
+// captured before the FIRST inbound request is unambiguously startup
+// traffic, whereas a per-test mock that merely lands before its window
+// (genuine stale cross-test bleed) must still be reaped to bound buffer
+// growth. Conflating the two would resurrect that bleed.
+func isStartupMock(mk *models.Mock) bool {
+	return mk != nil && mk.TestModeInfo.IsStartup
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
@@ -360,6 +538,11 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	var mocksToSend []*models.Mock
 	var associatedMockIDs []string
 	var mappingEntry *models.TestMockMapping
+	// lateMappings accumulates mock IDs for mocks retroactively binned
+	// into a PAST (already-resolved) window, keyed by that window's test
+	// name. lateBinned counts them for the buffer-transition diagnostic.
+	var lateMappings map[string][]string
+	lateBinned := 0
 
 	m.mu.Lock()
 	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
@@ -405,6 +588,31 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	//      that landed in the buffer during the brief unbound startup
 	//      window before SetOutputChannel.
 	cutoffTime := time.Now().Add(-7 * time.Second)
+
+	// Prune the recently-resolved-window ring to the same staleness
+	// horizon as the buffer cutoff, so retroactive binning below can't
+	// reattach a mock to an ancient window (which would defeat the
+	// stale-cutoff's buffer-bound guarantee).
+	if len(m.recentWindows) > 0 {
+		kept := m.recentWindows[:0]
+		for _, w := range m.recentWindows {
+			kept = append(kept, w)
+		}
+		m.recentWindows = kept
+	}
+	// ownerWindow returns the recently-resolved window whose [start,end]
+	// contains t (inclusive, matching the current-window test below).
+	// Windows are non-overlapping FIFO request windows, so at most one
+	// matches.
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
+
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
@@ -467,6 +675,62 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			continue
 		}
 
+		// RETROACTIVE BIN: the mock missed the CURRENT window, but a
+		// recently-resolved window may own it. This is the async-emit vs
+		// window-close race — most visibly a Mongo cursor getMore the app
+		// issued WHILE producing a response, whose decode finished only
+		// after that response was captured and its window closed. The
+		// mock's presaved ReqTimestampMock is correct and in that window,
+		// but the direct [start,end] test above already ran for it, and no
+		// FUTURE window can contain an earlier timestamp — so without this
+		// it would fall to the stale-cutoff and be lost. Attribute it to
+		// the owning window's test so it's persisted (and picked up by
+		// replay's timestamp filter) instead of dropped. Placed BEFORE the
+		// stale-cutoff so an in-window-but-old mock (long test window that
+		// straddles the 7 s horizon) is rescued rather than reaped. Mirrors
+		// the in-window branch's keep / outChanBound handling.
+		if ownerW, ok := ownerWindow(mockTime); ok {
+			if keep {
+				if !outChanBound {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
+				mock.Name = "mock-" + generateRandomString(8)
+				if ownerW.mapping {
+					if lateMappings == nil {
+						lateMappings = make(map[string][]string)
+					}
+					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
+				}
+				mocksToSend = append(mocksToSend, mock)
+				lateBinned++
+			}
+			// Handled (flushed or retained); drop from the current buffer.
+			continue
+		}
+
+		// STARTUP RESCUE: a mock captured before the first inbound request
+		// (IsStartup) is app-bootstrap traffic — an AWS Secret Manager
+		// fetch, DB/driver handshake, config load, etc. fired at boot. It
+		// can never claim a window, so the stale-cutoff below would
+		// silently reap it (the "present in some test sets, missing in
+		// others" bug). Flush it to disk instead so replay's startup tier
+		// can serve it. Placed BEFORE the cutoff so a slow boot (>7 s to
+		// the first request) can't lose it. A per-test mock that merely
+		// lands before the current window (genuine stale cross-test bleed)
+		// is NOT tagged IsStartup and still falls to the cutoff.
+		if isStartupMock(mock) {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+
 		// SAFETY VALVE: Expire stale OUT-OF-WINDOW mocks.
 		// A mock that didn't match the current window AND is older
 		// than 7 s is unrecoverable — no future request can have a
@@ -525,6 +789,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		}
 	}
 
+	// Record THIS window so a later ResolveRange can retroactively bin a
+	// mock decoded after this window closed (see recentWindows). Appended
+	// AFTER the match loop, so the current window's own mocks went through
+	// the direct [start,end] path above, never the ring. Skipped for the
+	// no-keep / unbound cases is unnecessary — an empty-but-recorded
+	// window is harmless and pruned by age.
+	m.recentWindows = append(m.recentWindows, resolvedWindow{
+		start:    start,
+		end:      end,
+		testName: testName,
+		mapping:  mapping,
+	})
+	if len(m.recentWindows) > maxRecentWindows {
+		// Drop the oldest entries; copy down so the big backing array
+		// isn't retained by the reslice.
+		n := copy(m.recentWindows, m.recentWindows[len(m.recentWindows)-maxRecentWindows:])
+		m.recentWindows = m.recentWindows[:n]
+	}
+
 	bufferLenAfter := len(m.buffer)
 	mocksToSendLen := len(mocksToSend)
 
@@ -544,6 +827,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			zap.Int("buffer_len_before", bufferLenBefore),
 			zap.Int("buffer_len_after", bufferLenAfter),
 			zap.Int("mocks_flushed", mocksToSendLen),
+			zap.Int("late_binned", lateBinned),
 			zap.Int("dropped_total", bufferLenBefore-bufferLenAfter-mocksToSendLen),
 			zap.Bool("outChan_bound", outChanBound),
 			zap.Bool("mapping_enabled", mapping),
@@ -563,35 +847,162 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		default:
 		}
 	}
+	// Retroactive mapping entries for mocks late-binned into past windows.
+	// The recorder Upserts mappings by test name, so a second entry for an
+	// already-resolved test merges into its existing mapping rather than
+	// replacing it.
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
 }
 
+// DeleteMocksStrictlyBefore is the dedup-queue cleanup invoked when a
+// DUPLICATE request is skipped: it clears buffered mocks captured before
+// the duplicate's request timestamp so the recording doesn't accumulate
+// the skipped duplicate's debris.
+//
+// It must NOT, however, delete a mock that legitimately belongs to an
+// earlier KEPT (non-duplicate) test and merely arrived in the buffer
+// late — the exact failure that lost every per-test Mongo mock in the
+// mongo-bigmock recording: a 6 MB document decodes/emits after its
+// HTTP window already resolved (so ResolveRange never matched it), and
+// then the NEXT cycle's duplicate requests fire DeleteMocksStrictlyBefore
+// and wipe those kept-but-late mocks before any retroactive-bin
+// ResolveRange can rescue them. Duplicate cycles take this path, never
+// ResolveRange, so without the rescue here the kept mocks are gone.
+//
+// Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
+// falls inside a recently-resolved window (recentWindows only ever holds
+// NON-duplicate windows — duplicates resolve through here, not
+// ResolveRange). So a before-the-horizon mock that owns a recent window
+// is a late kept mock → flush it (rescue); one that owns none is the
+// skipped duplicate's own debris → drop it. Session/connection mocks are
+// reusable across tests and are never reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
 	}
+
+	var mocksToSend []*models.Mock
+	var lateMappings map[string][]string
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	outChanBound, _ := m.outChanStatus()
+	mappingChan := m.mappingChan
+
+	ownerWindow := func(t time.Time) (resolvedWindow, bool) {
+		for _, w := range m.recentWindows {
+			if !t.Before(w.start) && !t.After(w.end) {
+				return w, true
+			}
+		}
+		return resolvedWindow{}, false
+	}
 
 	keepIdx := 0
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
-
-		if mock.Spec.ReqTimestampMock.Before(timestamp) {
+		if mock == nil {
 			continue
 		}
 
-		// Keep the mock
-		m.buffer[keepIdx] = mock
-		keepIdx++
+		// At/after the cleanup horizon: belongs to the current or a future
+		// request, not the duplicate being skipped — always retain.
+		if !mock.Spec.ReqTimestampMock.Before(timestamp) {
+			m.buffer[keepIdx] = mock
+			keepIdx++
+			continue
+		}
+
+		// Session/connection mocks outlive any single test window and must
+		// survive a per-test cleanup. Flush when we can persist them now,
+		// otherwise retain for a later drain.
+		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+			if outChanBound {
+				mocksToSend = append(mocksToSend, mock)
+				continue
+			}
+			m.buffer[keepIdx] = mock
+			keepIdx++
+			continue
+		}
+
+		// RESCUE: a before-the-horizon per-test mock that owns a recent
+		// KEPT window is a legitimately-kept test's late arrival — flush
+		// it to that test instead of deleting it as duplicate debris.
+		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
+			if !outChanBound {
+				// Can't deliver yet; retain so a later flush sends it.
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			if w.mapping {
+				if lateMappings == nil {
+					lateMappings = make(map[string][]string)
+				}
+				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
+			}
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+
+		// STARTUP RESCUE: app-bootstrap traffic (captured before the first
+		// inbound request, or pre-dating the first resolved test window) is
+		// NOT the skipped duplicate's debris — it owns no window because it
+		// ran before any test existed. Without this, a once-per-boot init
+		// call (e.g. AWS Secret Manager) is dropped here whenever the first
+		// inbound request happens to hash as a dedup duplicate (recentWindows
+		// is still empty, so the ownerWindow rescue above can't save it) —
+		// the root of the flaky per-test-set capture. Flush it instead.
+		if isStartupMock(mock) {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			mocksToSend = append(mocksToSend, mock)
+			continue
+		}
+
+		// Owns no kept window and is before the horizon → the skipped
+		// duplicate's own debris. Drop it (fall through without keeping).
 	}
 
 	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {
 		m.buffer[i] = nil
 	}
-
 	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
+	m.mu.Unlock()
+
+	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
+	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	for _, mock := range mocksToSend {
+		m.sendToOutChan(mock)
+	}
+	if mappingChan != nil {
+		for tn, ids := range lateMappings {
+			if len(ids) == 0 {
+				continue
+			}
+			select {
+			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
+			default:
+			}
+		}
+	}
 }
 
 type DedupJob struct {

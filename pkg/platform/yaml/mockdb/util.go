@@ -2,6 +2,7 @@ package mockdb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +17,215 @@ import (
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
+
+// EncodeMockJSON builds a NetworkTrafficDocJSON directly for HTTP-shape mocks
+// (HTTP, DNS, Generic, HTTP2 — anything whose spec struct is JSON-marshal-
+// clean and lives in OSS). Unlike EncodeMock, this path does NOT build a
+// yaml.Node tree first, so it avoids the gopkg.in/yaml.v3 emitter/parser
+// allocation cost under recording load.
+//
+// Redis and Kafka used to be encoded here too but their schemas moved out
+// of OSS into enterprise (#4036) — they now flow through the parser-owned
+// MockYAMLMapper extension hooks. Wire-message-based kinds (Mongo/MySQL/
+// Postgres) still go through the legacy YAML path because their specs
+// contain pre-encoded yaml.Node fields (req.Message).
+func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDocJSON, bool, error) {
+	doc := &yaml.NetworkTrafficDocJSON{
+		Version:      mock.Version,
+		Kind:         mock.Kind,
+		Name:         mock.Name,
+		Noise:        mock.Noise,
+		ConnectionID: mock.ConnectionID,
+	}
+
+	var spec any
+	switch mock.Kind {
+	case models.HTTP:
+		spec = models.HTTPSchema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          *mock.Spec.HTTPReq,
+			Response:         *mock.Spec.HTTPResp,
+			Created:          mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.DNS:
+		var dnsReq models.DNSReq
+		if mock.Spec.DNSReq != nil {
+			dnsReq = *mock.Spec.DNSReq
+		}
+		var dnsResp models.DNSResp
+		if mock.Spec.DNSResp != nil {
+			dnsResp = *mock.Spec.DNSResp
+		}
+		spec = models.DNSSchema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          dnsReq,
+			Response:         dnsResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.GENERIC:
+		spec = models.GenericSchema{
+			Metadata:         mock.Spec.Metadata,
+			GenericRequests:  mock.Spec.GenericRequests,
+			GenericResponses: mock.Spec.GenericResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.HTTP2:
+		var http2Req models.HTTP2Req
+		if mock.Spec.HTTP2Req != nil {
+			http2Req = *mock.Spec.HTTP2Req
+		}
+		var http2Resp models.HTTP2Resp
+		if mock.Spec.HTTP2Resp != nil {
+			http2Resp = *mock.Spec.HTTP2Resp
+		}
+		spec = models.HTTP2Schema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          http2Req,
+			Response:         http2Resp,
+			Created:          mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.GRPC_EXPORT:
+		spec = models.GrpcSpec{
+			Metadata:         mock.Spec.Metadata,
+			GrpcReq:          *mock.Spec.GRPCReq,
+			GrpcResp:         *mock.Spec.GRPCResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.PostgresV2:
+		// JSON-path spec for Postgres: serialise the raw PacketBundle
+		// structs directly instead of going through req.Message.Encode
+		// (yaml.Node) → MarshalDoc → yaml→JSON round-trip.
+		type pgRequest struct {
+			Meta         map[string]string     `json:"meta,omitempty"`
+			PacketBundle postgres.PacketBundle `json:"packet_bundle"`
+		}
+		type pgResponse struct {
+			Meta         map[string]string     `json:"meta,omitempty"`
+			PacketBundle postgres.PacketBundle `json:"packet_bundle"`
+		}
+		type pgSpec struct {
+			Metadata         map[string]string `json:"metadata"`
+			Requests         []pgRequest       `json:"requests"`
+			Response         []pgResponse      `json:"responses"`
+			CreatedAt        int64             `json:"created,omitempty"`
+			ReqTimestampMock interface{}       `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}       `json:"resTimestampMock,omitempty"`
+		}
+		reqs := make([]pgRequest, 0, len(mock.Spec.PostgresRequestsV2))
+		for _, v := range mock.Spec.PostgresRequestsV2 {
+			reqs = append(reqs, pgRequest{PacketBundle: v.PacketBundle})
+		}
+		resps := make([]pgResponse, 0, len(mock.Spec.PostgresResponsesV2))
+		for _, v := range mock.Spec.PostgresResponsesV2 {
+			resps = append(resps, pgResponse{PacketBundle: v.PacketBundle})
+		}
+		spec = pgSpec{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         reqs,
+			Response:         resps,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.Mongo:
+		// JSON-path spec for Mongo: emit the raw in-memory MongoRequest /
+		// MongoResponse structs directly. Their Message field is already
+		// `interface{}` with json tags on every concrete wire-message
+		// type (MongoOpMessage, MongoOpQuery, MongoOpReply, …), so
+		// encoding/json handles them natively — no yaml.Node round-trip.
+		type mgSpec struct {
+			Metadata         map[string]string      `json:"metadata"`
+			Requests         []models.MongoRequest  `json:"requests"`
+			Response         []models.MongoResponse `json:"responses"`
+			CreatedAt        int64                  `json:"created,omitempty"`
+			ReqTimestampMock interface{}            `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}            `json:"resTimestampMock,omitempty"`
+		}
+		spec = mgSpec{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         mock.Spec.MongoRequests,
+			Response:         mock.Spec.MongoResponses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.MySQL:
+		// JSON-path spec for MySQL. mysql.Request / mysql.Response embed
+		// PacketBundle whose Message is `interface{}` with JSON-ready
+		// packet types, so we can emit them as-is without the
+		// per-packet req.Message.Encode(...) yaml.Node dance.
+		type mySpec struct {
+			Metadata         map[string]string `json:"metadata"`
+			Requests         []mysql.Request   `json:"requests"`
+			Response         []mysql.Response  `json:"responses"`
+			CreatedAt        int64             `json:"created,omitempty"`
+			ReqTimestampMock interface{}       `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}       `json:"resTimestampMock,omitempty"`
+		}
+		spec = mySpec{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         mock.Spec.MySQLRequests,
+			Response:         mock.Spec.MySQLResponses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	case models.PostgresV3:
+		// JSON-path spec for the v3 Postgres parser. Mirrors
+		// postgresV3YamlSpec but with json tags. PostgresV3Spec already has
+		// json tags on every sub-pointer, so encoding/json handles the
+		// discriminated union natively — no yaml.Node round-trip.
+		//
+		// Both nil-spec and Type/sub-pointer mismatches are hard rejects on
+		// the YAML path; mirror that here so the JSON-path recorder cannot
+		// silently persist a malformed mock that would NPE on replay.
+		if mock.Spec.PostgresV3 == nil {
+			utils.LogError(logger, errPostgresV3NilPayload, "refusing to marshal PostgresV3 mock with nil Spec.PostgresV3 (json path)",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, false, errPostgresV3NilPayload
+		}
+		if err := validatePostgresV3Spec(mock.Spec.PostgresV3); err != nil {
+			utils.LogError(logger, err, "refusing to marshal PostgresV3 mock with inconsistent sub-spec (json path)",
+				zap.String("mock_name", mock.Name),
+				zap.String("mock_kind", string(mock.Kind)),
+				zap.String("postgres_v3_type", mock.Spec.PostgresV3.Type),
+				zap.String("next_step", nextStepPostgresV3NilPayload))
+			return nil, false, err
+		}
+		type pgV3Spec struct {
+			Metadata         map[string]string      `json:"metadata,omitempty"`
+			PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
+			ReqTimestampMock interface{}            `json:"reqTimestampMock,omitempty"`
+			ResTimestampMock interface{}            `json:"resTimestampMock,omitempty"`
+		}
+		spec = pgV3Spec{
+			Metadata:         mock.Spec.Metadata,
+			PostgresV3:       mock.Spec.PostgresV3,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+	default:
+		// Unknown kind — caller falls back to the legacy path.
+		return nil, false, nil
+	}
+
+	specBytes, err := json.Marshal(spec)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal mock spec to JSON")
+		return nil, true, err
+	}
+	doc.Spec = specBytes
+	return doc, true, nil
+}
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
@@ -1021,6 +1231,397 @@ func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*mode
 	}
 	mockSpec.PostgresResponsesV2 = resps
 	return &mockSpec, nil
+}
+
+// DecodeMocksJSON is the JSON-native read companion to EncodeMockJSON: it
+// unmarshals the json.RawMessage spec of each NetworkTrafficDocJSON directly
+// into the concrete in-memory models (HTTPSchema, MongoSpec, mysql.Spec,
+// ...). No yaml.Node, no DocToJSON, no gopkg.in/yaml.v3 involved.
+//
+// For the wire-message kinds (Mongo / MySQL / PostgresV2) the decoder mirrors
+// the shape written by EncodeMockJSON: Messages are emitted as JSON-native
+// concrete types so unmarshal into `interface{}` yields a map — we recover
+// the typed Message by dispatching on Header.Opcode / Header.Type.
+func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]*models.Mock, error) {
+	mocks := make([]*models.Mock, 0, len(docs))
+	for _, m := range docs {
+		// Skip enterprise-only kinds the way DecodeMocks does.
+		if strings.Count(string(m.Kind), "-") > 0 {
+			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
+			continue
+		}
+
+		mock := models.Mock{
+			Version:      m.Version,
+			Name:         m.Name,
+			Kind:         m.Kind,
+			Noise:        m.Noise,
+			ConnectionID: m.ConnectionID,
+		}
+
+		switch m.Kind {
+		case models.HTTP:
+			var s models.HTTPSchema
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal http mock %q: %w", m.Name, err)
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				HTTPReq:          &s.Request,
+				HTTPResp:         &s.Response,
+				Created:          s.Created,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.DNS:
+			var s models.DNSSchema
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal dns mock %q: %w", m.Name, err)
+			}
+			metadata := s.Metadata
+			if metadata == nil {
+				metadata = map[string]string{}
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         metadata,
+				DNSReq:           &s.Request,
+				DNSResp:          &s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.GRPC_EXPORT:
+			var s models.GrpcSpec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal grpc mock %q: %w", m.Name, err)
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				GRPCReq:          &s.GrpcReq,
+				GRPCResp:         &s.GrpcResp,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.GENERIC:
+			var s models.GenericSchema
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal generic mock %q: %w", m.Name, err)
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				GenericRequests:  s.GenericRequests,
+				GenericResponses: s.GenericResponses,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.HTTP2:
+			var s models.HTTP2Schema
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal http2 mock %q: %w", m.Name, err)
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				HTTP2Req:         &s.Request,
+				HTTP2Resp:        &s.Response,
+				Created:          s.Created,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.PostgresV2:
+			type pgRequest struct {
+				Meta         map[string]string     `json:"meta,omitempty"`
+				PacketBundle postgres.PacketBundle `json:"packet_bundle"`
+			}
+			type pgResponse struct {
+				Meta         map[string]string     `json:"meta,omitempty"`
+				PacketBundle postgres.PacketBundle `json:"packet_bundle"`
+			}
+			type pgSpec struct {
+				Metadata         map[string]string `json:"metadata"`
+				Requests         []pgRequest       `json:"requests"`
+				Response         []pgResponse      `json:"responses"`
+				CreatedAt        int64             `json:"created,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
+			}
+			var s pgSpec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal postgresV2 mock %q: %w", m.Name, err)
+			}
+			reqs := make([]postgres.Request, 0, len(s.Requests))
+			for _, r := range s.Requests {
+				reqs = append(reqs, postgres.Request{PacketBundle: r.PacketBundle})
+			}
+			resps := make([]postgres.Response, 0, len(s.Response))
+			for _, r := range s.Response {
+				resps = append(resps, postgres.Response{PacketBundle: r.PacketBundle})
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:            s.Metadata,
+				Created:             s.CreatedAt,
+				PostgresRequestsV2:  reqs,
+				PostgresResponsesV2: resps,
+				ReqTimestampMock:    s.ReqTimestampMock,
+				ResTimestampMock:    s.ResTimestampMock,
+			}
+		case models.Mongo:
+			// Mongo: Message is interface{} — json.Unmarshal puts a
+			// map[string]interface{} there. We dispatch on
+			// Header.Opcode to recover the typed message, mirroring
+			// what decodeMongoMessage does on the YAML path.
+			type mgSpec struct {
+				Metadata         map[string]string      `json:"metadata"`
+				Requests         []models.MongoRequest  `json:"requests"`
+				Response         []models.MongoResponse `json:"responses"`
+				CreatedAt        int64                  `json:"created,omitempty"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
+			}
+			var s mgSpec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal mongo mock %q: %w", m.Name, err)
+			}
+			// Re-type each Message from generic map into the
+			// concrete MongoOp* struct based on the opcode.
+			for i := range s.Requests {
+				typed, err := retypeMongoMessage(s.Requests[i].Header, s.Requests[i].Message)
+				if err != nil {
+					return nil, fmt.Errorf("failed to retype mongo request message in %q: %w", m.Name, err)
+				}
+				s.Requests[i].Message = typed
+			}
+			for i := range s.Response {
+				typed, err := retypeMongoMessage(s.Response[i].Header, s.Response[i].Message)
+				if err != nil {
+					return nil, fmt.Errorf("failed to retype mongo response message in %q: %w", m.Name, err)
+				}
+				s.Response[i].Message = typed
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MongoRequests:    s.Requests,
+				MongoResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.MySQL:
+			type mySpec struct {
+				Metadata         map[string]string `json:"metadata"`
+				Requests         []mysql.Request   `json:"requests"`
+				Response         []mysql.Response  `json:"responses"`
+				CreatedAt        int64             `json:"created,omitempty"`
+				ReqTimestampMock time.Time         `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time         `json:"resTimestampMock,omitempty"`
+			}
+			var s mySpec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal mysql mock %q: %w", m.Name, err)
+			}
+			for i := range s.Requests {
+				typed, err := retypeMySQLRequest(s.Requests[i].Header, s.Requests[i].Message)
+				if err != nil {
+					return nil, fmt.Errorf("failed to retype mysql request message in %q: %w", m.Name, err)
+				}
+				s.Requests[i].Message = typed
+			}
+			for i := range s.Response {
+				typed, err := retypeMySQLResponse(s.Response[i].Header, s.Response[i].Message)
+				if err != nil {
+					return nil, fmt.Errorf("failed to retype mysql response message in %q: %w", m.Name, err)
+				}
+				s.Response[i].Message = typed
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				Created:          s.CreatedAt,
+				MySQLRequests:    s.Requests,
+				MySQLResponses:   s.Response,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		case models.PostgresV3:
+			// Mirror of the YAML path's PostgresV3 case (see DecodeMocks),
+			// using json tags. PostgresV3Spec has json tags on every
+			// sub-pointer so encoding/json can reconstruct the
+			// discriminated union directly. Both nil-spec and
+			// Type/sub-pointer mismatches are hard rejects so a corrupt
+			// record cannot round-trip through disk and NPE at replay.
+			type pgV3Spec struct {
+				Metadata         map[string]string      `json:"metadata,omitempty"`
+				PostgresV3       *models.PostgresV3Spec `json:"postgresV3"`
+				ReqTimestampMock time.Time              `json:"reqTimestampMock,omitempty"`
+				ResTimestampMock time.Time              `json:"resTimestampMock,omitempty"`
+			}
+			var s pgV3Spec
+			if err := json.Unmarshal(m.Spec, &s); err != nil {
+				utils.LogError(logger, err, "failed to unmarshal PostgresV3 json",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3Decode))
+				return nil, err
+			}
+			if s.PostgresV3 == nil {
+				utils.LogError(logger, errPostgresV3NilPayload, "PostgresV3 json block missing typed payload",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, errPostgresV3NilPayload
+			}
+			if err := validatePostgresV3Spec(s.PostgresV3); err != nil {
+				utils.LogError(logger, err, "PostgresV3 json block has inconsistent sub-spec",
+					zap.String("mock_name", m.Name),
+					zap.String("mock_kind", string(m.Kind)),
+					zap.String("postgres_v3_type", s.PostgresV3.Type),
+					zap.String("next_step", nextStepPostgresV3NilPayload))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         s.Metadata,
+				PostgresV3:       s.PostgresV3,
+				ReqTimestampMock: s.ReqTimestampMock,
+				ResTimestampMock: s.ResTimestampMock,
+			}
+		default:
+			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
+			continue
+		}
+		mocks = append(mocks, &mock)
+	}
+	return mocks, nil
+}
+
+// retypeMongoMessage re-marshals the already-decoded generic map into the
+// concrete MongoOp* struct implied by the opcode. This is cheap: one
+// json.Marshal + one json.Unmarshal on a small struct.
+func retypeMongoMessage(header *models.MongoHeader, raw interface{}) (interface{}, error) {
+	if raw == nil || header == nil {
+		return raw, nil
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch header.Opcode {
+	case wiremessage.OpMsg:
+		v := &models.MongoOpMessage{}
+		if err := json.Unmarshal(buf, v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	case wiremessage.OpReply:
+		v := &models.MongoOpReply{}
+		if err := json.Unmarshal(buf, v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	case wiremessage.OpQuery:
+		v := &models.MongoOpQuery{}
+		if err := json.Unmarshal(buf, v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	default:
+		return raw, nil
+	}
+}
+
+// retypeMySQLRequest / retypeMySQLResponse mirror decodeMySQLMessage: they
+// select the concrete packet struct based on PacketInfo.Type and re-unmarshal
+// the already-decoded generic map into it.
+func retypeMySQLRequest(header *mysql.PacketInfo, raw interface{}) (interface{}, error) {
+	if raw == nil || header == nil {
+		return raw, nil
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var target interface{}
+	switch header.Type {
+	case mysql.SSLRequest:
+		target = &mysql.SSLRequestPacket{}
+	case mysql.HandshakeResponse41:
+		target = &mysql.HandshakeResponse41Packet{}
+	case mysql.CachingSha2PasswordToString(mysql.RequestPublicKey),
+		mysql.EncryptedPassword,
+		mysql.PlainPassword:
+		var s string
+		if err := json.Unmarshal(buf, &s); err != nil {
+			return nil, err
+		}
+		return s, nil
+	case mysql.CommandStatusToString(mysql.COM_QUIT):
+		target = &mysql.QuitPacket{}
+	case mysql.CommandStatusToString(mysql.COM_INIT_DB):
+		target = &mysql.InitDBPacket{}
+	case mysql.CommandStatusToString(mysql.COM_STATISTICS):
+		target = &mysql.StatisticsPacket{}
+	case mysql.CommandStatusToString(mysql.COM_DEBUG):
+		target = &mysql.DebugPacket{}
+	case mysql.CommandStatusToString(mysql.COM_PING):
+		target = &mysql.PingPacket{}
+	case mysql.CommandStatusToString(mysql.COM_CHANGE_USER):
+		target = &mysql.ChangeUserPacket{}
+	case mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION):
+		target = &mysql.ResetConnectionPacket{}
+	case mysql.CommandStatusToString(mysql.COM_QUERY):
+		target = &mysql.QueryPacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
+		target = &mysql.StmtPreparePacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
+		target = &mysql.StmtExecutePacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
+		target = &mysql.StmtClosePacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_RESET):
+		target = &mysql.StmtResetPacket{}
+	case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
+		target = &mysql.StmtSendLongDataPacket{}
+	default:
+		return raw, nil
+	}
+	if err := json.Unmarshal(buf, target); err != nil {
+		return nil, err
+	}
+	return target, nil
+}
+
+func retypeMySQLResponse(header *mysql.PacketInfo, raw interface{}) (interface{}, error) {
+	if raw == nil || header == nil {
+		return raw, nil
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var target interface{}
+	switch header.Type {
+	case mysql.StatusToString(mysql.EOF):
+		target = &mysql.EOFPacket{}
+	case mysql.StatusToString(mysql.ERR):
+		target = &mysql.ERRPacket{}
+	case mysql.StatusToString(mysql.OK):
+		target = &mysql.OKPacket{}
+	case mysql.AuthStatusToString(mysql.HandshakeV10):
+		target = &mysql.HandshakeV10Packet{}
+	case mysql.AuthStatusToString(mysql.AuthSwitchRequest):
+		target = &mysql.AuthSwitchRequestPacket{}
+	case mysql.AuthStatusToString(mysql.AuthMoreData):
+		target = &mysql.AuthMoreDataPacket{}
+	case mysql.AuthStatusToString(mysql.AuthNextFactor):
+		target = &mysql.AuthNextFactorPacket{}
+	case mysql.COM_STMT_PREPARE_OK:
+		target = &mysql.StmtPrepareOkPacket{}
+	case string(mysql.Text):
+		target = &mysql.TextResultSet{}
+	case string(mysql.Binary):
+		target = &mysql.BinaryProtocolResultSet{}
+	default:
+		return raw, nil
+	}
+	if err := json.Unmarshal(buf, target); err != nil {
+		return nil, err
+	}
+	return target, nil
 }
 
 // sanitizeYAMLStringNodes walks a yaml.Node tree and rewrites any

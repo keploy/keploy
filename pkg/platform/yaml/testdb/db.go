@@ -4,6 +4,7 @@ package testdb
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ const (
 type TestYaml struct {
 	TcsPath        string
 	logger         *zap.Logger
+	Format         yaml.Format
 	namingStrategy NamingStrategy
 
 	// lastIndex caches the max test-index per test-set path so upsert
@@ -54,18 +56,33 @@ type TestYaml struct {
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
-	return NewWithNaming(logger, tcsPath, NamingDescriptive)
+	return NewWithFormatAndNaming(logger, tcsPath, yaml.FormatYAML, NamingDescriptive)
+}
+
+// NewWithFormat constructs a TestYaml whose on-disk encoding uses the
+// given storage format (yaml or json). Naming defaults to descriptive.
+func NewWithFormat(logger *zap.Logger, tcsPath string, format yaml.Format) *TestYaml {
+	return NewWithFormatAndNaming(logger, tcsPath, format, NamingDescriptive)
 }
 
 // NewWithNaming constructs a TestYaml that uses the given naming
-// strategy for test cases without an explicit name.
+// strategy for test cases without an explicit name. Storage format
+// defaults to yaml.
 func NewWithNaming(logger *zap.Logger, tcsPath string, strategy NamingStrategy) *TestYaml {
+	return NewWithFormatAndNaming(logger, tcsPath, yaml.FormatYAML, strategy)
+}
+
+// NewWithFormatAndNaming is the full constructor for TestYaml. Storage
+// format and naming strategy are independent knobs — callers that want
+// non-default values for either should prefer this entry point.
+func NewWithFormatAndNaming(logger *zap.Logger, tcsPath string, format yaml.Format, strategy NamingStrategy) *TestYaml {
 	if strategy == "" {
 		strategy = NamingDescriptive
 	}
 	return &TestYaml{
 		TcsPath:        tcsPath,
 		logger:         logger,
+		Format:         format,
 		namingStrategy: strategy,
 	}
 }
@@ -117,7 +134,10 @@ func (ts *TestYaml) nextTestIndex(tcsPath string) (int, error) {
 	if v, ok := ts.lastIndex.Load(tcsPath); ok {
 		return int(v.(*atomic.Int64).Add(1)), nil
 	}
-	seed, err := yaml.FindLastIndex(tcsPath, ts.logger)
+	// Seed the cache with a format-aware scan so a tests/ directory recorded
+	// in the opposite StorageFormat seeds against the right files instead of
+	// returning 1 and clobbering existing test-N.* entries.
+	seed, err := yaml.FindLastIndexF(tcsPath, ts.logger, ts.Format)
 	if err != nil {
 		return 0, err
 	}
@@ -167,7 +187,9 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	}
 
 	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
-	reportNames, err := yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
+	// Accept reports saved in either format so that replay-side tools
+	// (e.g. "keploy report") keep working after a StorageFormat switch.
+	reportNames, err := yaml.ReadSessionIndicesAny(ctx, runReportPath, ts.logger, yaml.ModeFile)
 	if err != nil {
 		return nil, err
 	}
@@ -195,15 +217,26 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	if err != nil {
 		return nil, err
 	}
-	data, err := yaml.ReadFile(ctx, ts.logger, testPath, testCaseName)
+	// Auto-detect format on read so replay works even when StorageFormat
+	// differs from the format the testcase was originally recorded in.
+	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, testPath, testCaseName, ts.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("test case %q is empty", testCaseName)
 	}
-	var doc *yaml.NetworkTrafficDoc
-	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+	// JSON file → decode directly from json.RawMessage spec; no yaml.Node
+	// bridge on the hot path.
+	if detected == yaml.FormatJSON {
+		var jd yaml.NetworkTrafficDocJSON
+		if err := json.Unmarshal(data, &jd); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal json test case %q: %w", testCaseName, err)
+		}
+		return DecodeJSON(&jd, ts.logger)
+	}
+	doc, err := yaml.UnmarshalDoc(detected, data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal test case %q: %w", testCaseName, err)
 	}
 	if doc == nil {
@@ -235,15 +268,57 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
+	// Accept both .yaml and .json so a directory containing a mix of
+	// formats (e.g. mid-migration, or a yaml-default `keploy normalize`
+	// run that wrote .yaml siblings next to existing .json testcases) is
+	// fully visible to replay. Each file is decoded using its own
+	// extension-derived format.
+	//
+	// When both test-N.yaml and test-N.json exist for the same basename,
+	// prefer the one matching the configured StorageFormat. Pre-sort the
+	// directory listing so format-matching files come first; the
+	// "first-wins" dedup below then picks the preferred file every time.
+	// Without this sort, the dedup keeps whichever extension the
+	// filesystem returned first (creation order on ext4), which silently
+	// loaded stale pre-normalize testcases on the JSON-recorded /
+	// YAML-normalized path.
+	preferredExt := "." + ts.Format.FileExtension()
+	sort.SliceStable(files, func(i, j int) bool {
+		iMatch := filepath.Ext(files[i].Name()) == preferredExt
+		jMatch := filepath.Ext(files[j].Name()) == preferredExt
+		// Stable sort: format-matching files come before others; ties
+		// retain their original (filesystem) order.
+		return iMatch && !jMatch
+	})
+
+	seen := make(map[string]yaml.Format) // base-name -> format already loaded
 	for _, j := range files {
-		if filepath.Ext(j.Name()) != ".yaml" || strings.Contains(j.Name(), "mocks") {
+		fileExt := filepath.Ext(j.Name())
+		var fileFormat yaml.Format
+		switch fileExt {
+		case ".yaml":
+			fileFormat = yaml.FormatYAML
+		case ".json":
+			fileFormat = yaml.FormatJSON
+		default:
+			continue
+		}
+		if strings.Contains(j.Name(), "mocks") {
 			continue
 		}
 
-		name := strings.TrimSuffix(j.Name(), filepath.Ext(j.Name()))
-		data, err := yaml.ReadFile(ctx, ts.logger, TestPath, name)
+		name := strings.TrimSuffix(j.Name(), fileExt)
+		// First-wins: pre-sort guarantees the format-matching file is
+		// processed before its sibling, so any later occurrence of the
+		// same basename is by definition the non-preferred format.
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = fileFormat
+
+		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, fileFormat)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+			utils.LogError(ts.logger, err, "failed to read the testcase")
 			return nil, err
 		}
 
@@ -252,15 +327,31 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			continue
 		}
 
-		var testCase *yaml.NetworkTrafficDoc
-		err = yamlLib.Unmarshal(data, &testCase)
+		// JSON files decode directly into TestCase via DecodeJSON — no
+		// yaml.Node allocation on the per-testcase hot path.
+		if fileFormat == yaml.FormatJSON {
+			var jd yaml.NetworkTrafficDocJSON
+			if err := json.Unmarshal(data, &jd); err != nil {
+				utils.LogError(ts.logger, err, "failed to unmarshal json testcase data", zap.String("testcase name", name))
+				return nil, err
+			}
+			tc, err := DecodeJSON(&jd, ts.logger)
+			if err != nil {
+				utils.LogError(ts.logger, err, "failed to decode json testcase", zap.String("testcase name", name))
+				return nil, err
+			}
+			tcs = append(tcs, tc)
+			continue
+		}
+
+		testCase, err := yaml.UnmarshalDoc(fileFormat, data)
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
 			return nil, err
 		}
 
 		if testCase == nil {
-			ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", name))
+			ts.logger.Debug("skipping invalid testcase document", zap.String("testcase name", name))
 			continue
 		}
 
@@ -353,6 +444,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	var tcsName string
 	var reservedPlaceholder bool
 	if tc.Name == "" {
+		// claimName generates a descriptive or sequential name (per
+		// ts.namingStrategy) and atomically reserves the corresponding
+		// {name}.{ext} placeholder so concurrent recorders cannot
+		// collide. The reservation extension is driven by ts.Format —
+		// see claimName for details.
 		claimed, err := ts.claimName(tcsPath, tc)
 		if err != nil {
 			return tcsInfo{name: "", path: tcsPath}, err
@@ -364,14 +460,15 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	// If anything after the atomic filename reservation fails before
-	// we successfully write the final yaml, remove the empty
+	// we successfully write the final testcase, remove the empty
 	// placeholder we left behind in claimName so the testset
 	// directory doesn't accumulate stale 0-byte files that would
-	// also skew subsequent NextIndexForPrefix scans.
+	// also skew subsequent NextIndexForPrefix scans. The placeholder
+	// extension matches whatever ts.Format the recorder is using.
 	writeSucceeded := false
 	defer func() {
 		if reservedPlaceholder && !writeSucceeded {
-			placeholder := filepath.Join(tcsPath, tcsName+".yaml")
+			placeholder := filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension())
 			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
 				// This is a secondary failure during error handling —
 				// the primary upsert error is already returned to the
@@ -389,17 +486,35 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
-	yamlTc, err := EncodeTestcase(*tc, ts.logger)
-	if err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, err
+	// For YAML we build a NetworkTrafficDoc (whose Spec is a yaml.Node);
+	// for JSON we build a NetworkTrafficDocJSON directly (Spec is
+	// json.RawMessage). The JSON path skips the yaml.Node intermediate
+	// entirely — this is where the big win comes from.
+	var yamlTc *yaml.NetworkTrafficDoc
+	var jsonTc *yaml.NetworkTrafficDocJSON
+	if ts.Format == yaml.FormatJSON {
+		jsonTc, err = EncodeTestcaseJSON(*tc, ts.logger)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		jsonTc.Name = tcsName
+	} else {
+		yamlTc, err = EncodeTestcase(*tc, ts.logger)
+		if err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, err
+		}
+		yamlTc.Name = tcsName
 	}
-	yamlTc.Name = tcsName
 
-	// Stream YAML directly to disk instead of buffering in memory.
-	// This avoids allocating a large bytes.Buffer per test case.
+	// Stream the encoded testcase directly to disk via a temp file + rename
+	// instead of buffering the full document in memory. This avoids allocating
+	// a large bytes.Buffer per testcase. The final file's extension and
+	// encoding are both driven by ts.Format (yaml or json).
 
-	// Validate the output path to prevent directory traversal
-	yamlPath, err := yaml.ValidatePath(filepath.Join(tcsPath, tcsName+".yaml"))
+	ext := "." + ts.Format.FileExtension()
+
+	// Validate the output path to prevent directory traversal.
+	outPath, err := yaml.ValidatePath(filepath.Join(tcsPath, tcsName+ext))
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
 	}
@@ -408,7 +523,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*.yaml.tmp")
+	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*"+ext+".tmp")
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -422,20 +537,38 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}()
 
 	writer := bufio.NewWriter(tmpFile)
-	if version := utils.GetVersionAsComment(); version != "" {
-		if _, err := writer.WriteString(version); err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
+
+	// Version comment is a YAML-only concept (JSON has no comment syntax).
+	if ts.Format == yaml.FormatYAML {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
+			}
 		}
 	}
 
-	encoder := yamlLib.NewEncoder(writer)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&yamlTc); err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
+	switch ts.Format {
+	case yaml.FormatJSON:
+		// Pretty-print testcases so they're human-editable; json.Encoder
+		// streams directly to writer with no intermediate []byte. jsonTc
+		// was built via EncodeTestcaseJSON which skips the yaml.Node
+		// intermediate (no yaml_emitter_emit, no yaml parse-back).
+		enc := json.NewEncoder(writer)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(jsonTc); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase json: %w", err)
+		}
+	default:
+		encoder := yamlLib.NewEncoder(writer)
+		encoder.SetIndent(2)
+		if err := encoder.Encode(&yamlTc); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
+		}
+		if err := encoder.Close(); err != nil {
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
+		}
 	}
-	if err := encoder.Close(); err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
-	}
+
 	if err := writer.Flush(); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
 	}
@@ -455,7 +588,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	//
 	// On POSIX, os.Rename atomically replaces an existing target —
 	// which is what we want, because claimName has already created
-	// a zero-byte placeholder at yamlPath that holds the name
+	// a zero-byte placeholder at outPath that holds the name
 	// reservation. Skipping the explicit pre-rename Remove on POSIX
 	// keeps that reservation alive throughout the swap, so a
 	// concurrent recorder running claimName can't O_EXCL-claim the
@@ -469,18 +602,21 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	// Rename which we accept as a stdlib limitation; the
 	// concurrent-recorder scenario this addresses is rare on
 	// Windows in practice.
+	//
+	// outPath carries the configured ts.Format extension (yaml or
+	// json), so this works equally for both storage formats.
 	if runtime.GOOS == "windows" {
-		if _, statErr := os.Stat(yamlPath); statErr == nil {
-			if err := os.Remove(yamlPath); err != nil {
+		if _, statErr := os.Stat(outPath); statErr == nil {
+			if err := os.Remove(outPath); err != nil {
 				os.Remove(tmpPath)
-				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase yaml: %w", err)
+				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to remove existing testcase: %w", err)
 			}
 		} else if !os.IsNotExist(statErr) {
 			os.Remove(tmpPath)
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase yaml: %w", statErr)
+			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to stat existing testcase: %w", statErr)
 		}
 	}
-	if err := os.Rename(tmpPath, yamlPath); err != nil {
+	if err := os.Rename(tmpPath, outPath); err != nil {
 		os.Remove(tmpPath)
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to rename temp file: %w", err)
 	}
@@ -561,7 +697,14 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 			return "", err
 		}
 		lastName = name
-		target := filepath.Join(tcsPath, name+".yaml")
+		// Reservation extension matches ts.Format so the placeholder
+		// has the same path the upsert temp-rename will land on. Two
+		// concurrent recorders using different storage formats against
+		// the same testset directory still get isolated reservations
+		// (different extensions, no O_EXCL collision), which is the
+		// correct outcome — the placeholder is bound to a particular
+		// {name, format} pair.
+		target := filepath.Join(tcsPath, name+"."+ts.Format.FileExtension())
 		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			// Surface any Close error to the caller — on networked
@@ -585,7 +728,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	for _, testCaseID := range testCaseIDs {
-		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
+		err := yaml.DeleteFileF(ctx, ts.logger, path, testCaseID, ts.Format)
 		if err != nil {
 			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err
@@ -609,50 +752,90 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
-	// get the test case and fill the assertion and update the test case
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
-	data, err := yaml.ReadFile(ctx, ts.logger, tcsPath, testCaseID)
+	// Read whichever format the testcase was recorded in.
+	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+		utils.LogError(ts.logger, err, "failed to read the testcase")
 		return err
 	}
 	if len(data) == 0 {
 		ts.logger.Debug("skipping empty testcase", zap.String("testcase name", testCaseID))
 		return nil
 	}
-	var testCase *yaml.NetworkTrafficDoc
 
-	err = yamlLib.Unmarshal(data, &testCase)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
-		return err
+	// Decode via the path that matches the file on disk — yaml.Node for
+	// YAML files, json.RawMessage for JSON files. Write back in the SAME
+	// format we read: don't silently convert an existing .yaml testcase
+	// into .json just because StorageFormat flipped between record and
+	// replay.
+	var tc *models.TestCase
+	if detected == yaml.FormatJSON {
+		var jd yaml.NetworkTrafficDocJSON
+		if err := json.Unmarshal(data, &jd); err != nil {
+			utils.LogError(ts.logger, err, "failed to unmarshal json testcase data")
+			return err
+		}
+		tc, err = DecodeJSON(&jd, ts.logger)
+	} else {
+		testCase, err := yaml.UnmarshalDoc(detected, data)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to unmarshal testcase data")
+			return err
+		}
+		if testCase == nil {
+			ts.logger.Warn("skipping invalid testCase", zap.String("testcase name", testCaseID))
+			return nil
+		}
+		tc, err = Decode(testCase, ts.logger)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to decode the testcase")
+			return err
+		}
 	}
-
-	if testCase == nil {
-		ts.logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
-		return nil
-	}
-
-	tc, err := Decode(testCase, ts.logger)
+	// Both branches above already returned on a nil document or decode
+	// error; only the JSON branch's DecodeJSON err is left dangling here.
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to decode the testcase")
 		return err
 	}
 	tc.Assertions = assertions
+
+	// Re-encode in the same format we read.
+	if detected == yaml.FormatJSON {
+		jsonDoc, err := EncodeTestcaseJSON(*tc, ts.logger)
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to encode the testcase (json)")
+			return err
+		}
+		jsonDoc.Name = testCaseID
+		out, err := json.MarshalIndent(jsonDoc, "", "  ")
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to marshal the json testcase")
+			return err
+		}
+		out = append(out, '\n')
+		if err := yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, out, false, detected); err != nil {
+			utils.LogError(ts.logger, err, "failed to write testcase file")
+			return err
+		}
+		return nil
+	}
+
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to encode the testcase")
 		return err
 	}
 	yamlTc.Name = testCaseID
-	data, err = yamlLib.Marshal(&yamlTc)
+	data, err = yaml.MarshalDoc(detected, yamlTc)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to marshall the testcase")
+		utils.LogError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
-	err = yaml.WriteFile(ctx, ts.logger, tcsPath, testCaseID, data, false)
+	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, detected)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return err
 	}
 	return nil

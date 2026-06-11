@@ -60,6 +60,7 @@ func (m *mockMemDb) GetSessionScopedMocks() ([]*models.Mock, error)      { retur
 func (m *mockMemDb) HasFirstTestFired() bool                             { return false }
 func (m *mockMemDb) FirstTestWindowStart() time.Time                     { return time.Time{} }
 func (m *mockMemDb) WindowSnapshot() models.WindowSnapshot               { return models.WindowSnapshot{} }
+func (m *mockMemDb) CurrentTestWindow() (time.Time, time.Time)           { return time.Time{}, time.Time{} }
 func (m *mockMemDb) GetConnectionMocks(_ string) ([]*models.Mock, error) { return nil, nil }
 func (m *mockMemDb) SessionMockHitCounts() map[string]uint64             { return nil }
 
@@ -931,7 +932,7 @@ func TestUpdateMock_DoesNotMutatePoolPointer(t *testing.T) {
 	beforeIsFiltered := original.TestModeInfo.IsFiltered
 	beforeSortOrder := original.TestModeInfo.SortOrder
 
-	if ok := h.updateMock(context.TODO(), original, db); !ok {
+	if ok := h.updateMock(context.TODO(), original, db, nil); !ok {
 		t.Fatalf("updateMock returned false; expected true from stubbed UpdateUnFilteredMock")
 	}
 
@@ -986,7 +987,7 @@ func TestUpdateMock_PerTestPrefersDelete(t *testing.T) {
 		},
 	}
 
-	if ok := h.updateMock(context.TODO(), original, db); !ok {
+	if ok := h.updateMock(context.TODO(), original, db, nil); !ok {
 		t.Fatalf("updateMock returned false; expected true from stubbed DeleteFilteredMock")
 	}
 	if db.deletedFiltered == nil {

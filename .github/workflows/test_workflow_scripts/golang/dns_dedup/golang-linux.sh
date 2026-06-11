@@ -150,6 +150,29 @@ section "Verify DNS Dedup"
 check_dns_dedup
 endsec
 
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    section "Start Recording (json)"
+    echo "Starting json-format recording..."
+    sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-dedup" --generateGithubActions=false >record_json.txt 2>&1 &
+    KEPLOY_PID=$!
+    echo "Keploy record (json) started with PID: $KEPLOY_PID"
+    sleep 5
+    endsec
+
+    send_request
+
+    section "Stop Recording (json)"
+    echo "Stopping Keploy record (json) process (PID: $KEPLOY_PID)..."
+    sudo kill -INT "$KEPLOY_PID" 2>/dev/null || true
+    wait "$KEPLOY_PID" 2>/dev/null || true
+    check_for_errors "record_json.txt"
+    echo "Recording (json) stopped."
+    endsec
+fi
+
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
@@ -157,3 +180,18 @@ sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-dedup" --delay 10 --generate
 check_for_errors "test.txt"
 check_test_report
 endsec
+
+if json_pass_supported; then
+    # Second replay pass with --storage-format json — exercises the json
+    # write path AND the cross-format read path (yaml + json fixtures
+    # coexist in keploy/ now).
+    section "Start Replay (json)"
+    echo "Starting json-format Replay..."
+    sudo -E env PATH=$PATH "$REPLAY_BIN" test --storage-format json -c "./dns-dedup" --delay 10 --generateGithubActions=false 2>&1 | tee test_json.txt || true
+    check_for_errors "test_json.txt"
+    if ! json_scan_reports; then
+        cat test_json.txt
+        exit 1
+    fi
+    endsec
+fi

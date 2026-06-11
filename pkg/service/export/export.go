@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	yamlLib "gopkg.in/yaml.v3"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -180,49 +179,55 @@ func Export(_ context.Context, logger *zap.Logger) error {
 			}
 			keployRequests := make(map[interface{}]int, 0)
 			for _, testFile := range testFiles {
-				if filepath.Ext(testFile.Name()) == ".yaml" {
-					filePath := filepath.Join(testsDir, testFile.Name())
-
-					// Read the YAML file
-					data, err := os.ReadFile(filePath)
-					if err != nil {
-						utils.LogError(logger, err, "failed to read the YAML file", zap.String("path", filePath))
-						continue
-					}
-
-					if len(data) == 0 {
-						logger.Debug("skipping empty testcase", zap.String("testcase name", testFile.Name()))
-						continue
-					}
-
-					var testCase *yaml.NetworkTrafficDoc
-					err = yamlLib.Unmarshal(data, &testCase)
-					if err != nil {
-						utils.LogError(logger, err, "failed to unmarshall YAML data")
-						continue
-					}
-					if testCase == nil {
-						logger.Debug("skipping invalid testCase yaml", zap.String("testcase name", testFile.Name()))
-						continue
-					}
-
-					var httpSchema models.HTTPSchema
-
-					err = testCase.Spec.Decode(&httpSchema)
-					if err != nil {
-						utils.LogError(logger, err, "failed to decode the HTTP schema")
-						continue
-					}
-
-					requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
-					// Convert the requestJSON to a string (assuming it's a map or complex type)
-					requestJSONString, err := json.Marshal(requestJSON)
-					if err != nil {
-						utils.LogError(logger, err, "failed to marshal requestJSON to string")
-						continue
-					}
-					keployRequests[string(requestJSONString)]++
+				// Pick the unmarshaler based on the file extension so testcases
+				// recorded in either StorageFormat are exported correctly.
+				ext := filepath.Ext(testFile.Name())
+				var format yaml.Format
+				switch ext {
+				case ".yaml":
+					format = yaml.FormatYAML
+				case ".json":
+					format = yaml.FormatJSON
+				default:
+					continue
 				}
+
+				filePath := filepath.Join(testsDir, testFile.Name())
+				data, err := os.ReadFile(filePath)
+				if err != nil {
+					utils.LogError(logger, err, "failed to read test file", zap.String("path", filePath))
+					continue
+				}
+
+				if len(data) == 0 {
+					logger.Warn("skipping empty testcase", zap.String("testcase name", testFile.Name()))
+					continue
+				}
+
+				testCase, err := yaml.UnmarshalDoc(format, data)
+				if err != nil {
+					utils.LogError(logger, err, "failed to unmarshal test data", zap.String("file", testFile.Name()))
+					continue
+				}
+				if testCase == nil {
+					logger.Warn("skipping invalid testCase", zap.String("testcase name", testFile.Name()))
+					continue
+				}
+
+				var httpSchema models.HTTPSchema
+				err = testCase.Spec.Decode(&httpSchema)
+				if err != nil {
+					utils.LogError(logger, err, "failed to decode the HTTP schema")
+					continue
+				}
+
+				requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
+				requestJSONString, err := json.Marshal(requestJSON)
+				if err != nil {
+					utils.LogError(logger, err, "failed to marshal requestJSON to string")
+					continue
+				}
+				keployRequests[string(requestJSONString)]++
 			}
 			var uniqueRequests []interface{}
 			for request := range keployRequests {

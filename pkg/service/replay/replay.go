@@ -811,7 +811,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -1072,8 +1072,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, stopReason)
 		}
 		r.firstRun = false
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		// Prepare header + body noise configuration for mock matching
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1087,8 +1087,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -1259,8 +1261,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+		// Prepare header + body noise configuration for mock matching
+		mockNoiseConfig := PrepareMockNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
 			r.fallbackDeprecateOnce.Do(func() {
@@ -1274,8 +1276,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SQLDelay:               time.Duration(r.config.Test.Delay) * time.Second,
 			Mocking:                r.config.Test.Mocking,
 			Backdate:               testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:            headerNoiseConfig,
+			NoiseConfig:            mockNoiseConfig,
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
+			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
+			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -1776,14 +1780,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("mockNames", mockNames),
 				zap.Any("mocks", consumedMocks))
 
+			// strictMockReject: under SchemaNoiseStrict, an expected mock that
+			// went unconsumed means strict req-body matching REJECTED it — a
+			// non-noise request field drifted. The app's response can still
+			// match (e.g. a deterministic dependency), so the response check
+			// alone won't catch it; treat it as a real test failure.
+			strictMockReject := false
 			if mockSetMismatch {
-				if testPass {
+				switch {
+				case testPass && r.config.Test.SchemaNoiseStrict:
+					r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
+						zap.String("testcase", testCase.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", filteredExpectedNames),
+						zap.Strings("actualMocks", filteredMockNames))
+					testPass = false
+					strictMockReject = true
+					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
+				case testPass:
 					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", filteredExpectedNames),
 						zap.Strings("actualMocks", filteredMockNames))
-				} else {
+				default:
 					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
@@ -1805,7 +1825,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch {
+			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
@@ -2329,7 +2349,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {

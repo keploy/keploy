@@ -19,7 +19,6 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 const (
@@ -31,6 +30,7 @@ type PostmanImporter struct {
 	logger    *zap.Logger
 	ctx       context.Context
 	toCapture bool
+	Format    yaml.Format
 }
 
 func NewPostmanImporter(ctx context.Context, logger *zap.Logger) *PostmanImporter {
@@ -38,6 +38,16 @@ func NewPostmanImporter(ctx context.Context, logger *zap.Logger) *PostmanImporte
 		logger:    logger,
 		ctx:       ctx,
 		toCapture: true,
+		Format:    yaml.FormatYAML,
+	}
+}
+
+func NewPostmanImporterWithFormat(ctx context.Context, logger *zap.Logger, format yaml.Format) *PostmanImporter {
+	return &PostmanImporter{
+		logger:    logger,
+		ctx:       ctx,
+		toCapture: true,
+		Format:    format,
 	}
 }
 
@@ -374,12 +384,12 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 
 		testCase.Curl = pkg.MakeCurlCommand(requestSchema)
 
-		testResultBytes, err := yamlLib.Marshal(testCase)
+		testResultBytes, err := yaml.MarshalDocIndent(pi.Format, testCase)
 		if err != nil {
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFile(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false); err != nil {
+		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 

@@ -50,21 +50,36 @@ send_request() {
     sudo kill $pid
 }
 
-send_request &
-"$RECORD_BIN" record -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee record.txt
-if grep "ERROR" "record.txt"; then
-    echo "Error found in pipeline..."
-    cat record.txt
-    exit 1
+do_record() {
+    local extra_flags="${1:-}"
+    local label="${extra_flags:+_json}"
+    local log="record${label}.txt"
+    send_request &
+    # shellcheck disable=SC2086
+    "$RECORD_BIN" record $extra_flags -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee "$log"
+    if grep "ERROR" "$log"; then
+        echo "Error found in pipeline..."
+        cat "$log"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "$log"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "$log"
+        exit 1
+    fi
+    sleep 5
+    wait
+    echo "Recorded test case and mocks${label:+ (json)}"
+}
+
+do_record
+
+# shellcheck disable=SC1091
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
+
+if json_pass_supported; then
+    do_record "--storage-format json"
 fi
-if grep "WARNING: DATA RACE" "record.txt"; then
-    echo "Race condition detected in recording, stopping pipeline..."
-    cat record.txt
-    exit 1
-fi
-sleep 5
-wait
-echo "Recorded test case and mocks"
 
 # Start the app in test mode.
 "$REPLAY_BIN" test -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee test_logs.txt
@@ -99,11 +114,30 @@ for report_file in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
     fi
 done
 
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
+# Fail fast on yaml results before attempting json.
+if [ "$all_passed" != true ]; then
     cat "test_logs.txt"
     exit 1
 fi
+
+if json_pass_supported; then
+    "$REPLAY_BIN" test --storage-format json -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee test_logs_json.txt
+    if grep "ERROR" "test_logs_json.txt"; then
+        echo "Error found in pipeline (json replay)..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "test_logs_json.txt"; then
+        echo "Race condition detected in json test, stopping pipeline..."
+        cat "test_logs_json.txt"
+        exit 1
+    fi
+    if ! json_scan_reports; then
+        cat test_logs_json.txt
+        exit 1
+    fi
+    echo "All tests passed (yaml + json)"
+else
+    echo "All tests passed (yaml only — json pass skipped for compat-matrix cell)"
+fi
+exit 0
