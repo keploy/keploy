@@ -38,6 +38,13 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				return nil
 			}
 
+			// Self-terminate (gracefully) if the parent keploy client dies
+			// abnormally, so the agent never orphans and keeps eBPF hooks /
+			// DNS / proxy+ingress ports alive that would hang the next run.
+			// Read the flag directly so this never depends on config wiring.
+			clientPID, _ := cmd.Flags().GetUint32("client-pid")
+			watchParentProcess(ctx, logger, int(clientPID))
+
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
