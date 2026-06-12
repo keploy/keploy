@@ -293,7 +293,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
-		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
+		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -775,7 +775,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
+	// Redact the DB password before dumping the whole config at Debug — it would
+	// otherwise leak test.mongoPassword into any -debug capture.
+	redactedCfg := *c.cfg
+	if redactedCfg.Test.MongoPassword != "" {
+		redactedCfg.Test.MongoPassword = "****"
+	}
+	// InMemoryCompose can carry docker-compose YAML with embedded secrets/tokens;
+	// never dump its contents. redactedCfg is a shallow copy, so reassigning the
+	// slice header here leaves the live config untouched.
+	if len(redactedCfg.InMemoryCompose) > 0 {
+		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
+	}
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
 
 	switch cmd.Name() {
 
