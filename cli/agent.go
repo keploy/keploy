@@ -41,9 +41,20 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// Self-terminate (gracefully) if the parent keploy client dies
 			// abnormally, so the agent never orphans and keeps eBPF hooks /
 			// DNS / proxy+ingress ports alive that would hang the next run.
-			// Read the flag directly so this never depends on config wiring.
+			// Read the flags directly so this never depends on config wiring.
+			//
+			// Skip it in docker mode: there the agent runs in its OWN
+			// `docker run --rm` container (separate PID namespace), so
+			// --client-pid is the *host* keploy PID and is not visible here —
+			// kill(pid, 0) would return ESRCH and we'd self-terminate
+			// immediately, breaking record/replay. The container's --rm
+			// lifecycle bounds the agent in that mode instead.
 			clientPID, _ := cmd.Flags().GetUint32("client-pid")
-			watchParentProcess(ctx, logger, int(clientPID))
+			if isDocker, _ := cmd.Flags().GetBool("is-docker"); isDocker {
+				logger.Debug("keploy agent: parent-death watchdog disabled in docker mode (separate PID namespace; --rm bounds the container)")
+			} else {
+				watchParentProcess(ctx, logger, int(clientPID))
+			}
 
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
