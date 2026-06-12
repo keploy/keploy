@@ -751,7 +751,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 
-		if !testRunResult && len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+		// Print the mismatch table whenever there ARE mock mismatches — not
+		// only when the run as a whole failed. A green run with mock misses
+		// (e.g. tests demoted to OBSOLETE, or a protocol whose misses can't
+		// fail a test) is exactly the case the user must not stay blind to.
+		if len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
 			for _, failure := range r.mockMismatchFailures.GetFailures() {
 				failuresByTestSet[failure.TestSetID] = true
@@ -762,7 +766,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			if testRunResult {
+				r.logger.Warn("Tests passed, but some outgoing calls did not match the recorded mocks.",
+					zap.String("test_sets", testSets),
+					zap.String("next_steps", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+			} else {
+				r.logger.Info("Some testsets failed due to mock differences.",
+					zap.String("test_sets", testSets),
+					zap.String("next_steps", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
+			}
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -2563,6 +2575,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, firstTestCaseTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	} else if r.config.Test.SchemaNoiseDetection && r.instrument {
+		// --schema-noise-detection without --remove-unused-mocks: the learned
+		// req_body_noise used to ride only inside UpdateMocks (the pruning
+		// path), so detection alone learned noise and threw it away at exit.
+		// Persist it through the prune-free path instead. We persist noise
+		// from ALL consumed mocks (not just passing tests): the mock matched,
+		// so the request-side drift it learned is valid even when the test
+		// later failed on its response.
+		type mockNoisePersister interface {
+			PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error
+		}
+		if p, ok := r.mockDB.(mockNoisePersister); ok {
+			if err := p.PersistMockNoise(runTestSetCtx, testSetID, totalConsumedMocks); err != nil {
+				utils.LogError(r.logger, err, "failed to persist learned request-body noise onto mocks")
+			}
+		} else {
+			r.logger.Debug("mockDB implementation does not support prune-free noise persistence; learned req_body_noise not persisted")
 		}
 	}
 

@@ -65,13 +65,21 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if len(preview) > 64 {
 					preview = preview[:64]
 				}
-				logger.Debug("mock miss",
-					zap.String("protocol", "Generic"),
+				// Build the universal mismatch report so generic misses show
+				// up in the mismatch table / report yaml like HTTP and MySQL
+				// misses do, instead of vanishing as a bare error.
+				report := buildGenericMismatchReport(ctx, genericRequests, mockDb)
+				// Default-visible: this miss is the root cause of the test
+				// failure that follows (the app sees its connection close).
+				logger.Warn("no matching generic mock found for outgoing call",
+					zap.String("protocol", report.Protocol),
 					zap.Int("requestCount", len(genericRequests)),
 					zap.Int("firstRequestBytes", len(genericRequests[0])),
-					zap.String("hint", "Re-record mocks if the wire protocol data has changed"),
+					zap.String("closest", report.ClosestMock),
+					zap.String("diff", report.Diff),
+					zap.String("next_steps", report.NextSteps),
 					zap.Binary("preview", preview))
-				errCh <- fmt.Errorf("no matching generic mock found")
+				errCh <- models.NewMockMismatchError(fmt.Errorf("no matching generic mock found"), report)
 				return
 			}
 			for _, genericResponse := range genericResponses {

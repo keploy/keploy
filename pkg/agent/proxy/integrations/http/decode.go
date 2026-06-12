@@ -160,9 +160,28 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			// User body noise from test.globalNoise (root-relative dotted
+			// paths). Lowercased copy for the same reason as headerNoise:
+			// the matcher's noise index matches lowercased paths.
+			var bodyNoise map[string][]string
+			if opts.NoiseConfig != nil {
+				if bn, ok := opts.NoiseConfig["body"]; ok {
+					bodyNoise = make(map[string][]string, len(bn))
+					for k, v := range bn {
+						lk := strings.ToLower(k)
+						if existing, ok := bodyNoise[lk]; ok {
+							bodyNoise[lk] = append(existing, v...)
+						} else {
+							bodyNoise[lk] = v
+						}
+					}
+				}
+			}
 
-			ok, stub, err := h.match(ctx, input, mockDb, headerNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
+
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -171,16 +190,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
-
-				// Build mismatch report for the user (surfaced in the mismatch table)
-				report := h.buildHTTPMismatchReport(request, mockDb, nil)
+				// Build mismatch report for the user (surfaced in the mismatch
+				// table, the report yaml and `keploy report`).
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
-					h.Logger.Debug("mock miss",
+					// Default-visible: this is the root cause of the test
+					// failure that follows, so it must not hide at Debug.
+					h.Logger.Warn("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("actual", report.ActualSummary),
+						zap.String("match_phase", report.MatchPhase),
+						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff))
+						zap.String("diff", report.Diff),
+						zap.String("next_steps", report.NextSteps))
 				}
 
 				// No mock matched — send a 502 so the application gets a

@@ -2671,11 +2671,28 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
 				errs = append(errs, models.UnmatchedCall{
-					Protocol:      parserErr.MismatchReport.Protocol,
-					ActualSummary: parserErr.MismatchReport.ActualSummary,
-					ClosestMock:   parserErr.MismatchReport.ClosestMock,
-					Diff:          parserErr.MismatchReport.Diff,
-					NextSteps:     parserErr.MismatchReport.NextSteps,
+					Protocol:       parserErr.MismatchReport.Protocol,
+					ActualSummary:  parserErr.MismatchReport.ActualSummary,
+					ClosestMock:    parserErr.MismatchReport.ClosestMock,
+					Diff:           parserErr.MismatchReport.Diff,
+					NextSteps:      parserErr.MismatchReport.NextSteps,
+					MatchPhase:     parserErr.MismatchReport.MatchPhase,
+					CandidateCount: parserErr.MismatchReport.CandidateCount,
+					FieldDiffs:     parserErr.MismatchReport.FieldDiffs,
+				})
+			} else {
+				// A miss without a structured report must still reach the
+				// user's report — silently dropping it here is how whole
+				// protocols' misses used to vanish from
+				// FailureInfo.UnmatchedCalls.
+				summary := ""
+				if parserErr.Err != nil {
+					summary = parserErr.Err.Error()
+				}
+				errs = append(errs, models.UnmatchedCall{
+					Protocol:      "unknown",
+					ActualSummary: summary,
+					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
 				})
 			}
 		}
