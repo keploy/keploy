@@ -22,9 +22,10 @@ import (
 )
 
 // ErrMockNotMatched is returned by decodeHTTP when no recorded mock
-// matches the outgoing HTTP request. Callers can check for this with
-// errors.Is to distinguish a mock-miss from a real proxy error.
-var ErrMockNotMatched = errors.New("no matching mock found")
+// matches the outgoing HTTP request. It aliases models.ErrNoMockMatched so
+// callers can errors.Is against either symbol to distinguish a mock-miss
+// from a real proxy error.
+var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -163,17 +164,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// User body noise from test.globalNoise (root-relative dotted
 			// paths). Lowercased copy for the same reason as headerNoise:
 			// the matcher's noise index matches lowercased paths.
+			// Entries are normalized to presence-only (empty regex list):
+			// request-body mock matching and drift detection are path-based,
+			// so a value-regex cannot gate here the way it can't gate JSON
+			// body leaves in response assertions either. Normalizing (rather
+			// than dropping regex-valued entries) keeps the documented
+			// promise that a path copied from a mismatch report into
+			// test.globalNoise takes effect regardless of value style.
 			var bodyNoise map[string][]string
 			if opts.NoiseConfig != nil {
 				if bn, ok := opts.NoiseConfig["body"]; ok {
 					bodyNoise = make(map[string][]string, len(bn))
 					for k, v := range bn {
-						lk := strings.ToLower(k)
-						if existing, ok := bodyNoise[lk]; ok {
-							bodyNoise[lk] = append(existing, v...)
-						} else {
-							bodyNoise[lk] = v
+						if len(v) > 0 {
+							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+								zap.String("field", k))
 						}
+						bodyNoise[strings.ToLower(k)] = []string{}
 					}
 				}
 			}

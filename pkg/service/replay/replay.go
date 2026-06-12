@@ -755,9 +755,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// only when the run as a whole failed. A green run with mock misses
 		// (e.g. tests demoted to OBSOLETE, or a protocol whose misses can't
 		// fail a test) is exactly the case the user must not stay blind to.
-		if len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+		//
+		// Exception on green runs: DNS misses are answered with a synthetic
+		// response by design (the app keeps working), so on a fully passing
+		// run they are routine, not actionable — without this filter every
+		// healthy run with app-startup DNS chatter would print the table.
+		mismatchRows := r.mockMismatchFailures.GetFailures()
+		if testRunResult {
+			actionable := make([]TestFailure, 0, len(mismatchRows))
+			for _, f := range mismatchRows {
+				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.Protocol == "DNS" {
+					continue
+				}
+				actionable = append(actionable, f)
+			}
+			mismatchRows = actionable
+		}
+		if len(mismatchRows) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
-			for _, failure := range r.mockMismatchFailures.GetFailures() {
+			for _, failure := range mismatchRows {
 				failuresByTestSet[failure.TestSetID] = true
 			}
 

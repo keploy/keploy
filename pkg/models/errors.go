@@ -1,6 +1,9 @@
 package models
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type AppError struct {
 	AppErrorType AppErrorType
@@ -78,6 +81,12 @@ type MockMismatchReport struct {
 	CandidateCount int             // protocol mocks considered before giving up
 	FieldDiffs     []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
 }
+
+// ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
+// for which no recorded mock matched. Protocol parsers wrap it (errors.Is)
+// when they report a miss, so the proxy can distinguish real misses from
+// infrastructure/decode failures when building UnmatchedCalls for reports.
+var ErrNoMockMatched = errors.New("no matching mock found")
 
 type ParserError struct {
 	ParserErrorType ParserErrorType

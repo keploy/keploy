@@ -376,8 +376,18 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
 		outOpts.MysqlPorts = r.config.MysqlPorts
 	}
+	noiseCfg := map[string]map[string][]string{}
 	if headerNoise, ok := r.globalNoise["header"]; ok {
-		outOpts.NoiseConfig = map[string]map[string][]string{"header": headerNoise}
+		noiseCfg["header"] = headerNoise
+	}
+	if bodyNoise, ok := r.globalNoise["body"]; ok {
+		// The body bucket participates in HTTP request-body mock matching
+		// (drift-detection exclusion + strict-noise allowance) — same as the
+		// CLI replay path.
+		noiseCfg["body"] = bodyNoise
+	}
+	if len(noiseCfg) > 0 {
+		outOpts.NoiseConfig = noiseCfg
 	}
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
