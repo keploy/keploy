@@ -273,7 +273,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				return true, exact, nil, nil
 			}
 			if bodyKeyMatched && len(shortListed) > 0 {
-				pick := lowestSortOrder(shortListed)
+				pick := pickDeterministic(shortListed)
 				h.Logger.Info("deterministic tiebreak: serving recorded-order candidate among body-matched mocks",
 					zap.String("mock name", pick.Name),
 					zap.Int("candidates", len(shortListed)))
@@ -316,8 +316,30 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	}
 }
 
+// pickDeterministic returns the recorded-order candidate for the
+// deterministic tiebreak, preferring the per-test tier. SortOrder counters
+// are stamped independently per pool (SetFilteredMocks vs SetUnFilteredMocks),
+// so comparing SortOrder across tiers is meaningless — a session fixture
+// stamped 1 would beat the current test's own recorded mock stamped 7,
+// inverting the per-test-first preference the candidate ordering documents.
+func pickDeterministic(mocks []*models.Mock) *models.Mock {
+	var perTest []*models.Mock
+	for _, m := range mocks {
+		isConfig := m.Spec.Metadata != nil && m.Spec.Metadata["type"] == "config"
+		if m.TestModeInfo.Lifetime == models.LifetimePerTest && !isConfig {
+			perTest = append(perTest, m)
+		}
+	}
+	if len(perTest) > 0 {
+		return lowestSortOrder(perTest)
+	}
+	return lowestSortOrder(mocks)
+}
+
 // lowestSortOrder returns the candidate with the smallest recorded SortOrder —
 // i.e. the next mock in recorded order, the deterministic FIFO tiebreak.
+// Callers must only compare candidates from the same pool tier (see
+// pickDeterministic).
 func lowestSortOrder(mocks []*models.Mock) *models.Mock {
 	best := mocks[0]
 	for _, m := range mocks[1:] {
