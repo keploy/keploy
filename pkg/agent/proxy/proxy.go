@@ -1984,20 +1984,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 
-		// Dial target is the eBPF-captured original destination
-		// (dstAddr). The SNI value (dstURL) is the logical hostname on
-		// the server's certificate (e.g. "aerospike.local") — it is
-		// used as tls.Config.ServerName above so the upstream cert
-		// validates, but it is NOT the routable network address. For
-		// non-HTTPS workloads (Aerospike-TLS, custom DB TLS), SNI is
-		// typically unresolvable from the host, and substituting it
-		// here used to fail the upstream dial with "lookup ... server
-		// misbehaving". The CONNECT-tunnel path has its own dstConn
-		// already established, so this branch only runs for the
-		// eBPF-redirected case where dstAddr is always populated and
-		// authoritative.
 		addr := dstAddr
-		if dstAddr == "" && dstURL != "" {
+		if dstURL != "" {
 			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 		}
 
@@ -2087,18 +2075,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 								zap.String("negotiated", negotiated),
 								zap.Strings("wanted", cfg.NextProtos))
 							_ = specConn.Close()
-							// tls.Dial returns (*tls.Conn, error) — on
-							// error, the *tls.Conn is nil but assigning
-							// it to a net.Conn interface variable
-							// produces a typed-nil, which then trips the
-							// deferred dstConn.Close() with a nil-pointer
-							// panic. Stage through a concrete *tls.Conn
-							// so we can leave dstConn as untyped nil.
-							var tc *tls.Conn
-							tc, err = tls.Dial("tcp", addr, cfg)
-							if err == nil {
-								dstConn = tc
-							}
+							dstConn, err = tls.Dial("tcp", addr, cfg)
 						} else {
 							dstConn = specConn
 						}
@@ -2114,11 +2091,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					}
 					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
 					dialStart := time.Now()
-					var tc *tls.Conn
-					tc, err = tls.Dial("tcp", addr, cfg)
-					if err == nil {
-						dstConn = tc
-					}
+					dstConn, err = tls.Dial("tcp", addr, cfg)
 					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
