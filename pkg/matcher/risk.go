@@ -3,8 +3,10 @@ package matcher
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -174,8 +176,9 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 // normalize to a "[]" path suffix) and skips paths covered by `known` noise
 // (path -> regex list, root-relative). `pathPrefix` (e.g. "body.") is
 // prepended to every returned path so the result lines up with the noise
-// config vocabulary. Values are truncated to maxVal runes to keep reports
-// and yaml output bounded. Returns nil when either side isn't valid JSON.
+// config vocabulary. Values are truncated to at most maxVal bytes (cut at a
+// rune boundary) to keep reports and yaml output bounded. Returns nil when
+// either side isn't valid JSON.
 func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPrefix string, maxVal int) []models.MockFieldDiff {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil
@@ -199,11 +202,26 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
+	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
+	// each bucket so reports, yaml output and the capped diff subset are
+	// stable across runs.
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
+
 	trunc := func(s string) string {
-		if maxVal > 0 && len(s) > maxVal {
-			return s[:maxVal] + "…"
+		if maxVal <= 0 || len(s) <= maxVal {
+			return s
 		}
-		return s
+		// Back the cut off to a rune boundary so a multi-byte UTF-8
+		// character is never split — invalid UTF-8 here would garble the
+		// report yaml/json encoders downstream.
+		cut := maxVal
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "…"
 	}
 
 	var out []models.MockFieldDiff

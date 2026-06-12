@@ -79,7 +79,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					zap.String("diff", report.Diff),
 					zap.String("next_steps", report.NextSteps),
 					zap.Binary("preview", preview))
-				errCh <- models.NewMockMismatchError(fmt.Errorf("no matching generic mock found"), report)
+				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}
 			for _, genericResponse := range genericResponses {

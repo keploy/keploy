@@ -1240,11 +1240,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Test.SchemaNoiseStrict, err = cmd.Flags().GetBool("schema-noise-strict")
-			if err != nil {
-				errMsg := "failed to read the --schema-noise-strict flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Only let the flag override when it was explicitly passed or
+			// the config file doesn't set the key — otherwise the flag's
+			// default would silently clobber a yaml-only configuration
+			// (same guard pattern as disable-mapping above).
+			if cmd.Flags().Changed("schema-noise-strict") || !viper.IsSet("test.schemaNoiseStrict") {
+				c.cfg.Test.SchemaNoiseStrict, err = cmd.Flags().GetBool("schema-noise-strict")
+				if err != nil {
+					errMsg := "failed to read the --schema-noise-strict flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true
