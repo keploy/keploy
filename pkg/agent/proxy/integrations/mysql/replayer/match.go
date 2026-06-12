@@ -375,6 +375,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		matchedMock      *models.Mock
 		queryMatched     bool
 		stmtMatched      bool
+		fifoPicked       bool
 		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
 		bestPartialQuery string       // query of the closest partial match
 
@@ -665,6 +666,40 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}()))
 			}
 			matchedResp, matchedMock = chosenResp, chosenMock
+			fifoPicked = true
+		}
+	}
+
+	// Fuzzy-match policy gate for the score-based (partial-shape) pick.
+	// A candidate that survived ONLY via maxMatchedCount scoring — no exact
+	// query text, no definitive query+params match, no recorded-order FIFO —
+	// is a similarity guess and can serve the wrong result set (e.g. a
+	// same-length different SELECT winning at score 1). Under FuzzyMatchOff
+	// the guess is refused so the caller surfaces a structured mock miss;
+	// under FuzzyMatchWarn it is served but logged default-visibly.
+	//
+	// The gate applies ONLY to the command types where a partial-shape
+	// similarity pick exists (COM_QUERY, COM_STMT_PREPARE, COM_STMT_EXECUTE).
+	// Control commands (COM_PING, COM_STMT_CLOSE, COM_INIT_DB, COM_STATS,
+	// COM_DEBUG, COM_RESET_CONNECTION) also reach matchedMock through the
+	// score path, but their comparators are exact protocol-level matches on
+	// content-free (or query-exact) packets — refusing or warning on them
+	// would drop connections on routine driver housekeeping (pings,
+	// prepared-statement closes).
+	isFuzzyCapableCmd := req.Header.Type == sCOM_QUERY ||
+		req.Header.Type == sCOM_STMT_PREP ||
+		req.Header.Type == sCOM_STMT_EXEC
+	if matchedMock != nil && isFuzzyCapableCmd && !queryMatched && !stmtMatched && !fifoPicked {
+		switch decodeCtx.FuzzyMatchPolicy {
+		case models.FuzzyMatchOff:
+			logger.Warn("deterministic match policy (test.fuzzyMatch=off) rejected a score-based MySQL candidate — treating as a mock miss",
+				zap.String("mock_name", matchedMock.Name),
+				zap.Int("score", maxMatchedCount))
+			matchedResp, matchedMock = nil, nil
+		case models.FuzzyMatchWarn:
+			logger.Warn("MySQL mock served via score-based (partial-shape) match — verify this is the right result set or set test.fuzzyMatch=off for deterministic replay",
+				zap.String("mock_name", matchedMock.Name),
+				zap.Int("score", maxMatchedCount))
 		}
 	}
 

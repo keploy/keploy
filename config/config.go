@@ -219,6 +219,7 @@ type Test struct {
 	ProtoDir                    string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude                []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 	CompareAll                  bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
+	FuzzyMatch                  string              `json:"fuzzyMatch" yaml:"fuzzyMatch" mapstructure:"fuzzyMatch"` // on|warn|off — policy for similarity-based mock-match fallbacks (off = deterministic replay)
 	SchemaMatch                 bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	UpdateTestMapping           bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise      bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"`                                    // skip auto-noise for flaky headers (e.g. AWS SigV4)

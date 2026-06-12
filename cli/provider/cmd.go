@@ -415,6 +415,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("schema-noise-detection", c.cfg.Test.SchemaNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) on HTTP mocks during auto-replay matching")
+		cmd.Flags().String("fuzzy-match", c.cfg.Test.FuzzyMatch, "Policy for similarity-based mock-match fallbacks: 'on' (legacy, silent), 'warn' (fuzzy allowed, each fuzzy-served mock logs a Warn), 'off' (deterministic replay: recorded-order tiebreaks only, otherwise a structured mock miss)")
 		cmd.Flags().Bool("schema-noise-strict", c.cfg.Test.SchemaNoiseStrict, "Strictly enforce learned request-body noise during HTTP mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Same behaviour the in-cluster replay path enforces; previously configurable only via keploy.yml")
 		cmd.Flags().Bool("strict-failure", c.cfg.Test.StrictFailure, "Mark response-failing tests as FAILED even if the consumed mock set also diverged from the recorded mapping (default behaviour demotes such cases to OBSOLETE). The per-test mappingDiff block is still written for diagnostics.")
 		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
@@ -495,6 +496,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"schemaMatch":               "schema-match",
 		"schemaNoiseDetection":      "schema-noise-detection",
 		"schemaNoiseStrict":         "schema-noise-strict",
+		"fuzzyMatch":                "fuzzy-match",
 		"updateTestMapping":         "update-test-mapping",
 		"capturePackets":            "capture-packets",
 		"opportunisticTlsIntercept": "opportunistic-tls-intercept",
@@ -1251,6 +1253,25 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+			}
+
+			// Same Changed/IsSet guard as schema-noise-strict: the flag
+			// default must not clobber a yaml-only test.fuzzyMatch value.
+			if cmd.Flags().Changed("fuzzy-match") || !viper.IsSet("test.fuzzyMatch") {
+				c.cfg.Test.FuzzyMatch, err = cmd.Flags().GetString("fuzzy-match")
+				if err != nil {
+					errMsg := "failed to read the --fuzzy-match flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+			// Validate regardless of source (flag or yaml).
+			switch c.cfg.Test.FuzzyMatch {
+			case models.FuzzyMatchOn, models.FuzzyMatchWarn, models.FuzzyMatchOff, "":
+			default:
+				errMsg := "invalid --fuzzy-match value " + strconv.Quote(c.cfg.Test.FuzzyMatch) + "; expected one of: on, warn, off"
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true

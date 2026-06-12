@@ -73,6 +73,7 @@ test:
   protoDir: ""
   protoInclude: []
   compareAll: false
+  fuzzyMatch: warn
   updateTestMapping: false
   disableAutoHeaderNoise: false
   # strictMockWindow enforces cross-test bleed prevention. Per-test
