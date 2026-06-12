@@ -3286,7 +3286,7 @@ func (r *Replayer) reportMissingMappedMocks(testSetID string, expectedTestMockMa
 		zap.String("testSetID", testSetID),
 		zap.Int("affectedTests", len(missingByTest)),
 		zap.Strings("missingMocks", missing),
-		zap.String("next_steps", "Re-record the test-set with 'keploy record' to regenerate the mocks, or run with --update-test-mapping to refresh mappings against the current mock file."))
+		zap.String("next_step", "Re-record the test-set with 'keploy record' to regenerate the mocks, or run with --update-test-mapping to refresh mappings against the current mock file."))
 
 	for testID, names := range missingByTest {
 		sort.Strings(names)
