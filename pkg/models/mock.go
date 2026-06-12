@@ -39,6 +39,15 @@ const (
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
+
+	// Aerospike covers all Aerospike traffic — info text frames,
+	// AS_MSG binary frames, and their compressed wrapper. It is an
+	// ENTERPRISE-ONLY parser (enterprise-native tier, like Redis/Kafka):
+	// OSS core carries only this Kind string. The enterprise parser
+	// stores its captured frames in the generic GenericRequests /
+	// GenericResponses payload slices and owns the typed frame model +
+	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
+	Aerospike Kind = "Aerospike"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -167,6 +176,10 @@ type MockSpec struct {
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
+
+	// Aerospike (enterprise-only) stores its captured frames in the
+	// generic GenericRequests / GenericResponses payload slices above,
+	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
