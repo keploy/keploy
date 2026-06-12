@@ -785,11 +785,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if testRunResult {
 				r.logger.Warn("Tests passed, but some outgoing calls did not match the recorded mocks.",
 					zap.String("test_sets", testSets),
-					zap.String("next_steps", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+					zap.String("next_step", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
 			} else {
 				r.logger.Info("Some testsets failed due to mock differences.",
 					zap.String("test_sets", testSets),
-					zap.String("next_steps", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
+					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
 			}
 
 			r.mockMismatchFailures.PrintFailuresTable()
