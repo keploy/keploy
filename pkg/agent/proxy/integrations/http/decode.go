@@ -210,7 +210,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
 						zap.String("diff", report.Diff),
-						zap.String("next_steps", report.NextSteps))
+						zap.String("next_step", report.NextSteps))
 				}
 
 				// No mock matched — send a 502 so the application gets a

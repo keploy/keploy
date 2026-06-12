@@ -1083,10 +1083,11 @@ func (h *HTTP) detectReqBodyNoise(enabled bool, mock *models.Mock, reqBody []byt
 }
 
 // mergeNoiseMaps combines two noise maps into a fresh map; entries in a win
-// on key collision. Either input may be nil.
+// on key collision. Either input may be nil. The result never aliases an
+// input map, so callers may hold or extend it without mutating shared state.
 func mergeNoiseMaps(a, b map[string][]string) map[string][]string {
-	if len(b) == 0 {
-		return a
+	if len(a) == 0 && len(b) == 0 {
+		return nil
 	}
 	out := make(map[string][]string, len(a)+len(b))
 	for k, v := range b {

@@ -135,9 +135,28 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 			continue
 		}
 		var simSum float64
+		comparable := true
 		for i, reqBuff := range reqBuffs {
-			encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[i].Message[0].Data)
-			simSum += fuzzyCheck(encoded, reqBuff)
+			msg := mock.Spec.GenericRequests[i].Message[0]
+			// The recorder stores ASCII payloads verbatim (Type String) and
+			// binary payloads base64-encoded — decode per the recorded type,
+			// otherwise the similarity is computed against nil bytes and the
+			// closest-candidate ranking degrades to noise.
+			var recorded []byte
+			if msg.Type == models.String {
+				recorded = []byte(msg.Data)
+			} else {
+				decoded, err := util.DecodeBase64(msg.Data)
+				if err != nil {
+					comparable = false
+					break
+				}
+				recorded = decoded
+			}
+			simSum += fuzzyCheck(recorded, reqBuff)
+		}
+		if !comparable {
+			continue
 		}
 		if avg := simSum / float64(len(reqBuffs)); avg > bestSim {
 			bestSim = avg
