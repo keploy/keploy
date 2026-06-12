@@ -109,3 +109,21 @@ func TestLowestSortOrder(t *testing.T) {
 		t.Errorf("expected b, got %s", got.Name)
 	}
 }
+
+// The deterministic tiebreak must prefer the per-test tier: SortOrder
+// counters are stamped per pool, so a session fixture with a low stamp must
+// not beat the current test's own recorded mock.
+func TestPickDeterministic_PrefersPerTestTier(t *testing.T) {
+	session := jsonBodyMock("session-fixture", `{"order_id":"s"}`, 1)
+	session.TestModeInfo.Lifetime = models.LifetimeSession
+	perTest := jsonBodyMock("per-test-row", `{"order_id":"p"}`, 7)
+	perTest.TestModeInfo.Lifetime = models.LifetimePerTest
+
+	if got := pickDeterministic([]*models.Mock{session, perTest}); got.Name != "per-test-row" {
+		t.Errorf("expected per-test tier preferred, got %s", got.Name)
+	}
+	// With no per-test candidate, fall back to recorded order across the rest.
+	if got := pickDeterministic([]*models.Mock{session}); got.Name != "session-fixture" {
+		t.Errorf("expected session fallback, got %s", got.Name)
+	}
+}
