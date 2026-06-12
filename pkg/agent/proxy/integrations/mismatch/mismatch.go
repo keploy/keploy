@@ -97,6 +97,18 @@ func (b *Builder) WithNextSteps(steps string) *Builder {
 	return b
 }
 
+// WithRenderedRequests attaches the FULL rendered requests for the CLI
+// side-by-side whole-mock diff: mockReq is the closest recorded mock's
+// request, receivedReq is the live request the app sent. Both must already be
+// human-rendered (one field per line, JSON pretty-printed, sensitive values
+// redacted) by the parser. FieldDiffs remain the machine-readable companion;
+// these drive the highlighted whole-request view.
+func (b *Builder) WithRenderedRequests(mockReq, receivedReq string) *Builder {
+	b.report.ClosestMockReq = mockReq
+	b.report.ReceivedReq = receivedReq
+	return b
+}
+
 // Build renders the Diff string from FieldDiffs (when not explicitly set)
 // and returns the finished report.
 func (b *Builder) Build() *models.MockMismatchReport {

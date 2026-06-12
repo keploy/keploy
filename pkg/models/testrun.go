@@ -140,6 +140,10 @@ type UnmatchedCall struct {
 	MatchPhase     string          `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
 	CandidateCount int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
 	FieldDiffs     []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
+	// ClosestMockReq / ReceivedReq carry the FULL rendered requests for the CLI
+	// side-by-side whole-mock diff (left = mock, right = live request).
+	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
+	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

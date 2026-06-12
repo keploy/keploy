@@ -131,6 +131,14 @@ type Proxy struct {
 	// errChannel from filling up with background noise (OTel, health checks).
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
 	errDrainOnce     sync.Once
+	// pendingMockErrors retains mock-not-found errors that arrive while no
+	// test capture window is active (activeTestErrors is nil). Nothing
+	// currently calls BeginTestErrorCapture, so without this the continuous
+	// drain would discard every mock miss before GetMockErrors (called by the
+	// replayer after the test simulation) can read it. Only mock-not-found
+	// errors are retained here — background noise (OTel, health checks) still
+	// gets discarded, and the buffer is bounded so it can't grow unboundedly.
+	pendingMockErrors testErrorAccumulator
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -2585,6 +2593,34 @@ func (a *testErrorAccumulator) drain() []error {
 	return e
 }
 
+// maxPendingMockErrors bounds the retained mock-not-found errors so a replay
+// session that never drains them can't grow memory unboundedly. The replayer
+// drains per failed test, so the buffer stays small in practice.
+const maxPendingMockErrors = 512
+
+// addBounded appends err unless the accumulator already holds max entries.
+// Returns false when the entry was dropped.
+func (a *testErrorAccumulator) addBounded(err error, max int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.errs) >= max {
+		return false
+	}
+	a.errs = append(a.errs, err)
+	return true
+}
+
+// isMockNotFoundErr reports whether err is a parser mock-not-found error —
+// the only error class GetMockErrors surfaces to the replayer, and thus the
+// only class worth retaining in pendingMockErrors.
+func isMockNotFoundErr(err error) bool {
+	parserErr, ok := err.(models.ParserError)
+	if ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+		return true
+	}
+	return errors.Is(err, models.ErrNoMockMatched)
+}
+
 // StartErrorDrain launches a background goroutine that continuously reads from
 // errChannel so it never fills up. Errors are routed to the activeTestErrors
 // accumulator when a test is running, and discarded otherwise.
@@ -2605,6 +2641,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					}
 					if acc := p.activeTestErrors.Load(); acc != nil {
 						acc.add(err)
+					} else if isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors) {
+						// Retained for the replayer's per-test GetMockErrors
+						// fetch — these carry the mismatch report shown to the
+						// user. Non-mock-miss noise still falls to discard below.
 					} else {
 						// Log only the first discard and then every 100th to reduce noise.
 						n := discarded.Add(1)
@@ -2645,11 +2685,14 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
-	var rawErrs []error
+	// Errors the drain goroutine retained outside an active capture window
+	// (the usual case today — nothing opens a window) come first, oldest
+	// first.
+	rawErrs := p.pendingMockErrors.drain()
 
 	// Prefer test accumulator if active (StartErrorDrain is running)
 	if acc := p.activeTestErrors.Load(); acc != nil {
-		rawErrs = acc.drain()
+		rawErrs = append(rawErrs, acc.drain()...)
 	} else {
 		// Fallback: drain from channel directly (legacy path)
 	drainLoop:
@@ -2679,6 +2722,8 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 					MatchPhase:     parserErr.MismatchReport.MatchPhase,
 					CandidateCount: parserErr.MismatchReport.CandidateCount,
 					FieldDiffs:     parserErr.MismatchReport.FieldDiffs,
+					ClosestMockReq: parserErr.MismatchReport.ClosestMockReq,
+					ReceivedReq:    parserErr.MismatchReport.ReceivedReq,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

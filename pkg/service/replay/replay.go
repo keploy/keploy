@@ -2007,19 +2007,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
 							if f.MismatchReport != nil {
 								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
-									Protocol:      f.MismatchReport.Protocol,
-									ActualSummary: f.MismatchReport.ActualSummary,
-									ClosestMock:   f.MismatchReport.ClosestMock,
-									Diff:          f.MismatchReport.Diff,
-									NextSteps:     f.MismatchReport.NextSteps,
+									Protocol:       f.MismatchReport.Protocol,
+									ActualSummary:  f.MismatchReport.ActualSummary,
+									ClosestMock:    f.MismatchReport.ClosestMock,
+									Diff:           f.MismatchReport.Diff,
+									NextSteps:      f.MismatchReport.NextSteps,
+									MatchPhase:     f.MismatchReport.MatchPhase,
+									CandidateCount: f.MismatchReport.CandidateCount,
+									FieldDiffs:     f.MismatchReport.FieldDiffs,
+									ClosestMockReq: f.MismatchReport.ClosestMockReq,
+									ReceivedReq:    f.MismatchReport.ReceivedReq,
 								})
 							}
 						}
-						if !r.instrument {
-							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
-								for _, me := range mockErrors {
-									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
-								}
+						// Fetch in EVERY mode, not just non-instrument. The
+						// live HTTP agent transport returns a nil
+						// GetErrorChannel, so the channel-fed store above stays
+						// empty in instrument mode (local `keploy test -c`) —
+						// GetMockErrors is the one source that works on all
+						// transports. Fetched calls are also pushed into
+						// mockMismatchFailures so the end-of-run MOCKS MISMATCH
+						// SUMMARY table shows them; the store was already read
+						// for THIS test above (filtered by test ID), so this
+						// cannot double-count.
+						if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
+							for _, me := range mockErrors {
+								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
+								r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCase.Name, me)
 							}
 						}
 					}

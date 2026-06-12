@@ -320,13 +320,22 @@ func PrepareMockNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
-	// Extract header + body noise for mock matching.
+	// Extract the noise buckets the proxy consumes for mock matching:
+	//   - "header": HTTP outgoing header-key matching.
+	//   - "body":   outgoing-payload matchers (e.g. the Pulsar SEND matcher in
+	//               the integrations repo) strip these field names.
+	//   - "requestbody": DEDICATED HTTP request-body matching noise — kept
+	//               separate from "body" so response-assertion noise can't
+	//               silently soften request matching (see http/decode.go).
 	mockNoiseConfig := map[string]map[string][]string{}
 	if headerNoise, ok := noiseConfig["header"]; ok {
 		mockNoiseConfig["header"] = headerNoise
 	}
 	if bodyNoise, ok := noiseConfig["body"]; ok {
 		mockNoiseConfig["body"] = bodyNoise
+	}
+	if reqBodyNoise, ok := noiseConfig["requestbody"]; ok {
+		mockNoiseConfig["requestbody"] = reqBodyNoise
 	}
 
 	return mockNoiseConfig
@@ -694,6 +703,36 @@ func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID s
 	tfs.failures = append(tfs.failures, failure)
 }
 
+// AddUnmatchedCallForTest records a mock-not-found error fetched via the
+// agent's GetMockErrors API (the path used on all transports, notably the
+// HTTP agent transport whose error channel is nil) so it appears in the
+// end-of-run MOCKS MISMATCH SUMMARY table alongside channel-sourced failures.
+func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseID string, call models.UnmatchedCall) {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        testCaseID,
+		ExpectedMocks: []string{},
+		ActualMocks:   []string{},
+		FailureReason: models.ErrMockNotFound,
+		MismatchReport: &models.MockMismatchReport{
+			Protocol:       call.Protocol,
+			ActualSummary:  call.ActualSummary,
+			ClosestMock:    call.ClosestMock,
+			Diff:           call.Diff,
+			NextSteps:      call.NextSteps,
+			MatchPhase:     call.MatchPhase,
+			CandidateCount: call.CandidateCount,
+			FieldDiffs:     call.FieldDiffs,
+			ClosestMockReq: call.ClosestMockReq,
+			ReceivedReq:    call.ReceivedReq,
+		},
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
 func (tfs *TestFailureStore) GetFailures() []TestFailure {
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
@@ -780,7 +819,10 @@ func CompareMockSlices(expected, actual []string) []MockDifference {
 	return differences
 }
 
-// PrintFailuresTable prints all failures in a formatted table
+// PrintFailuresTable prints all failures, one block per failed test case: the
+// unmatched outgoing call, a side-by-side EXPECTED MOCK | RECEIVED REQUEST
+// view of the whole request with differing lines highlighted and long
+// unchanged runs folded, and the hint.
 func (tfs *TestFailureStore) PrintFailuresTable() {
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
@@ -792,30 +834,10 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
-	colWidths := tw.NewMapper[int, int]().Set(0, 15).Set(1, 12).Set(2, 50)
-	table := tablewriter.NewTable(os.Stdout,
-		tablewriter.WithRendition(tw.Rendition{
-			Settings: tw.Settings{
-				Separators: tw.Separators{
-					BetweenRows: tw.On,
-				},
-			},
-		}),
-		tablewriter.WithRowAutoWrap(1),
-		tablewriter.WithHeaderAlignment(tw.AlignCenter),
-		tablewriter.WithRowAlignment(tw.AlignCenter),
-		tablewriter.WithMaxWidth(120),
-		tablewriter.WithColumnWidths(colWidths),
-	)
-	table.Header([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
-
-	// Group failures by test set for better presentation
 	testSetGroups := make(map[string][]TestFailure)
 	for _, failure := range tfs.failures {
 		testSetGroups[failure.TestSetID] = append(testSetGroups[failure.TestSetID], failure)
 	}
-
-	// Sort test set IDs for consistent output
 	var testSetIDs []string
 	for testSetID := range testSetGroups {
 		testSetIDs = append(testSetIDs, testSetID)
@@ -823,16 +845,10 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 	sort.Strings(testSetIDs)
 
 	for _, testSetID := range testSetIDs {
-		failures := testSetGroups[testSetID]
-		testSetPrinted := false
-
-		// Group failures by test ID to combine mock differences and proxy errors
 		testIDGroups := make(map[string][]TestFailure)
-		for _, failure := range failures {
+		for _, failure := range testSetGroups[testSetID] {
 			testIDGroups[failure.TestID] = append(testIDGroups[failure.TestID], failure)
 		}
-
-		// Sort test IDs for consistent output
 		var testIDs []string
 		for testID := range testIDGroups {
 			testIDs = append(testIDs, testID)
@@ -840,33 +856,13 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 		sort.Strings(testIDs)
 
 		for _, testID := range testIDs {
-			testFailures := testIDGroups[testID]
-			var combinedDiffText string
-			var allDiffStrings []string
+			fmt.Printf("\nTest: %s / %s\n", testSetID, testID)
 
-			for _, failure := range testFailures {
+			var mappingNotes []string
+			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
-					if failure.MismatchReport != nil {
-						r := failure.MismatchReport
-						detail := fmt.Sprintf("[%s] %s", r.Protocol, r.ActualSummary)
-						if r.MatchPhase != "" {
-							detail += fmt.Sprintf(" | phase: %s", r.MatchPhase)
-						}
-						if r.ClosestMock != "" {
-							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
-						}
-						if r.Diff != "" {
-							detail += fmt.Sprintf(" | %s", strings.ReplaceAll(r.Diff, "\n", " "))
-						}
-						if r.NextSteps != "" {
-							detail += fmt.Sprintf(" | hint: %s", strings.ReplaceAll(r.NextSteps, "\n", " "))
-						}
-						allDiffStrings = append(allDiffStrings, detail)
-					} else {
-						allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
-					}
+					printMismatchReport(failure.MismatchReport)
 				}
-
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {
 					differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
 					var missingMocks, extraMocks []string
@@ -879,27 +875,260 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 						}
 					}
 					if len(missingMocks) > 0 {
-						allDiffStrings = append(allDiffStrings, fmt.Sprintf("Missing mocks: %s", strings.Join(missingMocks, ", ")))
+						mappingNotes = append(mappingNotes, fmt.Sprintf("Expected mocks not consumed: %s", strings.Join(missingMocks, ", ")))
 					}
 					if len(extraMocks) > 0 {
-						allDiffStrings = append(allDiffStrings, fmt.Sprintf("Extra mocks: %s", strings.Join(extraMocks, ", ")))
+						mappingNotes = append(mappingNotes, fmt.Sprintf("Unexpected mocks consumed: %s", strings.Join(extraMocks, ", ")))
 					}
 				}
-				if len(allDiffStrings) > 0 {
-					combinedDiffText = strings.Join(allDiffStrings, " | ")
-				} else {
-					combinedDiffText = "No differences"
-				}
 			}
-
-			if !testSetPrinted {
-				table.Append([]string{testSetID, testID, combinedDiffText})
-				testSetPrinted = true
-			} else {
-				table.Append([]string{"", testID, combinedDiffText})
+			for _, note := range mappingNotes {
+				fmt.Printf("  %s\n", note)
 			}
 		}
 	}
+	fmt.Println()
+}
 
+// printMismatchReport renders one unmatched outgoing call: a heading, then the
+// best available view — a side-by-side whole-request diff when the parser
+// rendered both requests, else the structured FIELD | EXPECTED | RECEIVED
+// table, else the one-line Diff — followed by the hint.
+func printMismatchReport(r *models.MockMismatchReport) {
+	if r == nil {
+		fmt.Println("  Outgoing call mock was not matched")
+		return
+	}
+	heading := fmt.Sprintf("  Unmatched outgoing call: [%s] %s", r.Protocol, r.ActualSummary)
+	if r.ClosestMock != "" {
+		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
+	}
+	if r.MatchPhase != "" {
+		heading += fmt.Sprintf("   [match stopped at: %s", r.MatchPhase)
+		if r.CandidateCount > 0 {
+			heading += fmt.Sprintf(", %d candidate mock(s)", r.CandidateCount)
+		}
+		heading += "]"
+	}
+	fmt.Println(heading)
+
+	switch {
+	case r.ClosestMockReq != "" && r.ReceivedReq != "":
+		printSideBySideDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
+	case len(r.FieldDiffs) > 0:
+		printFieldDiffTable(r.FieldDiffs)
+	case r.Diff != "":
+		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
+	}
+
+	if r.NextSteps != "" {
+		fmt.Printf("  Hint: %s\n", strings.ReplaceAll(r.NextSteps, "\n", " "))
+	}
+}
+
+// printSideBySideDiff renders the whole mock request (left) against the whole
+// received request (right). Differing lines are highlighted — red on the mock
+// side, green on the received side — and runs of unchanged lines longer than
+// foldThreshold collapse into a "… N unchanged lines …" row.
+func printSideBySideDiff(mockName, expected, received string) {
+	leftHeader := "EXPECTED MOCK"
+	if mockName != "" {
+		leftHeader = "EXPECTED MOCK: " + mockName
+	}
+	colWidths := tw.NewMapper[int, int]().Set(0, 55).Set(1, 55)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.Off}},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignLeft),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+		// Keep the mock name verbatim — autoformat would render "mock-0" as "MOCK - 0".
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+	)
+	table.Header([]string{leftHeader, "RECEIVED REQUEST"})
+	for _, row := range foldUnchangedRows(alignDiffRows(expected, received)) {
+		left, right := preserveIndent(row.left), preserveIndent(row.right)
+		if !row.fold && row.changed {
+			if left != "" {
+				left = models.HighlightFailingString(left)
+			}
+			if right != "" {
+				right = models.HighlightPassingString(right)
+			}
+		}
+		table.Append([]string{left, right})
+	}
 	table.Render()
+}
+
+// printFieldDiffTable renders the compact FIELD | EXPECTED | RECEIVED table —
+// the fallback when whole-request renders aren't available. Reads the
+// noise-vocabulary MockFieldDiff (Path/Kind/Expected/Actual).
+func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
+	colWidths := tw.NewMapper[int, int]().Set(0, 24).Set(1, 40).Set(2, 40)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignLeft),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{"FIELD", "EXPECTED (MOCK)", "RECEIVED (REQUEST)"})
+	for _, d := range fieldDiffs {
+		exp, rec := d.Expected, d.Actual
+		switch d.Kind {
+		case models.DiffKindMissingInLive:
+			rec = "(missing)"
+		case models.DiffKindMissingInMock:
+			exp = "(not recorded)"
+		case models.DiffKindTypeChanged:
+			exp, rec = "type "+d.Expected, "type "+d.Actual
+		}
+		table.Append([]string{d.Path, exp, rec})
+	}
+	table.Render()
+}
+
+// mockDiffRow is one aligned row of the side-by-side diff.
+type mockDiffRow struct {
+	left    string
+	right   string
+	changed bool
+	fold    bool // "… N unchanged lines …" marker
+}
+
+// maxDiffRenderLines caps lines per side fed to the LCS alignment so a
+// pathological payload can't make rendering quadratic-expensive.
+const maxDiffRenderLines = 400
+
+// alignDiffRows line-aligns the two renders via LCS: equal lines pair up
+// unchanged; runs of differing lines zip together as changed rows (one side
+// blank when the other has extra lines).
+func alignDiffRows(expected, received string) []mockDiffRow {
+	expLines := capLines(strings.Split(expected, "\n"))
+	recLines := capLines(strings.Split(received, "\n"))
+	n, m := len(expLines), len(recLines)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if expLines[i] == recLines[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	var rows []mockDiffRow
+	var dels, inss []string
+	flush := func() {
+		for k := 0; k < len(dels) || k < len(inss); k++ {
+			var l, r string
+			if k < len(dels) {
+				l = dels[k]
+			}
+			if k < len(inss) {
+				r = inss[k]
+			}
+			rows = append(rows, mockDiffRow{left: l, right: r, changed: true})
+		}
+		dels, inss = nil, nil
+	}
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case expLines[i] == recLines[j]:
+			flush()
+			rows = append(rows, mockDiffRow{left: expLines[i], right: recLines[j]})
+			i++
+			j++
+		case dp[i+1][j] >= dp[i][j+1]:
+			dels = append(dels, expLines[i])
+			i++
+		default:
+			inss = append(inss, recLines[j])
+			j++
+		}
+	}
+	for ; i < n; i++ {
+		dels = append(dels, expLines[i])
+	}
+	for ; j < m; j++ {
+		inss = append(inss, recLines[j])
+	}
+	flush()
+	return rows
+}
+
+func capLines(lines []string) []string {
+	if len(lines) <= maxDiffRenderLines {
+		return lines
+	}
+	return append(lines[:maxDiffRenderLines:maxDiffRenderLines], "… (truncated)")
+}
+
+// foldUnchangedRows collapses runs of unchanged rows longer than foldThreshold
+// into a "… N unchanged lines …" marker, keeping foldContext rows on each side
+// of every change — git-diff style context folding.
+func foldUnchangedRows(rows []mockDiffRow) []mockDiffRow {
+	const (
+		foldThreshold = 7
+		foldContext   = 2
+	)
+	var out []mockDiffRow
+	i := 0
+	for i < len(rows) {
+		if rows[i].changed {
+			out = append(out, rows[i])
+			i++
+			continue
+		}
+		runStart := i
+		for i < len(rows) && !rows[i].changed {
+			i++
+		}
+		runLen := i - runStart
+		lead, trail := foldContext, foldContext
+		if runStart == 0 {
+			lead = 0
+		}
+		if i == len(rows) {
+			trail = 0
+		}
+		if runLen <= foldThreshold || runLen <= lead+trail {
+			out = append(out, rows[runStart:i]...)
+			continue
+		}
+		out = append(out, rows[runStart:runStart+lead]...)
+		folded := runLen - lead - trail
+		marker := fmt.Sprintf("… %d unchanged lines …", folded)
+		out = append(out, mockDiffRow{left: marker, right: marker, fold: true})
+		out = append(out, rows[i-trail:i]...)
+	}
+	return out
+}
+
+// preserveIndent swaps leading spaces for braille-blank (U+2800) so
+// tablewriter's cell trimming doesn't flatten JSON indentation. NBSP doesn't
+// work: unicode.IsSpace counts it as whitespace, so TrimSpace-based cell
+// cleanup strips it; U+2800 renders blank but is not whitespace.
+func preserveIndent(s string) string {
+	i := 0
+	for i < len(s) && s[i] == ' ' {
+		i++
+	}
+	if i == 0 {
+		return s
+	}
+	return strings.Repeat("⠀", i) + s[i:]
 }

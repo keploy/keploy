@@ -1337,7 +1337,13 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithPhase(phase, candidateCount).
-		WithClosest(closestMock.Name, fieldDiffs)
+		WithClosest(closestMock.Name, fieldDiffs).
+		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
+		// passed so obfuscated values stay redacted on both sides.
+		WithRenderedRequests(
+			renderMockRequest(mockReq, closestMock.Noise),
+			renderLiveRequest(request, liveBody, closestMock.Noise),
+		)
 	if len(fieldDiffs) == 0 {
 		// Nothing structurally differs vs the closest candidate, yet the
 		// matcher rejected everything — point the user at the phase instead

@@ -80,6 +80,15 @@ type MockMismatchReport struct {
 	MatchPhase     string          // how far the match cascade got (MatchPhase* constants)
 	CandidateCount int             // protocol mocks considered before giving up
 	FieldDiffs     []MockFieldDiff // field-level diffs vs the closest mock, noise-vocabulary paths
+	// ClosestMockReq / ReceivedReq are the FULL rendered requests for the CLI
+	// side-by-side diff (left = recorded mock, right = live request). They are
+	// the human-facing complement to FieldDiffs (machine-readable): the
+	// renderer shows the whole mock with differing lines highlighted and falls
+	// back to the FieldDiffs table when these are empty (older agents /
+	// protocols that don't render whole requests). Sensitive/obfuscated values
+	// are redacted by the producing parser before they land here.
+	ClosestMockReq string // rendered request of the closest mock
+	ReceivedReq    string // rendered request the app actually sent
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

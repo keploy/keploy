@@ -161,19 +161,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			// User body noise from test.globalNoise (root-relative dotted
-			// paths). Lowercased copy for the same reason as headerNoise:
-			// the matcher's noise index matches lowercased paths.
-			// Entries are normalized to presence-only (empty regex list):
-			// request-body mock matching and drift detection are path-based,
-			// so a value-regex cannot gate here the way it can't gate JSON
-			// body leaves in response assertions either. Normalizing (rather
-			// than dropping regex-valued entries) keeps the documented
-			// promise that a path copied from a mismatch report into
-			// test.globalNoise takes effect regardless of value style.
+			// User request-body noise from test.globalNoise.requestBody
+			// (root-relative dotted paths). This is a DEDICATED bucket,
+			// distinct from the "body" bucket that governs RESPONSE
+			// assertions: request-matching noise and response-assertion noise
+			// are separate axes. Reusing the response "body" bucket here would
+			// let a field noised only because it is dynamic in the response
+			// silently soften request matching too (e.g. excusing a wrong
+			// user-id under --schema-noise-strict). Keeping them separate makes
+			// strict matching a real guarantee — a path can only weaken request
+			// matching if the user puts it under requestBody on purpose.
+			//
+			// Lowercased copy for the same reason as headerNoise: the matcher's
+			// noise index matches lowercased paths. Entries are normalized to
+			// presence-only (empty regex list): request-body mock matching and
+			// drift detection are path-based, so a value-regex cannot gate here.
 			var bodyNoise map[string][]string
 			if opts.NoiseConfig != nil {
-				if bn, ok := opts.NoiseConfig["body"]; ok {
+				if bn, ok := opts.NoiseConfig["requestbody"]; ok {
 					bodyNoise = make(map[string][]string, len(bn))
 					for k, v := range bn {
 						if len(v) > 0 {
