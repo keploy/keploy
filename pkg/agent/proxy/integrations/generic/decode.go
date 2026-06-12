@@ -55,7 +55,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb, opts.FuzzyMatchPolicy)
+			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb, models.NormalizeFuzzyPolicy(opts.FuzzyMatchPolicy))
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}

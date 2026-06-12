@@ -1165,7 +1165,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		addKinds(unfilteredMocks)
 
 		if isMappingEnabled {
-			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, filteredMocks, unfilteredMocks)
+			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, selectedTests, filteredMocks, unfilteredMocks)
 		}
 
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
@@ -1265,7 +1265,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
 		if isMappingEnabled {
-			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, filteredMocks, unfilteredMocks)
+			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, selectedTests, filteredMocks, unfilteredMocks)
 		}
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -3156,7 +3156,7 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 // (or worse, fuzzy substitutions) on calls whose recorded answer was simply
 // deleted. Each affected test gets a row in the MOCKS MISMATCH SUMMARY so the
 // root cause is named BEFORE the first confusing test failure.
-func (r *Replayer) reportMissingMappedMocks(testSetID string, expectedTestMockMappings map[string][]models.MockEntry, filteredMocks, unfilteredMocks []*models.Mock) {
+func (r *Replayer) reportMissingMappedMocks(testSetID string, expectedTestMockMappings map[string][]models.MockEntry, selectedTests map[string]bool, filteredMocks, unfilteredMocks []*models.Mock) {
 	if len(expectedTestMockMappings) == 0 {
 		return
 	}
@@ -3171,6 +3171,15 @@ func (r *Replayer) reportMissingMappedMocks(testSetID string, expectedTestMockMa
 	missingByTest := map[string][]string{}
 	missingSet := map[string]bool{}
 	for testID, entries := range expectedTestMockMappings {
+		// When the user runs a subset of tests, mocks mapped exclusively to
+		// unselected tests are DELIBERATELY not loaded (mockdb skips them via
+		// the mocksWeNeed predicate) — they are not missing from the file and
+		// must not be reported as pruned.
+		if len(selectedTests) > 0 {
+			if _, ok := selectedTests[testID]; !ok {
+				continue
+			}
+		}
 		for _, e := range entries {
 			if !loaded[e.Name] {
 				missingByTest[testID] = append(missingByTest[testID], e.Name)

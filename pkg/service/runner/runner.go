@@ -374,6 +374,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.DisableAutoHeaderNoise = r.config.Test.DisableAutoHeaderNoise
 		outOpts.SchemaNoiseDetection = r.config.Test.SchemaNoiseDetection
 		outOpts.SchemaNoiseStrict = r.config.Test.SchemaNoiseStrict
+		outOpts.FuzzyMatchPolicy = r.config.Test.FuzzyMatch
 		outOpts.MysqlPorts = r.config.MysqlPorts
 	}
 	noiseCfg := map[string]map[string][]string{}
