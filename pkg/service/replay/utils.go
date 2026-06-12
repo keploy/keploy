@@ -849,6 +849,9 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 					if failure.MismatchReport != nil {
 						r := failure.MismatchReport
 						detail := fmt.Sprintf("[%s] %s", r.Protocol, r.ActualSummary)
+						if r.MatchPhase != "" {
+							detail += fmt.Sprintf(" | phase: %s", r.MatchPhase)
+						}
 						if r.ClosestMock != "" {
 							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
 						}

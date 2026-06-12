@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -97,6 +98,62 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 			return false, nil, nil
 		}
 	}
+}
+
+// buildGenericMismatchReport builds the universal mock-miss report for the
+// generic (opaque TCP) parser. Field-level diffs are impossible for unparsed
+// wire bytes, so the report carries the closest candidate by Jaccard
+// similarity with its score — enough for the user to tell "nothing remotely
+// similar was recorded" (re-record) apart from "a near-miss exists"
+// (protocol drift, likely needs re-record of just this dependency).
+func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb integrations.MockMemDb) *models.MockMismatchReport {
+	summary := fmt.Sprintf("opaque TCP exchange (%d request buffer(s), first %d bytes)", len(reqBuffs), func() int {
+		if len(reqBuffs) == 0 {
+			return 0
+		}
+		return len(reqBuffs[0])
+	}())
+
+	mocks, err := mockDb.GetSessionMocks()
+	if err != nil || ctx.Err() != nil {
+		return mismatch.NewReport(mismatch.ProtocolGeneric, summary).Build()
+	}
+	var genericMocks []*models.Mock
+	for _, m := range mocks {
+		if m.Kind == "Generic" {
+			genericMocks = append(genericMocks, m)
+		}
+	}
+	if len(genericMocks) == 0 {
+		return mismatch.NewReport(mismatch.ProtocolGeneric, summary).
+			WithPhase(models.MatchPhaseNoMocks, 0).Build()
+	}
+
+	bestIdx, bestSim := -1, -1.0
+	for idx, mock := range genericMocks {
+		if len(mock.Spec.GenericRequests) != len(reqBuffs) {
+			continue
+		}
+		var simSum float64
+		for i, reqBuff := range reqBuffs {
+			encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[i].Message[0].Data)
+			simSum += fuzzyCheck(encoded, reqBuff)
+		}
+		if avg := simSum / float64(len(reqBuffs)); avg > bestSim {
+			bestSim = avg
+			bestIdx = idx
+		}
+	}
+
+	b := mismatch.NewReport(mismatch.ProtocolGeneric, summary).
+		WithPhase(models.MatchPhaseExhausted, len(genericMocks))
+	if bestIdx >= 0 {
+		b = b.WithClosest(genericMocks[bestIdx].Name, nil).
+			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (thresholds: 0.9 per-test, 0.4 session)", genericMocks[bestIdx].Name, bestSim))
+	} else {
+		b = b.WithDiff("no recorded exchange has the same number of request buffers")
+	}
+	return b.Build()
 }
 
 // TODO: need to generalize this function for different types of integrations.
