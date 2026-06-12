@@ -19,7 +19,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
+func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb, fuzzyPolicy string) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,8 +54,13 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 			index := findExactMatch(filteredMocks, reqBuff)
 
-			if index == -1 {
+			if index == -1 && fuzzyPolicy != models.FuzzyMatchOff {
 				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
+				if index != -1 && fuzzyPolicy != models.FuzzyMatchOn {
+					logger.Warn("generic mock served via similarity (Jaccard) match — verify this is the right mock or set test.fuzzyMatch=off for deterministic replay",
+						zap.String("mock name", filteredMocks[index].Name),
+						zap.Float64("threshold", 0.9))
+				}
 			}
 
 			// Concurrency note for both branches below: see HTTP's
@@ -79,8 +84,13 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
-			if index == -1 {
+			if index == -1 && fuzzyPolicy != models.FuzzyMatchOff {
 				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.4)
+				if index != -1 && fuzzyPolicy != models.FuzzyMatchOn {
+					logger.Warn("generic mock served via similarity (Jaccard) match — verify this is the right mock or set test.fuzzyMatch=off for deterministic replay",
+						zap.String("mock name", unfilteredMocks[index].Name),
+						zap.Float64("threshold", 0.4))
+				}
 			}
 			if index != -1 {
 				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))

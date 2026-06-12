@@ -51,6 +51,24 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// Fuzzy-match policy values for config Test.FuzzyMatch and
+// OutgoingOptions.FuzzyMatchPolicy. They govern the similarity-based
+// fallbacks in mock matching (HTTP Levenshtein/Jaccard, generic Jaccard,
+// MySQL partial-shape scoring):
+//
+//	FuzzyMatchOn   — legacy behaviour: a similarity fallback may serve a mock silently.
+//	FuzzyMatchWarn — similarity fallbacks still run, but every fuzzy-served mock
+//	                 logs a default-visible Warn naming the mock and score.
+//	FuzzyMatchOff  — deterministic replay: similarity guessing is disabled.
+//	                 Recorded-order (FIFO/SortOrder) tiebreaks still apply;
+//	                 anything that would need a similarity guess becomes a
+//	                 structured mock miss instead.
+const (
+	FuzzyMatchOn   = "on"
+	FuzzyMatchWarn = "warn"
+	FuzzyMatchOff  = "off"
+)
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
@@ -65,6 +83,7 @@ type OutgoingOptions struct {
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
 	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), an HTTP mock that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
+	FuzzyMatchPolicy       string                         // FuzzyMatchOn/Warn/Off — policy for similarity-based mock-match fallbacks
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
 	// CapturePackets toggles raw packet capture on the agent's proxy ports

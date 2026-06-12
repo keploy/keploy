@@ -35,6 +35,10 @@ func getCachedRegexp(pattern string) *regexp.Regexp {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
 		compiled = nil // will be cached as negative result
+		// Mock.Noise is user-editable (mocks.yaml `noise:` regexes). A typo'd
+		// pattern silently never matching is a debugging dead end — say so
+		// once (the negative cache prevents repeats for this pattern).
+		log.Printf("keploy: invalid noise regex %q in mock noise config ignored (it will never match): %v", pattern, err)
 	}
 	noiseCacheMu.Lock()
 	// Evict all entries when cache is full to bound memory usage.

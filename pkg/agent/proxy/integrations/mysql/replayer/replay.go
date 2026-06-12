@@ -75,7 +75,8 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{
-			Mode: models.MODE_TEST,
+			FuzzyMatchPolicy: opts.FuzzyMatchPolicy,
+			Mode:             models.MODE_TEST,
 			// Map for storing last operation per connection
 			LastOp: wire.NewLastOpMap(),
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)

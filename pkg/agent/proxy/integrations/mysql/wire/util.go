@@ -30,6 +30,10 @@ type DecodeContext struct {
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
+	// FuzzyMatchPolicy (models.FuzzyMatch*) governs the score-based
+	// (partial-shape) candidate selection in command-phase matching.
+	// Empty string behaves like models.FuzzyMatchOn (legacy).
+	FuzzyMatchPolicy string
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000

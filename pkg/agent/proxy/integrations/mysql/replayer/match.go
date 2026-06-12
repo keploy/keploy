@@ -375,6 +375,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		matchedMock      *models.Mock
 		queryMatched     bool
 		stmtMatched      bool
+		fifoPicked       bool
 		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
 		bestPartialQuery string       // query of the closest partial match
 
@@ -665,6 +666,28 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}()))
 			}
 			matchedResp, matchedMock = chosenResp, chosenMock
+			fifoPicked = true
+		}
+	}
+
+	// Fuzzy-match policy gate for the score-based (partial-shape) pick.
+	// A candidate that survived ONLY via maxMatchedCount scoring — no exact
+	// query text, no definitive query+params match, no recorded-order FIFO —
+	// is a similarity guess and can serve the wrong result set (e.g. a
+	// same-length different SELECT winning at score 1). Under FuzzyMatchOff
+	// the guess is refused so the caller surfaces a structured mock miss;
+	// under FuzzyMatchWarn it is served but logged default-visibly.
+	if matchedMock != nil && !queryMatched && !stmtMatched && !fifoPicked {
+		switch decodeCtx.FuzzyMatchPolicy {
+		case models.FuzzyMatchOff:
+			logger.Warn("deterministic match policy (test.fuzzyMatch=off) rejected a score-based MySQL candidate — treating as a mock miss",
+				zap.String("mock_name", matchedMock.Name),
+				zap.Int("score", maxMatchedCount))
+			matchedResp, matchedMock = nil, nil
+		case models.FuzzyMatchWarn:
+			logger.Warn("MySQL mock served via score-based (partial-shape) match — verify this is the right result set or set test.fuzzyMatch=off for deterministic replay",
+				zap.String("mock_name", matchedMock.Name),
+				zap.Int("score", maxMatchedCount))
 		}
 	}
 
