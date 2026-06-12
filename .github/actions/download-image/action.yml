@@ -60,7 +60,15 @@ runs:
           Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
           Start-Sleep -Seconds 2
         }
-        Write-Error "Docker daemon did not become ready within 60s"
+        Write-Host "::error::Docker daemon did not become ready within 60s"
+        # Mirror the Unix path's diagnostics so a genuinely-down daemon or the
+        # wrong (Windows vs Linux) engine context is actionable from the log.
+        # `docker context ls` works without the daemon and reveals whether the
+        # Linux engine the load targets is even selected.
+        Write-Host "docker context ls:"
+        docker context ls 2>&1 | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
+        Write-Host "docker info:"
+        docker info 2>&1 | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
         exit 1
 
     - name: Load image (Unix)
