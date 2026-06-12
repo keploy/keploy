@@ -49,10 +49,18 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// kill(pid, 0) would return ESRCH and we'd self-terminate
 			// immediately, breaking record/replay. The container's --rm
 			// lifecycle bounds the agent in that mode instead.
-			clientPID, _ := cmd.Flags().GetUint32("client-pid")
-			if isDocker, _ := cmd.Flags().GetBool("is-docker"); isDocker {
+			clientPID, cpErr := cmd.Flags().GetUint32("client-pid")
+			isDocker, dockErr := cmd.Flags().GetBool("is-docker")
+			switch {
+			case cpErr != nil || dockErr != nil:
+				// A flag was renamed/removed or the command was built without
+				// AddFlags. Don't guess — leave the watchdog off and say so,
+				// rather than silently watching a zero PID.
+				logger.Debug("keploy agent: could not read client-pid/is-docker flags; parent-death watchdog left disabled",
+					zap.NamedError("clientPidErr", cpErr), zap.NamedError("isDockerErr", dockErr))
+			case isDocker:
 				logger.Debug("keploy agent: parent-death watchdog disabled in docker mode (separate PID namespace; --rm bounds the container)")
-			} else {
+			default:
 				watchParentProcess(ctx, logger, int(clientPID))
 			}
 
