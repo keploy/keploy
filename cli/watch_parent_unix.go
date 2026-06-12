@@ -20,6 +20,11 @@ const watchParentInterval = time.Second
 // watchParentProcess terminates this agent process when its parent keploy
 // client (clientPID) goes away.
 //
+// clientPID is a real process id: the launcher passes the client's os.Getpid()
+// via --client-pid (see pkg/platform/http/agent.go and docker/util.go), and it
+// is consumed as a pid elsewhere too (/proc/<pid>/environ auto-detection). So
+// liveness via kill(pid, 0) below checks that exact process, not a group.
+//
 // The agent is spawned in its own process group (Setpgid) WITHOUT a
 // PR_SET_PDEATHSIG and without watching its parent, so an ABNORMAL death of the
 // parent CLI — `kill -9`, a panic/crash, the OOM-killer, or an abruptly-closed
