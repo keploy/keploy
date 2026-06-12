@@ -132,6 +132,14 @@ type UnmatchedCall struct {
 	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
 	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
 	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
+	// MatchPhase, CandidateCount and FieldDiffs mirror MockMismatchReport so
+	// report consumers (CLI `keploy report`, report yaml, platform UI) can
+	// render structured field-level drift instead of an opaque string. Paths
+	// in FieldDiffs use the noise-config vocabulary and can be copied
+	// verbatim into test.globalNoise / spec.assertions.noise.
+	MatchPhase     string          `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
+	CandidateCount int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
+	FieldDiffs     []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
