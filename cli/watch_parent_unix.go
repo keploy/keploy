@@ -41,7 +41,7 @@ const watchParentInterval = time.Second
 // track instead of the real CLI). No-op when clientPID <= 0.
 func watchParentProcess(ctx context.Context, logger *zap.Logger, clientPID int) {
 	if logger != nil {
-		logger.Debug("keploy agent: parent-death watchdog", zap.Int("clientPID", clientPID))
+		logger.Debug("arming parent-death watchdog", zap.Int("clientPID", clientPID))
 	}
 	if clientPID <= 0 {
 		return
@@ -56,7 +56,7 @@ func watchParentProcess(ctx context.Context, logger *zap.Logger, clientPID int) 
 			case <-ticker.C:
 				if !parentAlive(clientPID) {
 					if logger != nil {
-						logger.Info("keploy agent: parent client process exited; self-terminating to release eBPF hooks, DNS and ports",
+						logger.Info("parent client process exited; self-terminating to release eBPF hooks, DNS and ports",
 							zap.Int("clientPID", clientPID))
 					}
 					// Reuse the normal signal-driven graceful shutdown.

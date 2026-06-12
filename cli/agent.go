@@ -56,10 +56,10 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				// A flag was renamed/removed or the command was built without
 				// AddFlags. Don't guess — leave the watchdog off and say so,
 				// rather than silently watching a zero PID.
-				logger.Debug("keploy agent: could not read client-pid/is-docker flags; parent-death watchdog left disabled",
+				logger.Debug("could not read client-pid/is-docker flags; parent-death watchdog left disabled",
 					zap.NamedError("clientPidErr", cpErr), zap.NamedError("isDockerErr", dockErr))
 			case isDocker:
-				logger.Debug("keploy agent: parent-death watchdog disabled in docker mode (separate PID namespace; --rm bounds the container)")
+				logger.Debug("parent-death watchdog disabled in docker mode (separate PID namespace; --rm bounds the container)")
 			default:
 				watchParentProcess(ctx, logger, int(clientPID))
 			}
