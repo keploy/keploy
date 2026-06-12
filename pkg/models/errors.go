@@ -63,6 +63,7 @@ const (
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
 	MatchPhaseExhausted  = "no_match"             // full cascade ran and nothing matched
+	MatchPhaseFuzzyOff   = "fuzzy_match_disabled" // candidates existed but similarity fallback is disabled (test.fuzzyMatch=off)
 	MatchPhaseProtoError = "protocol_error"       // matching aborted on a protocol/decode error
 )
 
