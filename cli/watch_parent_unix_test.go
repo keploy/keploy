@@ -4,32 +4,30 @@ package cli
 
 import (
 	"context"
+	"math"
 	"os"
-	"os/exec"
 	"testing"
 
 	"go.uber.org/zap"
 )
 
 // TestParentAlive verifies the liveness primitive the parent-death watchdog
-// relies on: a running PID is "alive"; a spawned-then-reaped PID is "dead".
+// relies on: a running PID reads as "alive"; an unallocated PID reads as "dead".
 func TestParentAlive(t *testing.T) {
+	// A live process (ourselves) reads as alive.
 	if !parentAlive(os.Getpid()) {
 		t.Fatal("parentAlive(self) = false, want true")
 	}
-	// Spawn a short-lived process and reap it so its PID is definitively gone.
-	// Re-exec THIS test binary (os.Args[0], always present) with a run filter
-	// that matches no tests, so it exits immediately — rather than depending on
-	// an external `true` being on PATH, which isn't guaranteed on every Unix CI
-	// image. The exit code is irrelevant; we only need the PID reaped.
-	helper := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-exec of the test binary itself
-	if err := helper.Start(); err != nil {
-		t.Skipf("cannot spawn helper process: %v", err)
-	}
-	pid := helper.Process.Pid
-	_ = helper.Wait() // reap, so the PID leaves the table
-	if parentAlive(pid) {
-		t.Fatalf("parentAlive(%d) = true after the process exited and was reaped, want false", pid)
+	// A PID that can never be allocated reads as dead — deterministically. We
+	// deliberately do NOT spawn a real process and reap it to get a "dead" PID:
+	// a freshly-reaped PID can be recycled to an unrelated process on a busy
+	// host between the reap and the check, so kill(pid,0) would succeed and flake
+	// this assertion. pid_max is at most 2^22 on Linux and far lower on
+	// macOS/BSD, so a PID at the 32-bit ceiling has no task; kill(pid,0) returns
+	// ESRCH with no reuse race and no dependency on an external helper binary.
+	const neverAllocatedPID = math.MaxInt32
+	if parentAlive(neverAllocatedPID) {
+		t.Fatalf("parentAlive(%d) = true for an unallocated pid, want false", neverAllocatedPID)
 	}
 }
 
