@@ -114,6 +114,17 @@ type TestHooks interface {
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }
 
+// TestCaseMutator is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion; implementations that do not need
+// per-test-case mutations can safely omit it without breaking existing code.
+type TestCaseMutator interface {
+	// BeforeTestCaseRun is invoked once per test case, before SimulateRequest.
+	// Implementations may mutate tc in-place (e.g. decrypt protected fields,
+	// inject headers). It is called at most once per test case even when
+	// RetryPassing is enabled.
+	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
+}
+
 type Storage interface {
 	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)

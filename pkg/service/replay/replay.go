@@ -1535,8 +1535,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
-			// replace the request URL's BasePath/origin if provided
-			if r.config.Test.BasePath != "" {
+			// Stop early before the hook and URL mutations if an exit signal is
+			// already pending — avoids mutating test cases that will never run.
+			select {
+			case <-exitLoopChan:
+				testSetStatus = getErrStatus()
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
+
+			// Run pre-test mutation hook once per test case (not on retries) to
+			// avoid compounding side effects from in-place mutations.
+			if replay == 0 {
+				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
+					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
+						utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+							zap.String("testcase", testCase.Name),
+							zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
+					}
+				}
+			}
+
+			// replace the request URL's BasePath/origin if provided — gated on
+			// replay==0 to prevent path.Join from doubling the prefix on retries.
+			if r.config.Test.BasePath != "" && replay == 0 {
 				newURL, err := ReplaceBaseURL(r.config.Test.BasePath, testCase.HTTPReq.URL)
 				if err != nil {
 					r.logger.Error("failed to replace the request basePath",
@@ -1548,18 +1573,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCase.HTTPReq.URL = newURL
 				}
 				r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
-			}
-
-			// Checking for errors in the mocking and application
-			select {
-			case <-exitLoopChan:
-				testSetStatus = getErrStatus()
-				exitLoop = true
-			default:
-			}
-
-			if exitLoop {
-				break
 			}
 
 			var testStatus models.TestStatus
@@ -2105,6 +2118,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			if exitLoop {
 				break
+			}
+
+			// Run pre-test mutation before computing the mock window so that
+			// any timestamp fields decrypted by the mutator feed into the filter.
+			// Streaming Phase 2 has no retry loop so the replay==0 guard used
+			// in Phase 1 is not needed here — each tc is executed exactly once.
+			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
+				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
+					utils.LogError(r.logger, err, "BeforeTestCaseRun hook failed; replay continues with test case in current state",
+						zap.String("testcase", tc.Name),
+						zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
+				}
 			}
 
 			// Mock Window: Calculate the effective mock filter window for streaming
