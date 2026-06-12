@@ -677,7 +677,19 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// same-length different SELECT winning at score 1). Under FuzzyMatchOff
 	// the guess is refused so the caller surfaces a structured mock miss;
 	// under FuzzyMatchWarn it is served but logged default-visibly.
-	if matchedMock != nil && !queryMatched && !stmtMatched && !fifoPicked {
+	//
+	// The gate applies ONLY to the command types where a partial-shape
+	// similarity pick exists (COM_QUERY, COM_STMT_PREPARE, COM_STMT_EXECUTE).
+	// Control commands (COM_PING, COM_STMT_CLOSE, COM_INIT_DB, COM_STATS,
+	// COM_DEBUG, COM_RESET_CONNECTION) also reach matchedMock through the
+	// score path, but their comparators are exact protocol-level matches on
+	// content-free (or query-exact) packets — refusing or warning on them
+	// would drop connections on routine driver housekeeping (pings,
+	// prepared-statement closes).
+	isFuzzyCapableCmd := req.Header.Type == sCOM_QUERY ||
+		req.Header.Type == sCOM_STMT_PREP ||
+		req.Header.Type == sCOM_STMT_EXEC
+	if matchedMock != nil && isFuzzyCapableCmd && !queryMatched && !stmtMatched && !fifoPicked {
 		switch decodeCtx.FuzzyMatchPolicy {
 		case models.FuzzyMatchOff:
 			logger.Warn("deterministic match policy (test.fuzzyMatch=off) rejected a score-based MySQL candidate — treating as a mock miss",

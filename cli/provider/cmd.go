@@ -1255,12 +1255,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			c.cfg.Test.FuzzyMatch, err = cmd.Flags().GetString("fuzzy-match")
-			if err != nil {
-				errMsg := "failed to read the --fuzzy-match flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Same Changed/IsSet guard as schema-noise-strict: the flag
+			// default must not clobber a yaml-only test.fuzzyMatch value.
+			if cmd.Flags().Changed("fuzzy-match") || !viper.IsSet("test.fuzzyMatch") {
+				c.cfg.Test.FuzzyMatch, err = cmd.Flags().GetString("fuzzy-match")
+				if err != nil {
+					errMsg := "failed to read the --fuzzy-match flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
+			// Validate regardless of source (flag or yaml).
 			switch c.cfg.Test.FuzzyMatch {
 			case models.FuzzyMatchOn, models.FuzzyMatchWarn, models.FuzzyMatchOff, "":
 			default:

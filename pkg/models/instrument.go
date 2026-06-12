@@ -69,6 +69,19 @@ const (
 	FuzzyMatchOff  = "off"
 )
 
+// NormalizeFuzzyPolicy maps an unset/unknown policy to the shipped default
+// (FuzzyMatchWarn). Call it at every consumption point so an option struct
+// built without the field (older callers, in-cluster paths) behaves exactly
+// like the documented default instead of silently diverging per protocol.
+func NormalizeFuzzyPolicy(p string) string {
+	switch p {
+	case FuzzyMatchOn, FuzzyMatchWarn, FuzzyMatchOff:
+		return p
+	default:
+		return FuzzyMatchWarn
+	}
+}
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string

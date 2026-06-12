@@ -32,7 +32,8 @@ type DecodeContext struct {
 	NextStmtID uint32
 	// FuzzyMatchPolicy (models.FuzzyMatch*) governs the score-based
 	// (partial-shape) candidate selection in command-phase matching.
-	// Empty string behaves like models.FuzzyMatchOn (legacy).
+	// Callers normalize via models.NormalizeFuzzyPolicy, so an unset
+	// value behaves like the shipped default (warn).
 	FuzzyMatchPolicy string
 }
 
