@@ -476,7 +476,15 @@ func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, 
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
+	// Redact secrets before dumping the options at Debug (mongoPassword / TLS key).
+	redactedOpts := opts
+	if redactedOpts.MongoPassword != "" {
+		redactedOpts.MongoPassword = "****"
+	}
+	if redactedOpts.TLSPrivateKey != "" {
+		redactedOpts.TLSPrivateKey = "****"
+	}
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", redactedOpts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
