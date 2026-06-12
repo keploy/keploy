@@ -20,6 +20,49 @@ runs:
         name: ${{ inputs.artifact_name }}
         path: ${{ runner.temp }}/keploy-image
 
+    # The image is loaded into the LOCAL docker daemon below. On Docker Desktop
+    # runners (Windows / macOS) the daemon may still be starting when this action
+    # runs, so `docker load` fails with "failed to connect to the docker API ...
+    # the daemon is running" (a startup race, not a real fault). Wait for the
+    # daemon to answer before loading. Linux runners have systemd Docker already
+    # up, so this returns on the first attempt.
+    - name: Wait for the Docker daemon (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        for i in $(seq 1 30); do
+          if docker info >/dev/null 2>&1; then
+            echo "Docker is ready after $i attempt(s)"
+            exit 0
+          fi
+          echo "Waiting for Docker... attempt $i/30"
+          sleep 2
+        done
+        echo "::error::Docker daemon did not become ready within 60s"
+        docker info 2>&1 | head -20 || true
+        exit 1
+
+    - name: Wait for the Docker daemon (Windows)
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $maxAttempts = 30
+        $attempt = 0
+        while ($attempt -lt $maxAttempts) {
+          $attempt++
+          try {
+            docker info *> $null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Docker is ready after $attempt attempt(s)"
+              exit 0
+            }
+          } catch {}
+          Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+          Start-Sleep -Seconds 2
+        }
+        Write-Error "Docker daemon did not become ready within 60s"
+        exit 1
+
     - name: Load image (Unix)
       if: runner.os != 'Windows'
       shell: bash
