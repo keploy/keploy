@@ -775,7 +775,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
+	// Redact the DB password before dumping the whole config at Debug — it would
+	// otherwise leak test.mongoPassword into any -debug capture.
+	redactedCfg := *c.cfg
+	if redactedCfg.Test.MongoPassword != "" {
+		redactedCfg.Test.MongoPassword = "****"
+	}
+	// InMemoryCompose can carry docker-compose YAML with embedded secrets/tokens;
+	// never dump its contents. redactedCfg is a shallow copy, so reassigning the
+	// slice header here leaves the live config untouched.
+	if len(redactedCfg.InMemoryCompose) > 0 {
+		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
+	}
+	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
 
 	switch cmd.Name() {
 
