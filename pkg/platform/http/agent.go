@@ -52,6 +52,16 @@ type AgentClient struct {
 	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
 	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
+
+	// drainMu guards drainDone. drainDone is (re)created at the start of each
+	// GetOutgoing call and closed by that stream's reader goroutine once it
+	// has drained the agent's /outgoing wire to EOF. cmd.Cancel (the agent
+	// docker-teardown hook in startInDocker) reads it under drainMu and waits
+	// on it — bounded by a deadline — before hard-killing the agent, so the
+	// host finishes pulling the teardown tail off the wire before the
+	// connection is severed.
+	drainMu   sync.Mutex
+	drainDone chan struct{}
 }
 
 // var initStopScript []byte
@@ -282,6 +292,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
+	// This channel is UNBUFFERED on purpose: the downstream outgoingChan
+	// buffer (in record.go) alone is sufficient. The reader tightly forwards
+	// each decoded mock into the buffered outgoingChan, so the wire still
+	// drains fast.
 	mockChan := make(chan *models.Mock)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -289,9 +303,29 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get errorgroup from the context")
 	}
 
+	// drainDone is closed by this stream's reader goroutine when it has
+	// pulled the wire to EOF (or hit its own drain deadline) — i.e. "every
+	// mock the agent will send has been received into host RAM". The agent
+	// teardown path (cmd.Cancel in startInDocker) waits on this before it
+	// hard-kills the agent docker process, so we never sever the connection
+	// while mocks are still in flight. Recreated per GetOutgoing call; the
+	// reader goroutine spawned just below is the sole closer of THIS dd, so
+	// a plain close in its defer is race-free (no sync.Once needed).
+	dd := make(chan struct{})
+	a.drainMu.Lock()
+	a.drainDone = dd
+	a.drainMu.Unlock()
+
 	grp.Go(func() error {
 		defer func() {
 			close(mockChan)
+
+			// Signal the agent-teardown gate (cmd.Cancel) that the host has
+			// pulled this stream to EOF / hit its drain deadline — every mock
+			// that will arrive is now in host RAM. Closing dd unblocks the
+			// gate so the agent docker process can be stopped safely. This
+			// reader goroutine is the sole closer of dd, so close is race-free.
+			close(dd)
 
 			err := res.Body.Close()
 			if err != nil {
@@ -300,6 +334,40 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		}()
 
 		decoder := gob.NewDecoder(res.Body)
+
+		// Teardown-tail drain (fixes orphaned teardown test cases).
+		//
+		// At shutdown the agent flushes its remaining mocks onto the wire,
+		// but this host-side gob-decoder goroutine used to exit the instant
+		// ctx cancelled (`case <-ctx.Done(): return nil`): on SIGINT it
+		// returned within milliseconds, the deferred res.Body.Close() severed
+		// the HTTP connection, and every mock still in flight on the wire was
+		// discarded — orphaning the test cases that depended on them at replay.
+		//
+		// New behavior — mirrors the drain pattern in
+		// record.go::GetTestAndMockChans:
+		//
+		//   - Until ctx is done, normal path: decode + forward, with
+		//     ctx-cancellation watched.
+		//   - When ctx cancels for the first time, arm a 60-s drain
+		//     deadline. The select stops watching ctx (deadlineC is
+		//     now non-nil) and watches the deadline instead. We KEEP
+		//     reading and forwarding mocks until either:
+		//       * The agent closes its end of the stream (decoder
+		//         returns a shutdown error → break the for loop).
+		//       * The drain deadline expires (return early).
+		//
+		// This guarantees the teardown tail the agent is still
+		// flushing reaches the host's record.go drain — which then
+		// pushes it into InsertMock and finally mocks.yaml.
+		const drainGrace = 60 * time.Second
+		var drainDeadline <-chan time.Time
+		var deadlineT *time.Timer
+		defer func() {
+			if deadlineT != nil {
+				deadlineT.Stop()
+			}
+		}()
 
 		for {
 			var mock models.Mock
@@ -312,9 +380,29 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 				break
 			}
 
+			// Once ctx cancels we arm the drain deadline ONCE and then
+			// stop checking ctx — drainDeadline becomes the new "give
+			// up" signal. Until that arming, we still watch ctx so a
+			// caller cancelling without our drain extension (tests,
+			// non-record paths) exits promptly.
+			var ctxDone <-chan struct{}
+			if drainDeadline == nil {
+				ctxDone = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
-				// If the context is done, exit the loop
+			case <-ctxDone:
+				// First ctx cancellation — arm drain and try to send
+				// THIS mock under the new bounded wait. The for loop
+				// continues with drainDeadline armed (ctxDone now nil).
+				deadlineT = time.NewTimer(drainGrace)
+				drainDeadline = deadlineT.C
+				select {
+				case mockChan <- &mock:
+				case <-drainDeadline:
+					return nil
+				}
+			case <-drainDeadline:
 				return nil
 			case mockChan <- &mock:
 				// Send the decoded mock to the channel
@@ -362,6 +450,37 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 
 		decoder := json.NewDecoder(res.Body)
 
+		// SAME FIX AS GetOutgoing — drain the mappings stream past
+		// ctx-cancel.
+		//
+		// Root cause proven by the full-accounting run on pipeline
+		// 26948829833 (mongo_rbrb): every mock reached disk
+		// (agent_has=2626 → cli_wrote=2629, zero loss), yet 7 teardown
+		// TCs still failed at replay with "socket unexpectedly closed:
+		// EOF". Those 7 TCs were on disk but ABSENT from mappings.yaml.
+		//
+		// The mappings travel on THIS separate HTTP stream, distinct
+		// from the mocks stream in GetOutgoing. This goroutine used to
+		// have `case <-ctx.Done(): return nil`, so on host SIGINT it
+		// exited within milliseconds and the deferred res.Body.Close()
+		// tore down the connection — dropping every teardown TC→mock
+		// mapping still queued on the wire. Fixing only GetOutgoing
+		// (the mocks stream) left this stream still cutting the
+		// teardown mappings, which is why the teardown TCs stayed
+		// flaky: their mocks were on disk but unmapped.
+		//
+		// Mirror the GetOutgoing drain: when ctx cancels, arm a 60-s
+		// deadline and keep reading + forwarding mappings until either
+		// the agent closes the stream (EOF) or the deadline expires.
+		const drainGrace = 60 * time.Second
+		var drainDeadline <-chan time.Time
+		var deadlineT *time.Timer
+		defer func() {
+			if deadlineT != nil {
+				deadlineT.Stop()
+			}
+		}()
+
 		for {
 			var mapping models.TestMockMapping
 			if err := decoder.Decode(&mapping); err != nil {
@@ -372,8 +491,21 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 				break
 			}
 
+			var ctxDone <-chan struct{}
+			if drainDeadline == nil {
+				ctxDone = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
+			case <-ctxDone:
+				deadlineT = time.NewTimer(drainGrace)
+				drainDeadline = deadlineT.C
+				select {
+				case mappingChan <- mapping:
+				case <-drainDeadline:
+					return nil
+				}
+			case <-drainDeadline:
 				return nil
 			case mappingChan <- mapping:
 			}
@@ -1326,13 +1458,20 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 		containerName := opts.KeployContainer
 
+		// --time 30: give the agent 30s (vs docker's 10s default) to handle
+		// SIGTERM gracefully — its shutdown path flushes the SyncMock backlog
+		// onto the /outgoing wire (CloseOutChan -> FlushOwnedWindows) before
+		// the container is SIGKILL'd. Combined with the buffered mockChan
+		// (which lets the host drain that backlog at wire speed) and the
+		// drain gate below, this is what stops the teardown tail from being
+		// lost when recording is interrupted under load.
 		// Try stopping the container without sudo first (works if user is in docker group)
-		stopCmd := exec.Command("docker", "stop", containerName)
+		stopCmd := exec.Command("docker", "stop", "--time", "30", containerName)
 		if output, err := stopCmd.CombinedOutput(); err != nil {
 			// If that fails on Linux, try with sudo -n (non-interactive, won't prompt for password)
 			if runtime.GOOS == "linux" {
 				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
-				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
+				stopCmd = exec.Command("sudo", "-n", "docker", "stop", "--time", "30", containerName)
 				if output, err := stopCmd.CombinedOutput(); err != nil {
 					logger.Debug("Could not stop the docker container. It may have already stopped.",
 						zap.String("container", containerName),
@@ -1349,6 +1488,26 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			}
 		} else {
 			logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
+		}
+
+		// Drain-complete gate. `docker stop` above sent SIGTERM (the trigger
+		// for the agent's graceful flush) and blocks until the container
+		// exits, by which point the host's GetOutgoing reader has normally
+		// already pulled the wire to EOF and closed drainDone. We still wait
+		// on it explicitly — bounded by a deadline — so we never SIGKILL the
+		// local docker process while the host is mid-drain (e.g. if `docker
+		// stop` returned early because the container was already gone). The
+		// 30s deadline matches the stop grace and is < the GetOutgoing
+		// reader's 60s drain grace, so this can never outlive the goroutine
+		// that closes drainDone — no hang, no deadlock.
+		a.drainMu.Lock()
+		dd := a.drainDone
+		a.drainMu.Unlock()
+		if dd != nil {
+			select {
+			case <-dd:
+			case <-time.After(30 * time.Second):
+			}
 		}
 
 		if cmd.Process != nil {
@@ -1519,12 +1678,8 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
-			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
-		} else {
-			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
 		}
 
 		select {

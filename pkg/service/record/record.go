@@ -416,9 +416,23 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
 			}
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			// Persist with a ctx detached from cancellation so a mock that
+			// arrives during graceful shutdown — the late-decoded teardown
+			// tail the agent flushes when recording is asked to stop — is
+			// still written to disk. Inserting with the cancellable ctx made
+			// InsertMock fail the moment the parent ctx was cancelled, and the
+			// mock was then skipped (the continue below), orphaning its
+			// already-recorded test case at replay.
+			insertCtx := context.WithoutCancel(ctx)
+			err := r.mockDB.InsertMock(insertCtx, mock, newTestSetID)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				// During shutdown the error channels may already be closed by
+				// the deferred close above, so sending would panic. The insert
+				// used a detached ctx, so an error here is a genuine disk
+				// failure rather than cancellation — log it and keep draining.
+				if ctx.Err() != nil {
+					r.logger.Debug("mock insert failed during shutdown drain; continuing",
+						zap.Error(err), zap.String("mock", mock.Name))
 					continue
 				}
 				insertMockErrChan <- err
@@ -443,6 +457,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+			}
+			// Batched flush: when the source channel is momentarily empty, push
+			// this batch from the writer's buffer to physical disk. This replaces
+			// the removed background writer's "flush when queue empty" — the
+			// consumer now drives batching directly. FlushMocks is an optional
+			// method (type-asserted like Close), so non-yaml mockDB impls are
+			// unaffected.
+			if len(frames.Outgoing) == 0 {
+				if fm, ok := r.mockDB.(interface{ FlushMocks() error }); ok {
+					_ = fm.FlushMocks()
+				}
 			}
 		}
 		return nil
@@ -560,9 +585,18 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		Filters: r.config.Record.Filters,
 	}
 
-	// Create channels to receive incoming and outgoing data
+	// Create channels to receive incoming and outgoing data.
+	//
+	// outgoingChan is BUFFERED (16384) and this is NOT redundant with the
+	// upstream mockChan buffer: each does a distinct job at shutdown. mockChan
+	// absorbs the teardown tail OFF THE WIRE so the agent isn't back-pressured
+	// while it flushes; this buffer then HOLDS that tail so the detached-ctx
+	// InsertMock consumer can write it to disk AFTER recording stops. If this
+	// channel were unbuffered, the bridge that feeds it would stall the moment
+	// recording stops and the tail still sitting in mockChan would never reach
+	// disk, orphaning those test cases at replay. Keep both buffers.
 	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	outgoingChan := make(chan *models.Mock, 16384)
 	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -641,26 +675,82 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		defer close(outgoingChan)
 		defer cancel()
 
-		// Also cancel mockCtx when parent ctx is done
-		// This is done inside the goroutine to avoid goroutine leaks
-		go func() {
-			<-ctx.Done()
-			cancel()
+		// Graceful drain on shutdown.
+		//
+		// When the parent ctx is cancelled we do NOT abandon the agent's
+		// mock stream. Abandoning it dropped the late-decoded teardown tail
+		// the agent is still flushing at stop (its CloseOutChan flushes the
+		// buffered mocks the instant recording is told to stop), which
+		// orphaned the already-recorded teardown test cases at replay.
+		// Instead we keep forwarding until the agent closes the stream (EOF),
+		// bounded by drainGrace so a hung agent can never wedge `keploy
+		// record` shutdown. mockCtx is left alive for the drain and torn down
+		// by the deferred cancel() on exit — which also stops the agent
+		// stream when the deadline (not EOF) ended the drain. The deadline
+		// guarantees we always reach that deferred cancel, so dropping the
+		// old <-ctx.Done()->cancel() watchdog goroutine cannot leak mockCtx.
+		//
+		// Was 15 s; raised to 60 s after CI runs on the verify branch
+		// showed the host writer still flushing 800+ mongo mocks at the
+		// 15 s mark on heavy-load lanes (go-memory-load-mongo). At yaml-
+		// encode+fsync rates of ~60-80 writes/sec under sustained load,
+		// the old 15 s grace truncated the drain mid-flight and orphaned
+		// teardown TCs whose mocks were still in the agent → host queue.
+		const drainGrace = 60 * time.Second
+		var deadlineC <-chan time.Time // nil until the parent ctx cancels
+		var deadline *time.Timer
+
+		defer func() {
+			if deadline != nil {
+				deadline.Stop()
+			}
 		}()
+		armDrain := func() {
+			if deadline == nil {
+				deadline = time.NewTimer(drainGrace)
+				deadlineC = deadline.C
+			}
+		}
 
 		for {
+			// Watch the parent ctx only until the drain is armed; afterwards
+			// the drain is bounded by stream-EOF or deadlineC instead.
+			var ctxDone <-chan struct{}
+			if deadlineC == nil {
+				ctxDone = ctx.Done()
+			}
 			select {
-			case <-ctx.Done():
+			case <-ctxDone:
+				armDrain()
+			case <-deadlineC:
 				return ctx.Err()
 			case m, ok := <-outgoingStream:
 				if !ok {
+					// Agent closed the stream — every flushed mock forwarded.
 					return nil
 				}
+				if deadlineC != nil {
+					// Draining: bound the forward so a stalled consumer can't
+					// wedge shutdown. The consumer drains frames.Outgoing
+					// until close, so this normally never blocks.
+					select {
+					case outgoingChan <- m:
+					case <-deadlineC:
+						return ctx.Err()
+					}
+					continue
+				}
+				// Steady state: forward, switching to a bounded drain if the
+				// parent ctx cancels mid-send.
 				select {
-				case <-ctx.Done():
-					outgoingChan <- m
-					return ctx.Err()
 				case outgoingChan <- m:
+				case <-ctx.Done():
+					armDrain()
+					select {
+					case outgoingChan <- m:
+					case <-deadlineC:
+						return ctx.Err()
+					}
 				}
 			}
 		}

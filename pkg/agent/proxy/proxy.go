@@ -14,7 +14,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,41 +43,6 @@ type ParserPriority struct {
 	ParserType integrations.IntegrationType
 }
 
-// probeFanoutEnabled toggles [PROBE/proxy] / [PROBE/dial] structured
-// logs via KEPLOY_PROBE_FANOUT=1. The flag is read once at first use
-// and cached in an atomic so hot-path branches are a single load.
-// Used to diagnose the parallel-TLS-fanout stall (SAP + Postgres
-// concurrent handshakes) without polluting normal record runs.
-var (
-	probeFanoutOnce    sync.Once
-	probeFanoutEnabled atomic.Bool
-)
-
-func probeOn() bool {
-	probeFanoutOnce.Do(func() {
-		if os.Getenv("KEPLOY_PROBE_FANOUT") == "1" {
-			probeFanoutEnabled.Store(true)
-		}
-	})
-	return probeFanoutEnabled.Load()
-}
-
-// probeProxy emits a [PROBE/proxy] log tagged with a stable conn id
-// and phase name. Cheap to call when the probe is off (single atomic
-// load + early return); zero allocations on the hot disabled path.
-func probeProxy(logger *zap.Logger, phase string, connID int64, fields ...zap.Field) {
-	if !probeOn() {
-		return
-	}
-	base := []zap.Field{
-		zap.String("probe", "proxy"),
-		zap.String("phase", phase),
-		zap.Int64("connID", connID),
-		zap.Int64("ts_ns", time.Now().UnixNano()),
-	}
-	logger.Info("[PROBE/proxy]", append(base, fields...)...)
-}
-
 var defaultMysqlPorts = []uint32{3306, 4000}
 
 func isMysqlPort(port uint32, configured []uint32) bool {
@@ -94,20 +58,13 @@ func isMysqlPort(port uint32, configured []uint32) bool {
 	return false
 }
 
-// probeDial emits a [PROBE/dial] log for upstream dial timing.
-func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durNs int64, fields ...zap.Field) {
-	if !probeOn() {
-		return
-	}
-	base := []zap.Field{
-		zap.String("probe", "dial"),
-		zap.String("phase", phase),
-		zap.Int64("connID", connID),
-		zap.String("addr", addr),
-		zap.Int64("dur_ns", durNs),
-		zap.Int64("ts_ns", time.Now().UnixNano()),
-	}
-	logger.Info("[PROBE/dial]", append(base, fields...)...)
+// destCacheEntry holds all recently-seen destinations from a single source IP.
+// Keyed by destination port so the fallback can be used safely when the app
+// only connects to ONE backend on a given port (unambiguous) but not when
+// multiple distinct destinations are cached (would guess wrong).
+type destCacheEntry struct {
+	mu     sync.Mutex
+	byPort map[uint32]*agent.NetworkAddress // destPort → destInfo
 }
 
 type Proxy struct {
@@ -151,6 +108,18 @@ type Proxy struct {
 	// themselves via their own defers / context cancellation; we do
 	// not need references to force-close them.
 	activeConns sync.WaitGroup
+
+	// destCache is a fallback for when the eBPF redirectProxyMap lookup
+	// fails during an active recording session. Each successful DestInfo.Get
+	// stores the destination under the source IP key.
+	//
+	// Map structure: sourceIP (string) → *destCacheEntry
+	// destCacheEntry holds all destinations seen from that source IP,
+	// keyed by destination port (uint32). If exactly one destination
+	// was seen, it is safe to use as a fallback (avoids guessing wrong
+	// when the app connects to multiple backends). Multiple destinations
+	// → no fallback (can't determine the right one without dest port).
+	destCache sync.Map
 
 	Listener net.Listener
 
@@ -1324,35 +1293,80 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
+	// Extract source IP for the dest cache (fallback when eBPF miss occurs).
+	// RemoteAddr is always a *net.TCPAddr when listening on TCP, so the
+	// type assertion is safe. Capture it before any early return.
+	sourceIP := remoteAddr.IP.String()
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
+
+	// usedFallback is set to true when the eBPF lookup failed but the dest
+	// cache provided a recovery. In that case DestInfo.Delete must be skipped
+	// (there is no map entry to remove).
+	var usedFallback bool
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		// Gracefully handle untracked connections (eBPF lookup failed)
+		// eBPF redirectProxyMap lookup failed — the original destination is unknown.
 		// This can happen when:
-		// 1. A new connection was opened after test completion (e.g., driver health check)
-		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
-		// 3. The entry was already deleted before this lookup
-		//
-		// Instead of failing with an error (which causes the app to see a broken connection),
-		// we close the connection gracefully. The client will see "connection refused" or EOF,
-		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
-			zap.Int("Source port", sourcePort), zap.Error(err))
-		if srcConn != nil {
-			srcConn.Close()
+		// 1. eBPF hook didn't fire (race, or hook not covering this connection)
+		// 2. eBPF fired but this lookup raced with a deletion elsewhere
+		// 3. Connection opened after recording/test-set completed (health check etc.)
+		rule := p.getSession()
+
+		// Fallback: during an active recording session, recover the destination
+		// from the per-sourceIP cache populated by previous successful lookups.
+		// Only safe when EXACTLY ONE destination was ever seen from this sourceIP
+		// (unambiguous). Multiple destinations → skip to avoid wrong-backend
+		// forwarding (e.g. sending a mongo connection to mysql).
+		if rule != nil && rule.Mode == models.MODE_RECORD {
+			if cached, ok := p.destCache.Load(sourceIP); ok {
+				entry := cached.(*destCacheEntry)
+				entry.mu.Lock()
+				numDests := len(entry.byPort)
+				var fallbackDest *agent.NetworkAddress
+				for _, d := range entry.byPort {
+					fallbackDest = d
+				}
+				entry.mu.Unlock()
+
+				// Use the cached destination only when exactly one was ever
+				// seen from this source IP (unambiguous). Multiple cached
+				// destinations cannot be safely disambiguated.
+				if numDests == 1 && fallbackDest != nil {
+					destInfo = fallbackDest
+					usedFallback = true
+				}
+			}
 		}
-		return nil
+
+		// If fallback didn't recover a destination, close and return.
+		if !usedFallback {
+			if srcConn != nil {
+				srcConn.Close()
+			}
+			return nil
+		}
+	}
+
+	if !usedFallback {
+		// Successful eBPF lookup — populate the cache for future fallbacks.
+		raw, _ := p.destCache.LoadOrStore(sourceIP, &destCacheEntry{byPort: make(map[uint32]*agent.NetworkAddress)})
+		entry := raw.(*destCacheEntry)
+		entry.mu.Lock()
+		entry.byPort[destInfo.Port] = destInfo
+		entry.mu.Unlock()
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
-		return err
+	// releases the occupied source port when done fetching the destination info.
+	// Skipped on the fallback path (no eBPF map entry to remove).
+	if !usedFallback {
+		err = p.DestInfo.Delete(ctx, uint16(sourcePort))
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
+			return err
+		}
 	}
 
 	//get the session rule
@@ -1794,20 +1808,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if isTLS {
-		probeProxy(p.logger, "tls-handshake-start", clientConnID,
-			zap.Int("srcPort", sourcePort),
-			zap.Uint32("dstPort", destInfo.Port),
-			zap.String("dstAddr", dstAddr),
-			zap.Bool("speculative", speculativeDial != nil),
-		)
-		tlsStart := time.Now()
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
-		probeProxy(p.logger, "tls-handshake-done", clientConnID,
-			zap.Int("srcPort", sourcePort),
-			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),
-			zap.Bool("isMTLS", isMTLS),
-			zap.Error(err),
-		)
 		if err != nil {
 			// Client-facing MITM handshake failed; abandon the
 			// speculative upstream dial so its goroutine and socket
@@ -2030,10 +2031,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						speculativeDial.abandon()
 						speculativeDial = nil
 					}
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
-					dialStart := time.Now()
 					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim)
-					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 					// Release cbshim's per-connection rendezvous state
 					// at connection exit. dialPostgresSSLUpstream may
 					// have already called RegisterReal; if the matching
@@ -2054,11 +2052,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					// Fast path: the speculative dial targeted the
 					// same addr and offered a superset of the ALPN
 					// the caller now wants. Join it.
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "speculative-join"), zap.String("addr", addr))
-					joinStart := time.Now()
 					var specConn *tls.Conn
 					specConn, err = speculativeDial.join(ctx)
-					probeDial(p.logger, "speculative-join", clientConnID, addr, time.Since(joinStart).Nanoseconds(), zap.Error(err))
 					speculativeDial = nil
 					if err == nil {
 						negotiated := specConn.ConnectionState().NegotiatedProtocol
@@ -2089,10 +2084,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						speculativeDial.abandon()
 						speculativeDial = nil
 					}
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
-					dialStart := time.Now()
 					dstConn, err = tls.Dial("tcp", addr, cfg)
-					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
 					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
@@ -2111,10 +2103,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
-			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
-			dialStart := time.Now()
 			dstConn, err = net.Dial("tcp", dstAddr)
-			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 				return err
@@ -2155,11 +2144,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			break
 		}
 	}
-
-	probeProxy(p.logger, "integration-select", clientConnID,
-		zap.String("parser", string(parserType)),
-		zap.Bool("generic", generic),
-	)
 
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin

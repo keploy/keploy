@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,92 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// mockSummary returns a short human-readable description of the mock's
+// operation, used in pressure-drop and teardown logs so you can identify
+// which SQL query / mongo operation was lost without reading a full YAML.
+//
+//	MySQL  → "MySQL/mocks COM_QUERY: SELECT * FROM orders LIMIT 10"
+//	Mongo  → "Mongo/mocks kind=Mongo ts=18:43:16.357"
+//	Other  → "Http/mock-42"
+func mockSummary(mock *models.Mock) string {
+	if mock == nil {
+		return "<nil>"
+	}
+	kind := string(mock.Kind)
+	name := mock.Name
+	switch mock.Kind {
+	case models.MySQL:
+		if len(mock.Spec.MySQLRequests) > 0 {
+			req := mock.Spec.MySQLRequests[0]
+			// PacketBundle.Header is *PacketInfo; PacketInfo.Type is the packet type string.
+			hdrType := ""
+			if req.Header != nil {
+				hdrType = req.Header.Type
+			}
+			// Extract query text from the Message field (COM_QUERY, COM_STMT_PREPARE)
+			queryStr := ""
+			if m, ok := req.Message.(map[string]interface{}); ok {
+				if q, ok := m["query"].(string); ok && q != "" {
+					queryStr = q
+				}
+			}
+			if queryStr == "" {
+				queryStr = mock.Spec.Metadata["requestOperation"]
+			}
+			if len(queryStr) > 120 {
+				queryStr = queryStr[:120] + "…"
+			}
+			if queryStr != "" {
+				return fmt.Sprintf("MySQL/%s %s: %s", name, hdrType, queryStr)
+			}
+			return fmt.Sprintf("MySQL/%s %s", name, hdrType)
+		}
+		return fmt.Sprintf("MySQL/%s", name)
+	case models.Mongo:
+		// Mongo mocks come from the external integrations module; the Spec
+		// carries MongoRequests but the operation is buried in BSON payload.
+		// Log the connection ID and timestamp so the drop can be correlated
+		// to a TC by timestamp even without decoding the BSON.
+		ts := ""
+		if !mock.Spec.ReqTimestampMock.IsZero() {
+			ts = mock.Spec.ReqTimestampMock.UTC().Format("15:04:05.000")
+		}
+		conn := mock.ConnectionID
+		if ts != "" && conn != "" {
+			return fmt.Sprintf("Mongo/%s conn=%s req_ts=%s", name, conn, ts)
+		}
+		if ts != "" {
+			return fmt.Sprintf("Mongo/%s req_ts=%s", name, ts)
+		}
+		return fmt.Sprintf("Mongo/%s", name)
+	default:
+		return fmt.Sprintf("%s/%s", kind, name)
+	}
+}
+
+// pressureDropSummary builds the one-line log for a pressure-drop event.
+// It includes the mock summary plus the running counters so you can see
+// exactly what was lost and how bad the pressure situation is.
+func pressureDropSummary(mock *models.Mock, dropped, added int64) string {
+	return fmt.Sprintf("[DROP #%d/%d] %s", dropped, added, mockSummary(mock))
+}
+
+// tcCorrHint returns a short string suggesting which TC(s) the dropped
+// mock is likely associated with. Since we don't track TC→mock mapping at
+// AddMock time, we use req_ts of the mock relative to the current clock to
+// give the log reader a timestamp anchor for cross-referencing the TC yaml.
+func tcCorrHint(mock *models.Mock) string {
+	if mock == nil {
+		return ""
+	}
+	if !mock.Spec.ReqTimestampMock.IsZero() {
+		return fmt.Sprintf("TC correlation: check mappings.yaml for TCs whose req_ts ≈ %s",
+			mock.Spec.ReqTimestampMock.UTC().Format("15:04:05.000"))
+	}
+	return fmt.Sprintf("TC correlation: check mappings.yaml for TCs around now (ts_ms=%d)",
+		time.Now().UnixMilli())
+}
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
@@ -89,11 +176,46 @@ type SyncMockManager struct {
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
 
+	// pressureDropped / totalAdded track mocks dropped vs added under memory
+	// pressure. Both are atomic so they can be read without holding m.mu.
+	pressureDropped atomic.Int64
+	totalAdded      atomic.Int64
+
+	// outChanClosedDrops counts mocks that were already counted in
+	// totalAdded (they passed the pressure gate) but were then dropped
+	// because the outChan was already closed by CloseOutChan — i.e.
+	// the mock arrived AFTER shutdown sealed the stream. This is a
+	// real post-count drop, so without this counter totalAdded would
+	// over-report deliverable mocks. Accounting identity at shutdown:
+	//   totalAdded = forwarded + still_in_buffer + outChanClosedDrops
+	//                + sendBudget drops (dropCount)
+	outChanClosedDrops atomic.Int64
+
+	// pressureRanges records every [start, end] interval during which memory
+	// pressure was active. Appended on the false→true transition in
+	// SetMemoryPressure, closed on the true→false transition. The most recent
+	// entry has end == zero while pressure is still active. Guarded by mu.
+	//
+	// This is the join key for the Bug 0 TC-suppression fix:
+	// WasPressureActiveInWindow checks whether any range overlaps a TC's
+	// [HTTPReq.Timestamp, HTTPResp.Timestamp] window. Using pressure ranges
+	// instead of per-mock drop timestamps is RACE-FREE — memoryguard records
+	// the start the instant it flips memoryPause, BEFORE any mock-parser
+	// goroutine sees the result; so even if the paired AddMock fires AFTER
+	// the TC has reached routes/record.go, the overlap is already visible.
+	pressureRanges []pressureRange
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+}
+
+// pressureRange is one [start, end] interval during which memory pressure was
+// active. end is zero while the interval is still open (pressure not cleared yet).
+type pressureRange struct {
+	start, end time.Time
 }
 
 // Global instance is initialized at package load time
@@ -105,6 +227,56 @@ var instance = &SyncMockManager{
 // Get returns the global manager.
 func Get() *SyncMockManager {
 	return instance
+}
+
+// ShutdownProbe is a point-in-time snapshot of the SyncMockManager
+// returned by ShutdownSnapshot(). All fields are numeric so callers
+// can format it with fmt.Fprintf to stderr (bypassing zap) when they
+// need a SIGTERM-survivable log line.
+type ShutdownProbe struct {
+	BufferLen          int    // mocks parked in the windowing buffer
+	OutChanLen         int    // mocks queued for the live HTTP stream
+	OutChanCap         int    // outChan buffer capacity
+	OutChanBound       bool   // SetOutputChannel has fired
+	OutChanClosed      bool   // CloseOutChan has fired
+	TotalAdded         int64  // lifetime AddMock successes (post-dedup, post-pressure)
+	PressureDropped    int64  // mocks dropped by memory-pressure gate (BEFORE TotalAdded)
+	SendDropsTotal     uint64 // mocks dropped by sendToOutChan overflow (AFTER TotalAdded)
+	OutChanClosedDrops int64  // mocks dropped because outChan already closed (AFTER TotalAdded)
+	FirstReqSeen       bool   // windowing has started
+	RecentWindows      int    // resolved windows still tracked
+}
+
+// ShutdownSnapshot returns a best-effort read of the manager's state.
+// Designed for the SIGTERM probe registered via
+// utils.RegisterPreCancelHook — must be cheap and never block. Takes
+// the manager's mutexes briefly; safe to call concurrently with
+// AddMock / sendToOutChan because all reads are guarded.
+//
+// Returns the zero value if m is nil.
+func (m *SyncMockManager) ShutdownSnapshot() ShutdownProbe {
+	if m == nil {
+		return ShutdownProbe{}
+	}
+	var snap ShutdownProbe
+	m.mu.Lock()
+	snap.BufferLen = len(m.buffer)
+	snap.FirstReqSeen = m.firstReqSeen
+	snap.RecentWindows = len(m.recentWindows)
+	m.mu.Unlock()
+	m.outChanMu.RLock()
+	if m.outChan != nil {
+		snap.OutChanLen = len(m.outChan)
+		snap.OutChanCap = cap(m.outChan)
+		snap.OutChanBound = true
+	}
+	snap.OutChanClosed = m.outChanClosed
+	m.outChanMu.RUnlock()
+	snap.TotalAdded = m.totalAdded.Load()
+	snap.PressureDropped = m.pressureDropped.Load()
+	snap.SendDropsTotal = m.dropCount.Load()
+	snap.OutChanClosedDrops = m.outChanClosedDrops.Load()
+	return snap
 }
 
 // SetOutputChannel plugs an outgoing mock channel into the manager.
@@ -253,9 +425,35 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
-		m.mu.Unlock()
-		return
+		// Pressure is on at decode time, but this mock may have been decoded
+		// late for a request that happened during calm — its TC was captured
+		// at the ingress, so dropping the mock would orphan it. Decide by the
+		// request time, not now: drop only if the request ITSELF happened
+		// during pressure (the ingress never captured it, so there is no TC).
+		// Unknown timestamp → keep (safer than orphaning a captured TC).
+		reqTime := mock.Spec.ReqTimestampMock
+		if !reqTime.IsZero() && m.pressureActiveAtLocked(reqTime) {
+			m.mu.Unlock()
+			totalDropped := m.pressureDropped.Add(1)
+			totalAdded := m.totalAdded.Load()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Info("agent: mock dropped by memory pressure",
+					zap.String("dropped_mock", pressureDropSummary(mock, totalDropped, totalAdded)),
+					zap.String("tc_correlation", tcCorrHint(mock)),
+					zap.String("mock_kind", string(mock.Kind)),
+					zap.Time("mock_req_time", mock.Spec.ReqTimestampMock),
+					zap.Int64("ts_ms", time.Now().UnixMilli()),
+					zap.Int64("mocks_dropped_total", totalDropped),
+					zap.Int64("mocks_added_total", totalAdded),
+				)
+			}
+			return
+		}
+		// Request was during calm (or timestamp unknown) → its TC was captured
+		// → keep this mock; fall through to the normal buffer/forward path.
 	}
+	// Mock is being kept — count it as successfully added.
+	m.totalAdded.Add(1)
 
 	// Tag app-bootstrap traffic. Any mock captured before the first
 	// inbound request is startup/init traffic (e.g. an AWS Secret Manager
@@ -301,6 +499,10 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	switch {
 	case closed:
 		m.mu.Unlock()
+		// Count this post-totalAdded drop so the accounting identity
+		// holds and we can see exactly how many mocks were lost to the
+		// "arrived after outChan closed" race.
+		closedDrops := m.outChanClosedDrops.Add(1)
 		// Per-mock diagnostic: visible signal when AddMock drops a
 		// mock because the outChan has already been closed by
 		// CloseOutChan. This usually only fires during shutdown but
@@ -315,6 +517,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 				zap.String("connID", mock.ConnectionID),
 				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
 				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+				zap.Int64("outchan_closed_drops_total", closedDrops),
 			)
 		}
 		return
@@ -350,13 +553,37 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
 	m.sendToOutChan(mock)
 }
 
-// CloseOutChan closes the outgoing mock channel under the writer
-// lock so an in-flight sendToOutChan cannot race the close.
-// Idempotent; safe to call with outChan still nil.
+// CloseOutChan flushes any still-attributable buffered mocks and then
+// closes the outgoing mock channel under the writer lock so an in-flight
+// sendToOutChan cannot race the close. Idempotent; safe to call with
+// outChan still nil.
+//
+// The final FlushOwnedWindows is the shutdown twin of the periodic flush
+// ticker the proxy runs while recording is live (see proxy.go): that
+// ticker stops one step earlier in the shutdown sequence (its
+// clientConnCancel), so a mock that finished decoding after the ticker's
+// last tick — the classic teardown-phase late mock, a DB response still
+// being decoded when recording is asked to stop — would otherwise sit in
+// the buffer and be discarded here, orphaning its already-recorded test
+// case at replay. Flushing first persists every mock the buffer can still
+// attribute (session/connection mocks and per-test mocks whose
+// ReqTimestampMock falls inside an already-resolved window).
+//
+// FlushOwnedWindows takes outChanMu.RLock (via sendToOutChan); it runs to
+// completion and releases that lock BEFORE we take the write lock below,
+// so the two never deadlock. The proxy calls CloseOutChan only after all
+// connection handlers have drained, so no new mocks enter the buffer
+// between the flush and the close.
 func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
+	// Graceful-stop drain: flush every still-attributable buffered mock
+	// before sealing the channel. The periodic flush ticker stops one step
+	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
+	// discarded here and orphan its test case.
+	m.FlushOwnedWindows()
+
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {
@@ -480,37 +707,191 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	return m.firstReqSeen
 }
 
+// GetDropStats returns a snapshot of the current pressure state and drop counters.
+func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped int64, totalAdded int64, bufferSize int) {
+	m.mu.Lock()
+	pressureActive = m.memoryPause
+	bufferSize = len(m.buffer)
+	m.mu.Unlock()
+	pressureDropped = m.pressureDropped.Load()
+	totalAdded = m.totalAdded.Load()
+	return
+}
+
+// WasPressureActiveInWindow returns (true, overlapCount) if memory pressure
+// was active at any moment during [start, end].
+//
+// Called by the TC-send path in routes/record.go right before forwarding a
+// TC to the CLI: if it returns true, the TC is suppressed and never reaches
+// disk, so replay cannot encounter a missing-mock EOF for it.
+//
+// Why this is race-free unlike a per-mock-drop ledger:
+//   - memoryguard calls SetMemoryPressure(true) and the range is appended
+//     under mu in the SAME critical section that flips m.memoryPause = true.
+//   - Any mock-parser goroutine that subsequently sees memoryPause==true
+//     (and therefore drops its mock) does so BECAUSE the range was already
+//     committed. The "open" event happens-before any drop it causes.
+//   - The TC's HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp] is
+//     bounded by wall-clock time; if any pressure range overlaps that
+//     window, the TC was at risk of losing a mock to pressure regardless
+//     of when AddMock actually fires for that mock.
+//
+// Two intervals [a, b] and [c, d] overlap iff a <= d AND c <= b. An open
+// (still-active) range's end is treated as time.Now().
+func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool, int) {
+	if m == nil {
+		return false, 0
+	}
+	// Defensive: a zero start or end would either match every range or none
+	// depending on direction. Refuse to make a claim on degenerate inputs —
+	// the caller should fall back to "send the TC" rather than over-suppress.
+	if start.IsZero() || end.IsZero() {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		rEnd := r.end
+		if rEnd.IsZero() {
+			rEnd = now
+		}
+		// Standard interval-overlap test: [r.start, rEnd] vs [start, end]
+		if !r.start.After(end) && !rEnd.Before(start) {
+			count++
+		}
+	}
+	return count > 0, count
+}
+
+// pressureActiveAtLocked reports whether instant t fell inside any recorded
+// pressure interval. Caller MUST hold m.mu (this is the unlocked twin of
+// WasPressureActiveInWindow, used on the AddMock / SetMemoryPressure paths
+// that already hold the lock). A still-open interval extends to now.
+func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		end := r.end
+		if end.IsZero() {
+			end = now
+		}
+		if !t.Before(r.start) && !t.After(end) {
+			return true
+		}
+	}
+	return false
+}
+
+// PressureRangeCount returns the total number of pressure intervals recorded
+// so far. Exposed for the session-summary log in routes/record.go.
+func (m *SyncMockManager) PressureRangeCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pressureRanges)
+}
+
+// PressureRangesUnixMilli returns every recorded range as a [startMs, endMs]
+// pair in Unix milliseconds. A still-open range reports endMs = -1.
+// Diagnostics only — used to dump the actual ranges to the log so overlap
+// math can be verified by hand against a TC window.
+func (m *SyncMockManager) PressureRangesUnixMilli() [][2]int64 {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][2]int64, 0, len(m.pressureRanges))
+	for _, r := range m.pressureRanges {
+		endMs := int64(-1)
+		if !r.end.IsZero() {
+			endMs = r.end.UnixMilli()
+		}
+		out = append(out, [2]int64{r.start.UnixMilli(), endMs})
+	}
+	return out
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
 	}
 
+	// time.Now() OUTSIDE the lock: cheap, and avoids holding mu across the
+	// syscall. Reused for both the new-range open AND the close, so the two
+	// transitions can never produce a range with end < start due to clock skew.
+	now := time.Now()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
-	if !enabled {
-		return
-	}
-
-	// Drop buffered mocks to relieve memory pressure, but PRESERVE startup
-	// mocks. They were captured before the first inbound request, own no
-	// test window, and the periodic FlushOwnedWindows drain is their only
-	// remaining route to disk — wiping them here would silently lose the
-	// once-per-boot startup mock, the exact data loss the IsStartup tag
-	// exists to prevent (mirrors the rescues in DeleteMocksStrictlyBefore,
-	// ResolveRange and FlushOwnedWindows). They are few (typically one per
-	// boot), so the memory relief is effectively unchanged.
-	var kept []*models.Mock
-	for i := range m.buffer {
-		if isStartupMock(m.buffer[i]) {
-			kept = append(kept, m.buffer[i])
+	var clearedFromBuffer int
+	if enabled {
+		if !wasEnabled {
+			// false→true transition: open a new pressure interval.
+			// memoryguard fires SetMemoryPressure(true) once per 500ms tick,
+			// but only the first call (when wasEnabled is false) is a real
+			// transition; subsequent ticks while pressure is held are no-ops
+			// for range tracking — they would otherwise spam the slice.
+			m.pressureRanges = append(m.pressureRanges, pressureRange{start: now})
 		}
-		m.buffer[i] = nil
+		// Don't wipe the whole buffer: a mock whose request happened during
+		// calm belongs to an already-captured TC and must survive (else replay
+		// orphans it). Drop only mocks whose request was during pressure — the
+		// ingress never captured those, so there is no TC to orphan. Unknown
+		// timestamp → keep (safe default). In-place filter, then nil the tail.
+		before := len(m.buffer)
+		keep := m.buffer[:0]
+		for _, mk := range m.buffer {
+			if mk == nil {
+				continue
+			}
+			// Startup mocks (captured before the first inbound request) own no
+			// test window and must reach disk via FlushOwnedWindows — never wipe them.
+			if isStartupMock(mk) {
+				keep = append(keep, mk)
+				continue
+			}
+			if rt := mk.Spec.ReqTimestampMock; rt.IsZero() || !m.pressureActiveAtLocked(rt) {
+				keep = append(keep, mk)
+			}
+		}
+		for i := len(keep); i < before; i++ {
+			m.buffer[i] = nil
+		}
+		m.buffer = keep
+		clearedFromBuffer = before - len(keep)
+	} else if wasEnabled {
+		// true→false transition: close the most recent open interval.
+		// The defensive len check covers the degenerate case where
+		// SetMemoryPressure(false) is somehow called without a prior (true),
+		// e.g. a partial state restore in tests.
+		if n := len(m.pressureRanges); n > 0 && m.pressureRanges[n-1].end.IsZero() {
+			m.pressureRanges[n-1].end = now
+		}
 	}
-	// Re-home survivors into a fresh, small backing array so the (possibly
-	// large) old one is released to the GC.
-	m.buffer = append(make([]*models.Mock, 0, defaultMockBufferCapacity), kept...)
+	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
+
+	// Only log on state TRANSITIONS to avoid flooding logs on every 500ms memoryguard tick.
+	// Pressure can fire hundreds of times per second — we only want to see the moment it starts and clears.
+	if logger := m.dropLogger(); logger != nil {
+		if enabled && !wasEnabled {
+			// Pressure just turned ON (false→true transition)
+			logger.Info("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
+				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
+				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
+			)
+		} else if !enabled && wasEnabled {
+			logger.Info("agent: memory pressure cleared",
+				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_total", m.totalAdded.Load()),
+			)
+		}
+	}
 }
 
 // isStartupMock reports whether a buffered per-test mock is app-bootstrap
