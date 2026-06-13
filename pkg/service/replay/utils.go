@@ -20,6 +20,7 @@ import (
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -914,7 +915,7 @@ func printMismatchReport(r *models.MockMismatchReport) {
 
 	switch {
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
-		printSideBySideDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
+		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:
 		printFieldDiffTable(r.FieldDiffs)
 	case r.Diff != "":
@@ -926,43 +927,84 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	}
 }
 
-// printSideBySideDiff renders the whole mock request (left) against the whole
-// received request (right). Differing lines are highlighted — red on the mock
-// side, green on the received side. Every line of both requests is shown: no
-// folding and no line cap, so the user sees the complete mock.
-func printSideBySideDiff(mockName, expected, received string) {
-	leftHeader := "EXPECTED MOCK"
-	if mockName != "" {
-		leftHeader = "EXPECTED MOCK: " + mockName
+// printRequestDiff renders the closest mock's recorded request against the live
+// request in the SAME visual style as an HTTP test-case (response) mismatch: a
+// boxed diff whose rows are Expect/Actual sub-tables for the request line,
+// headers and body, produced by the shared matcher.DiffsPrinter. expected and
+// received are the whole rendered requests (request line + headers + body) the
+// parser emitted; the body therefore diffs field-by-field (changed fields
+// only), exactly like a response-body mismatch.
+func printRequestDiff(mockName, expected, received string) {
+	title := mockName
+	if title == "" {
+		title = "closest mock"
 	}
-	colWidths := tw.NewMapper[int, int]().Set(0, 55).Set(1, 55)
-	table := tablewriter.NewTable(os.Stdout,
-		tablewriter.WithRendition(tw.Rendition{
-			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.Off}},
-		}),
-		tablewriter.WithRowAutoWrap(1),
-		tablewriter.WithHeaderAlignment(tw.AlignCenter),
-		tablewriter.WithRowAlignment(tw.AlignLeft),
-		tablewriter.WithMaxWidth(120),
-		tablewriter.WithColumnWidths(colWidths),
-		// Keep the mock name verbatim — autoformat would render "mock-0" as "MOCK - 0".
-		tablewriter.WithHeaderAutoFormat(tw.Off),
-	)
-	table.Header([]string{leftHeader, "RECEIVED REQUEST"})
-	// Show the WHOLE mock side-by-side — every line, no folding and no cap.
-	for _, row := range alignDiffRows(expected, received) {
-		left, right := preserveIndent(row.left), preserveIndent(row.right)
-		if row.changed {
-			if left != "" {
-				left = models.HighlightFailingString(left)
-			}
-			if right != "" {
-				right = models.HighlightPassingString(right)
-			}
+	dp := matcherUtils.NewDiffsPrinter(title)
+
+	mockLine, mockHeaders, mockBody := parseRenderedRequest(expected)
+	liveLine, liveHeaders, liveBody := parseRenderedRequest(received)
+
+	// Request line -> method + target, surfaced as Expect/Actual rows only when
+	// they differ (for a body mismatch the closest mock shares method/path).
+	mockMethod, mockTarget := splitRequestLine(mockLine)
+	liveMethod, liveTarget := splitRequestLine(liveLine)
+	if mockMethod != liveMethod {
+		dp.PushHeaderDiff(mockMethod, liveMethod, "method", nil)
+	}
+	if mockTarget != liveTarget {
+		dp.PushHeaderDiff(mockTarget, liveTarget, "url", nil)
+	}
+
+	// Headers: push only the keys whose values differ, mirroring the response
+	// header diff. Identical (including both-redacted) headers are skipped.
+	seen := map[string]bool{}
+	for k, mv := range mockHeaders {
+		seen[k] = true
+		if lv := liveHeaders[k]; mv != lv {
+			dp.PushHeaderDiff(mv, lv, k, nil)
 		}
-		table.Append([]string{left, right})
 	}
-	table.Render()
+	for k, lv := range liveHeaders {
+		if !seen[k] && lv != "" {
+			dp.PushHeaderDiff("", lv, k, nil)
+		}
+	}
+
+	// Body: JSON bodies diff field-by-field (changed fields only), just like a
+	// response body mismatch; non-JSON falls back to a plain Expect/Actual cell.
+	dp.PushBodyDiff(mockBody, liveBody, nil)
+
+	_ = dp.Render()
+}
+
+// parseRenderedRequest splits a rendered request
+// ("METHOD target\nKey: val\n...\n\n<body>") back into its request line, header
+// map and body so the pieces can feed the shared Expect/Actual diff renderer.
+func parseRenderedRequest(s string) (line string, headers map[string]string, body string) {
+	headers = map[string]string{}
+	headBlock := s
+	if i := strings.Index(s, "\n\n"); i >= 0 {
+		headBlock, body = s[:i], s[i+2:]
+	}
+	lines := strings.Split(headBlock, "\n")
+	if len(lines) == 0 {
+		return line, headers, body
+	}
+	line = lines[0]
+	for _, l := range lines[1:] {
+		if j := strings.Index(l, ": "); j >= 0 {
+			headers[l[:j]] = l[j+2:]
+		}
+	}
+	return line, headers, body
+}
+
+// splitRequestLine splits "METHOD target" into its method and target.
+func splitRequestLine(line string) (method, target string) {
+	if i := strings.Index(line, " "); i >= 0 {
+		return line[:i], line[i+1:]
+	}
+	return line, ""
 }
 
 // printFieldDiffTable renders the compact FIELD | EXPECTED | RECEIVED table —
@@ -994,89 +1036,4 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 		table.Append([]string{d.Path, exp, rec})
 	}
 	table.Render()
-}
-
-// mockDiffRow is one aligned row of the side-by-side diff.
-type mockDiffRow struct {
-	left    string
-	right   string
-	changed bool
-}
-
-// alignDiffRows line-aligns the two renders via LCS: equal lines pair up
-// unchanged; runs of differing lines zip together as changed rows (one side
-// blank when the other has extra lines).
-func alignDiffRows(expected, received string) []mockDiffRow {
-	expLines := strings.Split(expected, "\n")
-	recLines := strings.Split(received, "\n")
-	n, m := len(expLines), len(recLines)
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
-	}
-	for i := n - 1; i >= 0; i-- {
-		for j := m - 1; j >= 0; j-- {
-			if expLines[i] == recLines[j] {
-				dp[i][j] = dp[i+1][j+1] + 1
-			} else if dp[i+1][j] >= dp[i][j+1] {
-				dp[i][j] = dp[i+1][j]
-			} else {
-				dp[i][j] = dp[i][j+1]
-			}
-		}
-	}
-	var rows []mockDiffRow
-	var dels, inss []string
-	flush := func() {
-		for k := 0; k < len(dels) || k < len(inss); k++ {
-			var l, r string
-			if k < len(dels) {
-				l = dels[k]
-			}
-			if k < len(inss) {
-				r = inss[k]
-			}
-			rows = append(rows, mockDiffRow{left: l, right: r, changed: true})
-		}
-		dels, inss = nil, nil
-	}
-	i, j := 0, 0
-	for i < n && j < m {
-		switch {
-		case expLines[i] == recLines[j]:
-			flush()
-			rows = append(rows, mockDiffRow{left: expLines[i], right: recLines[j]})
-			i++
-			j++
-		case dp[i+1][j] >= dp[i][j+1]:
-			dels = append(dels, expLines[i])
-			i++
-		default:
-			inss = append(inss, recLines[j])
-			j++
-		}
-	}
-	for ; i < n; i++ {
-		dels = append(dels, expLines[i])
-	}
-	for ; j < m; j++ {
-		inss = append(inss, recLines[j])
-	}
-	flush()
-	return rows
-}
-
-// preserveIndent swaps leading spaces for braille-blank (U+2800) so
-// tablewriter's cell trimming doesn't flatten JSON indentation. NBSP doesn't
-// work: unicode.IsSpace counts it as whitespace, so TrimSpace-based cell
-// cleanup strips it; U+2800 renders blank but is not whitespace.
-func preserveIndent(s string) string {
-	i := 0
-	for i < len(s) && s[i] == ' ' {
-		i++
-	}
-	if i == 0 {
-		return s
-	}
-	return strings.Repeat("⠀", i) + s[i:]
 }
