@@ -15,15 +15,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// Rendering bounds for the side-by-side whole-mock diff. These cap a single
-// unmatched request so a large payload can't bloat the report yaml or the CLI
-// view.
-const (
-	renderMaxValueLen = 100  // longest rendered header value
-	renderMaxBodyLen  = 2000 // body bytes shown (pretty-printed)
-	renderMaxHeaders  = 12   // headers shown per side
-)
-
 // valueRedacted replaces sensitive/obfuscated values in the rendered requests.
 const valueRedacted = "(redacted)"
 
@@ -121,21 +112,18 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	shown := 0
+	// Render ALL headers and the WHOLE body — no count/length cap — so the user
+	// sees the complete recorded mock side-by-side. Sensitive / obfuscated
+	// values are still redacted.
 	for _, k := range keys {
-		if shown >= renderMaxHeaders {
-			fmt.Fprintf(&b, "\n(+%d more headers)", len(keys)-shown)
-			break
-		}
 		v := header[k]
 		if isSensitiveHeader(k) || isObfuscated(v) {
 			v = valueRedacted
 		}
-		fmt.Fprintf(&b, "\n%s: %s", textproto.CanonicalMIMEHeaderKey(k), truncateForDisplay(v, renderMaxValueLen))
-		shown++
+		fmt.Fprintf(&b, "\n%s: %s", textproto.CanonicalMIMEHeaderKey(k), v)
 	}
 	if body != "" {
-		fmt.Fprintf(&b, "\n\n%s", truncateForDisplay(prettyJSONBody(body), renderMaxBodyLen))
+		fmt.Fprintf(&b, "\n\n%s", prettyJSONBody(body))
 	}
 	return b.String()
 }
@@ -151,17 +139,4 @@ func prettyJSONBody(body string) string {
 		return body
 	}
 	return buf.String()
-}
-
-// truncateForDisplay rune-safely truncates s to at most max characters,
-// appending an ellipsis when something was cut.
-func truncateForDisplay(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max]) + "…"
 }

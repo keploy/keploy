@@ -928,8 +928,8 @@ func printMismatchReport(r *models.MockMismatchReport) {
 
 // printSideBySideDiff renders the whole mock request (left) against the whole
 // received request (right). Differing lines are highlighted — red on the mock
-// side, green on the received side — and runs of unchanged lines longer than
-// foldThreshold collapse into a "… N unchanged lines …" row.
+// side, green on the received side. Every line of both requests is shown: no
+// folding and no line cap, so the user sees the complete mock.
 func printSideBySideDiff(mockName, expected, received string) {
 	leftHeader := "EXPECTED MOCK"
 	if mockName != "" {
@@ -949,9 +949,10 @@ func printSideBySideDiff(mockName, expected, received string) {
 		tablewriter.WithHeaderAutoFormat(tw.Off),
 	)
 	table.Header([]string{leftHeader, "RECEIVED REQUEST"})
-	for _, row := range foldUnchangedRows(alignDiffRows(expected, received)) {
+	// Show the WHOLE mock side-by-side — every line, no folding and no cap.
+	for _, row := range alignDiffRows(expected, received) {
 		left, right := preserveIndent(row.left), preserveIndent(row.right)
-		if !row.fold && row.changed {
+		if row.changed {
 			if left != "" {
 				left = models.HighlightFailingString(left)
 			}
@@ -1000,19 +1001,14 @@ type mockDiffRow struct {
 	left    string
 	right   string
 	changed bool
-	fold    bool // "… N unchanged lines …" marker
 }
-
-// maxDiffRenderLines caps lines per side fed to the LCS alignment so a
-// pathological payload can't make rendering quadratic-expensive.
-const maxDiffRenderLines = 400
 
 // alignDiffRows line-aligns the two renders via LCS: equal lines pair up
 // unchanged; runs of differing lines zip together as changed rows (one side
 // blank when the other has extra lines).
 func alignDiffRows(expected, received string) []mockDiffRow {
-	expLines := capLines(strings.Split(expected, "\n"))
-	recLines := capLines(strings.Split(received, "\n"))
+	expLines := strings.Split(expected, "\n")
+	recLines := strings.Split(received, "\n")
 	n, m := len(expLines), len(recLines)
 	dp := make([][]int, n+1)
 	for i := range dp {
@@ -1068,54 +1064,6 @@ func alignDiffRows(expected, received string) []mockDiffRow {
 	}
 	flush()
 	return rows
-}
-
-func capLines(lines []string) []string {
-	if len(lines) <= maxDiffRenderLines {
-		return lines
-	}
-	return append(lines[:maxDiffRenderLines:maxDiffRenderLines], "… (truncated)")
-}
-
-// foldUnchangedRows collapses runs of unchanged rows longer than foldThreshold
-// into a "… N unchanged lines …" marker, keeping foldContext rows on each side
-// of every change — git-diff style context folding.
-func foldUnchangedRows(rows []mockDiffRow) []mockDiffRow {
-	const (
-		foldThreshold = 7
-		foldContext   = 2
-	)
-	var out []mockDiffRow
-	i := 0
-	for i < len(rows) {
-		if rows[i].changed {
-			out = append(out, rows[i])
-			i++
-			continue
-		}
-		runStart := i
-		for i < len(rows) && !rows[i].changed {
-			i++
-		}
-		runLen := i - runStart
-		lead, trail := foldContext, foldContext
-		if runStart == 0 {
-			lead = 0
-		}
-		if i == len(rows) {
-			trail = 0
-		}
-		if runLen <= foldThreshold || runLen <= lead+trail {
-			out = append(out, rows[runStart:i]...)
-			continue
-		}
-		out = append(out, rows[runStart:runStart+lead]...)
-		folded := runLen - lead - trail
-		marker := fmt.Sprintf("… %d unchanged lines …", folded)
-		out = append(out, mockDiffRow{left: marker, right: marker, fold: true})
-		out = append(out, rows[i-trail:i]...)
-	}
-	return out
 }
 
 // preserveIndent swaps leading spaces for braille-blank (U+2800) so
