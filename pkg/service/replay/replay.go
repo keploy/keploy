@@ -751,9 +751,29 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 
-		if !testRunResult && len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+		// Print the mismatch table whenever there ARE mock mismatches — not
+		// only when the run as a whole failed. A green run with mock misses
+		// (e.g. tests demoted to OBSOLETE, or a protocol whose misses can't
+		// fail a test) is exactly the case the user must not stay blind to.
+		//
+		// Exception on green runs: DNS misses are answered with a synthetic
+		// response by design (the app keeps working), so on a fully passing
+		// run they are routine, not actionable — without this filter every
+		// healthy run with app-startup DNS chatter would print the table.
+		mismatchRows := r.mockMismatchFailures.GetFailures()
+		if testRunResult {
+			actionable := make([]TestFailure, 0, len(mismatchRows))
+			for _, f := range mismatchRows {
+				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.Protocol == "DNS" {
+					continue
+				}
+				actionable = append(actionable, f)
+			}
+			mismatchRows = actionable
+		}
+		if len(mismatchRows) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
-			for _, failure := range r.mockMismatchFailures.GetFailures() {
+			for _, failure := range mismatchRows {
 				failuresByTestSet[failure.TestSetID] = true
 			}
 
@@ -762,7 +782,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			if testRunResult {
+				r.logger.Warn("Tests passed, but some outgoing calls did not match the recorded mocks.",
+					zap.String("test_sets", testSets),
+					zap.String("next_step", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+			} else {
+				r.logger.Info("Some testsets failed due to mock differences.",
+					zap.String("test_sets", testSets),
+					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
+			}
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -1979,19 +2007,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
 							if f.MismatchReport != nil {
 								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
-									Protocol:      f.MismatchReport.Protocol,
-									ActualSummary: f.MismatchReport.ActualSummary,
-									ClosestMock:   f.MismatchReport.ClosestMock,
-									Diff:          f.MismatchReport.Diff,
-									NextSteps:     f.MismatchReport.NextSteps,
+									Protocol:       f.MismatchReport.Protocol,
+									ActualSummary:  f.MismatchReport.ActualSummary,
+									ClosestMock:    f.MismatchReport.ClosestMock,
+									Diff:           f.MismatchReport.Diff,
+									NextSteps:      f.MismatchReport.NextSteps,
+									MatchPhase:     f.MismatchReport.MatchPhase,
+									CandidateCount: f.MismatchReport.CandidateCount,
+									FieldDiffs:     f.MismatchReport.FieldDiffs,
+									ClosestMockReq: f.MismatchReport.ClosestMockReq,
+									ReceivedReq:    f.MismatchReport.ReceivedReq,
 								})
 							}
 						}
-						if !r.instrument {
-							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
-								for _, me := range mockErrors {
-									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
-								}
+						// Fetch in EVERY mode, not just non-instrument. The
+						// live HTTP agent transport returns a nil
+						// GetErrorChannel, so the channel-fed store above stays
+						// empty in instrument mode (local `keploy test -c`) —
+						// GetMockErrors is the one source that works on all
+						// transports. Fetched calls are also pushed into
+						// mockMismatchFailures so the end-of-run MOCKS MISMATCH
+						// SUMMARY table shows them; the store was already read
+						// for THIS test above (filtered by test ID), so this
+						// cannot double-count.
+						if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
+							for _, me := range mockErrors {
+								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
+								r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCase.Name, me)
 							}
 						}
 					}
@@ -2563,6 +2605,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, firstTestCaseTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	} else if r.config.Test.SchemaNoiseDetection && r.instrument {
+		// --schema-noise-detection without --remove-unused-mocks: the learned
+		// req_body_noise used to ride only inside UpdateMocks (the pruning
+		// path), so detection alone learned noise and threw it away at exit.
+		// Persist it through the prune-free path instead. We persist noise
+		// from ALL consumed mocks (not just passing tests): the mock matched,
+		// so the request-side drift it learned is valid even when the test
+		// later failed on its response.
+		type mockNoisePersister interface {
+			PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error
+		}
+		if p, ok := r.mockDB.(mockNoisePersister); ok {
+			if err := p.PersistMockNoise(runTestSetCtx, testSetID, totalConsumedMocks); err != nil {
+				utils.LogError(r.logger, err, "failed to persist learned request-body noise onto mocks")
+			}
+		} else {
+			r.logger.Debug("mockDB implementation does not support prune-free noise persistence; learned req_body_noise not persisted")
 		}
 	}
 
