@@ -707,7 +707,7 @@ func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID s
 // AddUnmatchedCallForTest records a mock-not-found error fetched via the
 // agent's GetMockErrors API (the path used on all transports, notably the
 // HTTP agent transport whose error channel is nil) so it appears in the
-// end-of-run MOCKS MISMATCH SUMMARY table alongside channel-sourced failures.
+// end-of-run mock mismatch report alongside channel-sourced failures.
 func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseID string, call models.UnmatchedCall) {
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
@@ -820,10 +820,9 @@ func CompareMockSlices(expected, actual []string) []MockDifference {
 	return differences
 }
 
-// PrintFailuresTable prints all failures, one block per failed test case: the
-// unmatched outgoing call, a side-by-side EXPECTED MOCK | RECEIVED REQUEST
-// view of the whole request with differing lines highlighted and long
-// unchanged runs folded, and the hint.
+// PrintFailuresTable prints all failures, one block per failed test case: a
+// "Mock mismatch" heading for each unmatched outgoing call followed by the
+// same Expect/Actual diff used for HTTP test-case mismatches, and the hint.
 func (tfs *TestFailureStore) PrintFailuresTable() {
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
@@ -833,7 +832,7 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 		return
 	}
 
-	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
+	fmt.Println("\n=========================== MOCK MISMATCH ===========================")
 
 	testSetGroups := make(map[string][]TestFailure)
 	for _, failure := range tfs.failures {
@@ -900,7 +899,7 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		fmt.Println("  Outgoing call mock was not matched")
 		return
 	}
-	heading := fmt.Sprintf("  Unmatched outgoing call: [%s] %s", r.Protocol, r.ActualSummary)
+	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
 	if r.ClosestMock != "" {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
 	}
