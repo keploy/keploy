@@ -2802,9 +2802,12 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		}
 	} else {
 		// Rendezvous could not complete (errChannel full or the drain stalled
-		// past the deadline). Take what the window holds but DON'T close it, so
-		// a miss the goroutine is still routing isn't dropped; the next
-		// BeginTestErrorCapture carries any leftovers forward. Degenerate path.
+		// past the deadline). Take what the window holds now but DON'T close it,
+		// so a miss the goroutine is still routing isn't dropped from THIS fetch.
+		// Any straggler the drain files afterward is discarded by the next
+		// BeginTestErrorCapture (which resets a never-closed window) - preferring
+		// correct per-test attribution over keeping a possibly cross-test miss.
+		// Degenerate path.
 		if acc := p.activeTestErrors.Load(); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
 		}

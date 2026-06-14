@@ -2058,8 +2058,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
-					currentFailures++
-					testSetStatus = models.TestSetStatusFailed
+					// Outcome was already counted at lines ~1850-1864; don't double-count here.
 					break
 				}
 			} else {
@@ -2072,8 +2071,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
-				currentFailures++
-				testSetStatus = models.TestSetStatusFailed
+				// Outcome was already counted at lines ~1850-1864; don't double-count here.
 				break
 			}
 
@@ -2317,6 +2315,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
+			if testResult == nil {
+				// Matcher returned no result (e.g. an internal compare path returning
+				// (false, nil)). Handle it HERE, before the hadStreamingMismatch block
+				// below dereferences testResult.BodyResult. Finalize the window + persist
+				// a failed result so the miss surfaces and can't carry forward.
+				utils.LogError(r.logger, nil, "streaming test result is nil")
+				failedResult := r.CreateFailedTestResult(tc, testSetID, started, "internal error: streaming comparison returned no result")
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
+				}
+				continue
+			}
 			// Override testPass if streaming comparison failed
 			// (HTTP matcher skips body comparison for non-JSON bodies by default)
 			if hadStreamingMismatch {
@@ -2441,17 +2454,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					break
 				}
 			} else {
+				// Unreachable: a nil testResult is finalized right after CompareHTTPResp
+				// above (persists a failed result and continues). Defensive only.
 				utils.LogError(r.logger, nil, "streaming test result is nil")
-				// Finalize the window + persist a failed result (same rationale as
-				// the non-streaming nil-result branch) so a streaming miss surfaces
-				// and can't carry forward.
-				failedResult := r.CreateFailedTestResult(tc, testSetID, started, "internal error: streaming comparison returned no result")
-				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
-				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
-					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
-				}
-				failure++
-				testSetStatus = models.TestSetStatusFailed
 				break
 			}
 		}
@@ -3712,9 +3717,9 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 // (via an optional capability — older agents / non-agent instrumentations skip
 // it and fall back to the legacy global queue) so a mock miss during this test
 // attributes to THIS test instead of whichever test drains GetMockErrors next.
-// Called right before SimulateRequest on the normal (non-streaming) path; the
-// matching GetMockErrors closes the window. The streaming path does not call it
-// (Phase 2 never fetches GetMockErrors, so the window would never be closed).
+// Called right before SimulateRequest on BOTH the normal and streaming paths;
+// the matching attachMockErrors/GetMockErrors closes the window (the streaming
+// path closes it only after the stream body is fully consumed).
 // Best-effort: a failure only degrades to the old behaviour.
 func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 	if b, ok := r.instrumentation.(interface {
