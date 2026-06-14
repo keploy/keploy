@@ -76,9 +76,12 @@ fi
 wait
 echo "Recorded test cases and mocks"
 
-# Force a mock mismatch: rewrite the recorded request host on the mock side so
-# the live outgoing request (to pokeapi.co) no longer matches any recorded
-# mock. Done on the mocks only — the test cases (inbound) are untouched.
+# Force a mock mismatch: rewrite the recorded request PATH on the mock side.
+# HTTP schema matching compares the request URL path (not host), so changing
+# the recorded "/api/v2/..." path means the live outgoing request to
+# "/api/v2/..." no longer matches any recorded mock -> the matcher reports an
+# unmatched outgoing call. Only the mocks are touched; the test cases (inbound
+# requests) are untouched, so the inbound path still replays normally.
 shopt -s nullglob
 mock_files=( ./keploy/test-set-*/mocks.yaml )
 shopt -u nullglob
@@ -87,10 +90,19 @@ if [ ${#mock_files[@]} -eq 0 ]; then
     cat record_logs.txt
     exit 1
 fi
+mutated_any=false
 for mf in "${mock_files[@]}"; do
-    sed -i 's#pokeapi\.co#pokeapi-mismatch.invalid#g' "$mf"
-    echo "mutated recorded mocks: $mf"
+    sed -i 's#/api/v2/#/api/v0-mismatch/#g' "$mf"
+    if grep -q '/api/v0-mismatch/' "$mf"; then
+        echo "mutated recorded request path in: $mf"
+        mutated_any=true
+    fi
 done
+if [ "$mutated_any" != true ]; then
+    echo "::error::mutation changed no recorded request path — sample/mock layout changed; e2e can't force a mismatch"
+    head -50 "${mock_files[0]}"
+    exit 1
+fi
 
 # Replay. The mutated mocks no longer match → keploy must report the unmatched
 # outgoing call. The replay itself is EXPECTED to not all-pass here.

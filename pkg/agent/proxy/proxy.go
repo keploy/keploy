@@ -130,7 +130,12 @@ type Proxy struct {
 	// and discards errors when nil (no test running). This prevents the
 	// errChannel from filling up with background noise (OTel, health checks).
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
-	errDrainOnce     sync.Once
+	// captureMu serializes the drain goroutine's routing decision (read
+	// activeTestErrors, then add) against BeginTestErrorCapture / GetMockErrors
+	// opening or closing the window. Without it, the goroutine could add a miss
+	// to an accumulator that GetMockErrors has just swapped away, losing it.
+	captureMu    sync.Mutex
+	errDrainOnce sync.Once
 	// pendingMockErrors retains mock-not-found errors that arrive while no
 	// test capture window is active (activeTestErrors is nil). Nothing
 	// currently calls BeginTestErrorCapture, so without this the continuous
@@ -2639,13 +2644,20 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					if !ok {
 						return
 					}
-					if acc := p.activeTestErrors.Load(); acc != nil {
-						acc.add(err)
-					} else if isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors) {
-						// Retained for the replayer's per-test GetMockErrors
-						// fetch — these carry the mismatch report shown to the
-						// user. Non-mock-miss noise still falls to discard below.
-					} else {
+					// Route under captureMu so the window can't be swapped
+					// between the Load and the add. The accumulator is bounded
+					// too, so even a window left open (e.g. an error path that
+					// skipped GetMockErrors) can't grow without limit.
+					p.captureMu.Lock()
+					acc := p.activeTestErrors.Load()
+					if acc != nil {
+						acc.addBounded(err, maxPendingMockErrors)
+						p.captureMu.Unlock()
+						continue
+					}
+					retained := isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors)
+					p.captureMu.Unlock()
+					if !retained {
 						// Log only the first discard and then every 100th to reduce noise.
 						n := discarded.Add(1)
 						if n == 1 || n%100 == 0 {
@@ -2666,8 +2678,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // background traffic) are discarded so they don't attach to this test.
 // GetMockErrors retrieves and the next BeginTestErrorCapture resets the window.
 func (p *Proxy) BeginTestErrorCapture() {
+	p.captureMu.Lock()
 	p.pendingMockErrors.drain()
 	p.activeTestErrors.Store(&testErrorAccumulator{})
+	p.captureMu.Unlock()
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -2690,6 +2704,12 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+	// Everything below runs under captureMu so the drain goroutine can't add to
+	// the window between our sweep and the swap-close. The goroutine only holds
+	// captureMu briefly around its routing decision, never across a channel
+	// receive, so this can't deadlock.
+	p.captureMu.Lock()
+
 	// Pre-window stragglers (retained before the first capture window — e.g.
 	// startup traffic). Oldest first.
 	rawErrs := p.pendingMockErrors.drain()
@@ -2713,12 +2733,13 @@ drainLoop:
 		}
 	}
 
-	// Then the per-test accumulator (errors the drain goroutine already routed
-	// into the active window). Drained AFTER the sweep so an item the goroutine
-	// moved off errChannel concurrently is still captured here.
-	if acc := p.activeTestErrors.Load(); acc != nil {
+	// End the window: Swap to nil so the drain goroutine stops appending to
+	// this test's accumulator (otherwise the last test's window would stay
+	// installed and grow for the rest of the process), and take its errors.
+	if acc := p.activeTestErrors.Swap(nil); acc != nil {
 		rawErrs = append(rawErrs, acc.drain()...)
 	}
+	p.captureMu.Unlock()
 
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {

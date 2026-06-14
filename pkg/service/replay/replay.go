@@ -2164,7 +2164,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
 
-			r.beginTestErrorCapture(runTestSetCtx)
+			// NOTE: no BeginTestErrorCapture here — the streaming (Phase 2) path
+			// doesn't fetch GetMockErrors, so opening a window would never be
+			// closed. Streaming mock-mismatch reporting is a separate follow-up.
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
