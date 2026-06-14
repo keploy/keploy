@@ -114,30 +114,40 @@ if grep "WARNING: DATA RACE" test_logs.txt; then
     exit 1
 fi
 
-# Assert the mismatch surfaced. Primary signal: the console "MOCK MISMATCH"
-# report / per-call "Mock mismatch:" heading printed by the replayer.
+# Assert the SPECIFIC forced mismatch surfaced — an HTTP unmatched outgoing
+# call on the mutated /api/v2/ path. A generic banner (e.g. a routine DNS miss)
+# must NOT satisfy this, otherwise the suite could pass while the HTTP mismatch
+# was actually dropped. The per-call heading is "Mock mismatch: [HTTP] <METHOD>
+# <path>" and the live path is the unmutated /api/v2/... the app requested.
 mismatch_reported=false
-if grep -qiE "MOCK MISMATCH|Mock mismatch:" test_logs.txt; then
-    echo "✓ replay surfaced the MOCK MISMATCH report"
+if grep -qE "Mock mismatch: \[HTTP\][^]]*/api/v2/" test_logs.txt; then
+    echo "✓ replay reported the forced HTTP /api/v2/ mock mismatch"
     mismatch_reported=true
 fi
 
-# Secondary signal: the test-set report YAML carries unmatched_calls / match_phase.
+# Equivalent specific check on the test-set report yaml: an unmatched_calls
+# entry whose protocol is HTTP and whose actual_summary references /api/v2/.
 shopt -s nullglob
 reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
 shopt -u nullglob
 for rf in "${reports[@]}"; do
-    if grep -qE "unmatched_calls|match_phase|closest_mock" "$rf"; then
-        echo "✓ report $(basename "$rf") carries the structured mismatch fields"
+    # Limit the scan to each report's unmatched_calls block and require both an
+    # HTTP protocol and an /api/v2/ actual_summary within it.
+    if awk '/unmatched_calls:/{f=1} f' "$rf" | grep -qE "protocol: ?\"?HTTP" \
+        && awk '/unmatched_calls:/{f=1} f' "$rf" | grep -qE "actual_summary:.*/api/v2/"; then
+        echo "✓ $(basename "$rf") has an HTTP /api/v2/ unmatched_calls entry"
         mismatch_reported=true
     fi
 done
 
 if [ "$mismatch_reported" != true ]; then
-    echo "::error::replay did NOT surface the mock mismatch — report regressed"
-    cat test_logs.txt
+    echo "::error::replay did NOT report the forced HTTP /api/v2/ mock mismatch"
+    echo "--- mismatch/unmatched lines in test_logs.txt ---"
+    grep -iE "mismatch|unmatched|no matching" test_logs.txt | head -20
+    echo "--- tail of test_logs.txt ---"
+    tail -40 test_logs.txt
     exit 1
 fi
 
-echo "mock-mismatch e2e passed: the unmatched outgoing call was reported"
+echo "mock-mismatch e2e passed: the forced HTTP /api/v2/ unmatched call was reported"
 exit 0

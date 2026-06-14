@@ -3705,8 +3705,10 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 // (via an optional capability — older agents / non-agent instrumentations skip
 // it and fall back to the legacy global queue) so a mock miss during this test
 // attributes to THIS test instead of whichever test drains GetMockErrors next.
-// Called right before each SimulateRequest, on both the normal and streaming
-// paths. Best-effort: a failure only degrades to the old behaviour.
+// Called right before SimulateRequest on the normal (non-streaming) path; the
+// matching GetMockErrors closes the window. The streaming path does not call it
+// (Phase 2 never fetches GetMockErrors, so the window would never be closed).
+// Best-effort: a failure only degrades to the old behaviour.
 func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 	if b, ok := r.instrumentation.(interface {
 		BeginTestErrorCapture(context.Context) error

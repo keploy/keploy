@@ -134,15 +134,20 @@ type Proxy struct {
 	// activeTestErrors, then add) against BeginTestErrorCapture / GetMockErrors
 	// opening or closing the window. Without it, the goroutine could add a miss
 	// to an accumulator that GetMockErrors has just swapped away, losing it.
-	captureMu    sync.Mutex
-	errDrainOnce sync.Once
-	// pendingMockErrors retains mock-not-found errors that arrive while no
-	// test capture window is active (activeTestErrors is nil). Nothing
-	// currently calls BeginTestErrorCapture, so without this the continuous
-	// drain would discard every mock miss before GetMockErrors (called by the
-	// replayer after the test simulation) can read it. Only mock-not-found
-	// errors are retained here — background noise (OTel, health checks) still
-	// gets discarded, and the buffer is bounded so it can't grow unboundedly.
+	captureMu sync.Mutex
+	// errDrainActive is true while the StartErrorDrain goroutine is running. It
+	// gates the GetMockErrors flush-marker rendezvous (which needs that single
+	// owner to consume the marker); when false we use the legacy direct sweep.
+	errDrainActive atomic.Bool
+	errDrainOnce   sync.Once
+	// pendingMockErrors retains mock-not-found errors that arrive while no test
+	// capture window is active (activeTestErrors is nil) — e.g. between tests,
+	// or when the replayer/agent predates the BeginTestErrorCapture wiring. The
+	// replayer normally opens a window per test (so misses route to
+	// activeTestErrors), but this remains the fallback so a miss is never
+	// silently dropped before GetMockErrors reads it. Only mock-not-found errors
+	// are retained (background noise — OTel, health checks — is still
+	// discarded), and the buffer is bounded so it can't grow unboundedly.
 	pendingMockErrors testErrorAccumulator
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
@@ -2631,11 +2636,22 @@ func isMockNotFoundErr(err error) bool {
 // accumulator when a test is running, and discarded otherwise.
 // This prevents background services (OTel, health checks) from saturating the
 // 100-slot error channel and blocking test coordination.
+// flushMarker is a sentinel GetMockErrors pushes onto errChannel. Because the
+// single drain goroutine consumes errChannel in FIFO order, once it pulls the
+// marker every error queued before it has already been routed — so closing the
+// capture window at that point cannot strand a miss the goroutine had received
+// but not yet filed. The goroutine closes done to signal it reached the marker.
+type flushMarker struct{ done chan struct{} }
+
+func (*flushMarker) Error() string { return "keploy: capture flush marker" }
+
 func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	p.errDrainOnce.Do(func() {
+		p.errDrainActive.Store(true)
 		var discarded atomic.Int64
 		go func() {
 			defer utils.Recover(p.logger)
+			defer p.errDrainActive.Store(false)
 			for {
 				select {
 				case <-ctx.Done():
@@ -2643,6 +2659,12 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 				case err, ok := <-p.errChannel:
 					if !ok {
 						return
+					}
+					// Flush-marker rendezvous: signal that we've reached it
+					// (all prior errors are already routed) and move on.
+					if m, isMarker := err.(*flushMarker); isMarker {
+						close(m.done)
+						continue
 					}
 					// Route under captureMu so the window can't be swapped
 					// between the Load and the add. The accumulator is bounded
@@ -2704,32 +2726,53 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
-	// Everything below runs under captureMu so the drain goroutine can't add to
-	// the window between our sweep and the swap-close. The goroutine only holds
-	// captureMu briefly around its routing decision, never across a channel
-	// receive, so this can't deadlock.
+	// Rendezvous with the drain goroutine BEFORE taking captureMu: push a flush
+	// marker and wait until the goroutine pulls it. FIFO ordering then
+	// guarantees every error the goroutine had already received from errChannel
+	// has been routed into the window — so closing the window below cannot
+	// strand an in-flight miss (the remaining race the previous fix left open).
+	// The app has already responded by now, so this test's pushes precede the
+	// marker. A bounded wait keeps a stalled drain from blocking replay.
+	if p.errDrainActive.Load() && p.errChannel != nil {
+		marker := &flushMarker{done: make(chan struct{})}
+		select {
+		case p.errChannel <- marker:
+			select {
+			case <-marker.done:
+			case <-time.After(2 * time.Second):
+			}
+		default:
+			// errChannel full (drain is behind) — skip; the legacy sweep below
+			// still runs when the drain goroutine isn't the owner.
+		}
+	}
+
 	p.captureMu.Lock()
 
 	// Pre-window stragglers (retained before the first capture window — e.g.
 	// startup traffic). Oldest first.
 	rawErrs := p.pendingMockErrors.drain()
 
-	// Sweep anything still buffered in errChannel that the async drain
-	// goroutine hasn't routed yet. By the time the replayer calls this the app
-	// has already responded, so this test's outgoing-call pushes have happened;
-	// sweeping synchronously here (instead of waiting on the goroutine) keeps a
-	// miss with THIS test rather than leaking it to whichever test drains next.
-	// Non-blocking. Runs in both modes (active window and legacy).
-drainLoop:
-	for {
-		select {
-		case err, ok := <-p.errChannel:
-			if !ok {
+	// Legacy path only (no drain goroutine): errors sit unrouted in errChannel,
+	// so sweep them here. With the drain goroutine active, the rendezvous above
+	// has already routed everything into the window, so sweeping is unnecessary
+	// and would only risk pulling a NEXT test's stray error into this one.
+	if !p.errDrainActive.Load() {
+	drainLoop:
+		for {
+			select {
+			case err, ok := <-p.errChannel:
+				if !ok {
+					break drainLoop
+				}
+				if m, isMarker := err.(*flushMarker); isMarker {
+					close(m.done)
+					continue
+				}
+				rawErrs = append(rawErrs, err)
+			default:
 				break drainLoop
 			}
-			rawErrs = append(rawErrs, err)
-		default:
-			break drainLoop
 		}
 	}
 
