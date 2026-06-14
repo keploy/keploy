@@ -33,6 +33,9 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+          - name: mock-mismatch
+            path: http-pokeapi
+            script_dir: mock_mismatch
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
