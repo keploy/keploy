@@ -2050,10 +2050,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					finalTestCaseResults[testCase.Name] = testCaseResult
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
+					// Finalize the capture window and persist a failed result so a
+					// miss during this test attaches here instead of leaking into a
+					// later test (or vanishing) when we bail out on this internal error.
+					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: test case result is nil")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
+					}
+					currentFailures++
+					testSetStatus = models.TestSetStatusFailed
 					break
 				}
 			} else {
 				utils.LogError(r.logger, nil, "test result is nil")
+				// Matcher returned no result (e.g. a comparison path returning
+				// (false, nil)). Same as above: finalize the window + persist a
+				// failed result so the miss surfaces and can't carry forward.
+				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: comparison returned no result")
+				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
+				}
+				currentFailures++
+				testSetStatus = models.TestSetStatusFailed
 				break
 			}
 
@@ -2132,9 +2152,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
-			// NOTE: no BeginTestErrorCapture here — the streaming (Phase 2) path
-			// doesn't fetch GetMockErrors, so opening a window would never be
-			// closed. Streaming mock-mismatch reporting is a separate follow-up.
+			// Open the per-test capture window before simulation. Unlike the
+			// non-streaming path we must NOT finalize it right after
+			// SimulateRequest (which returns at response headers) — outgoing mock
+			// calls keep happening while CompareHTTPStream consumes the stream
+			// body below. Every exit path therefore calls attachMockErrors only
+			// AFTER stream consumption has finished.
+			r.beginTestErrorCapture(runTestSetCtx)
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
@@ -2148,6 +2172,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
@@ -2209,6 +2234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
+						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
 							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
@@ -2250,6 +2276,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					failure++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errMsg)
+					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
@@ -2403,6 +2430,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
 
+				// Finalize the capture window now - AFTER CompareHTTPStream and the
+				// post-stream consumed-mock drain above, so in-stream mock misses
+				// are included - and attach them to this result.
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
@@ -2410,6 +2442,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			} else {
 				utils.LogError(r.logger, nil, "streaming test result is nil")
+				// Finalize the window + persist a failed result (same rationale as
+				// the non-streaming nil-result branch) so a streaming miss surfaces
+				// and can't carry forward.
+				failedResult := r.CreateFailedTestResult(tc, testSetID, started, "internal error: streaming comparison returned no result")
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
+				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
+				}
+				failure++
+				testSetStatus = models.TestSetStatusFailed
 				break
 			}
 		}
@@ -3692,6 +3734,15 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
 	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
 	if err != nil {
+		// Don't swallow silently. This test's misses can't be attached, but the
+		// agent-side window is reset by the next BeginTestErrorCapture (which
+		// discards a never-closed window), so the failure can't bleed into the
+		// next test. Log it so a persistent transport problem is visible rather
+		// than reports vanishing without a trace.
+		r.logger.Debug("failed to fetch mock errors for test; skipping unmatched-call attachment",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCaseName),
+			zap.Error(err))
 		return
 	}
 	for _, me := range mockErrors {

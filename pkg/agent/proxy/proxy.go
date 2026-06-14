@@ -2705,14 +2705,14 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 func (p *Proxy) BeginTestErrorCapture() {
 	p.captureMu.Lock()
 	p.pendingMockErrors.drain()
-	fresh := &testErrorAccumulator{}
-	// If a prior window was left open (its GetMockErrors couldn't finish the
-	// rendezvous — channel full / stalled drain), carry its leftovers into this
-	// window instead of dropping them. Degenerate path; bounded.
-	if old := p.activeTestErrors.Swap(fresh); old != nil {
-		for _, e := range old.drain() {
-			fresh.addBounded(e, maxPendingMockErrors)
-		}
+	// Discard anything left in a prior window that was never closed — e.g. a
+	// GetMockErrors whose HTTP round-trip failed, so the replayer couldn't
+	// finalize it. Carrying those misses into THIS window would misattribute the
+	// previous test's failures to the current test; they belong to a test we can
+	// no longer report for, so drop them (same reasoning as the pre-window
+	// stragglers drained above).
+	if old := p.activeTestErrors.Swap(&testErrorAccumulator{}); old != nil {
+		old.drain()
 	}
 	p.captureMu.Unlock()
 }
