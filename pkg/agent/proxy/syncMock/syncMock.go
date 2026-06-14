@@ -293,15 +293,13 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// at the ingress, so dropping the mock would orphan it. Decide by the
 		// request time, not now: drop only if the request ITSELF happened
 		// during pressure (the ingress never captured it, so there is no TC).
-		// Unknown timestamp → keep (safer than orphaning a captured TC).
-		reqTime := mock.Spec.ReqTimestampMock
-		if !reqTime.IsZero() && m.pressureActiveAtLocked(reqTime) {
+		if m.pressureActiveAtLocked(mock.Spec.ReqTimestampMock) {
 			m.mu.Unlock()
 			m.pressureDropped.Add(1)
 			return
 		}
-		// Request was during calm (or timestamp unknown) → its TC was captured
-		// → keep this mock; fall through to the normal buffer/forward path.
+		// Request was during calm → its TC was captured → keep this mock;
+		// fall through to the normal buffer/forward path.
 	}
 	// Mock is being kept — count it as successfully added.
 	m.totalAdded.Add(1)
@@ -363,7 +361,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// receiver — it ALWAYS resolves to a non-nil logger and is
 		// safe under the m.mu unlock.
 		if logger := m.dropLogger(); logger != nil {
-			logger.Info("diag/AddMock: outChan already closed, mock dropped",
+			logger.Debug("diag/AddMock: outChan already closed, mock dropped",
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.String("connID", mock.ConnectionID),
 				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
@@ -685,7 +683,7 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 				keep = append(keep, mk)
 				continue
 			}
-			if rt := mk.Spec.ReqTimestampMock; rt.IsZero() || !m.pressureActiveAtLocked(rt) {
+			if !m.pressureActiveAtLocked(mk.Spec.ReqTimestampMock) {
 				keep = append(keep, mk)
 			}
 		}
@@ -705,18 +703,20 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
 
-	// Only log on state TRANSITIONS to avoid flooding logs on every 500ms memoryguard tick.
-	// Pressure can fire hundreds of times per second — we only want to see the moment it starts and clears.
+	// Debug-level, and only on state TRANSITIONS (not on every 500ms memoryguard
+	// tick): these are internal pressure-mechanism diagnostics. The operator-facing
+	// "how many mocks were dropped" signal is surfaced once per session by the
+	// recording-complete summary in routes/record.go, so Info here would be noise.
 	if logger := m.dropLogger(); logger != nil {
 		if enabled && !wasEnabled {
 			// Pressure just turned ON (false→true transition)
-			logger.Info("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
+			logger.Debug("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
 				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
 				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
 				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
 			)
 		} else if !enabled && wasEnabled {
-			logger.Info("agent: memory pressure cleared",
+			logger.Debug("agent: memory pressure cleared",
 				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
 				zap.Int64("mocks_added_total", m.totalAdded.Load()),
 			)
@@ -959,7 +959,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			// post-hoc CI analysis. Sampled via dropLogger to honour
 			// the same flood-prevention as the outChan-overflow path.
 			if logger := m.dropLogger(); logger != nil {
-				logger.Info("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
+				logger.Debug("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
 					zap.String("mock_name", mock.Name),
 					zap.String("mock_kind", string(mock.Kind)),
 					zap.String("connID", mock.ConnectionID),
@@ -1031,7 +1031,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// for buffer-flow events on this manager. Only logged when there
 	// was actual state change to avoid log noise on idle resolves.
 	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
-		logger.Info("diag/ResolveRange: buffer transition",
+		logger.Debug("diag/ResolveRange: buffer transition",
 			zap.String("test_name", testName),
 			zap.Time("window_start", start),
 			zap.Time("window_end", end),
