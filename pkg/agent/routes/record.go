@@ -361,21 +361,18 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Bug 0 fix: suppress this TC if memory pressure was active at any
-			// moment during its HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp].
-			// We use pressure-range overlap (not per-mock-drop timestamps) because
-			// the Mongo-mock goroutine and the HTTP-TC goroutine race: a paired
-			// mock can be dropped AFTER the TC has already reached this handler,
-			// in which case a per-mock ledger would still be empty. Pressure
-			// ranges, however, are recorded the instant SetMemoryPressure(true)
-			// flips memoryPause — happens-before any mock drop it causes — so an
-			// overlap check is race-free.
+			// Skip this test case if memory pressure overlapped its HTTP window
+			// [request, response]: under pressure the paired mock may have been
+			// dropped, so sending the TC would orphan it at replay. We check the
+			// TC window against recorded pressure ranges (not individual mock
+			// drops) because that check is race-free regardless of when the
+			// mock's goroutine runs relative to this handler.
 			tcRespTime := t.HTTPResp.Timestamp
 			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
 
 			if hasOverlap {
 				tcsSuppressedSoFar++
-				a.logger.Info("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
+				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
