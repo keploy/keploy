@@ -1639,6 +1639,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
+				// Finalize the capture window even on this early exit, so a miss
+				// during this (failed) test attaches here and isn't carried to
+				// the next test or lost.
+				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
@@ -1738,6 +1742,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
@@ -1754,6 +1759,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
@@ -2024,20 +2030,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							})
 						}
 					}
-					// Fetch in EVERY mode, not just non-instrument. The live HTTP
-					// agent transport returns a nil GetErrorChannel, so the
-					// channel-fed store above stays empty in instrument mode
-					// (local `keploy test -c`) — GetMockErrors is the one source
-					// that works on all transports. Fetched calls are also pushed
-					// into mockMismatchFailures so the end-of-run mock mismatch
-					// report shows them; the store was already read for THIS test
-					// above (filtered by test ID), so this cannot double-count.
-					if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
-						for _, me := range mockErrors {
-							testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
-							r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCase.Name, me)
-						}
-					}
+					// Finalize the capture window for this test in EVERY mode.
+					// The live HTTP agent transport returns a nil
+					// GetErrorChannel, so the channel-fed store above stays empty
+					// in instrument mode (local `keploy test -c`) — GetMockErrors
+					// is the one source that works on all transports. Also closes
+					// the per-test window (see attachMockErrors); the channel
+					// store was already read for THIS test above (filtered by
+					// test ID), so this cannot double-count.
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -3716,6 +3717,24 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 		if err := b.BeginTestErrorCapture(ctx); err != nil {
 			r.logger.Debug("failed to begin test error capture", zap.Error(err))
 		}
+	}
+}
+
+// attachMockErrors drains the per-test mock-error capture window (closing it)
+// and records any unmatched outgoing calls onto the result and the end-of-run
+// summary store. It must run on EVERY test-iteration exit — including the early
+// simulation-error / invalid-response returns — so the window is finalized for
+// THIS test and a miss is never carried forward to the next test or lost.
+func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
+	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
+	if err != nil {
+		return
+	}
+	for _, me := range mockErrors {
+		if result != nil {
+			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
+		}
+		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
 	}
 }
 
