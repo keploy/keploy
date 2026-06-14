@@ -450,28 +450,20 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 
 		decoder := json.NewDecoder(res.Body)
 
-		// SAME FIX AS GetOutgoing — drain the mappings stream past
-		// ctx-cancel.
+		// Drain the mappings stream past ctx-cancel (same pattern as
+		// GetOutgoing).
 		//
-		// Root cause proven by the full-accounting run on pipeline
-		// 26948829833 (mongo_rbrb): every mock reached disk
-		// (agent_has=2626 → cli_wrote=2629, zero loss), yet 7 teardown
-		// TCs still failed at replay with "socket unexpectedly closed:
-		// EOF". Those 7 TCs were on disk but ABSENT from mappings.yaml.
+		// TC→mock mappings travel on this HTTP stream, separate from the
+		// mocks stream in GetOutgoing. On shutdown the agent flushes its
+		// remaining mappings onto the wire; if this goroutine exited the
+		// instant ctx cancelled, the deferred res.Body.Close() would sever
+		// the connection and drop every teardown mapping still in flight —
+		// leaving those mocks on disk but unmapped, so their test cases
+		// fail at replay with "socket unexpectedly closed: EOF".
 		//
-		// The mappings travel on THIS separate HTTP stream, distinct
-		// from the mocks stream in GetOutgoing. This goroutine used to
-		// have `case <-ctx.Done(): return nil`, so on host SIGINT it
-		// exited within milliseconds and the deferred res.Body.Close()
-		// tore down the connection — dropping every teardown TC→mock
-		// mapping still queued on the wire. Fixing only GetOutgoing
-		// (the mocks stream) left this stream still cutting the
-		// teardown mappings, which is why the teardown TCs stayed
-		// flaky: their mocks were on disk but unmapped.
-		//
-		// Mirror the GetOutgoing drain: when ctx cancels, arm a 60-s
-		// deadline and keep reading + forwarding mappings until either
-		// the agent closes the stream (EOF) or the deadline expires.
+		// So when ctx cancels, arm a 60-s drain deadline and keep reading
+		// and forwarding mappings until either the agent closes the stream
+		// (EOF) or the deadline expires.
 		const drainGrace = 60 * time.Second
 		var drainDeadline <-chan time.Time
 		var deadlineT *time.Timer
@@ -1678,8 +1670,12 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
+			a.logger.Debug("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+		} else {
+			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
 		}
 
 		select {

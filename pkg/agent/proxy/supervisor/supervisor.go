@@ -242,6 +242,14 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
+		// Debug-level: hang abort is a designed control-flow path —
+		// the dispatcher's FallthroughToPassthrough handling picks it
+		// up and the relay keeps forwarding bytes. Operators who want
+		// to tune behaviour have explicit knobs (see next_step).
+		s.cfg.Logger.Debug("parser hang detected; aborting",
+			zap.Duration("hang_budget", s.cfg.HangBudget),
+			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_NEW_RELAY=off to force the legacy parser path"),
+		)
 		s.fireOnAbort()
 		runCancel()
 		return Result{
