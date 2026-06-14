@@ -1627,6 +1627,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
 
+			r.beginTestErrorCapture(runTestSetCtx)
+
 			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
 			// Stop monitoring for this specific test case
@@ -2161,6 +2163,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Proxy Monitor: Start a per-test proxy error monitor.
 			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
+
+			r.beginTestErrorCapture(runTestSetCtx)
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
@@ -3693,6 +3697,22 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// beginTestErrorCapture opens a per-test mock-error capture window on the agent
+// (via an optional capability — older agents / non-agent instrumentations skip
+// it and fall back to the legacy global queue) so a mock miss during this test
+// attributes to THIS test instead of whichever test drains GetMockErrors next.
+// Called right before each SimulateRequest, on both the normal and streaming
+// paths. Best-effort: a failure only degrades to the old behaviour.
+func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
+	if b, ok := r.instrumentation.(interface {
+		BeginTestErrorCapture(context.Context) error
+	}); ok {
+		if err := b.BeginTestErrorCapture(ctx); err != nil {
+			r.logger.Debug("failed to begin test error capture", zap.Error(err))
+		}
+	}
 }
 
 // monitorProxyErrors monitors the proxy error channel and logs errors

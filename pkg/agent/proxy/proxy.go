@@ -2659,9 +2659,14 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	})
 }
 
-// BeginTestErrorCapture starts collecting errors for the current test case.
-// Call EndTestErrorCapture when the test finishes to retrieve collected errors.
+// BeginTestErrorCapture starts collecting mock-not-found errors for the current
+// test case into a fresh per-test accumulator, so the replayer's GetMockErrors
+// returns only THIS test's misses instead of draining a shared global queue.
+// Stale stragglers retained before any window (startup / between-test
+// background traffic) are discarded so they don't attach to this test.
+// GetMockErrors retrieves and the next BeginTestErrorCapture resets the window.
 func (p *Proxy) BeginTestErrorCapture() {
+	p.pendingMockErrors.drain()
 	p.activeTestErrors.Store(&testErrorAccumulator{})
 }
 
@@ -2685,28 +2690,34 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
-	// Errors the drain goroutine retained outside an active capture window
-	// (the usual case today — nothing opens a window) come first, oldest
-	// first.
+	// Pre-window stragglers (retained before the first capture window — e.g.
+	// startup traffic). Oldest first.
 	rawErrs := p.pendingMockErrors.drain()
 
-	// Prefer test accumulator if active (StartErrorDrain is running)
-	if acc := p.activeTestErrors.Load(); acc != nil {
-		rawErrs = append(rawErrs, acc.drain()...)
-	} else {
-		// Fallback: drain from channel directly (legacy path)
-	drainLoop:
-		for {
-			select {
-			case err, ok := <-p.errChannel:
-				if !ok {
-					break drainLoop
-				}
-				rawErrs = append(rawErrs, err)
-			default:
+	// Sweep anything still buffered in errChannel that the async drain
+	// goroutine hasn't routed yet. By the time the replayer calls this the app
+	// has already responded, so this test's outgoing-call pushes have happened;
+	// sweeping synchronously here (instead of waiting on the goroutine) keeps a
+	// miss with THIS test rather than leaking it to whichever test drains next.
+	// Non-blocking. Runs in both modes (active window and legacy).
+drainLoop:
+	for {
+		select {
+		case err, ok := <-p.errChannel:
+			if !ok {
 				break drainLoop
 			}
+			rawErrs = append(rawErrs, err)
+		default:
+			break drainLoop
 		}
+	}
+
+	// Then the per-test accumulator (errors the drain goroutine already routed
+	// into the active window). Drained AFTER the sweep so an item the goroutine
+	// moved off errChannel concurrently is still captured here.
+	if acc := p.activeTestErrors.Load(); acc != nil {
+		rawErrs = append(rawErrs, acc.drain()...)
 	}
 
 	var errs []models.UnmatchedCall
