@@ -1335,6 +1335,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(liveBody), ignore)...)
 	}
 
+	// Redact secret / obfuscated values out of the structured diffs before they
+	// are attached — they (and the Diff string derived from them) are persisted
+	// into the report YAML and the platform API.
+	redactFieldDiffs(fieldDiffs, closestMock.Noise)
+
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
