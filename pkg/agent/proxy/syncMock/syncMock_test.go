@@ -1681,11 +1681,12 @@ func TestStartupMockSurvivesStaleCutoffInResolveRange(t *testing.T) {
 func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	t.Parallel()
 
-	// A closed pressure window in the recent past. Both buffered mocks below
-	// carry a request timestamp INSIDE it, so the request-time filter alone
-	// would drop both — only the IsStartup tag rescues the startup mock.
+	// A closed pressure window in the recent past, within the staleness
+	// horizon so SetMemoryPressure's prune retains it. Both buffered mocks
+	// below carry a request timestamp INSIDE it, so the request-time filter
+	// alone would drop both — only the IsStartup tag rescues the startup mock.
 	now := time.Now()
-	inPressure := now.Add(-15 * time.Second)
+	inPressure := now.Add(-3 * time.Second)
 
 	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
 	startup.TestModeInfo.IsStartup = true
@@ -1693,7 +1694,7 @@ func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 
 	mgr := &SyncMockManager{
 		buffer:         []*models.Mock{pressureCaptured, startup},
-		pressureRanges: []pressureRange{{start: now.Add(-20 * time.Second), end: now.Add(-10 * time.Second)}},
+		pressureRanges: []pressureRange{{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)}},
 	}
 
 	mgr.SetMemoryPressure(true)
@@ -1709,6 +1710,46 @@ func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	if len(mgr.buffer) != 1 {
 		t.Fatalf("new mocks must still be dropped under memory pressure; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestSetMemoryPressurePrunesStaleRanges asserts the pressureRanges history is
+// bounded: SetMemoryPressure drops CLOSED ranges that ended longer ago than the
+// staleness horizon, but always keeps a still-open range. Without this the slice
+// would grow unbounded under continuous recording (mentor review #4220:119).
+func TestSetMemoryPressurePrunesStaleRanges(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	// Two stale closed ranges (ended well before the horizon) + one recent one.
+	mgr := &SyncMockManager{
+		pressureRanges: []pressureRange{
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale → prune
+			{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)}, // stale → prune
+			{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},   // recent → keep
+		},
+	}
+	// memoryPause is already false, so calling with false is a no-op transition
+	// that still runs the prune.
+	mgr.SetMemoryPressure(false)
+	if got := len(mgr.pressureRanges); got != 1 {
+		t.Fatalf("expected stale closed ranges pruned to 1 recent range; got %d", got)
+	}
+
+	// A still-open range (end == zero) must never be pruned, even if it started
+	// long ago (a single long pressure spell).
+	mgr2 := &SyncMockManager{
+		memoryPause: true,
+		pressureRanges: []pressureRange{
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale closed → prune
+			{start: now.Add(-40 * time.Second)},                                  // open → keep
+		},
+	}
+	// true→true: no new range opened, just the prune.
+	mgr2.SetMemoryPressure(true)
+	if got := len(mgr2.pressureRanges); got != 1 || !mgr2.pressureRanges[0].end.IsZero() {
+		t.Fatalf("expected only the open range kept; got %d ranges", got)
 	}
 }
 

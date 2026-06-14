@@ -20,6 +20,17 @@ const defaultMockBufferCapacity = 100
 // staleness cutoff keeps reachable, while staying O(1) memory.
 const maxRecentWindows = 256
 
+// pressureRangeStaleness bounds how long a CLOSED memory-pressure interval is
+// retained in SyncMockManager.pressureRanges. It is the same 7 s staleness
+// horizon the mock buffer and recentWindows already use: a pressure range that
+// ended longer ago than this can no longer overlap any still-live mock or test
+// window (both are stale-dropped at the same cutoff), so it is safe to prune.
+// Without this, the slice would grow by one entry per pressure transition for
+// the entire recording — under continuous recording that is an unbounded memory
+// leak and an ever-slower WasPressureActiveInWindow / pressureActiveAtLocked
+// scan (both loop over every range).
+const pressureRangeStaleness = 7 * time.Second
+
 // resolvedWindow is one already-resolved per-test window retained so a
 // late-arriving mock (decoded after the window closed) can still be
 // attributed to the test that actually owns its ReqTimestampMock.
@@ -116,6 +127,12 @@ type SyncMockManager struct {
 	// the start the instant it flips memoryPause, BEFORE any mock-parser
 	// goroutine sees the result; so even if the paired AddMock fires AFTER
 	// the TC has reached routes/record.go, the overlap is already visible.
+	//
+	// Bounded, not unbounded: SetMemoryPressure prunes closed ranges older
+	// than pressureRangeStaleness on every call, so the slice stays small
+	// (~the last few seconds) no matter how long recording runs. This keeps
+	// continuous recording from accumulating millions of intervals and
+	// slowing every overlap scan.
 	pressureRanges []pressureRange
 
 	// loggerMu guards logger so SetLogger and the drop path can run
@@ -656,6 +673,24 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	m.mu.Lock()
 	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
+
+	// Prune the pressure-range history to the staleness horizon so it stays
+	// bounded under continuous recording (mentor review #4220, syncMock.go:119).
+	// Keep the currently-open range (end == zero) and any range that ended
+	// within the last pressureRangeStaleness; drop the rest. memoryguard calls
+	// this every 500 ms, so the slice never holds more than ~the last few
+	// seconds of history regardless of recording length. In-place filter,
+	// preserving order (the open range, if any, is newest so stays last).
+	if cutoff := now.Add(-pressureRangeStaleness); len(m.pressureRanges) > 0 {
+		kept := m.pressureRanges[:0]
+		for _, r := range m.pressureRanges {
+			if r.end.IsZero() || r.end.After(cutoff) {
+				kept = append(kept, r)
+			}
+		}
+		m.pressureRanges = kept
+	}
+
 	var clearedFromBuffer int
 	if enabled {
 		if !wasEnabled {
