@@ -2726,9 +2726,10 @@ func (p *Proxy) EndTestErrorCapture() []error {
 }
 
 // GetErrorChannel returns the error channel for external monitoring.
-// When StartErrorDrain is active, this channel is continuously drained by the
-// background goroutine. Direct consumers (monitorProxyErrors) will compete
-// for reads. Prefer using BeginTestErrorCapture/EndTestErrorCapture instead.
+// Once StartProxy has run, StartErrorDrain continuously drains this channel in a
+// background goroutine, so an external direct consumer would compete with the
+// drain for reads and is not supported. Per-test mock-not-found errors are
+// exposed via BeginTestErrorCapture/GetMockErrors instead.
 func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }

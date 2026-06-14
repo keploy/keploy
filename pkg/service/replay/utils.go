@@ -689,21 +689,6 @@ func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks,
 	tfs.failures = append(tfs.failures, failure)
 }
 
-func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr models.ParserError) {
-	tfs.mu.Lock()
-	defer tfs.mu.Unlock()
-
-	failure := TestFailure{
-		TestSetID:      testSetID,
-		TestID:         testCaseID,
-		ExpectedMocks:  []string{},
-		ActualMocks:    []string{},
-		FailureReason:  proxyErr.ParserErrorType,
-		MismatchReport: proxyErr.MismatchReport,
-	}
-	tfs.failures = append(tfs.failures, failure)
-}
-
 // AddUnmatchedCallForTest records a mock-not-found error fetched via the
 // agent's GetMockErrors API (the path used on all transports, notably the
 // HTTP agent transport whose error channel is nil) so it appears in the
@@ -742,20 +727,6 @@ func (tfs *TestFailureStore) GetFailures() []TestFailure {
 	failures := make([]TestFailure, len(tfs.failures))
 	copy(failures, tfs.failures)
 	return failures
-}
-
-// GetFailuresForTestCase returns failures for a specific test set + test case.
-func (tfs *TestFailureStore) GetFailuresForTestCase(testSetID, testCaseID string) []TestFailure {
-	tfs.mu.Lock()
-	defer tfs.mu.Unlock()
-
-	var result []TestFailure
-	for _, f := range tfs.failures {
-		if f.TestSetID == testSetID && f.TestID == testCaseID {
-			result = append(result, f)
-		}
-	}
-	return result
 }
 
 type MockDifference struct {

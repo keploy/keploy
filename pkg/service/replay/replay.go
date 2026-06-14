@@ -34,7 +34,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const UNKNOWN_TEST = "UNKNOWN_TEST"
 const applicationFailedToRunLogMessage = "application failed to run; check the application logs for details or verify the app command is correct"
 
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
@@ -1624,15 +1623,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			started := time.Now().UTC()
 
-			testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
-			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
-
 			r.beginTestErrorCapture(runTestSetCtx)
 
 			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
-
-			// Stop monitoring for this specific test case
-			testCaseProxyErrCancel()
 
 			if loopErr != nil {
 				utils.LogError(r.logger, loopErr, "failed to simulate request")
@@ -2006,38 +1999,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							}
 						}
 					}
-					// UnmatchedCalls is fetched/drained for EVERY test, not just
-					// failed/obsolete ones. Two reasons: (1) a miss during an
-					// otherwise-passing test must still surface; (2) GetMockErrors
-					// drains a process-global queue, so fetching only on
-					// failed/obsolete tests would let a passing test's miss linger
-					// and be misattributed to the next failed test. Draining per
-					// test keeps each test's misses with that test. The channel
-					// source below is already test-tagged.
-					for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
-						if f.MismatchReport != nil {
-							testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
-								Protocol:       f.MismatchReport.Protocol,
-								ActualSummary:  f.MismatchReport.ActualSummary,
-								ClosestMock:    f.MismatchReport.ClosestMock,
-								Diff:           f.MismatchReport.Diff,
-								NextSteps:      f.MismatchReport.NextSteps,
-								MatchPhase:     f.MismatchReport.MatchPhase,
-								CandidateCount: f.MismatchReport.CandidateCount,
-								FieldDiffs:     f.MismatchReport.FieldDiffs,
-								ClosestMockReq: f.MismatchReport.ClosestMockReq,
-								ReceivedReq:    f.MismatchReport.ReceivedReq,
-							})
-						}
-					}
-					// Finalize the capture window for this test in EVERY mode.
-					// The live HTTP agent transport returns a nil
-					// GetErrorChannel, so the channel-fed store above stays empty
-					// in instrument mode (local `keploy test -c`) — GetMockErrors
-					// is the one source that works on all transports. Also closes
-					// the per-test window (see attachMockErrors); the channel
-					// store was already read for THIS test above (filtered by
-					// test ID), so this cannot double-count.
+					// UnmatchedCalls is finalized for EVERY test, not just
+					// failed/obsolete ones: (1) a miss during an otherwise-passing
+					// test must still surface; (2) the per-test capture window
+					// opened by beginTestErrorCapture must be drained-and-closed
+					// each iteration so a miss can't carry over to the next test.
+					// attachMockErrors (GetMockErrors -> result + summary store) is
+					// the single source of unmatched outgoing calls across all
+					// transports — native and k8s alike reach the agent over HTTP,
+					// so the agent's error channel is consumed only inside the
+					// agent's own drain goroutine, never by the replayer.
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
@@ -2161,10 +2132,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
-			// Proxy Monitor: Start a per-test proxy error monitor.
-			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
-			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
-
 			// NOTE: no BeginTestErrorCapture here — the streaming (Phase 2) path
 			// doesn't fetch GetMockErrors, so opening a window would never be
 			// closed. Streaming mock-mismatch reporting is a separate follow-up.
@@ -2175,9 +2142,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// continue after this call returns.
 			started := time.Now().UTC()
 			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
-
-			// Cleanup: Cancel the proxy error monitor immediately after simulation.
-			streamProxyErrCancel()
 
 			if simErr != nil {
 				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
@@ -3735,53 +3699,6 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
 		}
 		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
-	}
-}
-
-// monitorProxyErrors monitors the proxy error channel and logs errors
-func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, testCaseID string) {
-	defer utils.Recover(r.logger)
-
-	errorChannel := r.instrumentation.GetErrorChannel()
-	if errorChannel == nil {
-		r.logger.Debug("Proxy error channel is nil, skipping error monitoring")
-		return
-	}
-
-	r.logger.Debug("Starting proxy error monitoring",
-		zap.String("testSetID", testSetID),
-		zap.String("testCaseID", testCaseID))
-
-	for {
-		select {
-		case <-ctx.Done():
-			r.logger.Debug("Stopping proxy error monitoring",
-				zap.String("testSetID", testSetID),
-				zap.String("testCaseID", testCaseID))
-			return
-		case proxyErr, ok := <-errorChannel:
-			if !ok {
-				r.logger.Debug("Proxy error channel closed",
-					zap.String("testSetID", testSetID),
-					zap.String("testCaseID", testCaseID))
-				return
-			}
-
-			// Determine effective test case ID
-			effectiveTestCaseID := testCaseID
-			if effectiveTestCaseID == "" {
-				effectiveTestCaseID = UNKNOWN_TEST
-			}
-
-			if parserErr, ok := proxyErr.(models.ParserError); ok {
-				// Handle typed ParserError
-				switch parserErr.ParserErrorType {
-				case models.ErrMockNotFound:
-					r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
-				}
-			}
-
-		}
 	}
 }
 
