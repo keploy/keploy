@@ -161,10 +161,22 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		return "No recorded mocks exist for this protocol in the selected test set. Re-record the test set with 'keploy record'."
 	case onlyValueDrift:
 		paths := make([]string, 0, len(r.FieldDiffs))
+		// Body diffs are reported "body."-prefixed for readability, but HTTP
+		// request matching reads the request-body noise bucket with
+		// root-relative keys — so strip the prefix in the copy-paste hint to
+		// avoid pointing users at the response-noise (body) bucket, which the
+		// request matcher never consults.
+		bodyKeys := make([]string, 0, len(r.FieldDiffs))
 		for _, d := range r.FieldDiffs {
 			paths = append(paths, d.Path)
+			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
+				bodyKeys = append(bodyKeys, k)
+			}
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them as noise; otherwise re-record with 'keploy record'.", strings.Join(paths, ", "))
+		if len(bodyKeys) > 0 {
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with 'keploy record'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "))
+		}
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with 'keploy record'.", strings.Join(paths, ", "))
 	default:
 		return "Request structure changed since recording. Re-record the test set with 'keploy record', or refresh mappings with --update-test-mapping if mocks were edited."
 	}

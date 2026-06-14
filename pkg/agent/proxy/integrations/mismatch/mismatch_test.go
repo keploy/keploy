@@ -28,8 +28,11 @@ func TestBuilder_RendersFieldDiffsAndDefaults(t *testing.T) {
 		t.Errorf("Diff should render field paths, got %q", report.Diff)
 	}
 	// Pure value drift → next steps must suggest noise, never a nonexistent command.
-	if !strings.Contains(report.NextSteps, "noise") {
-		t.Errorf("value-only drift should suggest noise, got %q", report.NextSteps)
+	// Pure request-body value drift must point users at the request-body noise
+	// bucket (test.globalNoise.requestbody, root-relative keys) — not the
+	// response "body" bucket the request matcher never consults.
+	if !strings.Contains(report.NextSteps, "requestbody") {
+		t.Errorf("value-only request-body drift should point at the requestbody noise bucket, got %q", report.NextSteps)
 	}
 	if strings.Contains(report.NextSteps, "keploy rerecord") {
 		t.Errorf("next steps must not reference the nonexistent 'keploy rerecord' command: %q", report.NextSteps)

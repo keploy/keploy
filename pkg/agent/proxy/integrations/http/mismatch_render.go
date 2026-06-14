@@ -1,7 +1,6 @@
 package http
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,13 +17,15 @@ import (
 // valueRedacted replaces sensitive/obfuscated values in the rendered requests.
 const valueRedacted = "(redacted)"
 
-// sensitiveHeaderTokens marks header names whose values must never be printed
-// into a report (they commonly carry credentials).
-var sensitiveHeaderTokens = []string{"auth", "key", "token", "secret", "cookie", "signature", "credential"}
+// sensitiveKeyTokens marks header / query / body key names whose values must
+// never be printed into a report (they commonly carry credentials).
+var sensitiveKeyTokens = []string{"auth", "key", "token", "secret", "cookie", "signature", "credential", "password", "passwd", "pwd"}
 
+// isSensitiveHeader reports whether a header, query-param, or JSON body key
+// looks like it carries a credential and should be redacted.
 func isSensitiveHeader(name string) bool {
 	ln := strings.ToLower(name)
-	for _, t := range sensitiveHeaderTokens {
+	for _, t := range sensitiveKeyTokens {
 		if strings.Contains(ln, t) {
 			return true
 		}
@@ -82,7 +83,18 @@ func urlParamsQuery(params map[string]string) string {
 	return vals.Encode()
 }
 
+// Rendering bounds. The rendered requests are persisted into the report and
+// held in the agent's bounded pending-error queue, so a single pathological
+// value or body must not be able to bloat memory unbounded — cap them.
+const (
+	maxRenderValueLen = 256  // a single header / query value
+	maxRenderBodyLen  = 4096 // the rendered body
+)
+
 // renderRequestPreview is the shared renderer behind both sides of the diff.
+// Sensitive header/query/body values (by key name or by the mock's noise
+// patterns) are redacted before they ever land in a report, and every value
+// and the body are length-capped.
 func renderRequestPreview(method, path, rawQuery string, header map[string]string, body string, noise []string) string {
 	nc := util.NewNoiseChecker(noise)
 	isObfuscated := func(v string) bool { return v != "" && nc != nil && nc.IsNoisy(v) }
@@ -91,12 +103,9 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 	target := path
 	if rawQuery != "" {
 		// Canonicalize so semantically equal queries render identically on
-		// both sides regardless of original parameter order.
-		if vals, err := url.ParseQuery(rawQuery); err == nil {
-			target += "?" + vals.Encode()
-		} else {
-			target += "?" + rawQuery
-		}
+		// both sides, and redact sensitive / obfuscated parameter values so
+		// credentials in the query string never reach the report.
+		target += "?" + redactQuery(rawQuery, nc)
 	}
 	fmt.Fprintf(&b, "%s %s", method, target)
 
@@ -112,31 +121,92 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	// Render ALL headers and the WHOLE body — no count/length cap — so the user
-	// sees the complete recorded mock side-by-side. Sensitive / obfuscated
-	// values are still redacted.
 	for _, k := range keys {
 		v := header[k]
 		if isSensitiveHeader(k) || isObfuscated(v) {
 			v = valueRedacted
+		} else {
+			v = truncateValue(v, maxRenderValueLen)
 		}
 		fmt.Fprintf(&b, "\n%s: %s", textproto.CanonicalMIMEHeaderKey(k), v)
 	}
 	if body != "" {
-		fmt.Fprintf(&b, "\n\n%s", prettyJSONBody(body))
+		fmt.Fprintf(&b, "\n\n%s", truncateValue(redactBody(body, nc), maxRenderBodyLen))
 	}
 	return b.String()
 }
 
-// prettyJSONBody indents a JSON body one field per line so line-level diffs
-// align to fields; non-JSON bodies are returned unchanged.
-func prettyJSONBody(body string) string {
+// truncateValue rune-safely caps s, appending an ellipsis when it cuts.
+func truncateValue(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…(truncated)"
+}
+
+// redactQuery canonicalizes a query string and redacts parameter values whose
+// key looks sensitive or whose value matches the mock's noise patterns.
+func redactQuery(rawQuery string, nc *util.NoiseChecker) string {
+	vals, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return rawQuery
+	}
+	for k, vs := range vals {
+		for i, v := range vs {
+			if isSensitiveHeader(k) || (nc != nil && v != "" && nc.IsNoisy(v)) {
+				vs[i] = valueRedacted
+			} else {
+				vs[i] = truncateValue(v, maxRenderValueLen)
+			}
+		}
+	}
+	return vals.Encode()
+}
+
+// redactBody redacts secret / obfuscated fields in a request body before it is
+// rendered into a report. JSON bodies are walked field-by-field — a value is
+// redacted when its key looks sensitive or the value matches the mock's noise
+// patterns — and re-indented one field per line so line diffs align. Non-JSON
+// bodies are redacted wholesale when they match a noise pattern, else returned
+// as-is (the caller length-caps them).
+func redactBody(body string, nc *util.NoiseChecker) string {
 	if !pkg.IsJSON([]byte(body)) {
+		if nc != nil && nc.IsNoisy(body) {
+			return valueRedacted
+		}
 		return body
 	}
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, []byte(body), "", "  "); err != nil {
+	var v interface{}
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
 		return body
 	}
-	return buf.String()
+	redactJSONValue(v, nc)
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return body
+	}
+	return string(out)
+}
+
+func redactJSONValue(v interface{}, nc *util.NoiseChecker) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				if isSensitiveHeader(k) || (nc != nil && s != "" && nc.IsNoisy(s)) {
+					t[k] = valueRedacted
+					continue
+				}
+			}
+			redactJSONValue(val, nc)
+		}
+	case []interface{}:
+		for _, val := range t {
+			redactJSONValue(val, nc)
+		}
+	}
 }

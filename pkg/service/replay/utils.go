@@ -954,17 +954,17 @@ func printRequestDiff(mockName, expected, received string) {
 		dp.PushHeaderDiff(mockTarget, liveTarget, "url", nil)
 	}
 
-	// Headers: push only the keys whose values differ, mirroring the response
-	// header diff. Identical (including both-redacted) headers are skipped.
-	seen := map[string]bool{}
+	// Headers: push a row whenever a key is present on only one side or its
+	// value differs. Two-value lookups distinguish an absent header from one
+	// present with an empty value, so a key-presence mismatch (the exact reason
+	// a mock can be rejected) is never silently dropped.
 	for k, mv := range mockHeaders {
-		seen[k] = true
-		if lv := liveHeaders[k]; mv != lv {
+		if lv, ok := liveHeaders[k]; !ok || mv != lv {
 			dp.PushHeaderDiff(mv, lv, k, nil)
 		}
 	}
 	for k, lv := range liveHeaders {
-		if !seen[k] && lv != "" {
+		if _, ok := mockHeaders[k]; !ok {
 			dp.PushHeaderDiff("", lv, k, nil)
 		}
 	}
