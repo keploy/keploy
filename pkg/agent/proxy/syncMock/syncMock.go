@@ -645,7 +645,6 @@ func (m *SyncMockManager) PressureRangeCount() int {
 	return len(m.pressureRanges)
 }
 
-
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
