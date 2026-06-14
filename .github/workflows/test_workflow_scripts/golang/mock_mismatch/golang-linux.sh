@@ -125,17 +125,22 @@ if grep -qE "Mock mismatch: \[HTTP\][^]]*/api/v2/" test_logs.txt; then
     mismatch_reported=true
 fi
 
-# Equivalent specific check on the test-set report yaml: an unmatched_calls
-# entry whose protocol is HTTP and whose actual_summary references /api/v2/.
+# Equivalent specific check on the test-set report yaml: a SINGLE unmatched_calls
+# item whose protocol is HTTP *and* whose actual_summary references /api/v2/.
+# actual_summary appears only inside unmatched_calls items, and each item's
+# protocol line precedes its actual_summary, so tracking the most recent
+# protocol per item binds both fields to the same entry (independent greps
+# could otherwise match different items).
 shopt -s nullglob
 reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
 shopt -u nullglob
 for rf in "${reports[@]}"; do
-    # Limit the scan to each report's unmatched_calls block and require both an
-    # HTTP protocol and an /api/v2/ actual_summary within it.
-    if awk '/unmatched_calls:/{f=1} f' "$rf" | grep -qE "protocol: ?\"?HTTP" \
-        && awk '/unmatched_calls:/{f=1} f' "$rf" | grep -qE "actual_summary:.*/api/v2/"; then
-        echo "✓ $(basename "$rf") has an HTTP /api/v2/ unmatched_calls entry"
+    if awk '
+        /protocol:/        { httpItem = ($0 ~ /HTTP/) }
+        /actual_summary:/  { if (httpItem && $0 ~ /\/api\/v2\//) { found = 1 } }
+        END                { exit found ? 0 : 1 }
+    ' "$rf"; then
+        echo "✓ $(basename "$rf") has a single HTTP /api/v2/ unmatched_calls entry"
         mismatch_reported=true
     fi
 done
