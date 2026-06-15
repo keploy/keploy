@@ -368,7 +368,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	// the direct-channel fallback below runs. Production
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
-		if mgr := syncMock.Get(); mgr != nil {
+		if mgr := syncMock.FromContext(s.Ctx); mgr != nil {
 			// Best-effort ctx probe. mgr.AddMock (the SyncMock
 			// manager method obtained from syncMock.Get()) doesn't
 			// observe s.Ctx — it takes its own mutex and may sit

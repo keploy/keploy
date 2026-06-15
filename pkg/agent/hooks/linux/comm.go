@@ -31,6 +31,10 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 		IPv4Addr: d.DestIP4,
 		IPv6Addr: d.DestIP6,
 		Port:     d.DestPort,
+		// Surface the originating process TGID so the proxy can attribute the
+		// connection to an AppContext (multi-tenancy). The kernel already
+		// records it in the redirect map; it was previously dropped here.
+		Pid: d.KernelPid,
 	}, nil
 }
 

@@ -96,13 +96,14 @@ type SyncMockManager struct {
 	logger   *zap.Logger
 }
 
-// Global instance is initialized at package load time
-var instance = &SyncMockManager{
-	buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
-	firstReqSeen: false,
-}
+// Global instance is initialized at package load time. It is the
+// single-tenant / sidecar fallback returned by Get() and by FromContext()
+// when no per-app manager is on the context. Built via New() so there is one
+// construction path.
+var instance = New()
 
-// Get returns the global manager.
+// Get returns the global manager (single-tenant fallback). Prefer
+// FromContext(ctx) on the data path so per-app managers are honoured.
 func Get() *SyncMockManager {
 	return instance
 }

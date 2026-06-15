@@ -110,6 +110,37 @@ type FirstWindowStartReader interface {
 	FirstTestWindowStart() time.Time
 }
 
+// AppRegistrar is the optional extension implemented by proxies that support
+// multi-tenant per-app routing. Embedders that run one agent for many apps
+// (e.g. the enterprise daemonset) type-assert from Proxy and gracefully fall
+// back when the assertion fails — keeping third-party Proxy implementations
+// compiling without the multi-tenant surface.
+//
+//	if r, ok := p.(AppRegistrar); ok {
+//	    r.SetAppResolver(reconciler.AppForPID) // data-plane attribution
+//	    r.RegisterApp(key, rootPID)            // control-plane setup
+//	}
+type AppRegistrar interface {
+	// SetAppResolver installs the PID→app attribution function used on the
+	// data path to map an intercepted connection's originating kernel PID
+	// (NetworkAddress.Pid) to its AppKey. Overrides the proxy's default
+	// /proc-ancestry resolver.
+	SetAppResolver(resolver func(kernelPid uint32) (AppKey, bool))
+	// RegisterApp creates (if absent) the per-app state for key and seeds
+	// the attribution cache with the app's root PID(s) so the data plane
+	// resolves the same key the control plane uses.
+	RegisterApp(key AppKey, rootPIDs ...uint32)
+	// DeregisterApp tears down the app's per-app state and evicts its PID
+	// cache entries.
+	DeregisterApp(key AppKey)
+	// ResolveAppKey maps an intercepted connection's originating kernel PID
+	// to its owning app key, reporting whether it was attributed (ok=false
+	// → unattributed: cold-start / not a target / ambiguous). Used by
+	// embedders that capture outside handleConnection (the daemonset
+	// proxyless reader) to stamp the per-app key on the capture context.
+	ResolveAppKey(kernelPid uint32) (AppKey, bool)
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
@@ -136,6 +167,12 @@ type NetworkAddress struct {
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
 	Port     uint32
+	// Pid is the kernel TGID of the process that originated the intercepted
+	// connection, surfaced from the eBPF redirect map's DestInfo.KernelPid.
+	// It is the attribution key for multi-tenancy: the proxy resolves which
+	// AppContext an accepted connection belongs to from this PID. Zero when
+	// the hooks implementation does not populate it (non-Linux, or no entry).
+	Pid uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

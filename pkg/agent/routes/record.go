@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	coreagent "go.keploy.io/server/v3/pkg/agent"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
@@ -62,6 +63,12 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 	}
 
 	r.Route("/agent", func(r chi.Router) {
+		// Multi-tenancy: lift the per-app key off the X-Keploy-App-Id
+		// header onto the request context so every handler/service/proxy
+		// call operates on that app's state. Absent header → no key →
+		// DefaultAppKey (single-app path), so this is behaviour-neutral
+		// for existing single-tenant clients.
+		r.Use(appIDMiddleware)
 		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
@@ -89,6 +96,23 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+	})
+}
+
+// AppIDHeader is the HTTP header the client stamps with its per-app key so
+// the multi-tenant agent can route the request to that app's state.
+const AppIDHeader = "X-Keploy-App-Id"
+
+// appIDMiddleware lifts the per-app key from the AppIDHeader onto the request
+// context (via coreagent.WithAppKey). When the header is absent the context
+// is unchanged and downstream code resolves DefaultAppKey — the single-app
+// path — so single-tenant clients are unaffected.
+func appIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get(AppIDHeader); v != "" {
+			r = r.WithContext(coreagent.WithAppKey(r.Context(), coreagent.AppKey(v)))
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
