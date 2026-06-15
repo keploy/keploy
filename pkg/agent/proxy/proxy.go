@@ -131,12 +131,15 @@ type Proxy struct {
 	// errChannel from filling up with background noise (OTel, health checks).
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
 	errDrainOnce     sync.Once
-	// session holds the single active session for this proxy.
-	// Previously this was a sync.Map keyed by appID (always 0), which is
-	// no longer needed since the proxy serves a single client-app.
-	sessionMu   sync.RWMutex
-	session     *agent.Session
-	mockManager *MockManager
+	// apps holds the per-application state (session + mockManager today;
+	// more per-app state migrates here incrementally) keyed by agent.AppKey
+	// so one proxy process can record/replay many apps concurrently. The
+	// control plane resolves the app from the request context
+	// (agent.AppKeyFromContext, stamped by the HTTP route middleware); the
+	// data plane (handleConnection) resolves it from the originating kernel
+	// PID via apps.Resolve. The DefaultAppKey AppContext reproduces the
+	// historical single-app behaviour byte-for-byte.
+	apps *AppRegistry
 
 	synchronous bool
 
@@ -632,6 +635,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		ipMutex:                   &sync.Mutex{},
 		connMutex:                 &sync.Mutex{},
 		DestInfo:                  info,
+		apps:                      NewAppRegistry(logger),
 		clientClose:               make(chan bool, 1),
 		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
@@ -743,23 +747,28 @@ func (p *Proxy) buildRecordSession(
 	}
 }
 
-// getSession returns the current session in a thread-safe manner.
-func (p *Proxy) getSession() *agent.Session {
-	p.sessionMu.RLock()
-	defer p.sessionMu.RUnlock()
-	return p.session
+// appCtx resolves the AppContext for the app identified by ctx (the per-app
+// key stamped on the control path by the route middleware, or on the data
+// path by handleConnection from the originating kernel PID). With no key it
+// resolves the DefaultAppKey AppContext — the single-app path.
+func (p *Proxy) appCtx(ctx context.Context) *AppContext {
+	return p.apps.GetOrCreate(agent.AppKeyOrDefault(ctx))
 }
 
-// setSession replaces the current session in a thread-safe manner.
-func (p *Proxy) setSession(s *agent.Session) {
-	p.sessionMu.Lock()
-	defer p.sessionMu.Unlock()
-	p.session = s
+// getSession returns the current session for ctx's app in a thread-safe manner.
+func (p *Proxy) getSession(ctx context.Context) *agent.Session {
+	return p.appCtx(ctx).getSession()
 }
 
-// GetSession returns the current session in a thread-safe manner (exported for enterprise).
+// setSession replaces the current session for ctx's app in a thread-safe manner.
+func (p *Proxy) setSession(ctx context.Context, s *agent.Session) {
+	p.appCtx(ctx).setSession(s)
+}
+
+// GetSession returns the default app's session (exported for enterprise; the
+// no-context interface method resolves the DefaultAppKey app).
 func (p *Proxy) GetSession() *agent.Session {
-	return p.getSession()
+	return p.apps.GetOrCreate(agent.DefaultAppKey).getSession()
 }
 
 func (p *Proxy) GetDestInfo() agent.DestInfo {
@@ -820,30 +829,15 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 	p.auxiliaryHook = h
 }
 
-// getMockManager returns the current mock manager in a thread-safe manner.
-func (p *Proxy) getMockManager() *MockManager {
-	p.sessionMu.RLock()
-	defer p.sessionMu.RUnlock()
-	return p.mockManager
+// getMockManager returns the current mock manager for ctx's app.
+func (p *Proxy) getMockManager(ctx context.Context) *MockManager {
+	return p.appCtx(ctx).getMockManager()
 }
 
-// setMockManager replaces the current mock manager in a thread-safe manner.
-//
-// Swaps the new manager in while holding sessionMu, then closes the
-// PREVIOUS manager after releasing the lock — Close() must not run under
-// sessionMu because Close() synchronises with its own internal workers.
-// Closing the outgoing manager stops its background idle-sweeper
-// goroutine; without this, every Record / Mock session would leak a
-// goroutine since MockManager owns a per-instance ticker that only
-// stops on Close().
-func (p *Proxy) setMockManager(m *MockManager) {
-	p.sessionMu.Lock()
-	prev := p.mockManager
-	p.mockManager = m
-	p.sessionMu.Unlock()
-	if prev != nil {
-		prev.Close()
-	}
+// setMockManager replaces ctx's app mock manager, closing the previous one
+// outside the lock (see AppContext.setMockManager for the ordering contract).
+func (p *Proxy) setMockManager(ctx context.Context, m *MockManager) {
+	p.appCtx(ctx).setMockManager(m)
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -1220,12 +1214,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// guaranteeing every send completes before close runs.
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.CloseOutChan()
-		} else {
-			p.sessionMu.RLock()
-			if p.session != nil && p.session.MC != nil {
-				close(p.session.MC)
+		} else if ac, ok := p.apps.Get(agent.DefaultAppKey); ok {
+			if rule := ac.getSession(); rule != nil && rule.MC != nil {
+				close(rule.MC)
 			}
-			p.sessionMu.RUnlock()
 		}
 
 		p.nsSwitchMutex.Lock()
@@ -1355,8 +1347,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	// Attribute this connection to its owning app from the originating
+	// kernel PID (eBPF redirect map → DestInfo.Pid) and stamp the app key
+	// onto ctx so every downstream consumer (session, mock manager, parser
+	// dispatch) operates on that app's state. Unresolved PIDs fall to
+	// DefaultAppKey — the single-app path — so this is behaviour-neutral
+	// until the data plane is actually multi-tenant.
+	ctx = agent.WithAppKey(ctx, p.apps.Resolve(destInfo.Pid))
+
 	//get the session rule
-	rule := p.getSession()
+	rule := p.getSession(ctx)
 	if rule == nil {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
@@ -1519,7 +1519,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
-		m := p.getMockManager()
+		m := p.getMockManager(ctx)
 		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
 			return err
@@ -2129,7 +2129,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	startConnCloser()
 
 	// get the mock manager for the current app
-	m := p.getMockManager()
+	m := p.getMockManager(ctx)
 	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")
 		return err
@@ -2428,12 +2428,12 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept
-	p.setSession(&agent.Session{
+	p.setSession(ctx, &agent.Session{
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
-	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	p.setMockManager(ctx, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if opts.CapturePackets {
 		// Agent picks its own scratch dir on its OWN filesystem; the
@@ -2457,13 +2457,13 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	return nil
 }
 
-func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
 	// Mock is replay; no pcap capture during replay. Tear down any
 	// capture left over from a previous record session.
 	p.stopPacketCapture()
-	p.setSession(&agent.Session{
+	p.setSession(ctx, &agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
@@ -2494,8 +2494,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// explicit reset a long-lived connection could match
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
-	if mm := p.getMockManager(); mm == nil {
-		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	if mm := p.getMockManager(ctx); mm == nil {
+		p.setMockManager(ctx, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {
 		mm.ResetForReplaySession()
 	}
@@ -2517,8 +2517,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	return nil
 }
 
-func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	if m := p.getMockManager(); m != nil {
+func (p *Proxy) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	if m := p.getMockManager(ctx); m != nil {
 		m.SetFilteredMocks(filtered)
 		m.SetUnFilteredMocks(unFiltered)
 		p.dnsCache.Purge()
@@ -2530,8 +2530,8 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // SetMocksWithWindow atomically updates mocks AND the test window in a
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
-func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
-	if m := p.getMockManager(); m != nil {
+func (p *Proxy) SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	if m := p.getMockManager(ctx); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
 	}
@@ -2549,15 +2549,19 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 // Zero-time return means "no cutoff known yet" and callers should fall
 // back to legacy strict-gate semantics.
 func (p *Proxy) FirstTestWindowStart() time.Time {
-	if m := p.getMockManager(); m != nil {
+	// No context on this optional interface method; resolve the default
+	// app. Per-app window reporting (when needed) requires the windowed
+	// extension to carry the app key — tracked with the rest of the
+	// per-app error/window plane.
+	if m := p.apps.GetOrCreate(agent.DefaultAppKey).getMockManager(); m != nil {
 		return m.FirstTestWindowStart()
 	}
 	return time.Time{}
 }
 
-// GetConsumedMocks returns the consumed filtered mocks.
-func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
-	m := p.getMockManager()
+// GetConsumedMocks returns the consumed filtered mocks for ctx's app.
+func (p *Proxy) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	m := p.getMockManager(ctx)
 	if m == nil {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}

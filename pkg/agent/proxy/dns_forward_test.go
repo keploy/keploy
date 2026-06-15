@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -84,6 +85,7 @@ func newProxyWithUpstream(t *testing.T, addr string, timeout time.Duration) *Pro
 		dnsForwardTimeout:  timeout,
 		dnsCache:           newDNSCache(),
 		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		apps:               NewAppRegistry(zap.NewNop()),
 	}
 }
 
@@ -229,7 +231,7 @@ func TestServeDNS_LocalMockHit_NoForward(t *testing.T) {
 			},
 		},
 	}})
-	p.mockManager = mgr
+	p.apps.GetOrCreate(agent.DefaultAppKey).mockManager = mgr
 
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	resp, mocked := p.getMockedDNSResponse(q)
@@ -288,7 +290,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamForwardSuccess(t *testing.T
 	// Empty mock manager — every query misses locally.
 	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(emptyMgr.Close)
-	p.mockManager = emptyMgr
+	p.apps.GetOrCreate(agent.DefaultAppKey).mockManager = emptyMgr
 
 	q := dns.Question{Name: "mysql.sap-demo.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
@@ -339,7 +341,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 	p := newProxyWithUpstream(t, addr, 80*time.Millisecond)
 	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(emptyMgr.Close)
-	p.mockManager = emptyMgr
+	p.apps.GetOrCreate(agent.DefaultAppKey).mockManager = emptyMgr
 
 	q := dns.Question{Name: "unreachable.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
@@ -397,7 +399,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP
 	p := newProxyWithUpstream(t, addr, 2*time.Second)
 	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(emptyMgr.Close)
-	p.mockManager = emptyMgr
+	p.apps.GetOrCreate(agent.DefaultAppKey).mockManager = emptyMgr
 
 	// "localstack" is the bare service name from the issue — no FQDN,
 	// so Docker DNS returns NXDOMAIN for it.
@@ -459,7 +461,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough(t *tes
 	p := newProxyWithUpstream(t, addr, 2*time.Second)
 	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(emptyMgr.Close)
-	p.mockManager = emptyMgr
+	p.apps.GetOrCreate(agent.DefaultAppKey).mockManager = emptyMgr
 
 	q := dns.Question{Name: "mysql.sap-demo.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)

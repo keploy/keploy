@@ -166,7 +166,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 
-	session := p.getSession()
+	// The DNS server is shared infrastructure (one listener for the whole
+	// node) with no per-connection app key, so resolve the default app.
+	// Per-app DNS attribution is a separate, deferred concern.
+	session := p.getSession(context.Background())
 	mode := models.GetMode()
 	mockingEnabled := true
 	if session != nil {
@@ -429,7 +432,8 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 }
 
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
-	mgr := p.getMockManager()
+	// Shared DNS path → default app (see ServeDNS).
+	mgr := p.getMockManager(context.Background())
 	if mgr == nil {
 		return dnsCacheEntry{}, false
 	}
