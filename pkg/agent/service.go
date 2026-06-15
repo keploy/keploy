@@ -133,6 +133,12 @@ type AppRegistrar interface {
 	// DeregisterApp tears down the app's per-app state and evicts its PID
 	// cache entries.
 	DeregisterApp(key AppKey)
+	// ResolveAppKey maps an intercepted connection's originating kernel PID
+	// to its owning app key, reporting whether it was attributed (ok=false
+	// → unattributed: cold-start / not a target / ambiguous). Used by
+	// embedders that capture outside handleConnection (the daemonset
+	// proxyless reader) to stamp the per-app key on the capture context.
+	ResolveAppKey(kernelPid uint32) (AppKey, bool)
 }
 
 type IncomingProxy interface {

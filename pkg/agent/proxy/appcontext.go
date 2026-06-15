@@ -140,6 +140,14 @@ func (p *Proxy) DeregisterApp(key agent.AppKey) {
 	p.apps.Delete(key)
 }
 
+// ResolveAppKey maps an intercepted connection's originating kernel PID to its
+// owning app key, reporting whether it was attributed. Used by embedders that
+// capture outside handleConnection (the daemonset proxyless reader) to stamp
+// the per-app key on the capture context. Satisfies agent.AppRegistrar.
+func (p *Proxy) ResolveAppKey(kernelPid uint32) (agent.AppKey, bool) {
+	return p.apps.ResolveWithOK(kernelPid)
+}
+
 // PIDResolver maps an originating kernel TGID to the owning app key. The
 // attribution source is pluggable: the native path uses /proc ancestry
 // (resolveAppByProcAncestry); the daemonset supplies an authoritative
@@ -221,8 +229,17 @@ func (r *AppRegistry) Delete(key agent.AppKey) {
 // Resolve maps a kernel PID to its owning app key: cache first, then the
 // pluggable resolver (whose result is cached), else DefaultAppKey.
 func (r *AppRegistry) Resolve(kernelPid uint32) agent.AppKey {
+	key, _ := r.ResolveWithOK(kernelPid)
+	return key
+}
+
+// ResolveWithOK is Resolve but reports whether the PID was actually attributed
+// to a registered app. ok=false (with DefaultAppKey) means unresolved
+// (cold-start / not a target / ambiguous overlap) — callers on the data path
+// use this to drop unattributed captures rather than mis-file them.
+func (r *AppRegistry) ResolveWithOK(kernelPid uint32) (agent.AppKey, bool) {
 	if v, ok := r.byPID.Load(kernelPid); ok {
-		return v.(agent.AppKey)
+		return v.(agent.AppKey), true
 	}
 	r.resolverMu.RLock()
 	res := r.resolver
@@ -230,10 +247,10 @@ func (r *AppRegistry) Resolve(kernelPid uint32) agent.AppKey {
 	if res != nil {
 		if key, ok := res(kernelPid); ok {
 			r.byPID.Store(kernelPid, key)
-			return key
+			return key, true
 		}
 	}
-	return agent.DefaultAppKey
+	return agent.DefaultAppKey, false
 }
 
 // resolveAppByProcAncestry is the default native attribution: walk the /proc
