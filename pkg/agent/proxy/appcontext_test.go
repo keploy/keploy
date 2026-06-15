@@ -4,8 +4,46 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.uber.org/zap"
 )
+
+func TestAppContextSyncMgrPerApp(t *testing.T) {
+	r := NewAppRegistry(zap.NewNop())
+	// Default app reuses the process-global manager (single-tenant parity).
+	def := r.GetOrCreate(agent.DefaultAppKey)
+	if def.SyncMgr() != syncMock.Get() {
+		t.Fatalf("default app must reuse the global syncMock manager")
+	}
+	// A named app gets its own, distinct manager.
+	a := r.GetOrCreate(agent.AppKey("app-a"))
+	if a.SyncMgr() == nil || a.SyncMgr() == syncMock.Get() {
+		t.Fatalf("named app must get its own (non-global) syncMock manager")
+	}
+	b := r.GetOrCreate(agent.AppKey("app-b"))
+	if a.SyncMgr() == b.SyncMgr() {
+		t.Fatalf("distinct apps must get distinct syncMock managers")
+	}
+}
+
+func TestAppRegistryDeleteClosesResources(t *testing.T) {
+	r := NewAppRegistry(zap.NewNop())
+	a := r.GetOrCreate(agent.AppKey("app-a"))
+	a.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop()))
+	// Delete must not panic, must evict, and must clear the manager (closing
+	// its idle-sweeper goroutine) — the daemonset-churn leak fix.
+	r.Delete(agent.AppKey("app-a"))
+	if _, ok := r.Get(agent.AppKey("app-a")); ok {
+		t.Fatalf("Delete did not evict the app")
+	}
+	if a.getMockManager() != nil {
+		t.Fatalf("Delete did not close/clear the mock manager")
+	}
+	// Deleting the default app must NOT close the shared global manager's
+	// output channel (defensive: close() guards against it).
+	_ = r.GetOrCreate(agent.DefaultAppKey)
+	r.Delete(agent.DefaultAppKey) // must not panic / must not close global
+}
 
 func TestAppRegistryGetOrCreateIsIdempotent(t *testing.T) {
 	r := NewAppRegistry(zap.NewNop())

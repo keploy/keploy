@@ -63,12 +63,42 @@ type AppContext struct {
 // newAppContext builds an AppContext with its per-app caches/channels
 // initialised the same way Proxy.New initialises the singletons today.
 func newAppContext(logger *zap.Logger, key agent.AppKey) *AppContext {
+	// The DefaultAppKey app reuses the process-global syncMock manager so the
+	// single-tenant path — and every existing syncMock.Get() lifecycle site —
+	// is byte-for-byte unchanged; only additional apps get their own manager.
+	mgr := syncMock.New()
+	if key == agent.DefaultAppKey {
+		mgr = syncMock.Get()
+	}
+	mgr.SetLogger(logger)
 	return &AppContext{
 		logger:           logger,
 		Key:              key,
+		syncMgr:          mgr,
 		errChannel:       make(chan error, 100),
 		dnsCache:         newDNSCache(),
 		recordedDNSMocks: newRecordedDNSMocksCache(),
+	}
+}
+
+// SyncMgr returns the app's per-app mock-window manager.
+func (a *AppContext) SyncMgr() *syncMock.SyncMockManager { return a.syncMgr }
+
+// close releases the app's per-app resources: stops the mock manager's
+// idle-sweeper goroutine and closes the syncMock output channel. Never closes
+// the process-global (default-app) manager. Called by AppRegistry.Delete.
+func (a *AppContext) close() {
+	a.sessionMu.Lock()
+	mm := a.mockManager
+	a.mockManager = nil
+	a.sessionMu.Unlock()
+	if mm != nil {
+		mm.Close()
+	}
+	// Non-default apps own a fresh manager; the default app's manager is the
+	// shared global and must outlive any single app's teardown.
+	if a.syncMgr != nil && a.syncMgr != syncMock.Get() {
+		a.syncMgr.CloseOutChan()
 	}
 }
 
@@ -213,16 +243,29 @@ func (r *AppRegistry) RegisterPID(kernelPid uint32, key agent.AppKey) {
 	r.byPID.Store(kernelPid, key)
 }
 
-// Delete tears down an app: evicts its cache entries and removes it from the
-// registry. The caller is responsible for closing per-app resources
-// (mockManager, syncMgr, channels) before/after — wired in a later phase.
+// Delete tears down an app: closes its per-app resources (mock manager
+// idle-sweeper goroutine + syncMock output channel), evicts its PID-attribution
+// cache entries, and removes it from the registry. Mandatory under the
+// long-lived shared daemon — without the close, every session teardown leaks
+// the per-app MockManager's sweeper goroutine.
 func (r *AppRegistry) Delete(key agent.AppKey) {
+	if v, ok := r.apps.Load(key); ok {
+		v.(*AppContext).close()
+	}
 	r.apps.Delete(key)
 	r.byPID.Range(func(k, v any) bool {
 		if v.(agent.AppKey) == key {
 			r.byPID.Delete(k)
 		}
 		return true
+	})
+}
+
+// Range calls f for each live AppContext (stopping if f returns false). Used by
+// the proxy's per-app syncMock flush/close lifecycle.
+func (r *AppRegistry) Range(f func(*AppContext) bool) {
+	r.apps.Range(func(_, v any) bool {
+		return f(v.(*AppContext))
 	})
 }
 

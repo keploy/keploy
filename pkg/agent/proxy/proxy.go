@@ -1178,9 +1178,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			case <-clientConnCtx.Done():
 				return
 			case <-ticker.C:
-				if mgr := syncMock.Get(); mgr != nil {
-					mgr.FlushOwnedWindows()
-				}
+				// Flush every app's mock-window manager (the default app's is
+				// the global one, so single-tenant is unchanged).
+				p.apps.Range(func(ac *AppContext) bool {
+					if ac.syncMgr != nil {
+						ac.syncMgr.FlushOwnedWindows()
+					}
+					return true
+				})
 			}
 		}
 	}()
@@ -1212,13 +1217,15 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// correlated with a 28-min process hang at runtime.
 		// CloseOutChan takes an RWMutex that AddMock holds for read,
 		// guaranteeing every send completes before close runs.
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.CloseOutChan()
-		} else if ac, ok := p.apps.Get(agent.DefaultAppKey); ok {
-			if rule := ac.getSession(); rule != nil && rule.MC != nil {
-				close(rule.MC)
+		// Close every app's mock channel via its syncMock manager (the
+		// default app's manager is the global one). CloseOutChan is
+		// idempotent + serialized against in-flight AddMock sends.
+		p.apps.Range(func(ac *AppContext) bool {
+			if ac.syncMgr != nil {
+				ac.syncMgr.CloseOutChan()
 			}
-		}
+			return true
+		})
 
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
@@ -1354,9 +1361,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// DefaultAppKey — the single-app path — so this is behaviour-neutral
 	// until the data plane is actually multi-tenant.
 	ctx = agent.WithAppKey(ctx, p.apps.Resolve(destInfo.Pid))
+	appCtx := p.appCtx(ctx)
 
 	//get the session rule
-	rule := p.getSession(ctx)
+	rule := appCtx.getSession()
 	if rule == nil {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
@@ -1366,8 +1374,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// goroutines handle connections concurrently and modify DstCfg/Synchronous
 	outgoingOpts := rule.OutgoingOptions
 
-	mgr := syncMock.Get()
+	// Bind this app's syncMock manager to its session's mock channel and stamp
+	// it on ctx so the parser emit sites (FromContext) route this app's mocks
+	// into its own manager. For the default app this is the global manager, so
+	// single-tenant behaviour is unchanged.
+	mgr := appCtx.syncMgr
 	mgr.SetOutputChannel(rule.MC)
+	ctx = syncMock.NewContext(ctx, mgr)
 	var dstAddr string
 
 	switch destInfo.Version {
