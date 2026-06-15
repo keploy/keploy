@@ -42,27 +42,86 @@ const (
 )
 
 // TODO: Need to refactor this file
+// appIDHeader is the per-app key header the multi-tenant agent routes on.
+// Kept in sync with routes.AppIDHeader (declared there to avoid an import
+// cycle between the client and the agent route package).
+const appIDHeader = "X-Keploy-App-Id"
+
+// appIDTransport stamps the per-app key (X-Keploy-App-Id) onto every request
+// to the agent so a shared multi-tenant agent can route it to the right app.
+// keyFn is read per-request; an empty key stamps nothing, so single-tenant
+// clients (the default) send no header and the agent falls back to its
+// DefaultAppKey — behaviour-neutral.
+type appIDTransport struct {
+	base  http.RoundTripper
+	keyFn func() string
+}
+
+func (t *appIDTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if key := t.keyFn(); key != "" && r.Header.Get(appIDHeader) == "" {
+		r = r.Clone(r.Context())
+		r.Header.Set(appIDHeader, key)
+	}
+	return base.RoundTrip(r)
+}
+
 type AgentClient struct {
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
 	client       http.Client
-	conf         *config.Config
-	agentCmd     *exec.Cmd             // Track the agent process
-	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
-	mu           sync.Mutex
-	agentCancel  context.CancelFunc // Function to cancel the agent context
+	// appKey is this client's per-app key, stamped on every agent request
+	// via appIDTransport. Empty (default) means single-tenant: no header is
+	// sent and the agent uses its DefaultAppKey. Set by SetAppKey once the
+	// shared-daemon / daemonset register handshake assigns one.
+	appKey      string
+	conf        *config.Config
+	agentCmd    *exec.Cmd             // Track the agent process
+	agentPTY    *agentUtils.PTYHandle // Track the PTY handle for interactive commands
+	mu          sync.Mutex
+	agentCancel context.CancelFunc // Function to cancel the agent context
 }
 
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
-
-	return &AgentClient{
+	a := &AgentClient{
 		logger:       logger,
 		dockerClient: client,
-		client:       http.Client{},
 		conf:         c,
+	}
+	// All agent requests flow through a transport that stamps the per-app
+	// key header (no-op while appKey is empty — the single-tenant default).
+	a.client = http.Client{Transport: &appIDTransport{base: http.DefaultTransport, keyFn: a.currentAppKey}}
+	return a
+}
+
+// SetAppKey sets this client's per-app key. Subsequent agent requests carry
+// it as the X-Keploy-App-Id header so a shared multi-tenant agent routes them
+// to this app. Empty restores single-tenant behaviour (no header).
+func (a *AgentClient) SetAppKey(key string) {
+	a.mu.Lock()
+	a.appKey = key
+	a.mu.Unlock()
+}
+
+func (a *AgentClient) currentAppKey() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.appKey
+}
+
+// httpClient returns an http.Client with the given timeout that shares the
+// per-app-key stamping transport, so one-off request clients (e.g. the
+// /hooks/* calls) also carry the X-Keploy-App-Id header when set.
+func (a *AgentClient) httpClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &appIDTransport{base: http.DefaultTransport, keyFn: a.currentAppKey},
 	}
 }
 
@@ -476,7 +535,7 @@ func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
+	client := a.httpClient(50 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-simulate"), zap.Error(err))
@@ -512,7 +571,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
+	client := a.httpClient(50 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-simulate"), zap.Error(err))
@@ -547,7 +606,7 @@ func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
+	client := a.httpClient(50 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-run"), zap.Error(err))
@@ -584,7 +643,7 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
+	client := a.httpClient(50 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
@@ -622,7 +681,7 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
+	client := a.httpClient(50 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		a.logger.Debug("failed to call agent hook", zap.String("endpoint", "/hooks/after-test-run"), zap.Error(err))
