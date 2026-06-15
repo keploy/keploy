@@ -274,21 +274,27 @@ type TestReportVerdict struct {
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	noise := CloneGlobalNoise(globalNoise)
 
+	// Preserve the historical guarantee that the body and header buckets always
+	// exist, since some callers index them directly.
 	if _, ok := noise["body"]; !ok {
 		noise["body"] = make(map[string][]string)
 	}
-	if tsNoiseBody, ok := tsNoise["body"]; ok {
-		for field, regexArr := range tsNoiseBody {
-			noise["body"][field] = regexArr
-		}
-	}
-
 	if _, ok := noise["header"]; !ok {
 		noise["header"] = make(map[string][]string)
 	}
-	if tsNoiseHeader, ok := tsNoise["header"]; ok {
-		for field, regexArr := range tsNoiseHeader {
-			noise["header"][field] = regexArr
+
+	// Merge EVERY section present in the test-set noise — not just body/header.
+	// The previous code hard-coded those two buckets, so test-set-scoped
+	// `requestbody` noise (and any future bucket) was silently dropped while the
+	// global bucket worked, which under --schema-noise-strict could turn a
+	// noised request-body field back into a match-affecting one and falsely
+	// reject the mock.
+	for section, fields := range tsNoise {
+		if _, ok := noise[section]; !ok {
+			noise[section] = make(map[string][]string)
+		}
+		for field, regexArr := range fields {
+			noise[section][field] = regexArr
 		}
 	}
 
