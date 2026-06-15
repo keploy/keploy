@@ -109,6 +109,37 @@ func (a *AppContext) resetRecordedDNSMocks() {
 	a.recordedDNSMocks = newRecordedDNSMocksCache()
 }
 
+// Proxy implements the multi-tenant AppRegistrar extension.
+var _ agent.AppRegistrar = (*Proxy)(nil)
+
+// SetAppResolver installs the PID→app attribution function on the proxy's
+// registry (satisfies agent.AppRegistrar). Embedders with an authoritative
+// PID→app map (e.g. the daemonset controller) override the default
+// /proc-ancestry resolver here.
+func (p *Proxy) SetAppResolver(resolver func(kernelPid uint32) (agent.AppKey, bool)) {
+	p.apps.SetResolver(resolver)
+}
+
+// RegisterApp creates (if absent) the AppContext for key and seeds the
+// attribution cache with the app's root PID(s), so the data plane
+// (handleConnection → apps.Resolve) resolves the same key the control plane
+// stamps on ctx. Satisfies agent.AppRegistrar.
+func (p *Proxy) RegisterApp(key agent.AppKey, rootPIDs ...uint32) {
+	ac := p.apps.GetOrCreate(key)
+	for _, pid := range rootPIDs {
+		if pid != 0 {
+			ac.RootPID = pid
+			p.apps.RegisterPID(pid, key)
+		}
+	}
+}
+
+// DeregisterApp tears down the app's per-app state. Satisfies
+// agent.AppRegistrar.
+func (p *Proxy) DeregisterApp(key agent.AppKey) {
+	p.apps.Delete(key)
+}
+
 // PIDResolver maps an originating kernel TGID to the owning app key. The
 // attribution source is pluggable: the native path uses /proc ancestry
 // (resolveAppByProcAncestry); the daemonset supplies an authoritative
