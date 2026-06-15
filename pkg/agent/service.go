@@ -136,6 +136,12 @@ type NetworkAddress struct {
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
 	Port     uint32
+	// Pid is the kernel TGID of the process that originated the intercepted
+	// connection, surfaced from the eBPF redirect map's DestInfo.KernelPid.
+	// It is the attribution key for multi-tenancy: the proxy resolves which
+	// AppContext an accepted connection belongs to from this PID. Zero when
+	// the hooks implementation does not populate it (non-Linux, or no entry).
+	Pid uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.
