@@ -15,6 +15,22 @@ echo "iid.sh executed"
 
 git fetch origin
 
+# Mock-mismatch reporting (the per-test capture window + unmatched_calls in the
+# report) is new in this PR. On the cross-version matrix the 'latest' replay
+# binary is the published release that predates this feature, so it can never
+# emit the "Mock mismatch: [HTTP]" line / unmatched_calls entry this suite
+# asserts (success is inverted) — skip cleanly there rather than fail
+# deterministically. Local build binaries (*/build/keploy, */build-no-race/
+# keploy) have the feature. Mirrors the streaming sibling + risk_profile /
+# connect_tunnel capability gates.
+case "${REPLAY_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy) ;;
+    *)
+        echo "REPLAY_BIN ($REPLAY_BIN) predates mock-mismatch reporting; skipping suite"
+        exit 0
+        ;;
+esac
+
 if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
