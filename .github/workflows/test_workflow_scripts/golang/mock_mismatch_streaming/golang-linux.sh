@@ -88,7 +88,11 @@ send_request() {
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
     echo "Killing Keploy"
-    sudo kill "$pid"
+    # Unquoted on purpose: pgrep can return BOTH the keploy CLI and the agent
+    # process, so $pid may be multiple newline-separated PIDs. Quoting it passes
+    # one mangled arg to kill ("failed to parse argument"), keploy survives, and
+    # `wait` on the record command hangs to the job timeout. Word-split instead.
+    sudo kill $pid
 }
 
 # Record one iteration of test cases + Redis mocks.
