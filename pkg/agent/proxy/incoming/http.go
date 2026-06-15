@@ -652,7 +652,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				releaseLock()
 				streamingExchange = true
 			} else if captureEnabled && pm.synchronous && acquiredLock {
-				mgr := syncMock.Get()
+				mgr := syncMock.FromContext(ctx)
 				if !mgr.GetFirstReqSeen() {
 					mgr.SetFirstRequestSignaled()
 				}
