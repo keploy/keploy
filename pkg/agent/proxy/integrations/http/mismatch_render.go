@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -33,6 +34,53 @@ func isSensitiveHeader(name string) bool {
 	return false
 }
 
+// secretValuePatterns matches credential-SHAPED values, independent of the key
+// name or the mock's noise config — the value-shape backstop behind the
+// key-name denylist and the noise regexes. They are deliberately
+// prefix/scheme-based (not raw Shannon entropy): a generic "high-entropy"
+// rule would also redact UUIDs, content hashes and idempotency keys, which are
+// frequently the exact field that drifted and caused the mismatch — redacting
+// those would gut the diagnostic value of the diff. Each pattern matches a
+// credential FORM with effectively no legitimate non-secret collision.
+var secretValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),              // Authorization schemes
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`), // JWT (header.payload.sig)
+	regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----`),                            // PEM private key
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),                                // AWS access key id
+	regexp.MustCompile(`\bgh[posru]_[A-Za-z0-9]{20,}\b`),                               // GitHub token
+	regexp.MustCompile(`\bkep_[A-Za-z0-9_-]{20,}\b`),                                   // keploy PAT
+	regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b`),                        // Stripe secret key
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`),                             // Slack token
+	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),                                 // GitLab PAT
+	regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`),                                    // Google API key
+}
+
+// looksLikeSecretValue reports whether a single header / query-param /
+// JSON-scalar value is credential-shaped and must be redacted even when its key
+// isn't on the denylist and the mock's noise config didn't cover it.
+func looksLikeSecretValue(v string) bool {
+	s := strings.TrimSpace(v)
+	if len(s) < 8 {
+		return false
+	}
+	for _, re := range secretValuePatterns {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubSecretsInText replaces credential-shaped tokens embedded in free-form
+// (opaque, non-JSON / non-form) body text with the redaction marker, leaving
+// the surrounding structure intact so the diff stays useful.
+func scrubSecretsInText(s string) string {
+	for _, re := range secretValuePatterns {
+		s = re.ReplaceAllString(s, valueRedacted)
+	}
+	return s
+}
+
 // redactFieldDiffs redacts the Expected/Actual values of structured field diffs
 // in place. A value is redacted when its path key looks sensitive or the value
 // matches the mock's noise patterns. These diffs — and the one-line Diff string
@@ -44,10 +92,10 @@ func redactFieldDiffs(diffs []models.MockFieldDiff, mockNoise []string) {
 	isNoisy := func(v string) bool { return v != "" && nc != nil && nc.IsNoisy(v) }
 	for i := range diffs {
 		sensitive := isSensitiveHeader(diffs[i].Path)
-		if sensitive || isNoisy(diffs[i].Expected) {
+		if sensitive || isNoisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
 			diffs[i].Expected = valueRedacted
 		}
-		if sensitive || isNoisy(diffs[i].Actual) {
+		if sensitive || isNoisy(diffs[i].Actual) || looksLikeSecretValue(diffs[i].Actual) {
 			diffs[i].Actual = valueRedacted
 		}
 	}
@@ -157,7 +205,7 @@ func renderRequestPreview(method, path, rawQuery string, header map[string]strin
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := header[k]
-		if isSensitiveHeader(k) || isObfuscated(v) {
+		if isSensitiveHeader(k) || isObfuscated(v) || looksLikeSecretValue(v) {
 			v = valueRedacted
 		} else {
 			v = truncateValue(v, maxRenderValueLen)
@@ -203,7 +251,7 @@ func redactQuery(rawQuery string, nc *util.NoiseChecker) string {
 	}
 	for k, vs := range vals {
 		for i, v := range vs {
-			if isSensitiveHeader(k) || (nc != nil && v != "" && nc.IsNoisy(v)) {
+			if isSensitiveHeader(k) || (nc != nil && v != "" && nc.IsNoisy(v)) || looksLikeSecretValue(v) {
 				vs[i] = valueRedacted
 			} else {
 				vs[i] = truncateValue(v, maxRenderValueLen)
@@ -239,7 +287,10 @@ func redactBody(body, contentType string, nc *util.NoiseChecker) string {
 	if nc != nil && nc.IsNoisy(body) {
 		return valueRedacted
 	}
-	return body
+	// Opaque body (XML / SOAP / plain-text / proto / GraphQL): there's no field
+	// structure to walk, so scrub credential-shaped tokens in place as a
+	// backstop instead of emitting the body verbatim.
+	return scrubSecretsInText(body)
 }
 
 // redactJSONValue walks a decoded JSON value in place. A sensitive key's value
@@ -255,7 +306,7 @@ func redactJSONValue(v interface{}, nc *util.NoiseChecker) {
 				continue
 			}
 			if s, ok := val.(string); ok {
-				if isNoisy(s) {
+				if isNoisy(s) || looksLikeSecretValue(s) {
 					t[k] = valueRedacted
 				}
 				continue
@@ -265,7 +316,7 @@ func redactJSONValue(v interface{}, nc *util.NoiseChecker) {
 	case []interface{}:
 		for i, val := range t {
 			if s, ok := val.(string); ok {
-				if isNoisy(s) {
+				if isNoisy(s) || looksLikeSecretValue(s) {
 					t[i] = valueRedacted
 				}
 				continue
