@@ -191,7 +191,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// the taint flow and stops the go/clear-text-logging false
 		// positives that fire downstream (syncMock.go diag/Info
 		// logs include test_name for ResolveRange traceability).
-		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
+		if mgr := syncMock.GetForContext(ctx); mgr != nil { // dumping the test case from mock manager in synchronous mode
 			mgr.ResolveRange(reqTimeTest, resTimeTest, testName, true, mapping)
 		}
 	}

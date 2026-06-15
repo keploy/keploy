@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -96,15 +97,79 @@ type SyncMockManager struct {
 	logger   *zap.Logger
 }
 
-// Global instance is initialized at package load time
-var instance = &SyncMockManager{
-	buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
-	firstReqSeen: false,
+// newManager builds a fresh manager with the default buffer.
+func newManager() *SyncMockManager {
+	return &SyncMockManager{
+		buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
+		firstReqSeen: false,
+	}
 }
 
-// Get returns the global manager.
+// Global instance is initialized at package load time. It is the manager
+// returned to callers with no session key — i.e. the sidecar/single-app path,
+// whose behaviour is byte-for-byte unchanged.
+var instance = newManager()
+
+// registry holds per-session managers keyed by an opaque session key. In the
+// DaemonSet (one agent process, many concurrent recordings) each recording
+// session gets its OWN manager — its own buffer, time windows, dedup state and
+// output channel — so two apps recording on one node never share or overwrite
+// each other's mock stream. Callers without a session key keep using the
+// global `instance`, so nothing changes for the sidecar path.
+var registry sync.Map // string -> *SyncMockManager
+
+// sessionKeyCtx is the private context key carrying the per-session manager key.
+type sessionKeyCtxType struct{}
+
+var sessionKeyCtx = sessionKeyCtxType{}
+
+// WithSessionKey returns a ctx that routes syncMock lookups to the per-session
+// manager for key. An empty key is a no-op (callers fall back to the global
+// instance), so this is safe to call unconditionally.
+func WithSessionKey(ctx context.Context, key string) context.Context {
+	if ctx == nil || key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionKeyCtx, key)
+}
+
+// SessionKeyFromContext extracts the per-session key, or "" when none is set.
+func SessionKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(sessionKeyCtx).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// Get returns the global manager (the no-session-key path).
 func Get() *SyncMockManager {
 	return instance
+}
+
+// GetForContext returns the per-session manager for the session key carried on
+// ctx, lazily creating it. With no key on ctx it returns the global instance,
+// so existing call sites are unchanged unless a key has been threaded in.
+func GetForContext(ctx context.Context) *SyncMockManager {
+	key := SessionKeyFromContext(ctx)
+	if key == "" {
+		return instance
+	}
+	if v, ok := registry.Load(key); ok {
+		return v.(*SyncMockManager)
+	}
+	v, _ := registry.LoadOrStore(key, newManager())
+	return v.(*SyncMockManager)
+}
+
+// DeleteForContext removes a per-session manager (on session teardown) so the
+// registry doesn't accumulate. No-op for the global instance.
+func DeleteForContext(ctx context.Context) {
+	if key := SessionKeyFromContext(ctx); key != "" {
+		registry.Delete(key)
+	}
 }
 
 // SetOutputChannel plugs an outgoing mock channel into the manager.

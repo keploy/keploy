@@ -182,7 +182,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				LifetimeDerived: true,
 			},
 		}
-		if mgr := syncMock.Get(); mgr != nil {
+		if mgr := syncMock.GetForContext(ctx); mgr != nil {
 			mgr.AddMock(mock)
 		}
 		genericRequests = nil

@@ -299,10 +299,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		onMockRecorded(newMock)
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
+	if mgr := syncMock.GetForContext(ctx); mgr != nil {
 		// Route HTTP mocks through the sync manager. The manager uses its
 		// internal first-request state to decide whether to buffer or forward
-		// mocks for correct time-window based association.
+		// mocks for correct time-window based association. GetForContext picks
+		// the per-session manager when a session key is on ctx (DaemonSet
+		// multi-app), else the global one (sidecar) — unchanged for the latter.
 		mgr.AddMock(newMock)
 		return nil
 	}
