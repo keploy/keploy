@@ -39,7 +39,7 @@ type Agent struct {
 	config       *config.Config
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
-	clientMocks sync.Map // map[uint64]*ClientMockStorage
+	clientMocks sync.Map // map[coreAgent.AppKey]*ClientMockStorage
 	Ip          string
 
 	// strictLogOnce de-dupes the "strict mock window enabled" Info log
@@ -658,7 +658,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 		}
 	}
 
-	a.clientMocks.Store(uint64(0), storage)
+	a.clientMocks.Store(coreAgent.AppKeyOrDefault(ctx), storage)
 
 	// Compute the freeze anchor as the earliest ReqTimestampMock across the
 	// stored mocks and forward it to AgentHooks. The hook implementation
@@ -746,8 +746,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			zap.Time("windowEnd", params.BeforeTime))
 	}
 
-	// Get stored mocks for the client
-	storageInterface, exists := a.clientMocks.Load(uint64(0))
+	// Get stored mocks for the app addressed by this request (per-app key
+	// from ctx; DefaultAppKey for single-tenant clients).
+	storageInterface, exists := a.clientMocks.Load(coreAgent.AppKeyOrDefault(ctx))
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
