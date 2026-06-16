@@ -299,7 +299,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		onMockRecorded(newMock)
 	}
 
-	if mgr := syncMock.Get(); mgr != nil {
+	if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
 		// Route HTTP mocks through the sync manager. The manager uses its
 		// internal first-request state to decide whether to buffer or forward
 		// mocks for correct time-window based association.

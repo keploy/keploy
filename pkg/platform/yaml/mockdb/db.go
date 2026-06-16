@@ -62,12 +62,35 @@ func useGobMockFormat() bool {
 	return configuredMockFormat == mockFormatGob
 }
 
+// useGobFormat is the per-instance gob-vs-structured decision: the
+// KEPLOY_MOCK_FORMAT env override wins, then this db's per-session
+// MockFormat (set by multi-app callers), then the package-global default.
+// Single-session callers leave MockFormat empty and get exactly the old
+// useGobMockFormat() behaviour.
+func (ys *MockYaml) useGobFormat() bool {
+	if v := os.Getenv("KEPLOY_MOCK_FORMAT"); v != "" {
+		return v == mockFormatGob
+	}
+	if ys.MockFormat != "" {
+		return ys.MockFormat == mockFormatGob
+	}
+	return useGobMockFormat()
+}
+
 type MockYaml struct {
 	MockPath  string
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
 	Format    yaml.Format
+
+	// MockFormat is the per-instance record-time format (yaml vs gob),
+	// orthogonal to Format (the yaml/json storage encoding). Empty means
+	// "use the package-global default" (configuredMockFormat), preserving
+	// single-session behaviour. Multi-app/per-session callers set this so
+	// each session honours its own spec.MockFormat instead of the process
+	// global — see useGobFormat.
+	MockFormat string
 
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
@@ -686,7 +709,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
-	if useGobMockFormat() {
+	if ys.useGobFormat() {
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 

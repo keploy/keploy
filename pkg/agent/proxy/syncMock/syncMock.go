@@ -89,6 +89,13 @@ type SyncMockManager struct {
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
 
+	// testCounter generates this session's sequential test IDs
+	// ("test-1", "test-2", …). Per-instance so concurrent capture
+	// sessions in one process number their testcases independently.
+	// On the per-session path this replaces the package-global
+	// conn.GlobalTestCounter (see NextTestID).
+	testCounter atomic.Int64
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
@@ -105,6 +112,34 @@ var instance = &SyncMockManager{
 // Get returns the global manager.
 func Get() *SyncMockManager {
 	return instance
+}
+
+// New constructs an independent SyncMockManager with its own buffer,
+// window ring, drop counter, and output channel. It shares no state
+// with the package global returned by Get(). Use it when a single
+// process runs more than one concurrent capture session (e.g. the
+// enterprise multi-app DaemonSet agent, where each app owns its own
+// manager); Get() remains the single-session default and is unchanged.
+// The dedup queue is supplied separately at ResolveJob time, so callers
+// that want per-session dedup pair this with their own DedupQueue.
+func New(logger *zap.Logger) *SyncMockManager {
+	m := &SyncMockManager{
+		buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
+		firstReqSeen: false,
+	}
+	if logger != nil {
+		m.logger = logger
+	}
+	return m
+}
+
+// NextTestID returns this session's next sequential test ID. Per-instance
+// so two concurrent capture sessions number testcases independently
+// (each starts at 1). On the single-session path it runs against the
+// package-global manager, reproducing the old conn.GlobalTestCounter
+// behaviour exactly.
+func (m *SyncMockManager) NextTestID() int64 {
+	return m.testCounter.Add(1)
 }
 
 // SetOutputChannel plugs an outgoing mock channel into the manager.
@@ -1029,6 +1064,17 @@ var globalDedupQueue = &DedupQueue{
 
 func GetDedupQueue() *DedupQueue {
 	return globalDedupQueue
+}
+
+// NewDedupQueue constructs an independent dedup queue. Pair it with a
+// syncMock.New() manager when a process runs multiple concurrent capture
+// sessions, so each session's strict-FIFO dedup ordering is isolated and
+// one app's requests cannot mark another app's first occurrence a
+// duplicate. GetDedupQueue() remains the single-session global default.
+func NewDedupQueue() *DedupQueue {
+	return &DedupQueue{
+		queue: make([]*DedupJob, 0),
+	}
 }
 
 // Enqueue adds a request to the end of the queue as soon as it's encountered.

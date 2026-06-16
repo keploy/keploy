@@ -138,6 +138,14 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	// sessionResolver, when set, maps a connection's owning TGID to the
+	// session that should handle it. It is the seam by which an external
+	// composer (the enterprise multi-app agent) routes per-app traffic
+	// without this package knowing what an "app" is. nil ⇒ single-session
+	// mode: GetSessionFor falls back to the single session field above.
+	// Guarded by sessionMu.
+	sessionResolver func(tgid uint32) *agent.Session
+
 	synchronous bool
 
 	connMutex *sync.Mutex
@@ -762,6 +770,36 @@ func (p *Proxy) GetSession() *agent.Session {
 	return p.getSession()
 }
 
+// SetSessionResolver installs a per-TGID session resolver. Pass nil to
+// revert to single-session mode. Multi-app composers (the enterprise
+// agent) use this to route each app's captured traffic to its own
+// session; OSS never sets it and therefore stays single-session.
+func (p *Proxy) SetSessionResolver(fn func(tgid uint32) *agent.Session) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	p.sessionResolver = fn
+}
+
+// GetSessionFor returns the session that owns the connection originating
+// from tgid. With a resolver installed it dispatches per-app; otherwise
+// (or if the resolver returns nil for an unmapped/late connection) it
+// returns the single active session, so behaviour degrades to today's
+// single-session default rather than dropping the connection.
+func (p *Proxy) GetSessionFor(tgid uint32) *agent.Session {
+	p.sessionMu.RLock()
+	resolver := p.sessionResolver
+	single := p.session
+	p.sessionMu.RUnlock()
+	// Call the resolver outside the lock — it is external code and must
+	// not run under sessionMu (reentrancy / deadlock safety).
+	if resolver != nil {
+		if s := resolver(tgid); s != nil {
+			return s
+		}
+	}
+	return single
+}
+
 func (p *Proxy) GetDestInfo() agent.DestInfo {
 	return p.DestInfo
 }
@@ -1323,6 +1361,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
+
+	// Delete-on-close (O7): drop this source port's TLS dest mapping when
+	// the connection finishes. This defer runs at return — after the
+	// parserErrGrp.Wait() below — so no parser goroutine can still be
+	// reading the entry. It bounds SrcPortToDstURL and, critically for the
+	// multi-app agent, stops a recycled source port from reading a previous
+	// (possibly different-app) connection's stale destination when its
+	// ClientHello carries no SNI. Deleting an absent key is a no-op, so
+	// this is harmless for non-CONNECT/non-TLS connections.
+	defer pTls.SrcPortToDstURL.Delete(sourcePort)
 
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
