@@ -488,6 +488,14 @@ func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mappi
 	return added
 }
 
+// isMockSubsetWithConfig reports whether the streaming-path replay consumed a
+// mock set consistent with the test's mapping: a consumed mock that is NOT in
+// the expected set flags a mismatch — UNLESS it is a mock that doesn't
+// participate in the per-test comparison. Only PER-TEST mocks are compared;
+// reusable/startup-tier mocks (session / connection / config, recorded once at
+// app boot and reused) and DNS (non-deterministic resolution order) are
+// ignored, mirroring the non-streaming path's filtering. They belong in the
+// mapping but must not, by their reuse, falsely demote a test to OBSOLETE.
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
@@ -496,12 +504,13 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 
 	for _, m := range consumedMocks {
 		if !expectedMap[m.Name] {
-			// Found an extra mock in the actual run
-			if m.Type != "config" {
-				// This is NOT a config mock, so it IS a mismatch
+			// An extra consumed mock that wasn't in the mapping is a mismatch
+			// ONLY if it's a per-test mock. Reusable/startup-tier mocks
+			// (session/connection/config) and DNS are excluded from the
+			// comparison — they are reused / non-deterministically attributed.
+			if m.Kind != models.DNS && !isReusableTierState(m) {
 				return false
 			}
-			// If Type is "config", we ignore it as an extra mock
 		}
 	}
 	return true
@@ -849,6 +858,9 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 					if failure.MismatchReport != nil {
 						r := failure.MismatchReport
 						detail := fmt.Sprintf("[%s] %s", r.Protocol, r.ActualSummary)
+						if r.MatchPhase != "" {
+							detail += fmt.Sprintf(" | phase: %s", r.MatchPhase)
+						}
 						if r.ClosestMock != "" {
 							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
 						}

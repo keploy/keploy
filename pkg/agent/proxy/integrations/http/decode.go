@@ -22,9 +22,10 @@ import (
 )
 
 // ErrMockNotMatched is returned by decodeHTTP when no recorded mock
-// matches the outgoing HTTP request. Callers can check for this with
-// errors.Is to distinguish a mock-miss from a real proxy error.
-var ErrMockNotMatched = errors.New("no matching mock found")
+// matches the outgoing HTTP request. It aliases models.ErrNoMockMatched so
+// callers can errors.Is against either symbol to distinguish a mock-miss
+// from a real proxy error.
+var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -160,9 +161,34 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			// User body noise from test.globalNoise (root-relative dotted
+			// paths). Lowercased copy for the same reason as headerNoise:
+			// the matcher's noise index matches lowercased paths.
+			// Entries are normalized to presence-only (empty regex list):
+			// request-body mock matching and drift detection are path-based,
+			// so a value-regex cannot gate here the way it can't gate JSON
+			// body leaves in response assertions either. Normalizing (rather
+			// than dropping regex-valued entries) keeps the documented
+			// promise that a path copied from a mismatch report into
+			// test.globalNoise takes effect regardless of value style.
+			var bodyNoise map[string][]string
+			if opts.NoiseConfig != nil {
+				if bn, ok := opts.NoiseConfig["body"]; ok {
+					bodyNoise = make(map[string][]string, len(bn))
+					for k, v := range bn {
+						if len(v) > 0 {
+							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+								zap.String("field", k))
+						}
+						bodyNoise[strings.ToLower(k)] = []string{}
+					}
+				}
+			}
 
-			ok, stub, err := h.match(ctx, input, mockDb, headerNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
+
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -171,16 +197,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
-
-				// Build mismatch report for the user (surfaced in the mismatch table)
-				report := h.buildHTTPMismatchReport(request, mockDb, nil)
+				// Build mismatch report for the user (surfaced in the mismatch
+				// table, the report yaml and `keploy report`).
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
-					h.Logger.Debug("mock miss",
+					// Default-visible: this is the root cause of the test
+					// failure that follows, so it must not hide at Debug.
+					h.Logger.Warn("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("actual", report.ActualSummary),
+						zap.String("match_phase", report.MatchPhase),
+						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff))
+						zap.String("diff", report.Diff),
+						zap.String("next_step", report.NextSteps))
 				}
 
 				// No mock matched — send a 502 so the application gets a
