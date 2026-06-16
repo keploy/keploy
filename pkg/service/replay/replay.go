@@ -1030,9 +1030,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
 	mockKindByName := make(map[string]models.Kind)
+	// reusableMockNames marks mocks whose recorder-derived tier is reusable
+	// across tests (session / connection / config) or app-startup traffic —
+	// i.e. NOT per-test. They belong in the mapping (so the pool is complete)
+	// but are excluded from the per-test consumed-vs-expected assertion: only
+	// per-test mocks are deterministically attributed to a single test, so
+	// comparing reusable/startup mocks would falsely demote tests to OBSOLETE
+	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
+	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
+	reusableMockNames := make(map[string]bool)
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
+			if isReusableTierMock(m) {
+				reusableMockNames[m.Name] = true
+			}
 		}
 	}
 
@@ -1693,6 +1705,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 
 			// Compute non-DNS expected and consumed name slices once; reused for subset check and mismatch reporting.
+			// Only PER-TEST mocks participate in the consumed-vs-expected
+			// assertion. DNS (non-deterministic resolution order) and
+			// reusable/startup-tier mocks (session / connection / config,
+			// recorded once at app boot and shared across tests) stay in the
+			// mapping but are excluded here: they are not deterministically
+			// attributed to a single test's window, so including them would
+			// falsely demote tests to OBSOLETE.
 			filteredExpectedNames := make([]string, 0, len(expectedMocks))
 			for _, m := range expectedMocks {
 				isDNS := strings.EqualFold(m.Kind, string(models.DNS))
@@ -1701,28 +1720,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						isDNS = true
 					}
 				}
-				if !isDNS {
-					filteredExpectedNames = append(filteredExpectedNames, m.Name)
+				if isDNS || reusableMockNames[m.Name] {
+					continue
 				}
+				filteredExpectedNames = append(filteredExpectedNames, m.Name)
 			}
 
 			filteredMockNames := make([]string, 0, len(consumedMocks))
 			for _, m := range consumedMocks {
-				if m.Kind != models.DNS {
-					filteredMockNames = append(filteredMockNames, m.Name)
+				if m.Kind == models.DNS || isReusableTierState(m) {
+					continue
 				}
+				filteredMockNames = append(filteredMockNames, m.Name)
 			}
 
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
-				// Filter out DNS mocks from comparison since DNS resolution
-				// order is non-deterministic. Also gate on a successful per-
-				// test GetConsumedMocks — when the fetch failed, consumedMocks
-				// was cleared to nil above, which would deterministically
-				// compute mockSetMismatch=true (empty subset of any non-empty
-				// expected set) and falsely mark the test OBSOLETE due to an
-				// unrelated transport error rather than a real mock-pool
-				// divergence.
+				// Compare only per-test mocks (DNS + reusable/startup tiers
+				// excluded above) since those are the only mocks
+				// deterministically tied to a single test. Also gate on a
+				// successful per-test GetConsumedMocks — when the fetch failed,
+				// consumedMocks was cleared to nil above, which would
+				// deterministically compute mockSetMismatch=true (empty subset
+				// of any non-empty expected set) and falsely mark the test
+				// OBSOLETE due to an unrelated transport error rather than a
+				// real mock-pool divergence.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
@@ -3767,6 +3789,45 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 }
 
 // isMockSubset checks if all expected mocks are present in the actual mocks list
+// isReusableTierMock reports whether a loaded mock is a reusable, non-per-test
+// tier — session / connection / config — recorded once at app startup and
+// shared across every test rather than consumed by exactly one. Such mocks
+// belong in the per-test mapping (so the replay mock pool is complete) but
+// must be excluded from the per-test consumed-vs-expected assertion: they are
+// not deterministically attributed to a single test's window, so comparing
+// them would falsely demote tests to OBSOLETE. Only per-test mocks are
+// compared. Tier is read from TestModeInfo.Lifetime (derived at ingest) with
+// Spec.Metadata["type"] as a fallback for mocks whose lifetime wasn't derived.
+func isReusableTierMock(m *models.Mock) bool {
+	switch m.TestModeInfo.Lifetime {
+	case models.LifetimeSession, models.LifetimeConnection:
+		return true
+	}
+	if m.Spec.Metadata != nil {
+		switch m.Spec.Metadata["type"] {
+		case "config", "connection":
+			return true
+		}
+	}
+	return false
+}
+
+// isReusableTierState is the MockState (consumed-mock) equivalent of
+// isReusableTierMock. GetConsumedMocks carries the recorder-derived Lifetime
+// and metadata type, so session/connection/config mocks are carved out of the
+// consumed side of the assertion the same way they are on the expected side.
+func isReusableTierState(s models.MockState) bool {
+	switch s.Lifetime {
+	case models.LifetimeSession, models.LifetimeConnection:
+		return true
+	}
+	switch s.Type {
+	case "config", "connection":
+		return true
+	}
+	return false
+}
+
 func isMockSubset(actual []string, expected []string) bool {
 	actualMap := make(map[string]bool)
 	for _, mock := range actual {
