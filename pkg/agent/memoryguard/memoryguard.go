@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -204,10 +205,44 @@ func resetAllPressure() {
 	applyPausedState(false)
 }
 
+// pressureHooks are additional sinks for the memory-pressure signal,
+// registered via RegisterPressureHook. The decision to pause is global
+// (pod-level cgroup memory), but the buffered mocks that consume that memory
+// can live in many sync-mock managers — e.g. the multi-app agent runs one
+// manager per app and the package-global Get() manager is then unused. A
+// composer registers a hook that fans the pressure out to all its live
+// managers so the relief actually reaches the buffers.
+var (
+	pressureHookMu sync.RWMutex
+	pressureHooks  []func(paused bool)
+)
+
+// RegisterPressureHook adds fn to the set invoked by applyPausedState
+// alongside the package-global manager. Idempotency / lifecycle is the
+// caller's responsibility (register once at bring-up). Safe for concurrent
+// use.
+func RegisterPressureHook(fn func(paused bool)) {
+	if fn == nil {
+		return
+	}
+	pressureHookMu.Lock()
+	pressureHooks = append(pressureHooks, fn)
+	pressureHookMu.Unlock()
+}
+
 func applyPausedState(paused bool) {
 	recordingPaused.Store(paused)
+	// Global manager: the buffering manager in single-app mode.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetMemoryPressure(paused)
+	}
+	// Fan out to registered managers (multi-app: one per app). The global
+	// trigger stays global; only the action reaches every live buffer.
+	pressureHookMu.RLock()
+	hooks := pressureHooks
+	pressureHookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(paused)
 	}
 }
 
