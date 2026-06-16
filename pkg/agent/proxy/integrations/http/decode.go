@@ -206,9 +206,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// table, the report yaml and `keploy report`).
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
-					// Default-visible: this is the root cause of the test
-					// failure that follows, so it must not hide at Debug.
-					h.Logger.Warn("no matching http mock found for outgoing request",
+					// Per-call HTTP detail at Debug; the canonical, protocol-
+					// agnostic mock-mismatch WARN is emitted once in
+					// proxy.sendMockNotFoundError (where every parser's miss
+					// funnels), so this stays Debug to avoid double-logging.
+					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("destination", report.Destination),
 						zap.String("actual", report.ActualSummary),

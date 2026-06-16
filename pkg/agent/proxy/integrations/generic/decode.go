@@ -69,9 +69,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
 				report := buildGenericMismatchReport(ctx, genericRequests, mockDb)
-				// Default-visible: this miss is the root cause of the test
-				// failure that follows (the app sees its connection close).
-				logger.Warn("no matching generic mock found for outgoing call",
+				// Per-call generic detail at Debug; the canonical mock-mismatch
+				// WARN is emitted once in proxy.sendMockNotFoundError (covers
+				// every parser), so this stays Debug to avoid double-logging.
+				logger.Debug("no matching generic mock found for outgoing call",
 					zap.String("protocol", report.Protocol),
 					zap.Int("requestCount", len(genericRequests)),
 					zap.Int("firstRequestBytes", len(genericRequests[0])),

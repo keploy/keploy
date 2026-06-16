@@ -2876,6 +2876,23 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	if errors.As(err, &reporter) && reporter != nil {
 		proxyErr.MismatchReport = reporter.MismatchReport()
 	}
+	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
+	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
+	// gRPC, etc. uniformly — it names WHICH upstream missed and how far matching
+	// got, instead of each parser logging it differently (or not at all). The
+	// per-parser decode loggers stay at Debug to avoid double-logging.
+	if r := proxyErr.MismatchReport; r != nil {
+		p.logger.Warn("mock mismatch: no matching mock for outgoing call",
+			zap.String("protocol", r.Protocol),
+			zap.String("destination", r.Destination),
+			zap.String("actual", r.ActualSummary),
+			zap.String("match_phase", r.MatchPhase),
+			zap.Int("candidates", r.CandidateCount),
+			zap.String("closest", r.ClosestMock),
+			zap.String("next_step", r.NextSteps))
+	} else {
+		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+	}
 	p.SendError(proxyErr)
 }
 
