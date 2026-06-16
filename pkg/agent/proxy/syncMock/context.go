@@ -37,3 +37,33 @@ func FromContextOrGlobal(ctx context.Context) *SyncMockManager {
 	}
 	return Get()
 }
+
+// StaticDeduper is the per-session static-deduplication hook (the enterprise
+// "static dedup" feature). It is defined here — a package both the proxy
+// reader and the enterprise capture hook already import — so a per-app
+// deduper can ride the parser context without either side importing the
+// other (avoids an import cycle). The single-session build leaves it unset
+// and the capture hook uses its process-wide deduper unchanged.
+type StaticDeduper interface {
+	IsDuplicate(schema string) bool
+	GetCustomFieldsForEndpoint(method, path string, statusCode int) []string
+}
+
+type staticDedupKey struct{}
+
+// WithStaticDeduper returns a child of ctx carrying d. Multi-app callers
+// wrap the parser/capture context with this so the static-dedup check is
+// scoped to the owning app instead of one process-wide deduper.
+func WithStaticDeduper(ctx context.Context, d StaticDeduper) context.Context {
+	return context.WithValue(ctx, staticDedupKey{}, d)
+}
+
+// StaticDeduperFromContext returns the per-app deduper carried by ctx, or
+// nil if none (single-app default — caller falls back to its own deduper).
+func StaticDeduperFromContext(ctx context.Context) StaticDeduper {
+	if ctx == nil {
+		return nil
+	}
+	d, _ := ctx.Value(staticDedupKey{}).(StaticDeduper)
+	return d
+}

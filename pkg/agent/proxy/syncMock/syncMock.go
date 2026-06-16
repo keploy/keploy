@@ -96,6 +96,12 @@ type SyncMockManager struct {
 	// conn.GlobalTestCounter (see NextTestID).
 	testCounter atomic.Int64
 
+	// dedupQueue is this session's private dedup FIFO. Per-instance so
+	// concurrent capture sessions don't share dedup ordering. The
+	// package-global instance leaves this nil, and DedupQueue() falls back
+	// to the package-global queue — preserving single-session behaviour.
+	dedupQueue *DedupQueue
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
@@ -126,11 +132,24 @@ func New(logger *zap.Logger) *SyncMockManager {
 	m := &SyncMockManager{
 		buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
 		firstReqSeen: false,
+		dedupQueue:   NewDedupQueue(),
 	}
 	if logger != nil {
 		m.logger = logger
 	}
 	return m
+}
+
+// DedupQueue returns this manager's dedup queue: its own private one for
+// instances built by New(), or the package-global queue for the
+// single-session default instance (which leaves dedupQueue nil). Callers
+// that previously used the package-global GetDedupQueue() can switch to
+// mgr.DedupQueue() to get per-session dedup for free.
+func (m *SyncMockManager) DedupQueue() *DedupQueue {
+	if m == nil || m.dedupQueue == nil {
+		return globalDedupQueue
+	}
+	return m.dedupQueue
 }
 
 // NextTestID returns this session's next sequential test ID. Per-instance
