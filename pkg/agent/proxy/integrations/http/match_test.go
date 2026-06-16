@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func httpMock(name, method, rawURL string) *models.Mock {
 func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{mocks: nil}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -110,7 +111,7 @@ func TestBuildHTTPMismatchReport_NoMocks(t *testing.T) {
 func TestBuildHTTPMismatchReport_DbError(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{err: fmt.Errorf("db error")}
-	report := h.buildHTTPMismatchReport(makeReq("POST", "/api/items"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("POST", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -129,7 +130,7 @@ func TestBuildHTTPMismatchReport_NoHTTPMocks(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		{Name: "dns-mock", Kind: "DNS", Spec: models.MockSpec{}},
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/data"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/data"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -146,7 +147,7 @@ func TestBuildHTTPMismatchReport_SameMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 		httpMock("mock-post-users", "POST", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -166,7 +167,7 @@ func TestBuildHTTPMismatchReport_DiffMethodFallback(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-post-items", "POST", "http://localhost:8080/api/items"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/items"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -186,7 +187,7 @@ func TestBuildHTTPMismatchReport_PathDiff(t *testing.T) {
 	db := &mockMemDb{mocks: []*models.Mock{
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/orders"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/orders"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
@@ -206,13 +207,13 @@ func TestBuildHTTPMismatchReport_ExactPathMethodMatch(t *testing.T) {
 		httpMock("mock-get-users", "GET", "http://localhost:8080/api/users"),
 	}}
 	// Same method and path — diff should indicate headers/body differ
-	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), db, nil)
+	report := h.buildHTTPMismatchReport(makeReq("GET", "/api/users"), nil, db, nil, nil, nil, nil)
 
 	if report == nil {
 		t.Fatal("expected non-nil report")
 	}
-	if report.Diff != "method and path match but headers or body differ" {
-		t.Errorf("expected headers/body diff message, got %q", report.Diff)
+	if !strings.Contains(report.Diff, "no field-level differences") {
+		t.Errorf("expected no-field-level-differences diff message, got %q", report.Diff)
 	}
 }
 

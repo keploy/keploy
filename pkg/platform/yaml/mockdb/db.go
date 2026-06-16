@@ -599,29 +599,43 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		}
 	}
 
-	// Atomic rewrite: write to a sibling tmp file under the same
-	// directory, then rename over gobPath. os.Rename on the same
-	// filesystem is atomic, so a concurrent reader either sees the
-	// full old file or the full new one.
-	//
-	// Preserve the existing file's permissions across the rewrite.
-	// os.CreateTemp creates its file 0600, so without the chmod below
-	// pruning would quietly narrow mocks.gob from whatever mode the
-	// record writer produced (typically 0644 via umask 0022) down to
-	// owner-only, which breaks replay for any other user/process on
-	// the box. Stat before CreateTemp: if the source file is gone,
-	// fall back to the same mode the gob writer uses when it opens
-	// mocks.gob fresh (0644) so we do not introduce a new
-	// mode-inheritance path.
+	if err := writeGobMocksAtomically(ctx, gobPath, newMocks); err != nil {
+		return err
+	}
+
+	ys.Logger.Debug("pruned mocks successfully (gob)",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", len(mocks)),
+		zap.Int("kept", len(newMocks)),
+		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
+		zap.Time("pruneBefore", pruneBefore))
+	return nil
+}
+
+// writeGobMocksAtomically rewrites gobPath with the given mocks via a
+// sibling tmp file + rename. os.Rename on the same filesystem is atomic, so
+// a concurrent reader either sees the full old file or the full new one.
+//
+// Preserve the existing file's permissions across the rewrite.
+// os.CreateTemp creates its file 0600, so without the chmod below the
+// rewrite would quietly narrow mocks.gob from whatever mode the record
+// writer produced (typically 0644 via umask 0022) down to owner-only, which
+// breaks replay for any other user/process on the box. Stat before
+// CreateTemp: if the source file is gone, fall back to the same mode the gob
+// writer uses when it opens mocks.gob fresh (0644) so we do not introduce a
+// new mode-inheritance path.
+func writeGobMocksAtomically(ctx context.Context, gobPath string, mocks []*models.Mock) error {
 	dir := filepath.Dir(gobPath)
 	base := filepath.Base(gobPath)
 	var originalMode os.FileMode = 0644
 	if info, statErr := os.Stat(gobPath); statErr == nil {
 		originalMode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(dir, base+".prune.*.tmp")
+	tmp, err := os.CreateTemp(dir, base+".rewrite.*.tmp")
 	if err != nil {
-		return fmt.Errorf("create gob prune tmp: %w", err)
+		return fmt.Errorf("create gob rewrite tmp: %w", err)
 	}
 	tmpPath := tmp.Name()
 	cleanup := true
@@ -635,19 +649,19 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// renamed file.
 	if err := os.Chmod(tmpPath, originalMode); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("chmod gob prune tmp to %o: %w", originalMode, err)
+		return fmt.Errorf("chmod gob rewrite tmp to %o: %w", originalMode, err)
 	}
 
 	bw := bufio.NewWriterSize(tmp, 256*1024)
 	if _, err := bw.WriteString(gobMockMagic); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write gob magic to prune tmp: %w", err)
+		return fmt.Errorf("write gob magic to rewrite tmp: %w", err)
 	}
 	enc := gob.NewEncoder(bw)
-	for i, mock := range newMocks {
-		// Same cancellation cadence as the filter loop above — the
-		// encode pass is the expensive one (reflect-heavy) so an
-		// op at cancellation is worth the early exit cost.
+	for i, mock := range mocks {
+		// Check ctx every 1024 entries — the encode pass is the
+		// expensive one (reflect-heavy) so an op at cancellation is
+		// worth the early exit cost.
 		if i&0x3ff == 0 {
 			if err := ctx.Err(); err != nil {
 				_ = tmp.Close()
@@ -656,33 +670,157 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		}
 		if err := enc.Encode(mock); err != nil {
 			_ = tmp.Close()
-			return fmt.Errorf("encode mock during gob prune: %w", err)
+			return fmt.Errorf("encode mock during gob rewrite: %w", err)
 		}
 	}
 	if err := bw.Flush(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("flush gob prune tmp: %w", err)
+		return fmt.Errorf("flush gob rewrite tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync gob prune tmp: %w", err)
+		return fmt.Errorf("sync gob rewrite tmp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close gob prune tmp: %w", err)
+		return fmt.Errorf("close gob rewrite tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, gobPath); err != nil {
-		return fmt.Errorf("rename gob prune tmp over %s: %w", gobPath, err)
+		return fmt.Errorf("rename gob rewrite tmp over %s: %w", gobPath, err)
 	}
 	cleanup = false
+	return nil
+}
 
-	ys.Logger.Debug("pruned mocks successfully (gob)",
-		zap.String("testSetID", testSetID),
-		zap.Int("total", len(mocks)),
-		zap.Int("kept", len(newMocks)),
-		zap.Int("pruned", prunedCount),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
-		zap.Time("pruneBefore", pruneBefore))
+// PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
+// detected under --schema-noise-detection) into the on-disk mocks WITHOUT
+// pruning anything. This is the persistence path when mock pruning
+// (--remove-unused-mocks) is not enabled — previously the learned noise rode
+// only inside UpdateMocks, so running detection without pruning silently
+// discarded everything that was learned at process exit.
+func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
+	// Only mocks that actually carry learned noise matter.
+	withNoise := make(map[string]map[string][]string)
+	for name, st := range mockStates {
+		if len(st.ReqBodyNoise) > 0 {
+			withNoise[name] = st.ReqBodyNoise
+		}
+	}
+	if len(withNoise) == 0 {
+		return nil
+	}
+
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
+	lock.Lock()
+	defer lock.Unlock()
+
+	// merge applies the learned noise; returns true when any mock changed
+	// so unchanged files are never rewritten.
+	merge := func(mocks []*models.Mock) bool {
+		changed := false
+		for _, mock := range mocks {
+			noise, ok := withNoise[mock.Name]
+			if !ok || mock.Kind != models.Kind(models.HTTP) || mock.Spec.HTTPReq == nil {
+				continue
+			}
+			merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
+			if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+				changed = true
+			}
+			mock.Spec.HTTPReq.ReqBodyNoise = merged
+		}
+		return changed
+	}
+
+	logPersisted := func(total int) {
+		ys.Logger.Info("persisted learned request-body noise onto mocks",
+			zap.String("testSetID", testSetID),
+			zap.Int("mocksWithLearnedNoise", len(withNoise)),
+			zap.Int("totalMocks", total))
+	}
+
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		// Quiesce any in-flight async gob writer before the rewrite —
+		// same reasoning as updateMocksGob.
+		if err := ys.Close(); err != nil {
+			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
+			return err
+		}
+		mocks, err := readGobMocks(gobPath)
+		if err != nil {
+			return err
+		}
+		if !merge(mocks) {
+			return nil
+		}
+		if err := writeGobMocksAtomically(ctx, gobPath, mocks); err != nil {
+			return err
+		}
+		logPersisted(len(mocks))
+		return nil
+	}
+
+	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	if err != nil {
+		return err
+	}
+	if !existsAny {
+		return nil
+	}
+
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	var mocks []*models.Mock
+	if reader.Format() == yaml.FormatJSON {
+		var jsonDocs []*yaml.NetworkTrafficDocJSON
+		for {
+			jd, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to decode the file documents for noise persistence: %w", err)
+			}
+			jsonDocs = append(jsonDocs, jd)
+		}
+		mocks, err = DecodeMocksJSON(jsonDocs, ys.Logger)
+		if err != nil {
+			return err
+		}
+	} else {
+		var docs []*yaml.NetworkTrafficDoc
+		for {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to decode the file documents for noise persistence: %w", err)
+			}
+			docs = append(docs, doc)
+		}
+		mocks, err = DecodeMocks(docs, ys.Logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	if !merge(mocks) {
+		return nil
+	}
+	if err := ys.writeMocksAtomically(path, mockFileName, mocks, detectedFormat); err != nil {
+		return err
+	}
+	logPersisted(len(mocks))
 	return nil
 }
 

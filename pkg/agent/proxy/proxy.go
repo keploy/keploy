@@ -125,12 +125,31 @@ type Proxy struct {
 	integrationsPriority []ParserPriority
 	errChannel           chan error
 
-	// activeTestErrors accumulates mock-not-found errors during active test execution.
-	// The continuous error drain goroutine routes errors here when non-nil,
-	// and discards errors when nil (no test running). This prevents the
-	// errChannel from filling up with background noise (OTel, health checks).
+	// activeTestErrors accumulates mock-not-found errors during active test
+	// execution. The continuous drain goroutine routes errors here when non-nil.
+	// When nil (no window), mock-not-found errors fall to pendingMockErrors and
+	// only non-mock noise (OTel, health checks) is discarded — keeping the
+	// errChannel drained either way.
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
-	errDrainOnce     sync.Once
+	// captureMu serializes the drain goroutine's routing decision (read
+	// activeTestErrors, then add) against BeginTestErrorCapture / GetMockErrors
+	// opening or closing the window. Without it, the goroutine could add a miss
+	// to an accumulator that GetMockErrors has just swapped away, losing it.
+	captureMu sync.Mutex
+	// errDrainActive is true while the StartErrorDrain goroutine is running. It
+	// gates the GetMockErrors flush-marker rendezvous (which needs that single
+	// owner to consume the marker); when false we use the legacy direct sweep.
+	errDrainActive atomic.Bool
+	errDrainOnce   sync.Once
+	// pendingMockErrors retains mock-not-found errors that arrive while no test
+	// capture window is active (activeTestErrors is nil) — e.g. between tests,
+	// or when the replayer/agent predates the BeginTestErrorCapture wiring. The
+	// replayer normally opens a window per test (so misses route to
+	// activeTestErrors), but this remains the fallback so a miss is never
+	// silently dropped before GetMockErrors reads it. Only mock-not-found errors
+	// are retained (background noise — OTel, health checks — is still
+	// discarded), and the buffer is bounded so it can't grow unboundedly.
+	pendingMockErrors testErrorAccumulator
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -2585,16 +2604,57 @@ func (a *testErrorAccumulator) drain() []error {
 	return e
 }
 
+// maxPendingMockErrors bounds the retained mock-not-found errors (and the
+// per-test capture accumulator) so a replay session can't grow memory
+// unboundedly. The replayer drains after every test, so it stays small in
+// practice.
+const maxPendingMockErrors = 512
+
+// addBounded appends err unless the accumulator already holds max entries.
+// Returns false when the entry was dropped.
+func (a *testErrorAccumulator) addBounded(err error, max int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.errs) >= max {
+		return false
+	}
+	a.errs = append(a.errs, err)
+	return true
+}
+
+// isMockNotFoundErr reports whether err is a parser mock-not-found error —
+// the only error class GetMockErrors surfaces to the replayer, and thus the
+// only class worth retaining in pendingMockErrors.
+func isMockNotFoundErr(err error) bool {
+	parserErr, ok := err.(models.ParserError)
+	if ok && parserErr.ParserErrorType == models.ErrMockNotFound {
+		return true
+	}
+	return errors.Is(err, models.ErrNoMockMatched)
+}
+
 // StartErrorDrain launches a background goroutine that continuously reads from
 // errChannel so it never fills up. Errors are routed to the activeTestErrors
-// accumulator when a test is running, and discarded otherwise.
+// accumulator when a test window is open; otherwise mock-not-found errors are
+// retained in pendingMockErrors and only non-mock noise is discarded.
 // This prevents background services (OTel, health checks) from saturating the
 // 100-slot error channel and blocking test coordination.
+// flushMarker is a sentinel GetMockErrors pushes onto errChannel. Because the
+// single drain goroutine consumes errChannel in FIFO order, once it pulls the
+// marker every error queued before it has already been routed — so closing the
+// capture window at that point cannot strand a miss the goroutine had received
+// but not yet filed. The goroutine closes done to signal it reached the marker.
+type flushMarker struct{ done chan struct{} }
+
+func (*flushMarker) Error() string { return "keploy: capture flush marker" }
+
 func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	p.errDrainOnce.Do(func() {
+		p.errDrainActive.Store(true)
 		var discarded atomic.Int64
 		go func() {
 			defer utils.Recover(p.logger)
+			defer p.errDrainActive.Store(false)
 			for {
 				select {
 				case <-ctx.Done():
@@ -2603,9 +2663,26 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					if !ok {
 						return
 					}
-					if acc := p.activeTestErrors.Load(); acc != nil {
-						acc.add(err)
-					} else {
+					// Flush-marker rendezvous: signal that we've reached it
+					// (all prior errors are already routed) and move on.
+					if m, isMarker := err.(*flushMarker); isMarker {
+						close(m.done)
+						continue
+					}
+					// Route under captureMu so the window can't be swapped
+					// between the Load and the add. The accumulator is bounded
+					// too, so even a window left open (e.g. an error path that
+					// skipped GetMockErrors) can't grow without limit.
+					p.captureMu.Lock()
+					acc := p.activeTestErrors.Load()
+					if acc != nil {
+						acc.addBounded(err, maxPendingMockErrors)
+						p.captureMu.Unlock()
+						continue
+					}
+					retained := isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors)
+					p.captureMu.Unlock()
+					if !retained {
 						// Log only the first discard and then every 100th to reduce noise.
 						n := discarded.Add(1)
 						if n == 1 || n%100 == 0 {
@@ -2619,10 +2696,25 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	})
 }
 
-// BeginTestErrorCapture starts collecting errors for the current test case.
-// Call EndTestErrorCapture when the test finishes to retrieve collected errors.
+// BeginTestErrorCapture starts collecting mock-not-found errors for the current
+// test case into a fresh per-test accumulator, so the replayer's GetMockErrors
+// returns only THIS test's misses instead of draining a shared global queue.
+// Stale stragglers retained before any window (startup / between-test
+// background traffic) are discarded so they don't attach to this test.
+// GetMockErrors retrieves and the next BeginTestErrorCapture resets the window.
 func (p *Proxy) BeginTestErrorCapture() {
-	p.activeTestErrors.Store(&testErrorAccumulator{})
+	p.captureMu.Lock()
+	p.pendingMockErrors.drain()
+	// Discard anything left in a prior window that was never closed — e.g. a
+	// GetMockErrors whose HTTP round-trip failed, so the replayer couldn't
+	// finalize it. Carrying those misses into THIS window would misattribute the
+	// previous test's failures to the current test; they belong to a test we can
+	// no longer report for, so drop them (same reasoning as the pre-window
+	// stragglers drained above).
+	if old := p.activeTestErrors.Swap(&testErrorAccumulator{}); old != nil {
+		old.drain()
+	}
+	p.captureMu.Unlock()
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
@@ -2634,9 +2726,10 @@ func (p *Proxy) EndTestErrorCapture() []error {
 }
 
 // GetErrorChannel returns the error channel for external monitoring.
-// When StartErrorDrain is active, this channel is continuously drained by the
-// background goroutine. Direct consumers (monitorProxyErrors) will compete
-// for reads. Prefer using BeginTestErrorCapture/EndTestErrorCapture instead.
+// Once StartProxy has run, StartErrorDrain continuously drains this channel in a
+// background goroutine, so an external direct consumer would compete with the
+// drain for reads and is not supported. Per-test mock-not-found errors are
+// exposed via BeginTestErrorCapture/GetMockErrors instead.
 func (p *Proxy) GetErrorChannel() <-chan error {
 	return p.errChannel
 }
@@ -2645,19 +2738,52 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
 func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
-	var rawErrs []error
+	// Rendezvous with the drain goroutine BEFORE taking captureMu: push a flush
+	// marker and wait until the goroutine pulls it. FIFO ordering then
+	// guarantees every error the goroutine had already received from errChannel
+	// has been routed into the window — so closing the window below cannot
+	// strand an in-flight miss (the remaining race the previous fix left open).
+	// The app has already responded by now, so this test's pushes precede the
+	// marker. A bounded wait keeps a stalled drain from blocking replay.
+	rendezvousOK := false
+	drainActive := p.errDrainActive.Load()
+	if drainActive && p.errChannel != nil {
+		marker := &flushMarker{done: make(chan struct{})}
+		select {
+		case p.errChannel <- marker:
+			select {
+			case <-marker.done:
+				rendezvousOK = true
+			case <-time.After(2 * time.Second):
+				// drain stalled — DON'T close the window below (see end).
+			}
+		default:
+			// errChannel full (drain is behind) — marker not enqueued; DON'T
+			// close the window below.
+		}
+	}
 
-	// Prefer test accumulator if active (StartErrorDrain is running)
-	if acc := p.activeTestErrors.Load(); acc != nil {
-		rawErrs = acc.drain()
-	} else {
-		// Fallback: drain from channel directly (legacy path)
+	p.captureMu.Lock()
+
+	// Pre-window stragglers (retained before the first capture window — e.g.
+	// startup traffic). Oldest first.
+	rawErrs := p.pendingMockErrors.drain()
+
+	// Legacy path only (no drain goroutine): errors sit unrouted in errChannel,
+	// so sweep them here. With the drain goroutine active, the rendezvous above
+	// has already routed everything into the window, so sweeping is unnecessary
+	// and would only risk pulling a NEXT test's stray error into this one.
+	if !drainActive {
 	drainLoop:
 		for {
 			select {
 			case err, ok := <-p.errChannel:
 				if !ok {
 					break drainLoop
+				}
+				if m, isMarker := err.(*flushMarker); isMarker {
+					close(m.done)
+					continue
 				}
 				rawErrs = append(rawErrs, err)
 			default:
@@ -2666,16 +2792,58 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 		}
 	}
 
+	if rendezvousOK || !drainActive {
+		// Safe to END the window: the rendezvous confirmed every received error
+		// is routed (or there's no drain goroutine). Swap to nil so the drain
+		// goroutine stops appending — otherwise the last test's window would
+		// stay installed and grow for the rest of the process.
+		if acc := p.activeTestErrors.Swap(nil); acc != nil {
+			rawErrs = append(rawErrs, acc.drain()...)
+		}
+	} else {
+		// Rendezvous could not complete (errChannel full or the drain stalled
+		// past the deadline). Take what the window holds now but DON'T close it,
+		// so a miss the goroutine is still routing isn't dropped from THIS fetch.
+		// Any straggler the drain files afterward is discarded by the next
+		// BeginTestErrorCapture (which resets a never-closed window) - preferring
+		// correct per-test attribution over keeping a possibly cross-test miss.
+		// Degenerate path.
+		if acc := p.activeTestErrors.Load(); acc != nil {
+			rawErrs = append(rawErrs, acc.drain()...)
+		}
+	}
+	p.captureMu.Unlock()
+
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
 			if parserErr.MismatchReport != nil {
 				errs = append(errs, models.UnmatchedCall{
-					Protocol:      parserErr.MismatchReport.Protocol,
-					ActualSummary: parserErr.MismatchReport.ActualSummary,
-					ClosestMock:   parserErr.MismatchReport.ClosestMock,
-					Diff:          parserErr.MismatchReport.Diff,
-					NextSteps:     parserErr.MismatchReport.NextSteps,
+					Protocol:       parserErr.MismatchReport.Protocol,
+					ActualSummary:  parserErr.MismatchReport.ActualSummary,
+					Destination:    parserErr.MismatchReport.Destination,
+					ClosestMock:    parserErr.MismatchReport.ClosestMock,
+					Diff:           parserErr.MismatchReport.Diff,
+					NextSteps:      parserErr.MismatchReport.NextSteps,
+					MatchPhase:     parserErr.MismatchReport.MatchPhase,
+					CandidateCount: parserErr.MismatchReport.CandidateCount,
+					FieldDiffs:     parserErr.MismatchReport.FieldDiffs,
+					ClosestMockReq: parserErr.MismatchReport.ClosestMockReq,
+					ReceivedReq:    parserErr.MismatchReport.ReceivedReq,
+				})
+			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
+				// A genuine miss without a structured report must still reach
+				// the user's report — silently dropping it here is how whole
+				// protocols' misses used to vanish from
+				// FailureInfo.UnmatchedCalls. Errors that are NOT wrapped
+				// around models.ErrNoMockMatched are infrastructure/decode
+				// failures mislabeled by sendMockNotFoundError; reporting
+				// them as unmatched calls would misdirect the user, so they
+				// stay out of the report (they are already logged).
+				errs = append(errs, models.UnmatchedCall{
+					Protocol:      "unknown",
+					ActualSummary: parserErr.Err.Error(),
+					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
 				})
 			}
 		}
@@ -2707,6 +2875,23 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	var reporter mismatchReporter
 	if errors.As(err, &reporter) && reporter != nil {
 		proxyErr.MismatchReport = reporter.MismatchReport()
+	}
+	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
+	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
+	// gRPC, etc. uniformly — it names WHICH upstream missed and how far matching
+	// got, instead of each parser logging it differently (or not at all). The
+	// per-parser decode loggers stay at Debug to avoid double-logging.
+	if r := proxyErr.MismatchReport; r != nil {
+		p.logger.Warn("mock mismatch: no matching mock for outgoing call",
+			zap.String("protocol", r.Protocol),
+			zap.String("destination", r.Destination),
+			zap.String("actual", r.ActualSummary),
+			zap.String("match_phase", r.MatchPhase),
+			zap.Int("candidates", r.CandidateCount),
+			zap.String("closest", r.ClosestMock),
+			zap.String("next_step", r.NextSteps))
+	} else {
+		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
 	}
 	p.SendError(proxyErr)
 }

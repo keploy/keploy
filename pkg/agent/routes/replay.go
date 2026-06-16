@@ -2,6 +2,7 @@
 package routes
 
 import (
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"net/http"
@@ -88,6 +89,24 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, mockErrors)
+}
+
+// BeginTestErrorCapture opens a per-test mock-error capture window in the proxy
+// so the next GetMockErrors returns only this test's misses. Implemented via a
+// capability type-assertion so the agent.Service interface stays unchanged.
+func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if b, ok := a.svc.(interface {
+		BeginTestErrorCapture(context.Context) error
+	}); ok {
+		if err := b.BeginTestErrorCapture(r.Context()); err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {

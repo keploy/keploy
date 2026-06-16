@@ -3,8 +3,10 @@ package matcher
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -164,6 +166,94 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// JSONFieldDiffs returns field-level diffs between two JSON documents with
+// recorded/live values attached, for mock-mismatch reporting. It walks both
+// documents with the same traversal as ComputeFailureAssessmentJSON (arrays
+// normalize to a "[]" path suffix) and skips paths covered by `known` noise
+// (path -> regex list, root-relative). `pathPrefix` (e.g. "body.") is
+// prepended to every returned path so the result lines up with the noise
+// config vocabulary. Values are truncated to at most maxVal bytes (cut at a
+// rune boundary) to keep reports and yaml output bounded. Returns nil when
+// either side isn't valid JSON.
+func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPrefix string, maxVal int) []models.MockFieldDiff {
+	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
+		return nil
+	}
+
+	var exp, act interface{}
+	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+		return nil
+	}
+
+	idx := buildNoiseIndex(known)
+
+	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
+	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
+
+	collectJSON(exp, "", idx, &expMaps)
+	collectJSON(act, "", idx, &actMaps)
+
+	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
+
+	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
+	// each bucket so reports, yaml output and the capped diff subset are
+	// stable across runs.
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
+
+	trunc := func(s string) string {
+		if maxVal <= 0 || len(s) <= maxVal {
+			return s
+		}
+		// Back the cut off to a rune boundary so a multi-byte UTF-8
+		// character is never split — invalid UTF-8 here would garble the
+		// report yaml/json encoders downstream.
+		cut := maxVal
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "…"
+	}
+
+	var out []models.MockFieldDiff
+	for _, p := range valueChanges {
+		out = append(out, models.MockFieldDiff{
+			Path:     pathPrefix + p,
+			Kind:     models.DiffKindValueChanged,
+			Expected: trunc(expMaps.values[p]),
+			Actual:   trunc(actMaps.values[p]),
+		})
+	}
+	for _, p := range typeChanges {
+		out = append(out, models.MockFieldDiff{
+			Path:     pathPrefix + p,
+			Kind:     models.DiffKindTypeChanged,
+			Expected: trunc(expMaps.types[p] + ": " + expMaps.values[p]),
+			Actual:   trunc(actMaps.types[p] + ": " + actMaps.values[p]),
+		})
+	}
+	for _, p := range removed {
+		out = append(out, models.MockFieldDiff{
+			Path:     pathPrefix + p,
+			Kind:     models.DiffKindMissingInLive,
+			Expected: trunc(expMaps.values[p]),
+		})
+	}
+	for _, p := range added {
+		out = append(out, models.MockFieldDiff{
+			Path:   pathPrefix + p,
+			Kind:   models.DiffKindMissingInMock,
+			Actual: trunc(actMaps.values[p]),
+		})
 	}
 	return out
 }

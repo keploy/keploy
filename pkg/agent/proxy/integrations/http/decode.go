@@ -22,9 +22,10 @@ import (
 )
 
 // ErrMockNotMatched is returned by decodeHTTP when no recorded mock
-// matches the outgoing HTTP request. Callers can check for this with
-// errors.Is to distinguish a mock-miss from a real proxy error.
-var ErrMockNotMatched = errors.New("no matching mock found")
+// matches the outgoing HTTP request. It aliases models.ErrNoMockMatched so
+// callers can errors.Is against either symbol to distinguish a mock-miss
+// from a real proxy error.
+var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
@@ -160,9 +161,39 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			// User request-body noise from test.globalNoise.requestBody
+			// (root-relative dotted paths). This is a DEDICATED bucket,
+			// distinct from the "body" bucket that governs RESPONSE
+			// assertions: request-matching noise and response-assertion noise
+			// are separate axes. Reusing the response "body" bucket here would
+			// let a field noised only because it is dynamic in the response
+			// silently soften request matching too (e.g. excusing a wrong
+			// user-id under --schema-noise-strict). Keeping them separate makes
+			// strict matching a real guarantee — a path can only weaken request
+			// matching if the user puts it under requestBody on purpose.
+			//
+			// Lowercased copy for the same reason as headerNoise: the matcher's
+			// noise index matches lowercased paths. Entries are normalized to
+			// presence-only (empty regex list): request-body mock matching and
+			// drift detection are path-based, so a value-regex cannot gate here.
+			var bodyNoise map[string][]string
+			if opts.NoiseConfig != nil {
+				if bn, ok := opts.NoiseConfig["requestbody"]; ok {
+					bodyNoise = make(map[string][]string, len(bn))
+					for k, v := range bn {
+						if len(v) > 0 {
+							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+								zap.String("field", k))
+						}
+						bodyNoise[strings.ToLower(k)] = []string{}
+					}
+				}
+			}
 
-			ok, stub, err := h.match(ctx, input, mockDb, headerNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
+
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -171,16 +202,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
-
-				// Build mismatch report for the user (surfaced in the mismatch table)
-				report := h.buildHTTPMismatchReport(request, mockDb, nil)
+				// Build mismatch report for the user (surfaced in the mismatch
+				// table, the report yaml and `keploy report`).
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
-					h.Logger.Debug("mock miss",
+					// Per-call HTTP detail at Debug; the canonical, protocol-
+					// agnostic mock-mismatch WARN is emitted once in
+					// proxy.sendMockNotFoundError (where every parser's miss
+					// funnels), so this stays Debug to avoid double-logging.
+					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
+						zap.String("destination", report.Destination),
 						zap.String("actual", report.ActualSummary),
+						zap.String("match_phase", report.MatchPhase),
+						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff))
+						zap.String("diff", report.Diff),
+						zap.String("next_step", report.NextSteps))
 				}
 
 				// No mock matched — send a 502 so the application gets a

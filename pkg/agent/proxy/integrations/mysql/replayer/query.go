@@ -137,7 +137,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", closestMockName))
-				baseErr := fmt.Errorf("error while simulating the command phase due to no matching mock found")
+				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
 				return models.NewMockMismatchError(baseErr, report)
 			}
 

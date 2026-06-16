@@ -1458,6 +1458,37 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	return mockErrors, nil
 }
 
+// BeginTestErrorCapture asks the agent to open a per-test mock-error capture
+// window so the next GetMockErrors returns only this test's misses. A missing
+// endpoint (older agent) returns 404 and is treated as a no-op, preserving the
+// legacy global-queue behaviour.
+func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to begin test error capture: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for begin-test-error-capture; safe to ignore once")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil // older agent without the endpoint — fall back to legacy behaviour
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
+	}
+	return nil
+}
+
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
 // This should be called before cancelling contexts during application shutdown.
 // When the flag is set, connection errors will be logged as debug instead of error.

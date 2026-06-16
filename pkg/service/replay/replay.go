@@ -34,7 +34,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const UNKNOWN_TEST = "UNKNOWN_TEST"
 const applicationFailedToRunLogMessage = "application failed to run; check the application logs for details or verify the app command is correct"
 
 // startupMockCutoff returns the startup-mock exemption boundary for a test set:
@@ -796,9 +795,29 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 
-		if !testRunResult && len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+		// Print the mismatch table whenever there ARE mock mismatches — not
+		// only when the run as a whole failed. A green run with mock misses
+		// (e.g. tests demoted to OBSOLETE, or a protocol whose misses can't
+		// fail a test) is exactly the case the user must not stay blind to.
+		//
+		// Exception on green runs: DNS misses are answered with a synthetic
+		// response by design (the app keeps working), so on a fully passing
+		// run they are routine, not actionable — without this filter every
+		// healthy run with app-startup DNS chatter would print the table.
+		mismatchRows := r.mockMismatchFailures.GetFailures()
+		if testRunResult {
+			actionable := make([]TestFailure, 0, len(mismatchRows))
+			for _, f := range mismatchRows {
+				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.Protocol == "DNS" {
+					continue
+				}
+				actionable = append(actionable, f)
+			}
+			mismatchRows = actionable
+		}
+		if len(mismatchRows) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
-			for _, failure := range r.mockMismatchFailures.GetFailures() {
+			for _, failure := range mismatchRows {
 				failuresByTestSet[failure.TestSetID] = true
 			}
 
@@ -807,7 +826,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetIDs = append(testSetIDs, testSetID)
 			}
 			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Info("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+			if testRunResult {
+				r.logger.Warn("Tests passed, but some outgoing calls did not match the recorded mocks.",
+					zap.String("test_sets", testSets),
+					zap.String("next_step", "Review the mismatch summary below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+			} else {
+				r.logger.Info("Some testsets failed due to mock differences.",
+					zap.String("test_sets", testSets),
+					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
+			}
 
 			r.mockMismatchFailures.PrintFailuresTable()
 		}
@@ -1047,9 +1074,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
 	mockKindByName := make(map[string]models.Kind)
+	// reusableMockNames marks mocks whose recorder-derived tier is reusable
+	// across tests (session / connection / config) or app-startup traffic —
+	// i.e. NOT per-test. They belong in the mapping (so the pool is complete)
+	// but are excluded from the per-test consumed-vs-expected assertion: only
+	// per-test mocks are deterministically attributed to a single test, so
+	// comparing reusable/startup mocks would falsely demote tests to OBSOLETE
+	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
+	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
+	reusableMockNames := make(map[string]bool)
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
+			if isReusableTierMock(m) {
+				reusableMockNames[m.Name] = true
+			}
 		}
 	}
 
@@ -1641,19 +1680,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			started := time.Now().UTC()
 
-			testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
-			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+			r.beginTestErrorCapture(runTestSetCtx)
 
 			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
-
-			// Stop monitoring for this specific test case
-			testCaseProxyErrCancel()
 
 			if loopErr != nil {
 				utils.LogError(r.logger, loopErr, "failed to simulate request")
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
+				// Finalize the capture window even on this early exit, so a miss
+				// during this (failed) test attaches here and isn't carried to
+				// the next test or lost.
+				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
@@ -1710,6 +1749,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 
 			// Compute non-DNS expected and consumed name slices once; reused for subset check and mismatch reporting.
+			// Only PER-TEST mocks participate in the consumed-vs-expected
+			// assertion. DNS (non-deterministic resolution order) and
+			// reusable/startup-tier mocks (session / connection / config,
+			// recorded once at app boot and shared across tests) stay in the
+			// mapping but are excluded here: they are not deterministically
+			// attributed to a single test's window, so including them would
+			// falsely demote tests to OBSOLETE.
 			filteredExpectedNames := make([]string, 0, len(expectedMocks))
 			for _, m := range expectedMocks {
 				isDNS := strings.EqualFold(m.Kind, string(models.DNS))
@@ -1718,28 +1764,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						isDNS = true
 					}
 				}
-				if !isDNS {
-					filteredExpectedNames = append(filteredExpectedNames, m.Name)
+				if isDNS || reusableMockNames[m.Name] {
+					continue
 				}
+				filteredExpectedNames = append(filteredExpectedNames, m.Name)
 			}
 
 			filteredMockNames := make([]string, 0, len(consumedMocks))
 			for _, m := range consumedMocks {
-				if m.Kind != models.DNS {
-					filteredMockNames = append(filteredMockNames, m.Name)
+				if m.Kind == models.DNS || isReusableTierState(m) {
+					continue
 				}
+				filteredMockNames = append(filteredMockNames, m.Name)
 			}
 
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil {
-				// Filter out DNS mocks from comparison since DNS resolution
-				// order is non-deterministic. Also gate on a successful per-
-				// test GetConsumedMocks — when the fetch failed, consumedMocks
-				// was cleared to nil above, which would deterministically
-				// compute mockSetMismatch=true (empty subset of any non-empty
-				// expected set) and falsely mark the test OBSOLETE due to an
-				// unrelated transport error rather than a real mock-pool
-				// divergence.
+				// Compare only per-test mocks (DNS + reusable/startup tiers
+				// excluded above) since those are the only mocks
+				// deterministically tied to a single test. Also gate on a
+				// successful per-test GetConsumedMocks — when the fetch failed,
+				// consumedMocks was cleared to nil above, which would
+				// deterministically compute mockSetMismatch=true (empty subset
+				// of any non-empty expected set) and falsely mark the test
+				// OBSOLETE due to an unrelated transport error rather than a
+				// real mock-pool divergence.
 				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
@@ -1753,6 +1802,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
@@ -1769,6 +1819,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
@@ -2014,32 +2065,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 								}
 							}
 						}
-						// UnmatchedCalls comes from independent sources
-						// (mockMismatchFailures channel for in-process,
-						// GetMockErrors for remote/k8s-proxy) — neither
-						// depends on the consumed-mock list, so populate
-						// regardless of perTestConsumedKnown so failed/
-						// obsolete tests still surface their mock errors
-						// even when the consumed-mock fetch failed.
-						for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCase.Name) {
-							if f.MismatchReport != nil {
-								testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, models.UnmatchedCall{
-									Protocol:      f.MismatchReport.Protocol,
-									ActualSummary: f.MismatchReport.ActualSummary,
-									ClosestMock:   f.MismatchReport.ClosestMock,
-									Diff:          f.MismatchReport.Diff,
-									NextSteps:     f.MismatchReport.NextSteps,
-								})
-							}
-						}
-						if !r.instrument {
-							if mockErrors, err := r.instrumentation.GetMockErrors(runTestSetCtx); err == nil {
-								for _, me := range mockErrors {
-									testCaseResult.FailureInfo.UnmatchedCalls = append(testCaseResult.FailureInfo.UnmatchedCalls, me)
-								}
-							}
-						}
 					}
+					// UnmatchedCalls is finalized for EVERY test, not just
+					// failed/obsolete ones: (1) a miss during an otherwise-passing
+					// test must still surface; (2) the per-test capture window
+					// opened by beginTestErrorCapture must be drained-and-closed
+					// each iteration so a miss can't carry over to the next test.
+					// attachMockErrors (GetMockErrors -> result + summary store) is
+					// the single source of unmatched outgoing calls across all
+					// transports — native and k8s alike reach the agent over HTTP,
+					// so the agent's error channel is consumed only inside the
+					// agent's own drain goroutine, never by the replayer.
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -2080,10 +2117,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					finalTestCaseResults[testCase.Name] = testCaseResult
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
+					// Finalize the capture window and persist a failed result so a
+					// miss during this test attaches here instead of leaking into a
+					// later test (or vanishing) when we bail out on this internal error.
+					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: test case result is nil")
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
+					}
+					// Outcome was already counted at lines ~1850-1864; don't double-count here.
 					break
 				}
 			} else {
 				utils.LogError(r.logger, nil, "test result is nil")
+				// Matcher returned no result (e.g. a comparison path returning
+				// (false, nil)). Same as above: finalize the window + persist a
+				// failed result so the miss surfaces and can't carry forward.
+				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, "internal error: comparison returned no result")
+				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
+				}
+				// Outcome was already counted at lines ~1850-1864; don't double-count here.
 				break
 			}
 
@@ -2162,9 +2217,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
-			// Proxy Monitor: Start a per-test proxy error monitor.
-			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
-			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
+			// Open the per-test capture window before simulation. Unlike the
+			// non-streaming path we must NOT finalize it right after
+			// SimulateRequest (which returns at response headers) — outgoing mock
+			// calls keep happening while CompareHTTPStream consumes the stream
+			// body below. Every exit path therefore calls attachMockErrors only
+			// AFTER stream consumption has finished.
+			r.beginTestErrorCapture(runTestSetCtx)
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
@@ -2173,14 +2232,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			started := time.Now().UTC()
 			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
 
-			// Cleanup: Cancel the proxy error monitor immediately after simulation.
-			streamProxyErrCancel()
-
 			if simErr != nil {
 				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
@@ -2242,6 +2299,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
+						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
 							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
@@ -2283,6 +2341,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					failure++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errMsg)
+					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
@@ -2323,6 +2382,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
+			if testResult == nil {
+				// Matcher returned no result (e.g. an internal compare path returning
+				// (false, nil)). Handle it HERE, before the hadStreamingMismatch block
+				// below dereferences testResult.BodyResult. Finalize the window + persist
+				// a failed result so the miss surfaces and can't carry forward.
+				utils.LogError(r.logger, nil, "streaming test result is nil")
+				failedResult := r.CreateFailedTestResult(tc, testSetID, started, "internal error: streaming comparison returned no result")
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
+					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
+				}
+				continue
+			}
 			// Override testPass if streaming comparison failed
 			// (HTTP matcher skips body comparison for non-JSON bodies by default)
 			if hadStreamingMismatch {
@@ -2436,12 +2510,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
 
+				// Finalize the capture window now - AFTER CompareHTTPStream and the
+				// post-stream consumed-mock drain above, so in-stream mock misses
+				// are included - and attach them to this result.
+				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
 					break
 				}
 			} else {
+				// Unreachable: a nil testResult is finalized right after CompareHTTPResp
+				// above (persists a failed result and continues). Defensive only.
 				utils.LogError(r.logger, nil, "streaming test result is nil")
 				break
 			}
@@ -2596,6 +2677,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	} else if r.config.Test.SchemaNoiseDetection && r.instrument {
+		// --schema-noise-detection without --remove-unused-mocks: the learned
+		// req_body_noise used to ride only inside UpdateMocks (the pruning
+		// path), so detection alone learned noise and threw it away at exit.
+		// Persist it through the prune-free path instead. We persist noise
+		// from ALL consumed mocks (not just passing tests): the mock matched,
+		// so the request-side drift it learned is valid even when the test
+		// later failed on its response.
+		type mockNoisePersister interface {
+			PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error
+		}
+		if p, ok := r.mockDB.(mockNoisePersister); ok {
+			if err := p.PersistMockNoise(runTestSetCtx, testSetID, totalConsumedMocks); err != nil {
+				utils.LogError(r.logger, err, "failed to persist learned request-body noise onto mocks")
+			}
+		} else {
+			r.logger.Debug("mockDB implementation does not support prune-free noise persistence; learned req_body_noise not persisted")
 		}
 	}
 
@@ -3669,50 +3768,48 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 	return nil
 }
 
-// monitorProxyErrors monitors the proxy error channel and logs errors
-func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, testCaseID string) {
-	defer utils.Recover(r.logger)
+// beginTestErrorCapture opens a per-test mock-error capture window on the agent
+// (via an optional capability — older agents / non-agent instrumentations skip
+// it and fall back to the legacy global queue) so a mock miss during this test
+// attributes to THIS test instead of whichever test drains GetMockErrors next.
+// Called right before SimulateRequest on BOTH the normal and streaming paths;
+// the matching attachMockErrors/GetMockErrors closes the window (the streaming
+// path closes it only after the stream body is fully consumed).
+// Best-effort: a failure only degrades to the old behaviour.
+func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
+	if b, ok := r.instrumentation.(interface {
+		BeginTestErrorCapture(context.Context) error
+	}); ok {
+		if err := b.BeginTestErrorCapture(ctx); err != nil {
+			r.logger.Debug("failed to begin test error capture", zap.Error(err))
+		}
+	}
+}
 
-	errorChannel := r.instrumentation.GetErrorChannel()
-	if errorChannel == nil {
-		r.logger.Debug("Proxy error channel is nil, skipping error monitoring")
+// attachMockErrors drains the per-test mock-error capture window (closing it)
+// and records any unmatched outgoing calls onto the result and the end-of-run
+// summary store. It must run on EVERY test-iteration exit — including the early
+// simulation-error / invalid-response returns — so the window is finalized for
+// THIS test and a miss is never carried forward to the next test or lost.
+func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
+	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
+	if err != nil {
+		// Don't swallow silently. This test's misses can't be attached, but the
+		// agent-side window is reset by the next BeginTestErrorCapture (which
+		// discards a never-closed window), so the failure can't bleed into the
+		// next test. Log it so a persistent transport problem is visible rather
+		// than reports vanishing without a trace.
+		r.logger.Debug("failed to fetch mock errors for test; skipping unmatched-call attachment",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCaseName),
+			zap.Error(err))
 		return
 	}
-
-	r.logger.Debug("Starting proxy error monitoring",
-		zap.String("testSetID", testSetID),
-		zap.String("testCaseID", testCaseID))
-
-	for {
-		select {
-		case <-ctx.Done():
-			r.logger.Debug("Stopping proxy error monitoring",
-				zap.String("testSetID", testSetID),
-				zap.String("testCaseID", testCaseID))
-			return
-		case proxyErr, ok := <-errorChannel:
-			if !ok {
-				r.logger.Debug("Proxy error channel closed",
-					zap.String("testSetID", testSetID),
-					zap.String("testCaseID", testCaseID))
-				return
-			}
-
-			// Determine effective test case ID
-			effectiveTestCaseID := testCaseID
-			if effectiveTestCaseID == "" {
-				effectiveTestCaseID = UNKNOWN_TEST
-			}
-
-			if parserErr, ok := proxyErr.(models.ParserError); ok {
-				// Handle typed ParserError
-				switch parserErr.ParserErrorType {
-				case models.ErrMockNotFound:
-					r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
-				}
-			}
-
+	for _, me := range mockErrors {
+		if result != nil {
+			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
 		}
+		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
 	}
 }
 
@@ -3754,6 +3851,45 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 }
 
 // isMockSubset checks if all expected mocks are present in the actual mocks list
+// isReusableTierMock reports whether a loaded mock is a reusable, non-per-test
+// tier — session / connection / config — recorded once at app startup and
+// shared across every test rather than consumed by exactly one. Such mocks
+// belong in the per-test mapping (so the replay mock pool is complete) but
+// must be excluded from the per-test consumed-vs-expected assertion: they are
+// not deterministically attributed to a single test's window, so comparing
+// them would falsely demote tests to OBSOLETE. Only per-test mocks are
+// compared. Tier is read from TestModeInfo.Lifetime (derived at ingest) with
+// Spec.Metadata["type"] as a fallback for mocks whose lifetime wasn't derived.
+func isReusableTierMock(m *models.Mock) bool {
+	switch m.TestModeInfo.Lifetime {
+	case models.LifetimeSession, models.LifetimeConnection:
+		return true
+	}
+	if m.Spec.Metadata != nil {
+		switch m.Spec.Metadata["type"] {
+		case "config", "connection":
+			return true
+		}
+	}
+	return false
+}
+
+// isReusableTierState is the MockState (consumed-mock) equivalent of
+// isReusableTierMock. GetConsumedMocks carries the recorder-derived Lifetime
+// and metadata type, so session/connection/config mocks are carved out of the
+// consumed side of the assertion the same way they are on the expected side.
+func isReusableTierState(s models.MockState) bool {
+	switch s.Lifetime {
+	case models.LifetimeSession, models.LifetimeConnection:
+		return true
+	}
+	switch s.Type {
+	case "config", "connection":
+		return true
+	}
+	return false
+}
+
 func isMockSubset(actual []string, expected []string) bool {
 	actualMap := make(map[string]bool)
 	for _, mock := range actual {

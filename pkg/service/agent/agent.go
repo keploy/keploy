@@ -602,6 +602,20 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	return a.Proxy.GetMockErrors(ctx)
 }
 
+// BeginTestErrorCapture opens a per-test mock-error capture window so the
+// replayer's subsequent GetMockErrors returns only this test's misses instead
+// of draining a process-global queue. The replayer calls it before each test
+// (in-process here, over HTTP via the agent client). Safe no-op return.
+func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
+	// a.Proxy is the agent.Proxy interface; reach the concrete capability via a
+	// type-assertion so the interface stays unchanged. Older proxies without it
+	// simply fall back to the legacy global queue.
+	if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
+		b.BeginTestErrorCapture()
+	}
+	return nil
+}
+
 // StoreMocks stores the filtered and unfiltered mocks for a client ID.
 //
 // Unification (Phase 1): every mock is run through DeriveLifetime on
