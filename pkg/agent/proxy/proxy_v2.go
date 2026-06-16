@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -100,6 +101,10 @@ func (p *Proxy) recordViaSupervisor(
 		// integrations#133 (the app's startup DB queries never found
 		// their mocks).
 		RouteMocksViaSyncMock: true,
+		// Per-app manager carried on the parser ctx by a multi-app caller
+		// (nil otherwise ⇒ EmitMock uses the package-global). Routes V2
+		// parser mocks to the right app's manager, like the legacy parsers.
+		Mgr: syncMock.FromContext(ctx),
 		// Legacy fields kept populated so a migrated parser can still
 		// consult them for fields we haven't promoted yet. The parser
 		// must not touch Ingress/Egress net.Conn values on the V2 path.
