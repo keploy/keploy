@@ -129,6 +129,7 @@ type MatchedCall struct {
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
+	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
 	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
 	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
 	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher

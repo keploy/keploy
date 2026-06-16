@@ -712,6 +712,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		MismatchReport: &models.MockMismatchReport{
 			Protocol:       call.Protocol,
 			ActualSummary:  call.ActualSummary,
+			Destination:    call.Destination,
 			ClosestMock:    call.ClosestMock,
 			Diff:           call.Diff,
 			NextSteps:      call.NextSteps,
@@ -877,6 +878,9 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		return
 	}
 	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
+	if r.Destination != "" {
+		heading += fmt.Sprintf("  →  %s", r.Destination)
+	}
 	if r.ClosestMock != "" {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
 	}

@@ -210,6 +210,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// failure that follows, so it must not hide at Debug.
 					h.Logger.Warn("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
+						zap.String("destination", report.Destination),
 						zap.String("actual", report.ActualSummary),
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),

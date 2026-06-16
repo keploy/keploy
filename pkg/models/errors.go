@@ -74,6 +74,7 @@ const (
 type MockMismatchReport struct {
 	Protocol       string          // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
 	ActualSummary  string          // Brief description of the actual request
+	Destination    string          // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
 	ClosestMock    string          // Name of the closest mock (empty if none)
 	Diff           string          // Human-readable diff (protocol-specific)
 	NextSteps      string          // Actionable suggestion for the user

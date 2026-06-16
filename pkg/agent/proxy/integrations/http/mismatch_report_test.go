@@ -70,6 +70,30 @@ func TestBuildHTTPMismatchReport_FieldDiffsAgainstSchemaSurvivor(t *testing.T) {
 	}
 }
 
+// The report must record WHICH upstream the missed call targeted (Host first,
+// URL authority as fallback) so the log and report can disambiguate the same
+// method+path hitting different hosts.
+func TestBuildHTTPMismatchReport_RecordsDestination(t *testing.T) {
+	h := newHTTP()
+	mock := httpMockWithReq("mock-1", "GET", "http://localhost:8080/api/orders", "", nil, nil)
+	db := &mockMemDb{mocks: []*models.Mock{mock}}
+	diag := &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{mock}}
+
+	// Host header wins.
+	req := makeReqWithQuery("GET", "/api/orders", "")
+	req.Host = "api.payments.svc:8443"
+	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "api.payments.svc:8443" {
+		t.Fatalf("expected destination from Host header, got %q", got)
+	}
+
+	// Falls back to the URL authority when Host is unset.
+	req = makeReqWithQuery("GET", "/api/orders", "")
+	req.URL.Host = "inventory.internal:9000"
+	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.internal:9000" {
+		t.Fatalf("expected destination from URL authority fallback, got %q", got)
+	}
+}
+
 // Fields covered by learned req_body_noise or user body noise must not be
 // flagged in the report — the report should never tell the user to fix a
 // field the matcher already ignores.

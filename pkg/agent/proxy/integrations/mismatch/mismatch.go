@@ -65,6 +65,15 @@ func NewReport(protocol, actualSummary string) *Builder {
 	}}
 }
 
+// WithDestination records the outgoing call's destination/domain (e.g. the
+// HTTP Host authority, or a "host:port") so the report and its log line say
+// WHICH upstream missed — method+path alone collide across hosts when an app
+// calls several services.
+func (b *Builder) WithDestination(dest string) *Builder {
+	b.report.Destination = dest
+	return b
+}
+
 // WithPhase records how far the match cascade got and how many candidate
 // mocks were considered. Use the models.MatchPhase* constants.
 func (b *Builder) WithPhase(phase string, candidateCount int) *Builder {

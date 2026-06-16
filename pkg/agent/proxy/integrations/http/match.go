@@ -1244,6 +1244,12 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
 	actualKey := request.Method + " " + request.URL.Path
+	// Destination identifies WHICH upstream this missed call targeted; the same
+	// method+path can hit several hosts. Host header first, URL authority next.
+	dest := request.Host
+	if dest == "" && request.URL != nil {
+		dest = request.URL.Host
+	}
 	if httpMocks == nil && (diag == nil || len(diag.schemaMatched) == 0) {
 		// Mirror match()'s pool-merging + ordering strategy so
 		// mismatch diagnostics see the same candidate set in the
@@ -1251,11 +1257,13 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
 			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+				WithDestination(dest).
 				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
 			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+				WithDestination(dest).
 				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
 		}
 		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
@@ -1279,6 +1287,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			WithDestination(dest).
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()
 	}
 
@@ -1289,6 +1298,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	closestMock := pickClosestCandidate(request, schemaSurvivors, httpMocks)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			WithDestination(dest).
 			WithPhase(phase, candidateCount).Build()
 	}
 
@@ -1341,6 +1351,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	redactFieldDiffs(fieldDiffs, closestMock.Noise)
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		WithDestination(dest).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
