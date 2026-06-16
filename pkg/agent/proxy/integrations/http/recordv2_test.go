@@ -342,9 +342,19 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 	// "HTTP_CLIENT" type tag is non-canonical), gets promoted to
 	// LifetimeSession, and syncMock's lifetime carve-out then persists it
 	// unconditionally — bypassing window resolution and dedup cleanup.
-	if !reflect.DeepEqual(v2Mock.TestModeInfo, legacyMock.TestModeInfo) {
+	//
+	// IsStartup is excluded from the comparison: it is NOT a build-time
+	// recorder property. It is a transient routing flag stamped later by
+	// syncMock.AddMock when a mock is captured before the first inbound
+	// request. In this harness the legacy mock is produced via
+	// parseFinalHTTP → AddMock (so it gets tagged), while the V2 builder
+	// returns the mock pre-ingest; in production both paths ingest via
+	// AddMock identically, so the flag is not a recorder divergence.
+	v2TMI, legacyTMI := v2Mock.TestModeInfo, legacyMock.TestModeInfo
+	v2TMI.IsStartup, legacyTMI.IsStartup = false, false
+	if !reflect.DeepEqual(v2TMI, legacyTMI) {
 		t.Errorf("TestModeInfo mismatch:\n  v2=%+v\n  legacy=%+v",
-			v2Mock.TestModeInfo, legacyMock.TestModeInfo)
+			v2TMI, legacyTMI)
 	}
 	if v2Mock.TestModeInfo.Lifetime != models.LifetimePerTest || !v2Mock.TestModeInfo.LifetimeDerived {
 		t.Errorf("V2 mock must be stamped LifetimePerTest+LifetimeDerived at build time, got %+v",

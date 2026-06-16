@@ -39,6 +39,15 @@ const (
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 	DNS         Kind = "DNS"
+
+	// Aerospike covers all Aerospike traffic — info text frames,
+	// AS_MSG binary frames, and their compressed wrapper. It is an
+	// ENTERPRISE-ONLY parser (enterprise-native tier, like Redis/Kafka):
+	// OSS core carries only this Kind string. The enterprise parser
+	// stores its captured frames in the generic GenericRequests /
+	// GenericResponses payload slices and owns the typed frame model +
+	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
+	Aerospike Kind = "Aerospike"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -115,6 +124,25 @@ type TestModeInfo struct {
 	// used?" observability — non-zero helps confirm tagging; zero for
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
+
+	// IsStartup marks app-bootstrap traffic captured before the first
+	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
+	// Such an outbound call can never claim a per-test window — it ran
+	// before any test — so the record-side syncMock reapers (dedup
+	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
+	// instead of dropping it as debris.
+	//
+	// This is a RECORD-side cleanup signal only, with no replay-time
+	// meaning, which is why it is NOT modelled as a Lifetime value:
+	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
+	// replay-time pool routing, whereas IsStartup is set live at ingest in
+	// SyncMockManager.AddMock and is only ever read on buffered, live-
+	// captured mocks before they are persisted. Like the sibling
+	// runtime-only fields, the json/bson tags keep it out of the text
+	// formats; gob (which ignores struct tags) does encode it, but a value
+	// carried on a reloaded mock is inert — the reapers run only on the
+	// live record buffer, never on disk-loaded mocks.
+	IsStartup bool `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -148,6 +176,10 @@ type MockSpec struct {
 	// PostgresV3 is the single discriminated spec for the v3 Postgres parser.
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
+
+	// Aerospike (enterprise-only) stores its captured frames in the
+	// generic GenericRequests / GenericResponses payload slices above,
+	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -691,6 +723,7 @@ func (m *Mock) DeepCopy() *Mock {
 	sortOrder := m.TestModeInfo.SortOrder
 	lifetime := m.TestModeInfo.Lifetime
 	lifetimeDerived := m.TestModeInfo.LifetimeDerived
+	isStartup := m.TestModeInfo.IsStartup
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
@@ -702,6 +735,7 @@ func (m *Mock) DeepCopy() *Mock {
 			SortOrder:       sortOrder,
 			Lifetime:        lifetime,
 			LifetimeDerived: lifetimeDerived,
+			IsStartup:       isStartup,
 		},
 		ConnectionID: m.ConnectionID,
 	}
