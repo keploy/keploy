@@ -339,7 +339,13 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // mockNames is a keep-set keyed by mock name (values carry models.MockState details).
 // Mocks present in mockNames are retained; other mocks may still be retained by
 // timestamp-based exemptions (for replay writes and startup/init traffic).
-func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error {
+//
+// startupCutoffTime is the startup-mock exemption boundary: any mock recorded
+// before it is a "startup mock" (captured from app boot up to and including the
+// first StartupMockTestCaseWindow test cases) and is kept even when no executed
+// test consumes it. The caller (replay) computes it from the per-test-case
+// request timestamps; a zero value disables the exemption.
+func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, startupCutoffTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -355,7 +361,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	// to the format-detection logic below for yaml/json.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		return ys.updateMocksGob(ctx, testSetID, gobPath, mockNames, pruneBefore, firstTestCaseTime)
+		return ys.updateMocksGob(ctx, testSetID, gobPath, mockNames, pruneBefore, startupCutoffTime)
 	}
 
 	// Detect the format the mocks file is actually stored in (may differ
@@ -457,13 +463,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		// Keep startup/init mocks: mocks recorded before the first test case
-		// are connection-level or app-init traffic (DNS, TLS, DB handshake,
-		// config fetch, etc.) that only fires once at app startup. In multi-
-		// test-set replays without app restart, these won't be consumed in
-		// later test-sets but are still needed for future replays.
-		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
-			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+		// Keep startup/init mocks: every mock recorded before startupCutoffTime
+		// (app boot up to and including the first StartupMockTestCaseWindow test
+		// cases) is connection-level or app-init traffic (DNS, TLS, DB handshake,
+		// config fetch, etc.) plus the outbound calls of those early tests. In
+		// multi-test-set replays without app restart, these won't be consumed in
+		// later test-sets but are still needed for app startup on future replays.
+		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -496,14 +503,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 // updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
 // filter decision matches the YAML path exactly (keep config mocks,
-// mocks named in mockNames, post-replay mocks, and pre-first-test
-// startup mocks — prune everything else). The rewrite rules are
-// different because gob doesn't support append: we read the whole
-// file, filter, and atomically rewrite a fresh single-encoder
-// stream with the magic header. An existing gob writer on this
-// MockYaml must be quiesced before we touch the file so a
+// mocks named in mockNames, post-replay mocks, and startup mocks
+// recorded before startupCutoffTime — prune everything else). The
+// rewrite rules are different because gob doesn't support append: we
+// read the whole file, filter, and atomically rewrite a fresh
+// single-encoder stream with the magic header. An existing gob writer
+// on this MockYaml must be quiesced before we touch the file so a
 // concurrent InsertMock doesn't race the truncate-and-rewrite.
-func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath string, mockNames map[string]models.MockState, pruneBefore, firstTestCaseTime time.Time) error {
+func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath string, mockNames map[string]models.MockState, pruneBefore, startupCutoffTime time.Time) error {
 	ys.Logger.Debug("pruning unused mocks (gob)",
 		zap.Any("consumedMocks", mockNames),
 		zap.String("testSetID", testSetID),
@@ -574,8 +581,11 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
-			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+		// Keep startup mocks (see the YAML path): everything recorded before
+		// startupCutoffTime is app-init traffic plus the early tests' outbound
+		// calls, needed for startup on future replays even when unconsumed here.
+		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
 			newMocks = append(newMocks, mock)
 			continue
 		}
