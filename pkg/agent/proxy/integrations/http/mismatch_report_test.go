@@ -92,6 +92,13 @@ func TestBuildHTTPMismatchReport_RecordsDestination(t *testing.T) {
 	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.internal:9000" {
 		t.Fatalf("expected destination from URL authority fallback, got %q", got)
 	}
+
+	// A nil URL (hand-built request reaching the error path) must not panic; the
+	// destination still comes from the Host header.
+	nilURLReq := &http.Request{Method: "GET", Host: "api.example.com", Header: http.Header{}}
+	if got := h.buildHTTPMismatchReport(nilURLReq, nil, db, nil, nil, nil, diag).Destination; got != "api.example.com" {
+		t.Fatalf("nil-URL request: expected destination from Host, got %q", got)
+	}
 }
 
 // Fields covered by learned req_body_noise or user body noise must not be

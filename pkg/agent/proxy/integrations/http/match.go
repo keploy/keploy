@@ -1243,11 +1243,19 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
+	// Defensive: this diagnostic builder and its callees (pickClosestCandidate,
+	// renderLiveRequest) — plus decode.go's 502 error line — dereference
+	// request.URL throughout. http.ReadRequest always sets a non-nil URL on the
+	// live path, but normalize here so a hand-built request (tests / future
+	// callers) can never panic the agent on the error path.
+	if request.URL == nil {
+		request.URL = &url.URL{}
+	}
 	actualKey := request.Method + " " + request.URL.Path
 	// Destination identifies WHICH upstream this missed call targeted; the same
 	// method+path can hit several hosts. Host header first, URL authority next.
 	dest := request.Host
-	if dest == "" && request.URL != nil {
+	if dest == "" {
 		dest = request.URL.Host
 	}
 	if httpMocks == nil && (diag == nil || len(diag.schemaMatched) == 0) {
