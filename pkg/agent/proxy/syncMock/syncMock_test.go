@@ -1320,6 +1320,10 @@ func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
 	mgr := &SyncMockManager{}
 	mgr.SetOutputChannel(ch)
 	mgr.SetFirstRequestSignaled()
+	// Past the startup window, so the orphan below is a genuine non-startup
+	// orphan and the stale-cutoff drop (this test's invariant) still applies —
+	// inside the window every ingest is tagged IsStartup and rescued.
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
 
 	// An old window, well past the 7 s cutoff.
 	old := time.Now().Add(-30 * time.Second)
@@ -1782,22 +1786,25 @@ func TestStartupMockFlushedByFlushOwnedWindows(t *testing.T) {
 	}
 }
 
-// TestDuplicateDebrisStillDroppedAfterFirstReqSeen is the negative control:
-// an outbound mock captured AFTER firstReqSeen that owns no window is the
-// skipped duplicate's own debris — it is NOT a startup mock and the dedup
-// cleanup must still drop it, so the startup rescue does not over-rescue.
-func TestDuplicateDebrisStillDroppedAfterFirstReqSeen(t *testing.T) {
+// TestDuplicateDebrisStillDroppedAfterStartupWindow is the negative control:
+// once we are PAST the startup window (>= N unique recorded test cases), an
+// outbound mock captured after firstReqSeen that owns no window is the skipped
+// duplicate's own debris — it is NOT a startup mock and the dedup cleanup must
+// still drop it, so the widened startup rescue does not over-rescue forever.
+func TestDuplicateDebrisStillDroppedAfterStartupWindow(t *testing.T) {
 	t.Parallel()
 
 	out := make(chan *models.Mock, 4)
 	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
 	mgr.SetOutputChannel(out)
-	mgr.SetFirstRequestSignaled() // request-driven traffic, not startup
+	mgr.SetFirstRequestSignaled() // request-driven traffic, not boot
+	// Advance past the startup window so new ingests are no longer tagged.
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
 
 	debris := startupHTTPMock(time.Now().Add(-1 * time.Second))
 	mgr.AddMock(debris)
 	if mgr.buffer[0].TestModeInfo.IsStartup {
-		t.Fatalf("a mock captured after firstReqSeen must NOT be tagged IsStartup")
+		t.Fatalf("a mock captured past the startup window must NOT be tagged IsStartup")
 	}
 
 	mgr.DeleteMocksStrictlyBefore(time.Now())
@@ -1809,5 +1816,124 @@ func TestDuplicateDebrisStillDroppedAfterFirstReqSeen(t *testing.T) {
 	}
 	if len(mgr.buffer) != 0 {
 		t.Fatalf("debris must be dropped from the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestStartupWindowTagsMocksAfterFirstReqSeen pins the widened tagging: while
+// fewer than N unique test cases have been recorded, AddMock tags ingested
+// mocks IsStartup EVEN after firstReqSeen — that is what makes the first N
+// tests' mocks survive the dedup reapers.
+func TestStartupWindowTagsMocksAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetFirstRequestSignaled() // past boot, but still inside the startup window
+
+	mgr.AddMock(startupHTTPMock(time.Now()))
+	if !mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("a mock captured within the startup window must be tagged IsStartup")
+	}
+}
+
+// TestResolvedTestCountClosesStartupWindowOnKeptResolves verifies the boundary:
+// only kept resolves (keep==true, one per UNIQUE recorded test) advance the
+// counter, and a keep==false (duplicate) resolve does not. After N kept
+// resolves the window closes and new ingests are no longer tagged.
+func TestResolvedTestCountClosesStartupWindowOnKeptResolves(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+
+	now := time.Now()
+	// A duplicate resolve must NOT advance the counter.
+	mgr.ResolveRange(now.Add(-time.Second), now, "test-0", false, false)
+	if mgr.resolvedTestCount != 0 {
+		t.Fatalf("duplicate (keep=false) resolve must not advance the counter; got %d", mgr.resolvedTestCount)
+	}
+
+	// N kept resolves close the window.
+	for i := range models.StartupMockTestCaseWindow {
+		base := now.Add(time.Duration(i+1) * time.Second)
+		mgr.ResolveRange(base, base.Add(10*time.Millisecond), "test", true, false)
+	}
+	if mgr.resolvedTestCount != models.StartupMockTestCaseWindow {
+		t.Fatalf("expected counter == %d after kept resolves, got %d", models.StartupMockTestCaseWindow, mgr.resolvedTestCount)
+	}
+
+	// Past the window: ingests are no longer startup.
+	mgr.AddMock(startupHTTPMock(now.Add(10 * time.Second)))
+	last := mgr.buffer[len(mgr.buffer)-1]
+	if last.TestModeInfo.IsStartup {
+		t.Fatalf("ingest past the startup window must NOT be tagged IsStartup")
+	}
+}
+
+// TestStartupMockRescuedFromDuplicateWindowResolve is the core static-dedup
+// regression: a startup-window mock captured inside the window of a test case
+// that static-dedup deems a DUPLICATE (ResolveRange keep=false) must be flushed
+// to disk, not pruned with the rest of the duplicate's window. This is the
+// in-window keep=false rescue that the OSS path lacked.
+func TestStartupMockRescuedFromDuplicateWindowResolve(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled() // inside the startup window (count == 0)
+
+	now := time.Now()
+	inWindowTS := now.Add(-20 * time.Millisecond)
+	mgr.AddMock(startupHTTPMock(inWindowTS))
+	if !mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("mock captured inside the startup window must be tagged IsStartup")
+	}
+
+	// Duplicate resolve (keep=false) over the window that contains the mock.
+	mgr.ResolveRange(now.Add(-50*time.Millisecond), now, "test-0", false, false)
+
+	select {
+	case got := <-out:
+		if !got.Spec.ReqTimestampMock.Equal(inWindowTS) {
+			t.Fatalf("rescued wrong mock: ts=%v want %v", got.Spec.ReqTimestampMock, inWindowTS)
+		}
+	default:
+		t.Fatalf("startup mock inside a duplicate window must be rescued, not pruned")
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("rescued mock should leave the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestNonStartupMockPrunedFromDuplicateWindowResolve is the matching negative
+// control: past the startup window, a non-startup mock inside a duplicate's
+// window (ResolveRange keep=false) is pruned as before — the rescue is scoped to
+// the startup window only.
+func TestNonStartupMockPrunedFromDuplicateWindowResolve(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow // past the window
+
+	now := time.Now()
+	mgr.AddMock(startupHTTPMock(now.Add(-20 * time.Millisecond)))
+	if mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("mock past the startup window must NOT be tagged IsStartup")
+	}
+
+	mgr.ResolveRange(now.Add(-50*time.Millisecond), now, "test-0", false, false)
+
+	select {
+	case got := <-out:
+		t.Fatalf("non-startup mock in a duplicate window must be pruned, but it was flushed: ts=%v", got.Spec.ReqTimestampMock)
+	default:
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("pruned mock should leave the buffer; buffer=%d", len(mgr.buffer))
 	}
 }

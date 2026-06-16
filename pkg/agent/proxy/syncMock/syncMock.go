@@ -58,12 +58,24 @@ func generateRandomString(n int) string {
 
 type SyncMockManager struct {
 	// mu guards buffer, firstReqSeen, memoryPause, mappingChan,
-	// recentWindows.
+	// recentWindows, resolvedTestCount.
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
+
+	// resolvedTestCount is the number of UNIQUE recorded test cases resolved so
+	// far (incremented once per kept ResolveRange — duplicates skipped by static
+	// dedup resolve with keep=false and do NOT advance it). It defines the
+	// startup window: while it is < models.StartupMockTestCaseWindow, every mock
+	// AddMock ingests is tagged TestModeInfo.IsStartup, so the dedup reapers
+	// (DeleteMocksStrictlyBefore, the ResolveRange keep=false / out-of-window
+	// rescues, the memory-pressure wipe) preserve it instead of pruning. The
+	// effect is that static-dedup pruning only begins from the (N+1)-th test
+	// case, keeping the boot-through-Nth-test mock corpus complete. Mirrors
+	// firstReqSeen's lifecycle (set forward-only within a record session).
+	resolvedTestCount int
 
 	// recentWindows is a bounded, time-pruned ring of the most recently
 	// RESOLVED per-test windows. It exists to close the async-emit vs
@@ -321,15 +333,20 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	// Mock is being kept — count it as successfully added.
 	m.totalAdded.Add(1)
 
-	// Tag app-bootstrap traffic. Any mock captured before the first
-	// inbound request is startup/init traffic (e.g. an AWS Secret Manager
-	// fetch at boot) that ran before any test window exists. It can never
-	// claim a per-test window, so the reapers below (dedup DeleteMocks-
-	// StrictlyBefore, the ResolveRange stale-cutoff, FlushOwnedWindows and
-	// the memory-pressure wipe) would otherwise drop it. firstReqSeen,
-	// flipped on the first inbound request, is the boot-vs-test boundary;
-	// tagging here is the sole signal isStartupMock keys off.
-	if mock != nil && !m.firstReqSeen {
+	// Tag startup-window traffic. A mock is "startup" when it is captured
+	// either (a) before the first inbound request — classic app-bootstrap
+	// traffic (e.g. an AWS Secret Manager fetch at boot) that ran before any
+	// test window exists — or (b) while we are still inside the startup window,
+	// i.e. fewer than models.StartupMockTestCaseWindow unique test cases have
+	// been recorded. Case (b) widens the old "before firstReqSeen" rule so the
+	// boot-through-Nth-test mock corpus is preserved wholesale: the IsStartup
+	// tag is the single signal every reaper below keys off (dedup DeleteMocks-
+	// StrictlyBefore, the ResolveRange keep=false / out-of-window / stale-cutoff
+	// rescues, FlushOwnedWindows, and the memory-pressure wipe), so tagging here
+	// makes static-dedup pruning a no-op until the (N+1)-th test case. (firstReqSeen
+	// is subsumed by the count test — count is 0 before the first request — but
+	// is kept explicit so the boot case still holds if the window is ever 0.)
+	if mock != nil && (!m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow) {
 		mock.TestModeInfo.IsStartup = true
 	}
 
@@ -522,11 +539,12 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			mocksToSend = append(mocksToSend, mock)
 			continue
 		}
-		// STARTUP RESCUE: app-bootstrap traffic owns no window (it ran
-		// before any test) so the ownerWindow check above never claims it.
-		// Flush it to disk proactively on the ticker rather than leaving it
-		// parked in the buffer where a dedup cleanup, stale-cutoff, or
-		// memory-pressure wipe could reap it before it is ever persisted.
+		// STARTUP RESCUE: a startup-window mock the ownerWindow check above
+		// didn't claim (boot traffic owns no window; an early-test mock whose
+		// window hasn't resolved yet on this ticker tick). Flush it to disk
+		// proactively rather than leaving it parked in the buffer where a dedup
+		// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
+		// is ever persisted.
 		if isStartupMock(mock) {
 			mock.Name = "mock-" + generateRandomString(8)
 			mocksToSend = append(mocksToSend, mock)
@@ -701,19 +719,24 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			// for range tracking — they would otherwise spam the slice.
 			m.pressureRanges = append(m.pressureRanges, pressureRange{start: now})
 		}
-		// Don't wipe the whole buffer: a mock whose request happened during
-		// calm belongs to an already-captured TC and must survive (else replay
-		// orphans it). Drop only mocks whose request was during pressure — the
-		// ingress never captured those, so there is no TC to orphan. Unknown
-		// timestamp → keep (safe default). In-place filter, then nil the tail.
+		// Don't wipe the whole buffer. Two classes of mock must survive:
+		//   1. Startup-window mocks (IsStartup) — boot traffic and everything
+		//      captured within the first StartupMockTestCaseWindow test cases
+		//      (#4282). They own no resolved window and reach disk only via
+		//      FlushOwnedWindows; wiping them is the exact loss the IsStartup
+		//      tag exists to prevent.
+		//   2. Mocks whose request happened during calm — they belong to an
+		//      already-captured TC and must survive or replay orphans it
+		//      (#4220 Bug-0). Only mocks whose request was during pressure are
+		//      dropped: the ingress never captured those, so there is no TC to
+		//      orphan.
+		// Unknown timestamp → keep (safe default). In-place filter, nil the tail.
 		before := len(m.buffer)
 		keep := m.buffer[:0]
 		for _, mk := range m.buffer {
 			if mk == nil {
 				continue
 			}
-			// Startup mocks (captured before the first inbound request) own no
-			// test window and must reach disk via FlushOwnedWindows — never wipe them.
 			if isStartupMock(mk) {
 				keep = append(keep, mk)
 				continue
@@ -759,17 +782,18 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	}
 }
 
-// isStartupMock reports whether a buffered per-test mock is app-bootstrap
-// traffic that can never legitimately claim a test window: it was captured
-// before the first inbound request (tagged IsStartup at ingest in AddMock).
-// Such mocks (e.g. an AWS Secret Manager fetch at boot) must be flushed to
-// disk so replay's startup tier can serve them, NOT reaped as duplicate
-// debris or stale-cutoff. The tag — rather than a "request pre-dates the
-// first window" timestamp test — is deliberately the only signal: a mock
-// captured before the FIRST inbound request is unambiguously startup
-// traffic, whereas a per-test mock that merely lands before its window
-// (genuine stale cross-test bleed) must still be reaped to bound buffer
-// growth. Conflating the two would resurrect that bleed.
+// isStartupMock reports whether a buffered mock falls in the startup window
+// and must be preserved by every reaper instead of pruned. A mock is tagged
+// IsStartup at ingest in AddMock when it is captured before the first inbound
+// request (classic app-bootstrap, e.g. an AWS Secret Manager fetch) OR while
+// fewer than models.StartupMockTestCaseWindow unique test cases have been
+// recorded. Such mocks must be flushed to disk so replay's startup tier can
+// serve them, NOT reaped as duplicate debris or stale-cutoff. The tag — rather
+// than a timestamp test — is deliberately the only signal: it captures the
+// "recorded inside the startup window" intent precisely (including mocks that
+// land inside a static-dedup duplicate's window), whereas a per-test mock that
+// merely lands before its window once we are PAST the startup window (genuine
+// stale cross-test bleed) is untagged and still reaped to bound buffer growth.
 func isStartupMock(mk *models.Mock) bool {
 	return mk != nil && mk.TestModeInfo.IsStartup
 }
@@ -798,6 +822,17 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// send itself when outChanClosed is true.
 	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
+
+	// A kept resolve (keep==true) is one UNIQUE recorded test case; advance the
+	// startup-window counter so AddMock stops tagging mocks IsStartup once we are
+	// past the Nth test. Duplicates resolve with keep==false (static dedup) and
+	// must NOT count — the window is measured in recorded tests, not requests.
+	// Incrementing here only gates FUTURE ingests; the mocks processed in this
+	// call were already tagged (or not) at AddMock time, and the rescues below
+	// key off that per-mock tag, not the live counter.
+	if keep {
+		m.resolvedTestCount++
+	}
 
 	// Stale-buffer safety valve.
 	//
@@ -915,6 +950,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
 				mocksToSend = append(mocksToSend, mock)
+			} else if isStartupMock(mock) {
+				// STARTUP RESCUE (static-dedup duplicate window): keep==false
+				// means the enterprise static-dedup deemed THIS test case a
+				// duplicate, so its in-window mocks are normally pruned (the
+				// drop-via-continue below). But a startup-window mock must
+				// survive — until the Nth unique test is recorded, dedup pruning
+				// is suppressed wholesale (a once-per-boot init call that fires
+				// inside a duplicate's window would otherwise be lost, corrupting
+				// the startup recording). Retain when outChan isn't bound yet,
+				// else flush to disk. No associatedMockIDs entry: a duplicate's
+				// testName is synthetic ("test-0"), so it owns no real mapping —
+				// the same treatment the window-less startup rescue below gives.
+				if !outChanBound {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
+				mock.Name = "mock-" + generateRandomString(8)
+				mocksToSend = append(mocksToSend, mock)
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -956,16 +1010,16 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			continue
 		}
 
-		// STARTUP RESCUE: a mock captured before the first inbound request
-		// (IsStartup) is app-bootstrap traffic — an AWS Secret Manager
-		// fetch, DB/driver handshake, config load, etc. fired at boot. It
-		// can never claim a window, so the stale-cutoff below would
-		// silently reap it (the "present in some test sets, missing in
-		// others" bug). Flush it to disk instead so replay's startup tier
-		// can serve it. Placed BEFORE the cutoff so a slow boot (>7 s to
-		// the first request) can't lose it. A per-test mock that merely
-		// lands before the current window (genuine stale cross-test bleed)
-		// is NOT tagged IsStartup and still falls to the cutoff.
+		// STARTUP RESCUE (out-of-window): a startup-window mock (IsStartup) that
+		// didn't match the current window — boot traffic like an AWS Secret
+		// Manager fetch / DB handshake / config load, or an early-test mock
+		// whose own window isn't the one resolving now. The stale-cutoff below
+		// would otherwise silently reap it (the "present in some test sets,
+		// missing in others" bug). Flush it to disk instead so replay's startup
+		// tier can serve it. Placed BEFORE the cutoff so a slow boot (>7 s to the
+		// first request) can't lose it. A per-test mock captured PAST the startup
+		// window that merely lands before the current window (genuine stale
+		// cross-test bleed) is NOT tagged IsStartup and still falls to the cutoff.
 		if isStartupMock(mock) {
 			if !outChanBound {
 				m.buffer[keepIdx] = mock
@@ -1202,14 +1256,15 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			continue
 		}
 
-		// STARTUP RESCUE: app-bootstrap traffic (captured before the first
-		// inbound request, or pre-dating the first resolved test window) is
-		// NOT the skipped duplicate's debris — it owns no window because it
-		// ran before any test existed. Without this, a once-per-boot init
-		// call (e.g. AWS Secret Manager) is dropped here whenever the first
-		// inbound request happens to hash as a dedup duplicate (recentWindows
-		// is still empty, so the ownerWindow rescue above can't save it) —
-		// the root of the flaky per-test-set capture. Flush it instead.
+		// STARTUP RESCUE: a startup-window mock (boot traffic, or anything
+		// captured within the first StartupMockTestCaseWindow test cases) is NOT
+		// the skipped duplicate's debris and must survive this cleanup. Without
+		// this, a once-per-boot init call (e.g. AWS Secret Manager) is dropped
+		// whenever an early request hashes as a dedup duplicate while
+		// recentWindows can't yet claim it (empty at boot, or the mock landed in
+		// a duplicate's own window) — the root of the flaky per-test-set capture,
+		// and exactly what keeps static dedup from pruning the startup corpus.
+		// Flush it instead.
 		if isStartupMock(mock) {
 			if !outChanBound {
 				m.buffer[keepIdx] = mock
