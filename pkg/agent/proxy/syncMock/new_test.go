@@ -83,3 +83,23 @@ func TestNextTestIDPerInstance(t *testing.T) {
 		t.Fatalf("first NextTestID on b = %d, want 1 (counter leaked from a)", got)
 	}
 }
+
+// TestManagerDedupQueueOwnership verifies New() managers own a private dedup
+// queue while the package-global instance falls back to globalDedupQueue —
+// so callers can switch GetDedupQueue() → mgr.DedupQueue() for per-session
+// dedup without changing single-session behaviour.
+func TestManagerDedupQueueOwnership(t *testing.T) {
+	t.Parallel()
+
+	a := New(nil)
+	b := New(nil)
+	if a.DedupQueue() == b.DedupQueue() {
+		t.Fatal("two New() managers share a dedup queue")
+	}
+	if a.DedupQueue() == GetDedupQueue() {
+		t.Fatal("a New() manager's queue aliases the global queue")
+	}
+	if Get().DedupQueue() != GetDedupQueue() {
+		t.Fatal("the global manager's DedupQueue() must be the package-global queue")
+	}
+}

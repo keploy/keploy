@@ -35,3 +35,28 @@ func TestFromContextOrGlobal(t *testing.T) {
 		t.Fatal("carried manager must not be the global instance")
 	}
 }
+
+// fakeStaticDeduper is a minimal StaticDeduper for the context round-trip.
+type fakeStaticDeduper struct{}
+
+func (fakeStaticDeduper) IsDuplicate(string) bool                          { return false }
+func (fakeStaticDeduper) GetCustomFieldsForEndpoint(string, string, int) []string { return nil }
+
+// TestStaticDeduperContext verifies the per-app static-deduper context
+// carrier: a deduper set via WithStaticDeduper is returned, and absence
+// yields nil (single-app fallback).
+func TestStaticDeduperContext(t *testing.T) {
+	t.Parallel()
+
+	if StaticDeduperFromContext(context.Background()) != nil {
+		t.Fatal("no deduper on ctx should yield nil")
+	}
+	if StaticDeduperFromContext(nil) != nil { //nolint:staticcheck // testing nil-ctx guard
+		t.Fatal("nil ctx should yield nil")
+	}
+	d := fakeStaticDeduper{}
+	ctx := WithStaticDeduper(context.Background(), d)
+	if got := StaticDeduperFromContext(ctx); got != d {
+		t.Fatal("StaticDeduperFromContext did not return the carried deduper")
+	}
+}
