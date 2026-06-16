@@ -37,6 +37,51 @@ import (
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 const applicationFailedToRunLogMessage = "application failed to run; check the application logs for details or verify the app command is correct"
 
+// startupMockCutoff returns the startup-mock exemption boundary for a test set:
+// any mock recorded before this time is a startup mock that UpdateMocks must
+// keep even when unconsumed. It is the request timestamp of the
+// (models.StartupMockTestCaseWindow+1)-th test case (ordered by request time),
+// so the startup window covers app boot through the recording of the Nth test
+// case — the replay-side twin of the record-side IsStartup tagging keyed off
+// SyncMockManager.resolvedTestCount.
+//
+// When the set has <= models.StartupMockTestCaseWindow test cases, the entire
+// recording is startup; keepAll (the replay start time, pruneBefore) is
+// returned so every recorded mock is retained — mocks recorded before replay
+// start are kept by this exemption and any written after it are kept by
+// UpdateMocks' post-replay-write rule. Returns the zero time when no test case
+// carries a usable timestamp, which disables the exemption (matching the prior
+// behaviour for timestamp-less sets).
+func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Time {
+	tcTimes := make([]time.Time, 0, len(testCases))
+	for _, tc := range testCases {
+		var candidate time.Time
+
+		// Prefer high-precision request timestamps when available.
+		if !tc.HTTPReq.Timestamp.IsZero() {
+			candidate = tc.HTTPReq.Timestamp
+		} else if !tc.GrpcReq.Timestamp.IsZero() {
+			candidate = tc.GrpcReq.Timestamp
+		} else if tc.Created > 0 {
+			// Fallback to the coarser Created timestamp.
+			candidate = time.Unix(tc.Created, 0)
+		}
+
+		if !candidate.IsZero() {
+			tcTimes = append(tcTimes, candidate)
+		}
+	}
+	sort.Slice(tcTimes, func(i, j int) bool { return tcTimes[i].Before(tcTimes[j]) })
+
+	if len(tcTimes) > models.StartupMockTestCaseWindow {
+		return tcTimes[models.StartupMockTestCaseWindow]
+	}
+	if len(tcTimes) > 0 {
+		return keepAll
+	}
+	return time.Time{}
+}
+
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
@@ -2539,28 +2584,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// Find the earliest test-case timestamp so UpdateMocks can exempt
-		// startup/init mocks (recorded before any test case) from deletion.
-		var firstTestCaseTime time.Time
-		for _, tc := range testCases {
-			var candidate time.Time
+		// Compute the startup-mock cutoff so UpdateMocks can exempt startup/init
+		// mocks from deletion. "Startup mocks" are every mock recorded from app
+		// boot up to and including the StartupMockTestCaseWindow-th test case;
+		// mocks recorded before the cutoff survive pruning while still keeping
+		// their per-test mappings for replay matching. With <= window test cases
+		// the whole recording is startup, so pruneBefore is used as the cutoff to
+		// retain everything (see startupMockCutoff).
+		startupCutoffTime := startupMockCutoff(testCases, pruneBefore)
 
-			// Prefer high-precision request timestamps when available.
-			if !tc.HTTPReq.Timestamp.IsZero() {
-				candidate = tc.HTTPReq.Timestamp
-			} else if !tc.GrpcReq.Timestamp.IsZero() {
-				candidate = tc.GrpcReq.Timestamp
-			} else if tc.Created > 0 {
-				// Fallback to the coarser Created timestamp.
-				candidate = time.Unix(tc.Created, 0)
-			}
-
-			if !candidate.IsZero() && (firstTestCaseTime.IsZero() || candidate.Before(firstTestCaseTime)) {
-				firstTestCaseTime = candidate
-			}
-		}
-
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, firstTestCaseTime)
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
