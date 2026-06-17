@@ -1941,18 +1941,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			} else {
 				r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 			}
-			// A payload-aware mock mismatch (schema matched, request body diverged)
-			// is a real regression and must fail the test even when the recorded
-			// response is unchanged, and must not be demoted to OBSOLETE.
-			payloadMismatch := r.hasPayloadAwareMismatch(testSetID, testCase.Name)
-			if testPass && !payloadMismatch {
+			if testPass {
 				testStatus = models.TestStatusPassed
 				currentSuccess++
 				nextTestsToRun = append(nextTestsToRun, testCase)
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure && !payloadMismatch {
+			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
@@ -2108,6 +2104,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// so the agent's error channel is consumed only inside the
 					// agent's own drain goroutine, never by the replayer.
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					// Re-classify AFTER the drain above (the per-test failure store is only
+					// populated now): a payload-aware mismatch — schema matched, request body
+					// diverged — must FAIL the test even when the recorded response is unchanged
+					// (e.g. an async Pulsar/Kafka/SQS SEND), and must not stay PASSED or be
+					// demoted to OBSOLETE. Benign misses are not MatchPhaseBody (warn-only).
+					if testStatus != models.TestStatusFailed && r.hasPayloadAwareMismatch(testSetID, testCase.Name) {
+						switch testStatus {
+						case models.TestStatusPassed:
+							currentSuccess--
+							if n := len(nextTestsToRun); n > 0 && nextTestsToRun[n-1].Name == testCase.Name {
+								nextTestsToRun = nextTestsToRun[:n-1]
+							}
+						case models.TestStatusObsolete:
+							currentObsolete--
+						}
+						testStatus = models.TestStatusFailed
+						currentFailures++
+						testSetStatus = models.TestSetStatusFailed
+						testCaseResult.Status = models.TestStatusFailed
+					}
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -2492,18 +2508,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			//  Record: Update counters and persist result.
-			// A payload-aware mock mismatch (schema matched, request body diverged)
-			// is a real regression and must fail the test even when the recorded
-			// response is unchanged, and must not be demoted to OBSOLETE.
-			payloadMismatch := r.hasPayloadAwareMismatch(testSetID, tc.Name)
 			var testStatus models.TestStatus
-			if testPass && !payloadMismatch {
+			if testPass {
 				testStatus = models.TestStatusPassed
 				success++
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.config.Test.StrictFailure && !payloadMismatch {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
@@ -2549,6 +2561,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// post-stream consumed-mock drain above, so in-stream mock misses
 				// are included - and attach them to this result.
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+				// Re-classify AFTER the drain above (see the non-streaming path): a
+				// payload-aware mismatch (schema matched, request body diverged) must FAIL
+				// the test even when the recorded response is unchanged; benign misses
+				// (not MatchPhaseBody) stay warn-only.
+				if testStatus != models.TestStatusFailed && r.hasPayloadAwareMismatch(testSetID, tc.Name) {
+					switch testStatus {
+					case models.TestStatusPassed:
+						success--
+					case models.TestStatusObsolete:
+						obsolete--
+					}
+					testStatus = models.TestStatusFailed
+					failure++
+					testSetStatus = models.TestSetStatusFailed
+					testCaseResult.Status = models.TestStatusFailed
+				}
 
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
