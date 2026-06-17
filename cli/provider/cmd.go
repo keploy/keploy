@@ -1270,7 +1270,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			case models.FuzzyMatchOn, models.FuzzyMatchWarn, models.FuzzyMatchOff, "":
 			default:
 				errMsg := "invalid --fuzzy-match value " + strconv.Quote(c.cfg.Test.FuzzyMatch) + "; expected one of: on, warn, off"
-				utils.LogError(c.logger, nil, errMsg)
+				// Plain logger.Error, not utils.LogError: there is no underlying
+				// error here (a bad flag value), so utils.LogError's zap.Error(nil)
+				// would log a misleading "error: null".
+				c.logger.Error(errMsg)
 				return errors.New(errMsg)
 			}
 
