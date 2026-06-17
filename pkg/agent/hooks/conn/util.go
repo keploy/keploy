@@ -156,6 +156,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:          models.HTTP,
 		Created:       time.Now().Unix(),
+		SourcePod:     SourcePodFromContext(ctx),
 		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
@@ -426,14 +427,15 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	// Create test case from stream data
 	testCase := &models.TestCase{
-		Version:  models.GetVersion(),
-		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
-		Kind:     models.GRPC_EXPORT,
-		Created:  time.Now().Unix(),
-		GrpcReq:  *http2Stream.GRPCReq,
-		GrpcResp: *http2Stream.GRPCResp,
-		Noise:    map[string][]string{},
-		AppPort:  appPort,
+		Version:   models.GetVersion(),
+		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:      models.GRPC_EXPORT,
+		Created:   time.Now().Unix(),
+		SourcePod: SourcePodFromContext(ctx),
+		GrpcReq:   *http2Stream.GRPCReq,
+		GrpcResp:  *http2Stream.GRPCResp,
+		Noise:     map[string][]string{},
+		AppPort:   appPort,
 	}
 
 	select {
