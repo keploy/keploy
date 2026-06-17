@@ -235,6 +235,24 @@ func (r *Replayer) GetMockMismatchFailures() []TestFailure {
 	return r.mockMismatchFailures.GetFailures()
 }
 
+// hasPayloadAwareMismatch reports whether the test case hit a mock mismatch where
+// the schema matched a recorded mock but the request body diverged
+// (MatchPhaseBody) — a real payload regression (the Flipkart contactNumber
+// class). Unlike a benign miss (an unrecorded retry/cleanup op, or a DNS lookup
+// answered synthetically), a payload-aware mismatch must FAIL the test even when
+// the application's recorded response is unchanged — e.g. an async Pulsar/Kafka/
+// SQS SEND whose divergence never shows up in the HTTP response — so CI catches
+// the drift instead of staying green. Benign misses keep their warn-only
+// behaviour (they are not MatchPhaseBody).
+func (r *Replayer) hasPayloadAwareMismatch(testSetID, testCaseName string) bool {
+	for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCaseName) {
+		if f.MismatchReport != nil && f.MismatchReport.MatchPhase == models.MatchPhaseBody {
+			return true
+		}
+	}
+	return false
+}
+
 // GetTestRunID returns the current test run ID.
 func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
@@ -1175,6 +1193,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
+			FuzzyMatchPolicy:       r.config.Test.FuzzyMatch,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -1218,6 +1237,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
+
+		if isMappingEnabled {
+			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, selectedTests, filteredMocks, unfilteredMocks)
+		}
 
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -1315,6 +1338,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
+		if isMappingEnabled {
+			r.reportMissingMappedMocks(testSetID, expectedTestMockMappings, selectedTests, filteredMocks, unfilteredMocks)
+		}
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
 			for _, m := range filteredMocks {
@@ -1364,6 +1390,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise: r.config.Test.DisableAutoHeaderNoise,
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
+			FuzzyMatchPolicy:       r.config.Test.FuzzyMatch,
 			MysqlPorts:             r.config.MysqlPorts,
 		})
 		if err != nil {
@@ -2077,6 +2104,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// so the agent's error channel is consumed only inside the
 					// agent's own drain goroutine, never by the replayer.
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					// Re-classify AFTER the drain above (the per-test failure store is only
+					// populated now): a payload-aware mismatch — schema matched, request body
+					// diverged — must FAIL the test even when the recorded response is unchanged
+					// (e.g. an async Pulsar/Kafka/SQS SEND), and must not stay PASSED or be
+					// demoted to OBSOLETE. Benign misses are not MatchPhaseBody (warn-only).
+					if testStatus != models.TestStatusFailed && r.hasPayloadAwareMismatch(testSetID, testCase.Name) {
+						switch testStatus {
+						case models.TestStatusPassed:
+							currentSuccess--
+							if n := len(nextTestsToRun); n > 0 && nextTestsToRun[n-1].Name == testCase.Name {
+								nextTestsToRun = nextTestsToRun[:n-1]
+							}
+						case models.TestStatusObsolete:
+							currentObsolete--
+						}
+						testStatus = models.TestStatusFailed
+						currentFailures++
+						testSetStatus = models.TestSetStatusFailed
+						testCaseResult.Status = models.TestStatusFailed
+					}
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -2514,6 +2561,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// post-stream consumed-mock drain above, so in-stream mock misses
 				// are included - and attach them to this result.
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+				// Re-classify AFTER the drain above (see the non-streaming path): a
+				// payload-aware mismatch (schema matched, request body diverged) must FAIL
+				// the test even when the recorded response is unchanged; benign misses
+				// (not MatchPhaseBody) stay warn-only.
+				if testStatus != models.TestStatusFailed && r.hasPayloadAwareMismatch(testSetID, tc.Name) {
+					switch testStatus {
+					case models.TestStatusPassed:
+						success--
+					case models.TestStatusObsolete:
+						obsolete--
+					}
+					testStatus = models.TestStatusFailed
+					failure++
+					testSetStatus = models.TestSetStatusFailed
+					testCaseResult.Status = models.TestStatusFailed
+				}
 
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -3224,6 +3287,67 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	}
 
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)
+}
+
+// reportMissingMappedMocks detects mocks that mappings.yaml says the test set
+// needs but that no longer exist in the mock file — the dedup/evolution case:
+// pruned by --remove-unused-mocks, dropped during a hand-edit, or lost in a
+// partial sync. Without this check the replay silently degrades into misses
+// (or worse, fuzzy substitutions) on calls whose recorded answer was simply
+// deleted. Each affected test gets a row in the MOCKS MISMATCH SUMMARY so the
+// root cause is named BEFORE the first confusing test failure.
+func (r *Replayer) reportMissingMappedMocks(testSetID string, expectedTestMockMappings map[string][]models.MockEntry, selectedTests map[string]bool, filteredMocks, unfilteredMocks []*models.Mock) {
+	if len(expectedTestMockMappings) == 0 {
+		return
+	}
+	loaded := make(map[string]bool, len(filteredMocks)+len(unfilteredMocks))
+	for _, m := range filteredMocks {
+		loaded[m.Name] = true
+	}
+	for _, m := range unfilteredMocks {
+		loaded[m.Name] = true
+	}
+
+	missingByTest := map[string][]string{}
+	missingSet := map[string]bool{}
+	for testID, entries := range expectedTestMockMappings {
+		// When the user runs a subset of tests, mocks mapped exclusively to
+		// unselected tests are DELIBERATELY not loaded (mockdb skips them via
+		// the mocksWeNeed predicate) — they are not missing from the file and
+		// must not be reported as pruned.
+		if len(selectedTests) > 0 {
+			if _, ok := selectedTests[testID]; !ok {
+				continue
+			}
+		}
+		for _, e := range entries {
+			if !loaded[e.Name] {
+				missingByTest[testID] = append(missingByTest[testID], e.Name)
+				missingSet[e.Name] = true
+			}
+		}
+	}
+	if len(missingByTest) == 0 {
+		return
+	}
+
+	var missing []string
+	for name := range missingSet {
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+	r.logger.Warn("mappings.yaml references mocks that are missing from the mock file — they may have been pruned (--remove-unused-mocks), deduplicated, or removed in an edit. Tests that consumed them will miss during replay.",
+		zap.String("testSetID", testSetID),
+		zap.Int("affectedTests", len(missingByTest)),
+		zap.Strings("missingMocks", missing),
+		zap.String("next_step", "Re-record the test-set with 'keploy record' to regenerate the mocks, or run with --update-test-mapping to refresh mappings against the current mock file."))
+
+	for testID, names := range missingByTest {
+		sort.Strings(names)
+		// ExpectedMocks populated, ActualMocks empty → the summary table
+		// renders these as "Missing mocks: ..." for the affected test.
+		r.mockMismatchFailures.AddFailure(testSetID, testID, names, []string{})
+	}
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {

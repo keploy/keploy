@@ -130,8 +130,9 @@ type matchDiag struct {
 // matched is false and no error occurred. userBodyNoise carries the user's
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
-// as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+// as response assertions. fuzzyPolicy (models.FuzzyMatch*) governs the
+// similarity fallbacks at the end of the cascade.
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, schemaNoiseDetection bool, schemaNoiseStrict bool, fuzzyPolicy string) (bool, *models.Mock, *matchDiag, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -214,6 +215,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		shortListed := schemaMatched
+		bodyKeyMatched := false
 		// Schema match for JSON bodies
 		if pkg.IsJSON(input.body) {
 			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
@@ -253,13 +255,59 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 			// More than one match, perform fuzzy match
 			shortListed = bodyMatched
+			bodyKeyMatched = true
+		}
+
+		// Deterministic mode (test.fuzzyMatch=off): no similarity guessing.
+		// The byte-equality (encoding-normalized) check still runs — it's
+		// deterministic. Among candidates that already matched on body keys
+		// (+ strict noise), the recorded-order (lowest SortOrder) candidate
+		// is served as a deterministic tiebreak. Everything else is a
+		// structured miss instead of a Levenshtein/Jaccard guess.
+		if fuzzyPolicy == models.FuzzyMatchOff {
+			if ok, exact := h.fuzzyExactEncodingMatch(shortListed, input.raw); ok {
+				detected := h.detectReqBodyNoise(schemaNoiseDetection, exact, input.body, userBodyNoise)
+				if !h.updateMock(ctx, exact, mockDb, detected) {
+					continue
+				}
+				return true, exact, nil, nil
+			}
+			if bodyKeyMatched && len(shortListed) > 0 {
+				pick := pickDeterministic(shortListed)
+				// Debug, not Info: this fires from the per-request matcher hot
+				// path and would flood logs for a large suite.
+				h.Logger.Debug("deterministic tiebreak: serving recorded-order candidate among body-matched mocks",
+					zap.String("mock name", pick.Name),
+					zap.Int("candidates", len(shortListed)))
+				detected := h.detectReqBodyNoise(schemaNoiseDetection, pick, input.body, userBodyNoise)
+				if !h.updateMock(ctx, pick, mockDb, detected) {
+					continue
+				}
+				return true, pick, nil, nil
+			}
+			h.Logger.Warn("fuzzy matching disabled (test.fuzzyMatch=off): treating unmatched request as a mock miss",
+				zap.String("method", input.method),
+				zap.String("path", input.url.Path),
+				zap.Int("candidates", len(shortListed)))
+			return false, nil, &matchDiag{phase: models.MatchPhaseFuzzyOff, candidates: len(unfilteredMocks), schemaMatched: shortListed}, nil
 		}
 
 		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
-		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
+		isMatched, bestMatch, fz := h.performFuzzyMatchScored(shortListed, input.raw)
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
+			if fz.guessed && fuzzyPolicy != models.FuzzyMatchOn {
+				// Default-visible audit trail for every similarity guess —
+				// the mock may be the wrong one and nothing else will say so.
+				h.Logger.Warn("mock served via similarity (fuzzy) match — verify this is the right mock or set test.fuzzyMatch=off for deterministic replay",
+					zap.String("mock name", bestMatch.Name),
+					zap.String("match_type", fz.matchType),
+					zap.Float64("match_percentage", fz.score),
+					zap.Int("candidates", len(shortListed)),
+					zap.String("method", input.method),
+					zap.String("path", input.url.Path))
+			}
 			detected := h.detectReqBodyNoise(schemaNoiseDetection, bestMatch, input.body, userBodyNoise)
 			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
 				continue
@@ -268,6 +316,40 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed}, nil
 	}
+}
+
+// pickDeterministic returns the recorded-order candidate for the
+// deterministic tiebreak, preferring the per-test tier. SortOrder counters
+// are stamped independently per pool (SetFilteredMocks vs SetUnFilteredMocks),
+// so comparing SortOrder across tiers is meaningless — a session fixture
+// stamped 1 would beat the current test's own recorded mock stamped 7,
+// inverting the per-test-first preference the candidate ordering documents.
+func pickDeterministic(mocks []*models.Mock) *models.Mock {
+	var perTest []*models.Mock
+	for _, m := range mocks {
+		isConfig := m.Spec.Metadata != nil && m.Spec.Metadata["type"] == "config"
+		if m.TestModeInfo.Lifetime == models.LifetimePerTest && !isConfig {
+			perTest = append(perTest, m)
+		}
+	}
+	if len(perTest) > 0 {
+		return lowestSortOrder(perTest)
+	}
+	return lowestSortOrder(mocks)
+}
+
+// lowestSortOrder returns the candidate with the smallest recorded SortOrder —
+// i.e. the next mock in recorded order, the deterministic FIFO tiebreak.
+// Callers must only compare candidates from the same pool tier (see
+// pickDeterministic).
+func lowestSortOrder(mocks []*models.Mock) *models.Mock {
+	best := mocks[0]
+	for _, m := range mocks[1:] {
+		if m.TestModeInfo.SortOrder < best.TestModeInfo.SortOrder {
+			best = m
+		}
+	}
+	return best
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
@@ -685,14 +767,25 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 // PerformFuzzyMatch performs fuzzy matching on the request body.
 // Noisy (obfuscated) values are stripped from mock bodies before computing
 // similarity so that redacted padding doesn't skew the score.
-func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	// Log all mock names in a single line for better readability
-	mockNames := make([]string, len(tcsMocks))
-	for i, mock := range tcsMocks {
-		mockNames[i] = mock.Name
-	}
-	h.Logger.Debug("mocks under consideration for performfuzzyMatch function", zap.Strings("mock names", mockNames))
+// fuzzyResult describes how the fuzzy stage picked a mock. guessed is false
+// only for the byte-equality (encoding-normalized) path — Levenshtein and
+// Jaccard picks are similarity guesses and subject to the fuzzy-match policy.
+type fuzzyResult struct {
+	matchType string
+	score     float64 // match percentage 0-100
+	guessed   bool
+}
 
+func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
+	ok, mock, _ := h.performFuzzyMatchScored(tcsMocks, reqBuff)
+	return ok, mock
+}
+
+// fuzzyExactEncodingMatch is the non-guessing part of the fuzzy stage: it
+// matches mocks whose body equals the request after base64
+// encoding/decoding normalization. Safe to run even under
+// test.fuzzyMatch=off, since byte equality is deterministic.
+func (h *HTTP) fuzzyExactEncodingMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
@@ -703,6 +796,20 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 				zap.String("match_type", "fuzzy_exact"))
 			return true, mock
 		}
+	}
+	return false, nil
+}
+
+func (h *HTTP) performFuzzyMatchScored(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock, fuzzyResult) {
+	// Log all mock names in a single line for better readability
+	mockNames := make([]string, len(tcsMocks))
+	for i, mock := range tcsMocks {
+		mockNames[i] = mock.Name
+	}
+	h.Logger.Debug("mocks under consideration for performfuzzyMatch function", zap.Strings("mock names", mockNames))
+
+	if ok, mock := h.fuzzyExactEncodingMatch(tcsMocks, reqBuff); ok {
+		return true, mock, fuzzyResult{matchType: "fuzzy_exact", score: 100.0}
 	}
 
 	// Build mock body strings, stripping noisy values for fair comparison
@@ -729,7 +836,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 				zap.String("mock", tcsMocks[idx].Name),
 				zap.Float64("match_percentage", pct),
 				zap.String("match_type", "fuzzy_levenshtein"))
-			return true, tcsMocks[idx]
+			return true, tcsMocks[idx], fuzzyResult{matchType: "fuzzy_levenshtein", score: pct, guessed: true}
 		}
 	}
 
@@ -744,9 +851,9 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 			zap.String("mock", tcsMocks[mxIdx].Name),
 			zap.Float64("match_percentage", mxSim*100),
 			zap.String("match_type", "fuzzy_jaccard"))
-		return true, tcsMocks[mxIdx]
+		return true, tcsMocks[mxIdx], fuzzyResult{matchType: "fuzzy_jaccard", score: mxSim * 100, guessed: true}
 	}
-	return false, nil
+	return false, nil, fuzzyResult{}
 }
 
 // parseMediaTypes splits a (possibly comma-joined) Content-Type header

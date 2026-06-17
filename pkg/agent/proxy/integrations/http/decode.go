@@ -193,7 +193,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict, models.NormalizeFuzzyPolicy(opts.FuzzyMatchPolicy)) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
