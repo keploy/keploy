@@ -235,6 +235,24 @@ func (r *Replayer) GetMockMismatchFailures() []TestFailure {
 	return r.mockMismatchFailures.GetFailures()
 }
 
+// hasPayloadAwareMismatch reports whether the test case hit a mock mismatch where
+// the schema matched a recorded mock but the request body diverged
+// (MatchPhaseBody) — a real payload regression (the Flipkart contactNumber
+// class). Unlike a benign miss (an unrecorded retry/cleanup op, or a DNS lookup
+// answered synthetically), a payload-aware mismatch must FAIL the test even when
+// the application's recorded response is unchanged — e.g. an async Pulsar/Kafka/
+// SQS SEND whose divergence never shows up in the HTTP response — so CI catches
+// the drift instead of staying green. Benign misses keep their warn-only
+// behaviour (they are not MatchPhaseBody).
+func (r *Replayer) hasPayloadAwareMismatch(testSetID, testCaseName string) bool {
+	for _, f := range r.mockMismatchFailures.GetFailuresForTestCase(testSetID, testCaseName) {
+		if f.MismatchReport != nil && f.MismatchReport.MatchPhase == models.MatchPhaseBody {
+			return true
+		}
+	}
+	return false
+}
+
 // GetTestRunID returns the current test run ID.
 func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
@@ -1923,14 +1941,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			} else {
 				r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 			}
-			if testPass {
+			// A payload-aware mock mismatch (schema matched, request body diverged)
+			// is a real regression and must fail the test even when the recorded
+			// response is unchanged, and must not be demoted to OBSOLETE.
+			payloadMismatch := r.hasPayloadAwareMismatch(testSetID, testCase.Name)
+			if testPass && !payloadMismatch {
 				testStatus = models.TestStatusPassed
 				currentSuccess++
 				nextTestsToRun = append(nextTestsToRun, testCase)
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure {
+			} else if mockSetMismatch && !strictMockReject && !r.config.Test.StrictFailure && !payloadMismatch {
 				testStatus = models.TestStatusObsolete
 				currentObsolete++
 			} else {
@@ -2470,14 +2492,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			//  Record: Update counters and persist result.
+			// A payload-aware mock mismatch (schema matched, request body diverged)
+			// is a real regression and must fail the test even when the recorded
+			// response is unchanged, and must not be demoted to OBSOLETE.
+			payloadMismatch := r.hasPayloadAwareMismatch(testSetID, tc.Name)
 			var testStatus models.TestStatus
-			if testPass {
+			if testPass && !payloadMismatch {
 				testStatus = models.TestStatusPassed
 				success++
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.config.Test.StrictFailure {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure && !payloadMismatch {
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
