@@ -718,6 +718,13 @@ type MockState struct {
 	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
 	// -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
+	// QueryNoise carries per-position literal noise detected during
+	// schema-based auto-replay matching of a COM_QUERY (plaintext SQL) MySQL
+	// mock back from the agent to the replay service so UpdateMocks can
+	// persist it onto the matched mock's MySQLRequests[0].QueryNoise. Key is
+	// the eligible literal position ("set:<col>#<n>" / "values:<row>:<col>");
+	// value is the recorded literal(s) treated as noise.
+	QueryNoise map[string][]string `json:"queryNoise,omitempty"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
@@ -787,6 +794,23 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
 	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
+	// Deep-copy the per-request QueryNoise map (schema-detected COM_QUERY
+	// literal noise). The shallow copy() above aliases the map header, so a
+	// clone's learned noise would otherwise mutate the shared pooled mock's
+	// map (and vice versa) — same hazard handled for HTTPReq.ReqBodyNoise below.
+	for i := range c.Spec.MySQLRequests {
+		src := m.Spec.MySQLRequests[i].QueryNoise
+		if src == nil {
+			continue
+		}
+		dst := make(map[string][]string, len(src))
+		for k, v := range src {
+			vc := make([]string, len(v))
+			copy(vc, v)
+			dst[k] = vc
+		}
+		c.Spec.MySQLRequests[i].QueryNoise = dst
+	}
 
 	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
 	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)

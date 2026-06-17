@@ -20,6 +20,9 @@ type RequestYaml struct {
 	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
+	// QueryNoise mirrors mysql.Request.QueryNoise so schema-detected
+	// COM_QUERY literal noise survives the on-disk YAML round-trip.
+	QueryNoise map[string][]string `json:"queryNoise,omitempty" yaml:"queryNoise,omitempty" bson:"queryNoise,omitempty"`
 }
 
 type ResponseYaml struct {
@@ -35,6 +38,14 @@ type PacketInfo struct {
 
 type Request struct {
 	PacketBundle `json:"packet_bundle" yaml:"packet_bundle"`
+	// QueryNoise carries per-position literal noise learned during
+	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
+	// for COM_QUERY (plaintext SQL) requests. The key encodes the eligible
+	// literal position ("set:<col>#<n>" for UPDATE SET, "values:<row>:<col>"
+	// for INSERT VALUES); the value is the recorded literal(s) treated as
+	// noise. Only SET/VALUES literals are ever learnable (default-deny);
+	// WHERE/ON/HAVING/subquery/CASE literals are never recorded here.
+	QueryNoise map[string][]string `json:"queryNoise,omitempty" yaml:"queryNoise,omitempty" bson:"queryNoise,omitempty"`
 }
 
 type Response struct {

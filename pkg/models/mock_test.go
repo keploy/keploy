@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -41,6 +42,45 @@ func TestDeepCopyPreservesReqBodyNoise(t *testing.T) {
 	}
 	if len(orig.Spec.HTTPReq.ReqBodyNoise["body.ts"]) != 1 {
 		t.Fatal("DeepCopy shared a noise slice with the original")
+	}
+}
+
+// TestDeepCopyPreservesQueryNoise verifies Mock.DeepCopy deep-copies the
+// per-request MySQL QueryNoise map: the clone must carry the same keys/regexes
+// as the original, and mutating either side's map (keys or per-key slices) must
+// not leak across to the other. Without an independent backing map the gob
+// async-writer / pool clones would silently share — and drop — the
+// schema-detected literal noise. Mirrors TestDeepCopyPreservesReqBodyNoise.
+func TestDeepCopyPreservesQueryNoise(t *testing.T) {
+	orig := &Mock{
+		Kind: Kind(MySQL),
+		Spec: MockSpec{
+			MySQLRequests: []mysql.Request{{
+				QueryNoise: map[string][]string{
+					"set:updated_at#0": {"2026-06-16 12:48:36"},
+					"values:0:1":       {},
+				},
+			}},
+		},
+	}
+
+	c := orig.DeepCopy()
+	if len(c.Spec.MySQLRequests) != 1 {
+		t.Fatalf("DeepCopy dropped MySQLRequests: %v", c.Spec.MySQLRequests)
+	}
+	if len(c.Spec.MySQLRequests[0].QueryNoise) != 2 {
+		t.Fatalf("DeepCopy dropped QueryNoise: %v", c.Spec.MySQLRequests[0].QueryNoise)
+	}
+
+	// Mutating the copy must not affect the original (independent backing maps).
+	c.Spec.MySQLRequests[0].QueryNoise["values:0:2"] = []string{}
+	c.Spec.MySQLRequests[0].QueryNoise["set:updated_at#0"] = append(
+		c.Spec.MySQLRequests[0].QueryNoise["set:updated_at#0"], "x")
+	if _, ok := orig.Spec.MySQLRequests[0].QueryNoise["values:0:2"]; ok {
+		t.Fatal("DeepCopy shared the QueryNoise map with the original")
+	}
+	if len(orig.Spec.MySQLRequests[0].QueryNoise["set:updated_at#0"]) != 1 {
+		t.Fatal("DeepCopy shared a QueryNoise slice with the original")
 	}
 }
 
