@@ -424,3 +424,34 @@ func TestMatchCommand_ComQueryStrictHardRejectForcesMiss(t *testing.T) {
 		t.Errorf("nothing should be consumed on a hard-reject miss; deletedFil=%v deletedMk=%d", db.deletedFil, len(db.deletedMk))
 	}
 }
+
+// TestMatchCommand_StrictNoPartialForDifferentSkeleton is the regression guard
+// for the follow-up finding: under strict, a candidate whose redacted skeleton
+// differs from the live query (changed column / operator, or a different
+// statement shape) must NOT be served through matchCommand's score-based
+// partial fallback even when payload lengths coincide. Strict serves only an
+// exact or within-noise match; otherwise it must MISS so the real query-shape
+// regression surfaces.
+func TestMatchCommand_StrictNoPartialForDifferentSkeleton(t *testing.T) {
+	logger := zap.NewNop()
+	cases := []struct{ name, recorded, live string }{
+		// same AST node-type signature, different column in WHERE
+		{"column", "update t set a=1 where id=1", "update t set a=1 where ix=1"},
+		// same node-type signature, different operator in WHERE
+		{"operator", "update t set a=1 where id=1", "update t set a=1 where id>1"},
+		// different statement shape (extra SET column) — falls to the score path
+		{"shape", "update t set a=1, b=2 where id=1", "update t set a=1 where id=1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := &fakeMockDb{perTest: []*models.Mock{dmlMock("cand", c.recorded, nil)}}
+			resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(c.live), db, newDecodeCtx(), false, true)
+			if ok || resp != nil {
+				t.Fatalf("strict: %s drift must MISS, never serve a score partial; got ok=%v resp=%v err=%v", c.name, ok, resp, err)
+			}
+			if len(db.deletedFil) != 0 || len(db.deletedMk) != 0 {
+				t.Errorf("%s: nothing should be consumed on a strict miss; deletedFil=%v", c.name, db.deletedFil)
+			}
+		})
+	}
+}

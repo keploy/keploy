@@ -518,7 +518,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 						bestPartialQuery = qp.Query
 					}
-				} else if c > maxMatchedCount {
+				} else if c > maxMatchedCount && !schemaNoiseStrict {
+					// Under strict, a score-based partial must NEVER be served for
+					// COM_QUERY: only an exact or within-noise match (queryMatched)
+					// or the out-of-window exact fallback may satisfy a strict
+					// query. This stops a same-payload-length, different-skeleton
+					// candidate (e.g. a changed column/operator that the redacted-
+					// skeleton gate already refuses to treat as comparable) from
+					// masking a real query-shape regression via the partial path.
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 					bestPartialMock = mock
 					// On the detection path a structurally-equal-but-value-
@@ -1217,7 +1224,12 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 			log.Debug("strict: same-type-signature candidate is not this query's counterpart (different skeleton)",
 				zap.String("expected query", expectedQuery),
 				zap.String("actual query", actualQuery))
-			return false, matchCount, nil, false
+			// Score 0 so a different-skeleton (different table/column/operator)
+			// candidate can never win the score-based partial fallback under
+			// strict. matchCommand additionally suppresses COM_QUERY partials
+			// under strict, but returning 0 keeps the matchQuery contract honest:
+			// this candidate is not the live query's counterpart.
+			return false, 0, nil, false
 		}
 
 		// DETECTION (lenient): learn which eligible literal positions drifted
