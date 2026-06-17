@@ -124,21 +124,71 @@ func extractQueryLiterals(sql string) ([]queryLiteralToken, error) {
 	return tokens, nil
 }
 
-// markLiteralsUnder records every *sqlparser.Literal reachable from expr into
-// the eligible set under key. A SET RHS / VALUES element is usually a bare
-// literal, but it can also be a wrapping expression (e.g. NOW() has no literal,
-// a tuple, an arithmetic expression) — walking the subtree captures whatever
+// markLiteralsUnder records every DIRECT-value *sqlparser.Literal reachable
+// from expr into the eligible set under key. A SET RHS / VALUES element is
+// usually a bare literal, but it can also be a wrapping expression (e.g. a
+// tuple or an arithmetic expression) — walking the subtree captures whatever
 // literals it actually contains while keeping non-literal positions out.
+//
+// Crucially, eligibility must NOT leak into nested query/predicate contexts:
+// a literal inside a subquery, a SELECT/UNION, or a CASE expression under the
+// SET RHS (e.g. `set score=(select max(score) from scores where tenant_id=1)`)
+// lives in a predicate position that is never learnable. We stop descending at
+// those node types so their literals remain default-deny (they are still
+// collected as non-eligible by the main extractor Walk).
 func markLiteralsUnder(expr sqlparser.Expr, key string, eligible map[*sqlparser.Literal]string) {
 	if expr == nil {
 		return
 	}
 	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-		if lit, ok := node.(*sqlparser.Literal); ok {
-			eligible[lit] = key
+		switch n := node.(type) {
+		case *sqlparser.Subquery, *sqlparser.Select, *sqlparser.Union, *sqlparser.CaseExpr:
+			// Stop descending: literals under a nested query / CASE predicate
+			// are never directly-set values and must stay non-eligible.
+			return false, nil
+		case *sqlparser.Literal:
+			eligible[n] = key
 		}
 		return true, nil
 	}, expr)
+}
+
+// redactedSkeleton returns sql with every literal replaced by a placeholder
+// while preserving table/column/operator/keyword structure — a canonical
+// skeleton produced by vitess' RedactSQLQuery. The bool is false when the SQL
+// fails to parse/normalize. Two queries whose skeletons are byte-equal share
+// ALL non-literal semantics (same tables, columns, operators, clause shape);
+// only their literal VALUES may differ.
+func redactedSkeleton(sql string) (string, bool) {
+	parser, err := newSQLParser()
+	if err != nil {
+		return "", false
+	}
+	skeleton, err := parser.RedactSQLQuery(sql)
+	if err != nil {
+		return "", false
+	}
+	return skeleton, true
+}
+
+// skeletonsEqual reports whether two queries redact to byte-identical
+// skeletons. This is the authoritative structural gate for request-literal
+// noise: getQueryStructure (the matchQuery structure gate) records only AST
+// node TYPES, so it treats `update users ... where id=1` and
+// `update admins ... where id=1` (or `where id=1` vs `where other_id=1`) as
+// comparable when they are NOT. The redacted skeleton preserves identifiers,
+// operators and clause shape, so requiring it to be equal means per-literal
+// value comparison only decides tolerance — never structural identity.
+func skeletonsEqual(a, b string) bool {
+	sa, oka := redactedSkeleton(a)
+	if !oka {
+		return false
+	}
+	sb, okb := redactedSkeleton(b)
+	if !okb {
+		return false
+	}
+	return sa == sb
 }
 
 // detectQueryNoise diffs a recorded COM_QUERY against a structurally-identical
@@ -153,6 +203,14 @@ func markLiteralsUnder(expr sqlparser.Expr, key string, eligible map[*sqlparser.
 // make the queries "drift" in a place that is never learnable, and the strict
 // enforce step (queryMatchesWithinNoise) rejects the mock on them.
 func detectQueryNoise(recordedSQL, liveSQL string) (map[string][]string, bool) {
+	// Authoritative structural gate: the two queries must redact to the SAME
+	// skeleton (same tables/columns/operators/clause shape). getQueryStructure
+	// only compares AST node TYPES, so without this an UPDATE on `users` and on
+	// `admins`, or `where id=1` vs `where other_id=1`, would be treated as
+	// comparable. Only literal VALUES may differ past this point.
+	if !skeletonsEqual(recordedSQL, liveSQL) {
+		return nil, false
+	}
 	recTokens, err := extractQueryLiterals(recordedSQL)
 	if err != nil {
 		return nil, false
@@ -196,6 +254,12 @@ func detectQueryNoise(recordedSQL, liveSQL string) (map[string][]string, bool) {
 // true. If either side fails to parse, or the token counts differ, it returns
 // false (not structurally identical -> caller must not treat it as a match).
 func queryMatchesWithinNoise(recordedSQL, liveSQL string, learned map[string][]string) bool {
+	// Authoritative structural gate (see detectQueryNoise): a differing
+	// table/column/operator/clause shape is NOT a literal-noise drift and must
+	// reject outright, never be tolerated as "within noise".
+	if !skeletonsEqual(recordedSQL, liveSQL) {
+		return false
+	}
 	recTokens, err := extractQueryLiterals(recordedSQL)
 	if err != nil {
 		return false

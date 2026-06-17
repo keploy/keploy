@@ -173,3 +173,62 @@ func TestQueryMatchesWithinNoise_NonComparable(t *testing.T) {
 		t.Errorf("differing literal counts must not match")
 	}
 }
+
+// (Finding 1) A difference in a non-literal part of the query — table, column,
+// or operator — is NOT a literal-noise drift. The redacted skeletons differ, so
+// detection refuses to learn (ok=false) and strict never tolerates it, even if
+// every eligible position were already learned. getQueryStructure alone (AST
+// node types) would wrongly treat these as comparable.
+func TestQueryNoise_NonLiteralDriftRejected(t *testing.T) {
+	cases := []struct{ name, recorded, live string }{
+		{"table", "update users set name='x' where id=1", "update admins set name='x' where id=1"},
+		{"column", "update t set a=1 where id=1", "update t set a=1 where other_id=1"},
+		{"operator", "update t set a=1 where id=1", "update t set a=1 where id>1"},
+	}
+	// Deliberately generous: pretend every eligible position is learned noise.
+	learned := map[string][]string{"set:a#0": {"1"}, "set:name#0": {"x"}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, ok := detectQueryNoise(c.recorded, c.live); ok {
+				t.Errorf("%s drift must be non-comparable (detectQueryNoise ok=false)", c.name)
+			}
+			if queryMatchesWithinNoise(c.recorded, c.live, learned) {
+				t.Errorf("%s drift must reject under strict (queryMatchesWithinNoise=false)", c.name)
+			}
+		})
+	}
+}
+
+// (Finding 2) A literal inside a subquery/predicate under a SET expression is
+// NOT learnable. The skeleton still matches (only the nested literal differs),
+// but because the literal is non-eligible, detection learns nothing and strict
+// rejects the drift.
+func TestQueryNoise_SubqueryUnderSetNotLearnable(t *testing.T) {
+	recorded := "update t set score=(select max(score) from scores where tenant_id=1) where id=7"
+	live := "update t set score=(select max(score) from scores where tenant_id=2) where id=7"
+
+	// The subquery's tenant_id literal must be collected as NON-eligible.
+	toks, err := extractQueryLiterals(recorded)
+	if err != nil {
+		t.Fatalf("extractQueryLiterals: %v", err)
+	}
+	for _, tk := range toks {
+		if tk.Val == "1" && tk.Eligible {
+			t.Errorf("subquery literal tenant_id=1 must NOT be Eligible; got %+v", tk)
+		}
+	}
+
+	// Skeletons are equal (only the nested literal differs), so detection runs
+	// but learns nothing (the drift is non-eligible).
+	noise, ok := detectQueryNoise(recorded, live)
+	if !ok {
+		t.Fatalf("skeletons should be equal -> detectQueryNoise ok=true")
+	}
+	if len(noise) != 0 {
+		t.Errorf("subquery-predicate drift must not be learned; got %v", noise)
+	}
+	// And strict rejects it even with a generous learned set.
+	if queryMatchesWithinNoise(recorded, live, map[string][]string{"set:score#0": {"whatever"}}) {
+		t.Errorf("subquery-predicate drift must reject under strict")
+	}
+}

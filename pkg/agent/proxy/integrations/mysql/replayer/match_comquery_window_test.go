@@ -393,3 +393,34 @@ func TestMatchCommand_ComQueryLiteralNoise(t *testing.T) {
 		}
 	})
 }
+
+// TestMatchCommand_ComQueryStrictHardRejectForcesMiss is the regression guard
+// for Finding 3: when the live query's structural counterpart is found but
+// drifted in a non-noise / predicate literal (a real regression), strict mode
+// must force an OVERALL MISS — it must NOT fall back to serving an unrelated
+// candidate that merely scored a payload-length partial.
+func TestMatchCommand_ComQueryStrictHardRejectForcesMiss(t *testing.T) {
+	logger := zap.NewNop()
+	// Same skeleton as the live query; only the WHERE region literal drifts ->
+	// hard reject under strict (region is non-eligible).
+	counterpart := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='north'"
+	live := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='south'"
+	// Unrelated query (different table/columns) that still scores a payload-
+	// length partial (matchCount=1). Without the hard-reject, matchCommand would
+	// serve THIS as the best partial for the live query.
+	unrelated := "update events set code='x' where id=1"
+
+	learned := map[string][]string{"set:updated_at#0": {"2026-01-01 12:48:36"}}
+	db := &fakeMockDb{perTest: []*models.Mock{
+		dmlMock("unrelated", unrelated, nil),
+		dmlMock("counterpart", counterpart, learned),
+	}}
+
+	resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(live), db, newDecodeCtx(), false, true)
+	if ok || resp != nil {
+		t.Fatalf("strict: WHERE-drift counterpart must force an overall MISS even with a competing partial; got ok=%v resp=%v err=%v", ok, resp, err)
+	}
+	if len(db.deletedFil) != 0 || len(db.deletedMk) != 0 {
+		t.Errorf("nothing should be consumed on a hard-reject miss; deletedFil=%v deletedMk=%d", db.deletedFil, len(db.deletedMk))
+	}
+}
