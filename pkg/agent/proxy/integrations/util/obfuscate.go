@@ -63,10 +63,10 @@ func NewNoiseChecker(patterns []string) *NoiseChecker {
 	}
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
+		// getCachedRegexp already logs an invalid pattern once (negative cache
+		// prevents repeats); just skip it here rather than logging it twice.
 		if re := getCachedRegexp(p); re != nil {
 			compiled = append(compiled, re)
-		} else {
-			log.Printf("keploy: ignoring invalid noise regex pattern %q in Mock.Noise — check the pattern syntax", p)
 		}
 	}
 	if len(compiled) == 0 {

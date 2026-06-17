@@ -274,7 +274,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			if bodyKeyMatched && len(shortListed) > 0 {
 				pick := pickDeterministic(shortListed)
-				h.Logger.Info("deterministic tiebreak: serving recorded-order candidate among body-matched mocks",
+				// Debug, not Info: this fires from the per-request matcher hot
+				// path and would flood logs for a large suite.
+				h.Logger.Debug("deterministic tiebreak: serving recorded-order candidate among body-matched mocks",
 					zap.String("mock name", pick.Name),
 					zap.Int("candidates", len(shortListed)))
 				detected := h.detectReqBodyNoise(schemaNoiseDetection, pick, input.body, userBodyNoise)
