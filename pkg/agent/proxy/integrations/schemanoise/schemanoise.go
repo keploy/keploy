@@ -61,6 +61,37 @@ type Adapter interface {
 	// enterprise-obfuscated secrets) are not re-flagged as schema noise.
 	// Implementations with no such concept return nil.
 	RecordedValueIsNoise(m *models.Mock) func(string) bool
+
+	// Diff is the parser-owned schema comparison — the one piece that is
+	// inherently protocol-specific, just like each parser owns its
+	// buildXMismatchReport. It returns the "body."-prefixed field paths that
+	// drifted between the recorded and live request bodies and are NOT already
+	// in known (root-relative: global/user ∪ already-learned, prefix-stripped),
+	// plus whether the payload had any diffable schema at all.
+	//
+	// comparable=false means the payload is byte-opaque (no field structure):
+	// the engine then treats any byte difference as a real, non-learnable
+	// mismatch instead of "nothing drifted". A JSON-payload parser embeds
+	// JSONDiffer to get this for free; a binary/structured parser (Avro,
+	// Protobuf, RESP, BSON) supplies its own. m is provided for parsers that
+	// need headers/metadata to pick a decoder (e.g. HTTP JSON vs form); JSON-
+	// only parsers ignore it.
+	Diff(m *models.Mock, recorded, live []byte, known map[string][]string, valIsNoise func(string) bool) (drift map[string][]string, comparable bool)
+}
+
+// JSONDiffer is the ready-made JSON implementation of Adapter.Diff. A parser
+// whose request body is JSON embeds it and inherits Diff with no extra code:
+//
+//	type myAdapter struct{ schemanoise.JSONDiffer }
+//
+// so the only parser-specific methods left to implement are RecordedBody /
+// StoredNoise / SetLearnedNoise / RecordedValueIsNoise.
+type JSONDiffer struct{}
+
+// Diff implements Adapter.Diff for JSON bodies via DetectJSONDrift. The mock is
+// unused — JSON needs no header/metadata to decode.
+func (JSONDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, valIsNoise func(string) bool) (map[string][]string, bool) {
+	return DetectJSONDrift(recorded, live, known, valIsNoise)
 }
 
 // Engine runs the schema-noise learn/enforce flow for one protocol through its
@@ -115,7 +146,7 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 	if !ok {
 		return nil, false
 	}
-	return DetectJSONDrift(recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+	return e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
 }
 
 // Learn merges newly-detected drift into the mock's stored noise (monotonic —
@@ -153,7 +184,7 @@ func (e *Engine) StrictAllows(m *models.Mock, liveBody []byte, userNoise map[str
 	if !ok {
 		return true
 	}
-	drift, comparable := DetectJSONDrift(recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+	drift, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
 	if !comparable {
 		// No field structure to diff — fall back to byte equality so unequal
 		// opaque bodies are a real mismatch rather than a silent pass.

@@ -2,6 +2,7 @@ package schemanoise
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -9,8 +10,10 @@ import (
 
 // fakeAdapter is a minimal Adapter for exercising the engine independently of
 // any protocol: the recorded body and stored noise are supplied directly, and
-// SetLearnedNoise records what the engine wrote back.
+// SetLearnedNoise records what the engine wrote back. It embeds JSONDiffer, so
+// its payloads are compared as JSON — the common case.
 type fakeAdapter struct {
+	JSONDiffer
 	body      []byte
 	hasBody   bool
 	stored    map[string][]string
@@ -86,6 +89,82 @@ func TestDetectJSONDrift(t *testing.T) {
 				t.Fatalf("drift: got %v want %v", drift, tc.wantDrift)
 			}
 		})
+	}
+}
+
+// lineDiffer is a reference NON-JSON Diff: it proves a parser with a binary /
+// structured (non-JSON) payload can plug into the same Engine by supplying its
+// own Diff. It treats the body as newline-separated "key=value" records and
+// reports drifting keys as "body.<key>" — no JSON anywhere. This is the
+// contract test for "plug-and-play for all parser categories".
+type lineDiffer struct{}
+
+func (lineDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, _ func(string) bool) (map[string][]string, bool) {
+	parse := func(b []byte) map[string]string {
+		out := map[string]string{}
+		for _, line := range strings.Split(string(b), "\n") {
+			if i := strings.IndexByte(line, '='); i >= 0 {
+				out[line[:i]] = line[i+1:]
+			}
+		}
+		return out
+	}
+	rec, liv := parse(recorded), parse(live)
+	drift := map[string][]string{}
+	for k, rv := range rec {
+		if _, isKnown := known[k]; isKnown {
+			continue
+		}
+		if lv, ok := liv[k]; !ok || lv != rv {
+			drift["body."+k] = []string{}
+		}
+	}
+	if len(drift) == 0 {
+		return nil, true // comparable, no drift
+	}
+	return drift, true
+}
+
+// binaryAdapter is a non-JSON parser adapter built on lineDiffer.
+type binaryAdapter struct {
+	lineDiffer
+	body    []byte
+	stored  map[string][]string
+	written map[string][]string
+}
+
+func (b *binaryAdapter) RecordedBody(*models.Mock) ([]byte, bool)         { return b.body, true }
+func (b *binaryAdapter) StoredNoise(*models.Mock) map[string][]string     { return b.stored }
+func (b *binaryAdapter) SetLearnedNoise(_ *models.Mock, m map[string][]string) { b.written = m }
+func (b *binaryAdapter) RecordedValueIsNoise(*models.Mock) func(string) bool   { return nil }
+
+// TestNonJSONParserPlugsIn proves the engine is parser-generic: a non-JSON
+// adapter detects drift, learns it, and enforces strict — all without the
+// engine knowing anything about the payload format.
+func TestNonJSONParserPlugsIn(t *testing.T) {
+	a := &binaryAdapter{body: []byte("orderId=EKL-1\nstatus=DISPATCHED")}
+	e := New(a, true, false)
+
+	// status drifts → learnable, even though the payload is not JSON.
+	drift, comparable := e.Detect(&models.Mock{}, []byte("orderId=EKL-1\nstatus=CANCELLED"), nil)
+	if !comparable {
+		t.Fatalf("line format must be comparable")
+	}
+	if _, ok := drift["body.status"]; !ok {
+		t.Fatalf("status drift must be detected for a non-JSON parser: %v", drift)
+	}
+	if _, ok := drift["body.orderId"]; ok {
+		t.Fatalf("stable orderId must not drift: %v", drift)
+	}
+
+	// Strict: with status learned as noise, a status drift is allowed; an
+	// orderId drift is rejected.
+	a.stored = map[string][]string{"body.status": {}}
+	if !New(a, false, true).StrictAllows(&models.Mock{}, []byte("orderId=EKL-1\nstatus=CANCELLED"), nil) {
+		t.Fatalf("non-JSON strict must allow drift confined to learned noise")
+	}
+	if New(a, false, true).StrictAllows(&models.Mock{}, []byte("orderId=EKL-2\nstatus=DISPATCHED"), nil) {
+		t.Fatalf("non-JSON strict must reject drift on a non-noise field")
 	}
 }
 
