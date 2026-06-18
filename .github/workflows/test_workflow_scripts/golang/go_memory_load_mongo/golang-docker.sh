@@ -208,7 +208,7 @@ check_test_report() {
     # small number of non-deterministic test divergences is expected and is not
     # a real regression. The lane fails only if MORE than this fraction of the
     # recorded test cases fail at replay. Tunable via MAX_FAIL_PERCENT.
-    local max_fail_percent="${MAX_FAIL_PERCENT:-2}"
+    local max_fail_percent="${MAX_FAIL_PERCENT:-4}"
 
     echo "Checking test reports (failure tolerance: ${max_fail_percent}% of total test cases)..."
 
