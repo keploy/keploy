@@ -733,19 +733,32 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	defer lock.Unlock()
 
 	// merge applies the learned noise; returns true when any mock changed
-	// so unchanged files are never rewritten.
+	// so unchanged files are never rewritten. It mirrors UpdateMocks: HTTP
+	// mocks store noise on HTTPReq.ReqBodyNoise; non-HTTP integrations (e.g.
+	// Pulsar) whose request lives in the wire-encoded GenericRequests use the
+	// kind-agnostic MockSpec.ReqBodyNoise field. Previously this path skipped
+	// every non-HTTP mock, so learning under --schema-noise-detection WITHOUT
+	// --remove-unused-mocks silently discarded all non-HTTP noise at exit.
 	merge := func(mocks []*models.Mock) bool {
 		changed := false
 		for _, mock := range mocks {
 			noise, ok := withNoise[mock.Name]
-			if !ok || mock.Kind != models.Kind(models.HTTP) || mock.Spec.HTTPReq == nil {
+			if !ok {
 				continue
 			}
-			merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
-			if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+			if mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+				merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
+				if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+					changed = true
+				}
+				mock.Spec.HTTPReq.ReqBodyNoise = merged
+				continue
+			}
+			merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+			if len(merged) != len(mock.Spec.ReqBodyNoise) {
 				changed = true
 			}
-			mock.Spec.HTTPReq.ReqBodyNoise = merged
+			mock.Spec.ReqBodyNoise = merged
 		}
 		return changed
 	}

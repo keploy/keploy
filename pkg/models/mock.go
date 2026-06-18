@@ -725,9 +725,11 @@ type MockState struct {
 	Lifetime Lifetime `json:"lifetime,omitempty"`
 	// ReqBodyNoise carries field-path request-body noise detected during
 	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
-	// back from the agent to the replay service so UpdateMocks can persist
-	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
-	// -> regex list; empty list means "ignore the whole field".
+	// back from the agent to the replay service so UpdateMocks /
+	// PersistMockNoise can persist it onto the mock. HTTP mocks store it on
+	// HTTPReq.ReqBodyNoise; non-HTTP integrations (Pulsar/Kafka/Redis/Generic)
+	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
+	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
@@ -779,6 +781,21 @@ func (m *Mock) DeepCopy() *Mock {
 		c.Spec.Metadata = make(map[string]string, len(m.Spec.Metadata))
 		for k, v := range m.Spec.Metadata {
 			c.Spec.Metadata[k] = v
+		}
+	}
+
+	// Deep copy the kind-agnostic request-body noise map (used by non-HTTP
+	// integrations like Pulsar). Started from m.Spec by value above, so the
+	// clone would otherwise share this map and its value slices — and DeepCopy
+	// runs before async gob writes and when building runtime mock pools, so a
+	// learned-noise mutation on one copy could bleed into another or race a
+	// persistence read. HTTPReq.ReqBodyNoise gets the same treatment below.
+	if m.Spec.ReqBodyNoise != nil {
+		c.Spec.ReqBodyNoise = make(map[string][]string, len(m.Spec.ReqBodyNoise))
+		for k, v := range m.Spec.ReqBodyNoise {
+			vc := make([]string, len(v))
+			copy(vc, v)
+			c.Spec.ReqBodyNoise[k] = vc
 		}
 	}
 

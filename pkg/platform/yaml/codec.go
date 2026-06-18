@@ -59,6 +59,11 @@ type NetworkTrafficDocJSON struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
+	// ReqBodyNoise mirrors NetworkTrafficDoc.ReqBodyNoise: the kind-agnostic
+	// MockSpec.ReqBodyNoise (schema-noise for non-HTTP integrations), carried on
+	// the shared top-level doc because the non-HTTP per-kind specs have no field
+	// for it. Restored to MockSpec on decode.
+	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation

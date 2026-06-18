@@ -44,6 +44,37 @@ func TestDeepCopyPreservesReqBodyNoise(t *testing.T) {
 	}
 }
 
+// TestDeepCopyPreservesSpecReqBodyNoise is the non-HTTP sibling of the above:
+// it verifies Mock.DeepCopy deep-copies the kind-agnostic MockSpec.ReqBodyNoise
+// map (used by Pulsar/Kafka/Redis/Generic). Mock.DeepCopy starts from m.Spec by
+// value, so without an explicit deep copy the clone would share this map and
+// its per-path slices — and DeepCopy runs before async gob writes and when
+// building runtime mock pools, so a learned-noise mutation on one copy could
+// bleed into another or race a persistence read.
+func TestDeepCopyPreservesSpecReqBodyNoise(t *testing.T) {
+	orig := &Mock{
+		Kind: GENERIC,
+		Spec: MockSpec{
+			ReqBodyNoise: map[string][]string{"body.eventTs": {}, "body.traceId": {"re"}},
+		},
+	}
+
+	c := orig.DeepCopy()
+	if len(c.Spec.ReqBodyNoise) != 2 {
+		t.Fatalf("DeepCopy dropped Spec.ReqBodyNoise: %v", c.Spec.ReqBodyNoise)
+	}
+
+	// Mutating the copy must not affect the original (independent backing maps).
+	c.Spec.ReqBodyNoise["body.new"] = []string{}
+	c.Spec.ReqBodyNoise["body.traceId"] = append(c.Spec.ReqBodyNoise["body.traceId"], "x")
+	if _, ok := orig.Spec.ReqBodyNoise["body.new"]; ok {
+		t.Fatal("DeepCopy shared the Spec.ReqBodyNoise map with the original")
+	}
+	if len(orig.Spec.ReqBodyNoise["body.traceId"]) != 1 {
+		t.Fatal("DeepCopy shared a Spec.ReqBodyNoise slice with the original")
+	}
+}
+
 func TestMockNamePostgresV3Constants(t *testing.T) {
 	if MockNamePostgresV3Query != "PostgresV3Query" {
 		t.Fatalf("MockNamePostgresV3Query: want %q, got %q", "PostgresV3Query", MockNamePostgresV3Query)

@@ -14,8 +14,8 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1058,16 +1058,11 @@ func (h *HTTP) detectReqBodyNoise(enabled bool, mock *models.Mock, reqBody []byt
 	case pkg.IsJSON([]byte(mockBody)) && pkg.IsJSON(reqBody):
 		// The matcher matches noise paths root-relative; our stored keys carry
 		// a "body." prefix, so strip it for the already-known exclusion set.
+		// Delegate the JSON field diff to the shared schema-noise kernel so HTTP
+		// and the other parsers detect drift through one implementation.
 		known := mergeNoiseMaps(stripBodyPrefix(mock.Spec.HTTPReq.ReqBodyNoise), userNoise)
-		paths := matcher.ChangedJSONFieldPaths(mockBody, string(reqBody), known, isObfuscated)
-		if len(paths) == 0 {
-			return nil
-		}
-		out := make(map[string][]string, len(paths))
-		for _, p := range paths {
-			out["body."+p] = []string{}
-		}
-		return out
+		drift, _ := schemanoise.DetectJSONDrift([]byte(mockBody), reqBody, known, isObfuscated)
+		return drift
 
 	case isFormURLEncoded(mock.Spec.HTTPReq.Header):
 		// formReqBodyNoise keys its known-set with the "body." prefix, so
@@ -1214,23 +1209,11 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 // mergeReqBodyNoise returns a fresh map combining existing and newly-detected
 // request-body noise. Existing entries win on key collision (noise is
 // monotonic — once a field is flagged it stays flagged), and every slice is
-// copied so the result shares no backing storage with its inputs.
+// copied so the result shares no backing storage with its inputs. It delegates
+// to the shared schema-noise engine so HTTP, Pulsar and the on-disk persistence
+// all merge learned noise through one implementation.
 func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(existing)+len(detected))
-	for k, v := range existing {
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	for k, v := range detected {
-		if _, ok := out[k]; ok {
-			continue
-		}
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	return out
+	return schemanoise.MergeLearned(existing, detected)
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
