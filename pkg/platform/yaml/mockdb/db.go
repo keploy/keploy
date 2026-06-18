@@ -69,6 +69,10 @@ type MockYaml struct {
 	idCounter int64
 	Format    yaml.Format
 
+	// Cache fields
+	mockCache   map[string][]*models.Mock
+	mockCacheMu sync.RWMutex
+
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
 	// goroutines never block on disk or gob encoding. Sync fallback
@@ -148,6 +152,7 @@ func NewWithFormat(Logger *zap.Logger, mockPath string, mockName string, format 
 		Logger:    Logger,
 		idCounter: -1,
 		Format:    format,
+		mockCache: make(map[string][]*models.Mock),
 	}
 }
 
@@ -164,6 +169,101 @@ func getMockFileLock(lockKey string) *sync.RWMutex {
 	_, _ = hasher.Write([]byte(lockKey))
 	return &mockFileLockStripes[hasher.Sum32()%mockFileLockStripeCount]
 }
+
+func (ys *MockYaml) invalidateCache(path, mockFileName string) {
+	ys.mockCacheMu.Lock()
+	defer ys.mockCacheMu.Unlock()
+	if ys.mockCache != nil {
+		cacheKey := filepath.Join(path, mockFileName)
+		delete(ys.mockCache, cacheKey)
+	}
+}
+
+func (ys *MockYaml) loadMocks(ctx context.Context, path, mockFileName string) ([]*models.Mock, error) {
+	cacheKey := filepath.Join(path, mockFileName)
+
+	ys.mockCacheMu.RLock()
+	var cached []*models.Mock
+	var hit bool
+	if ys.mockCache != nil {
+		cached, hit = ys.mockCache[cacheKey]
+	}
+	ys.mockCacheMu.RUnlock()
+
+	if hit {
+		copied := make([]*models.Mock, len(cached))
+		for i, m := range cached {
+			copied[i] = m.DeepCopy()
+		}
+		return copied, nil
+	}
+
+	var mocks []*models.Mock
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		m, err := readGobMocks(gobPath)
+		if err != nil {
+			return nil, err
+		}
+		mocks = m
+	} else {
+		reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+		if err != nil {
+			if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		defer reader.Close()
+
+		readerIsJSON := reader.Format() == yaml.FormatJSON
+
+		for {
+			var docMocks []*models.Mock
+			if readerIsJSON {
+				jsonDoc, err := reader.ReadNextDocJSON()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+				}
+				docMocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				doc, err := reader.ReadNextDoc()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
+				}
+				docMocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+				if err != nil {
+					return nil, err
+				}
+			}
+			mocks = append(mocks, docMocks...)
+		}
+	}
+
+	cachedCopy := make([]*models.Mock, len(mocks))
+	for i, m := range mocks {
+		cachedCopy[i] = m.DeepCopy()
+	}
+
+	ys.mockCacheMu.Lock()
+	if ys.mockCache == nil {
+		ys.mockCache = make(map[string][]*models.Mock)
+	}
+	ys.mockCache[cacheKey] = cachedCopy
+	ys.mockCacheMu.Unlock()
+
+	return mocks, nil
+}
+
 
 // writeMocksAtomically writes the given mocks to <path>/<fileName>.<ext> in
 // the specified `format`. Callers pass the format actually observed on disk
@@ -351,6 +451,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
+	defer ys.invalidateCache(path, mockFileName)
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
 	lock.Lock()
 	defer lock.Unlock()
@@ -714,6 +815,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
+	defer ys.invalidateCache(path, mockFileName)
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
 	lock.Lock()
 	defer lock.Unlock()
@@ -831,6 +933,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
+	defer ys.invalidateCache(mockPath, mockFileName)
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
@@ -1314,141 +1417,27 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	lock.RLock()
 	defer lock.RUnlock()
 
-	// Prefer gob binary format when present (low-latency record output).
-	// gob is mutually exclusive with the yaml/json text formats, so we
-	// short-circuit and return before the auto-detect reader runs.
-	gobPath := filepath.Join(path, mockFileName+".gob")
-	if _, err := os.Stat(gobPath); err == nil {
-		mocks, err := readGobMocks(gobPath)
-		if err != nil {
-			return nil, err
-		}
-		for _, mock := range mocks {
-			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-			if isMappedToSpecificTest && !isNeededForCurrentRun {
-				continue
-			}
-			// Unification: lifetime-only routing via DeriveLifetime —
-			// the same classifier the YAML path below uses. Aligns the
-			// gob and YAML read paths so an explicit per-test tag
-			// (metadata["type"] == "mocks") on a kind that isUnfiltered-
-			// MockKind lists as implicit-session (HTTP, Postgres, ...)
-			// correctly lands in the per-test pool instead of being
-			// shunted to unfiltered on-read. Previously the gob path
-			// gated on kind + config-tag only, which silently dropped
-			// every per-test HTTP mock from the filtered pool even
-			// when the recorder had explicitly tagged it per-test.
-			//
-			// PostgresV2 keeps its dual-pool quirk (present in BOTH
-			// filtered and unfiltered) — the YAML path mirrors this
-			// via its sibling GetUnFilteredMocks reader.
-			mock.DeriveLifetime()
-			if mock.TestModeInfo.Lifetime == models.LifetimePerTest || mock.Kind == models.PostgresV2 {
-				tcsMocks = append(tcsMocks, mock)
-			}
-		}
-		return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false), nil
-	}
-
-	// Auto-detect the mocks file's format (may be yaml or json regardless
-	// of the currently-configured StorageFormat) so replay keeps working
-	// across format switches.
-	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	mocks, err := ys.loadMocks(ctx, path, mockFileName)
 	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
-			// No mocks file in either format — nothing to replay. Use the
-			// lax (strict=false) filter to mirror the gob branch above and
-			// the agent-level filter; strictness is decided downstream.
-			filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false)
-			return filtered, nil
-		}
-		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
-	defer reader.Close()
 
-	// When the mocks file is JSON we go through ReadNextDocJSON +
-	// DecodeMocksJSON, skipping the yaml.Node bridge entirely. YAML files
-	// keep the original path for full backwards compatibility with
-	// existing recordings.
-	readerIsJSON := reader.Format() == yaml.FormatJSON
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	_, errStat := os.Stat(gobPath)
+	isGob := errStat == nil
 
-	hasContent := false
-	for {
-		var mocks []*models.Mock
-		if readerIsJSON {
-			jsonDoc, err := reader.ReadNextDocJSON()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
-		} else {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
+	for _, mock := range mocks {
+		_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+		_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+		if isMappedToSpecificTest && !isNeededForCurrentRun {
+			continue
 		}
-
-		for _, mock := range mocks {
-			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-			if isMappedToSpecificTest && !isNeededForCurrentRun {
-				continue
-			}
-			// Unification (Phase 3): resolve the mock's typed Lifetime
-			// once via DeriveLifetime — which reads
-			// Spec.Metadata["type"] first and falls back to the legacy
-			// kind-switch only for pre-tag recordings (logged via
-			// LegacyKindFallbackFires). Routing into the per-test
-			// (tcsMocks) pool is then purely Lifetime-driven.
-			// LifetimePerTest lands here; Session and Connection land
-			// in the unfiltered/config pool returned by the sibling
-			// GetUnFilteredMocks below.
-			mock.DeriveLifetime()
-			if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
-				tcsMocks = append(tcsMocks, mock)
-			}
+		mock.DeriveLifetime()
+		if mock.TestModeInfo.Lifetime == models.LifetimePerTest || (isGob && mock.Kind == models.PostgresV2) {
+			tcsMocks = append(tcsMocks, mock)
 		}
 	}
-
-	if !hasContent {
-		utils.LogError(ys.Logger, nil, "failed to read the mocks from file (empty)", zap.String("session", filepath.Base(path)))
-		return nil, fmt.Errorf("failed to get mocks, empty file")
-	}
-
-	// NO disk-level window filter: return every per-test mock this
-	// test-set needs and let the agent's SetMocksWithWindow decide
-	// what to keep. FilterTcsMocks discards the unfiltered (out-of-
-	// window) slice, which would silently eat STARTUP-INIT mocks
-	// (app-bootstrap traffic whose req-timestamp is strictly before
-	// the first test's window start — Hibernate pool init, HikariCP
-	// connection validation, driver handshake). The agent's pre-
-	// filter promotes those to the session pool via its
-	// firstWindowStart cache; dropping them here would defeat that.
-	//
-	// Pruning based on TestCase mappings (mocksWeNeed /
-	// mocksThatHaveMappings) already ran in the per-doc loop above,
-	// so what reaches here is the minimal relevant set.
-	ys.Logger.Debug("per-test mocks count", zap.Int("count", len(tcsMocks)))
-	return tcsMocks, nil
+	return pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime, false), nil
 }
 
 func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
@@ -1465,104 +1454,24 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	lock.RLock()
 	defer lock.RUnlock()
 
-	// Prefer gob binary format when present (mutually exclusive with the
-	// yaml/json text formats — short-circuit before falling through).
-	gobPath := filepath.Join(path, mockName+".gob")
-	if _, err := os.Stat(gobPath); err == nil {
-		mocks, err := readGobMocks(gobPath)
-		if err != nil {
-			return nil, err
-		}
-		for _, mock := range mocks {
-			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-			if isMappedToSpecificTest && !isNeededForCurrentRun {
-				continue
-			}
-			// Unification: lifetime-only routing via DeriveLifetime —
-			// the same classifier the YAML path uses. A mock lands in
-			// the session/config pool iff DeriveLifetime classified it
-			// as Session or Connection. Untagged mocks of the legacy
-			// implicit-session kinds (HTTP, Postgres, MySQL, ...) still
-			// resolve to Session via DeriveLifetime's kind-fallback
-			// branch, so pre-tag recordings keep replaying byte-for-
-			// byte identically. metadata["scope"] is NOT consulted.
-			mock.DeriveLifetime()
-			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
-				mock.TestModeInfo.Lifetime == models.LifetimeConnection {
-				configMocks = append(configMocks, mock)
-			}
-		}
-		return pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime, false), nil
-	}
-
-	// Auto-detect format so config mocks recorded in the other format
-	// remain visible to replay.
-	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockName, ys.Format)
+	mocks, err := ys.loadMocks(ctx, path, mockName)
 	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
-			unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime, false)
-			return unfiltered, nil
-		}
-		utils.LogError(ys.Logger, err, "failed to read the mocks from config file", zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
-	defer reader.Close()
 
-	readerIsJSON := reader.Format() == yaml.FormatJSON
-
-	for {
-		var mocks []*models.Mock
-		if readerIsJSON {
-			jsonDoc, err := reader.ReadNextDocJSON()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
-		} else {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
+	for _, mock := range mocks {
+		_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+		_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+		if isMappedToSpecificTest && !isNeededForCurrentRun {
+			continue
 		}
-
-		for _, mock := range mocks {
-			_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
-			_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
-			if isMappedToSpecificTest && !isNeededForCurrentRun {
-				continue
-			}
-			// Unification (Phase 3): Lifetime-only routing. A mock lands
-			// in the session/config pool iff DeriveLifetime classified
-			// it as Session or Connection. Old kind-switch behaviour is
-			// preserved byte-for-byte for pre-tag recordings because
-			// DeriveLifetime's compat fallback maps the same kind list
-			// to LifetimeSession.
-			mock.DeriveLifetime()
-			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
-				mock.TestModeInfo.Lifetime == models.LifetimeConnection {
-				configMocks = append(configMocks, mock)
-			}
+		mock.DeriveLifetime()
+		if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+			mock.TestModeInfo.Lifetime == models.LifetimeConnection {
+			configMocks = append(configMocks, mock)
 		}
 	}
 
-	// See FilterTcsMocks call above: the disk loader runs lax; the
-	// agent-level filter enforces strictness based on config.
 	unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime, false)
 
 	return unfiltered, nil

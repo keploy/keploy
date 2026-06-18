@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -199,3 +200,78 @@ func TestInsertMock_FlushOnCtxCancel(t *testing.T) {
 		}
 	})
 }
+
+func TestMockYaml_Caching(t *testing.T) {
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	ctx := context.Background()
+
+	// 1. Initially cached state must be empty, but loadMocks should return empty (no file)
+	mocks, err := ys.GetUnFilteredMocks(ctx, "set-0", time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocks empty: %v", err)
+	}
+	if len(mocks) != 0 {
+		t.Fatalf("expected 0 mocks, got %d", len(mocks))
+	}
+
+	// 2. Insert a mock (this should invalidate/clear the cache)
+	mock := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.HTTP,
+		Name:    "mock-0",
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": "mocks"},
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://example.com"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		},
+	}
+	if err := ys.InsertMock(ctx, mock, "set-0"); err != nil {
+		t.Fatalf("InsertMock: %v", err)
+	}
+
+	// 3. Load mocks. This should read from disk and store in cache.
+	mocks1, err := ys.GetUnFilteredMocks(ctx, "set-0", time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocks: %v", err)
+	}
+	if len(mocks1) != 1 {
+		t.Fatalf("expected 1 mock, got %d", len(mocks1))
+	}
+
+	// Verify deep-copy protection: mutate mocks1
+	mocks1[0].Name = "mutated-name"
+
+	// 4. Load mocks again. This should hit the cache and return a clean, unmutated copy.
+	mocks2, err := ys.GetUnFilteredMocks(ctx, "set-0", time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocks 2: %v", err)
+	}
+	if len(mocks2) != 1 {
+		t.Fatalf("expected 1 mock, got %d", len(mocks2))
+	}
+	if mocks2[0].Name == "mutated-name" {
+		t.Fatalf("cache is sharing pointers! Deep-copy protection failed.")
+	}
+	if mocks2[0].Name != "mock-0" {
+		t.Fatalf("expected mock name mock-0, got %s", mocks2[0].Name)
+	}
+
+	// 5. Update mocks (prune). This should invalidate/clear the cache.
+	mockNames := map[string]models.MockState{
+		"mock-0": {Name: "mock-0"},
+	}
+	if err := ys.UpdateMocks(ctx, "set-0", mockNames, time.Time{}, time.Time{}); err != nil {
+		t.Fatalf("UpdateMocks: %v", err)
+	}
+
+	// 6. Reload mocks to verify cache was invalidated and reloaded correctly.
+	mocks3, err := ys.GetUnFilteredMocks(ctx, "set-0", time.Time{}, time.Time{}, nil, nil)
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocks 3: %v", err)
+	}
+	if len(mocks3) != 1 {
+		t.Fatalf("expected 1 mock after UpdateMocks, got %d", len(mocks3))
+	}
+}
+
