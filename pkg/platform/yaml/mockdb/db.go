@@ -451,9 +451,16 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. HTTP mocks store it on
+			// HTTPReq; non-HTTP integrations (e.g. Pulsar) whose request lives
+			// in the wire-encoded GenericRequests use the kind-agnostic
+			// MockSpec.ReqBodyNoise field.
+			if len(st.ReqBodyNoise) > 0 {
+				if mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+					mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+				} else {
+					mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
+				}
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -570,9 +577,16 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. HTTP mocks store it on
+			// HTTPReq; non-HTTP integrations (e.g. Pulsar) whose request lives
+			// in the wire-encoded GenericRequests use the kind-agnostic
+			// MockSpec.ReqBodyNoise field.
+			if len(st.ReqBodyNoise) > 0 {
+				if mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+					mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+				} else {
+					mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
+				}
 			}
 			newMocks = append(newMocks, mock)
 			continue

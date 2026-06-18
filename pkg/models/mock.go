@@ -197,6 +197,17 @@ type MockSpec struct {
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
+
+	// ReqBodyNoise is the kind-agnostic counterpart to HTTPReq.ReqBodyNoise:
+	// field-path request-body noise detected during schema-based auto-replay
+	// matching (config.Test.SchemaNoiseDetection) for integrations whose
+	// request is NOT modelled as an HTTPReq — e.g. Pulsar/Kafka/Redis, which
+	// carry their request in the wire-encoded GenericRequests payloads and so
+	// have no per-protocol struct to hang noise on. Same shape and vocabulary
+	// as HTTPReq.ReqBodyNoise: fieldpath ("body.user.id") -> regex list, where
+	// an empty list means "ignore this whole field". HTTP mocks keep using
+	// HTTPReq.ReqBodyNoise; everything else uses this.
+	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
