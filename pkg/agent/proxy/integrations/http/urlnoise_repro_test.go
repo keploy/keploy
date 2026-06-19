@@ -86,3 +86,34 @@ func TestMatchURLPath_NoiseScoping(t *testing.T) {
 		t.Fatal("with no url noise, a different path must not match (backward compatibility)")
 	}
 }
+
+// TestMatchURLPath_NumericIDScoping documents how a simple, changing numeric id
+// (e.g. /users/55) is handled, and why patterns must be anchored to their path
+// context. A bare value pattern over-matches; an anchored one is precise.
+func TestMatchURLPath_NumericIDScoping(t *testing.T) {
+	h := newHTTP()
+	mock := "http://api/users/55/orders/100"
+
+	// ANCHORED pattern: wildcards ONLY the user-id segment.
+	anchored := []string{`/users/[0-9]+`}
+	if !h.MatchURLPath(mock, "/users/56/orders/100", anchored) {
+		t.Fatal("anchored: a different user-id should match")
+	}
+	if h.MatchURLPath(mock, "/users/55/orders/999", anchored) {
+		t.Fatal("anchored: a different ORDER id must NOT match (order-id stays strict)")
+	}
+	if h.MatchURLPath("http://api/v1/users/55", "/v2/users/56", anchored) {
+		t.Fatal("anchored: a different API version must NOT match (version stays strict)")
+	}
+
+	// BARE value pattern: over-matches every numeric run — captured here so the
+	// footgun is explicit and a future change to this behaviour is caught. Users
+	// should anchor instead (see MatchURLPath doc + the anchored cases above).
+	bare := []string{`[0-9]+`}
+	if !h.MatchURLPath(mock, "/users/55/orders/999", bare) {
+		t.Fatal("bare [0-9]+ is expected to (over-)match a different order — documents the footgun")
+	}
+	if !h.MatchURLPath("http://api/v1/users/55", "/v2/users/56", bare) {
+		t.Fatal("bare [0-9]+ is expected to (over-)match across /v1 vs /v2 — documents the footgun")
+	}
+}

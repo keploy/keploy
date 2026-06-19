@@ -314,6 +314,19 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string) bool {
 	// live request path, then compare. A variable segment thus matches while the
 	// rest of the path stays strict. No url noise configured => exact match as
 	// before (fully backward compatible).
+	//
+	// SCOPE PATTERNS TO THEIR PATH CONTEXT. A pattern is applied as a substring
+	// replace over the whole path, so a BARE value pattern over-matches: "[0-9]+"
+	// wildcards EVERY numeric run — a /users/55 id, a sibling /orders/100 id, and
+	// even the "1" inside /v1 — which can collapse distinct calls onto one mock.
+	// Anchor it to the surrounding path instead:
+	//   "/users/[0-9]+"  -> wildcards only the user-id segment; /orders/100 and
+	//                       /v1 stay strict, so a different order or version still
+	//                       does NOT match.
+	// UUIDs/hashes are specific enough to use unanchored. Whole-path substring
+	// replacement is deliberate — it is what lets a partial-segment key like
+	// "<uuid>.txt" match; the trade-off is that bare value patterns need
+	// anchoring (see TestMatchURLPath_NumericIDScoping).
 	if len(urlNoise) == 0 {
 		return false
 	}
