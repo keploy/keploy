@@ -1310,6 +1310,21 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	return h, nil
 }
 
+// ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
+// retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
+// not hit a "container name already in use" conflict from the dependency
+// containers/network left behind. No-op when there is no managed app or it is
+// not a compose app (App.ComposeDown self-guards on kind == DockerCompose).
+func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		a.logger.Debug("ComposeDownOnSetupFailure: no managed app to tear down")
+		return nil
+	}
+	ap.ComposeDown()
+	return nil
+}
+
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
