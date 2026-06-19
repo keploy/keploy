@@ -641,6 +641,48 @@ func (a *App) run(ctx context.Context) models.AppError {
 					warning := fmt.Sprintf("error sending SIGINT: %s", err)
 					a.logger.Debug(warning)
 				}
+
+				// Docker Compose teardown differs from a single `docker run`: the
+				// stack has several containers (the app, its dependencies, and the
+				// injected keploy-agent). The SIGINT above makes `docker compose up`
+				// stop them gracefully in the foreground, but the app container
+				// usually exits first — e.g. a Go server with no SIGTERM handler
+				// exits immediately on Go's default signal disposition — while the
+				// SLOWER services keep stopping, most notably the eBPF agent.
+				// `docker compose up` does not return until every service has
+				// stopped, and os/exec's WaitDelay then blocks the teardown for ~25s
+				// waiting on it. When the app is kept alive on the outer replay
+				// errgroup (compose + mocking), that teardown runs under
+				// utils.DrainErrGroup's 30s budget, so the overrun trips a spurious
+				// "teardown drain timed out … a goroutine is ignoring context
+				// cancellation" error and fails an otherwise-green run.
+				//
+				// So for compose: give the app a short grace to flush coverage during
+				// the graceful stop, then bring the WHOLE project down fast via
+				// ComposeDown (`docker compose down --timeout 1`) so `docker compose
+				// up` returns promptly instead of blocking on the slow agent. The
+				// run()-deferred ComposeDown then becomes an idempotent no-op.
+				if a.kind == utils.DockerCompose {
+					gracePeriod := 5
+					for i := 0; i < gracePeriod; i++ {
+						time.Sleep(1 * time.Second)
+						// `docker compose up` already returned (all services stopped).
+						if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+							a.logger.Debug("docker compose process exited")
+							break
+						}
+						// App container has exited -> its coverage flush is done; no
+						// need to keep waiting on the slower sibling services.
+						if info, err := a.docker.ContainerInspect(context.Background(), a.container); err == nil &&
+							(info.State.Status == "exited" || info.State.Status == "dead") {
+							a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
+							break
+						}
+					}
+					a.ComposeDown()
+					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
+				}
+
 				gracePeriod := 5
 				for i := 0; i < gracePeriod; i++ {
 					time.Sleep(1 * time.Second)
