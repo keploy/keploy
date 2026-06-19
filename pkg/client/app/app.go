@@ -504,13 +504,20 @@ func (a *App) composeDown() {
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"compose", "-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "down")
+		// --timeout 1: stop containers fast instead of the default 10s graceful
+		// wait PER container. Between test-sets `keploy test` restarts the whole
+		// compose stack; under loaded CI a slow `down` was exceeding the
+		// per-test-set teardown drain budget and being abandoned, leaving a
+		// half-removed agent container that the next test-set's `up` then
+		// collided with ("container name already in use" -> dependency
+		// keploy-agent failed to start -> test-set abandoned, no report).
+		args = append(args, "down", "--timeout", "1")
 		downCmd = exec.Command("docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down")
+		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
 	default:
 		return
 	}
@@ -518,6 +525,36 @@ func (a *App) composeDown() {
 	if output, err := downCmd.CombinedOutput(); err != nil {
 		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
 			zap.Error(err), zap.String("output", string(output)))
+	}
+
+	// Coverage safety: this runs only AFTER the app has already been stopped by
+	// run()'s cmdCancel (SIGINT + grace period, force-kill only if it doesn't
+	// exit), so the app's coverage flush has already happened — Go writes
+	// GOCOVERDIR, Java its jacoco .exec (both to host-mounted paths that survive
+	// container removal), and the Java SDK streams coverage over a socket during
+	// the run. The --timeout 1 above and the force-remove below therefore only
+	// reclaim already-stopped containers; they never shorten a runtime's
+	// coverage-flush window (that window is cmdCancel's grace, not down).
+	//
+	// Belt-and-suspenders: guarantee the agent + app container names are free
+	// before the next test-set's compose up reuses them. `compose down` already
+	// removes them, but if it errored or was cut short under load the names
+	// could linger and the next up would hit "container name already in use".
+	// A force-remove by name is near-instant and idempotent.
+	a.forceRemoveContainerByName(a.keployContainer)
+	a.forceRemoveContainerByName(a.container)
+}
+
+// forceRemoveContainerByName removes a container by name, ignoring the
+// "no such container" case. Used after compose down to guarantee a name is free
+// for reuse on the next per-test-set compose up.
+func (a *App) forceRemoveContainerByName(name string) {
+	if name == "" {
+		return
+	}
+	if output, err := exec.Command("docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		a.logger.Debug("force-remove container finished (may already be gone)",
+			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
 }
 
