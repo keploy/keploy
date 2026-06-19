@@ -132,7 +132,7 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -190,9 +190,25 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		// Matching process
-		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise)
+		// Pass 1: exact URL + configured url-noise only. Deterministic and
+		// genuinely-distinct calls match here and are never relaxed.
+		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, false)
 		if err != nil {
 			return false, nil, nil, err
+		}
+		// Pass 2 (zero-config DEFAULT): only when nothing matched the URL exactly
+		// or under url-noise, retry allowing auto-detected dynamic id segments
+		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
+		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
+		if len(schemaMatched) == 0 && autoURLDynamic {
+			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if len(schemaMatched) > 0 {
+				h.Logger.Debug("http url: matched via auto-detected dynamic path segment(s) after no exact/url-noise match",
+					zap.Int("candidates", len(schemaMatched)))
+			}
 		}
 
 		if len(schemaMatched) == 0 {
@@ -294,7 +310,7 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	return mockBodyType == reqBodyType
 }
 
-func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string) bool {
+func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDynamic bool) bool {
 	parsedURL, err := url.Parse(mockURL)
 	if err != nil {
 		return false
@@ -327,21 +343,97 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string) bool {
 	// replacement is deliberate — it is what lets a partial-segment key like
 	// "<uuid>.txt" match; the trade-off is that bare value patterns need
 	// anchoring (see TestMatchURLPath_NumericIDScoping).
-	if len(urlNoise) == 0 {
+	if len(urlNoise) > 0 {
+		const ph = "{{keploy.urlnoise}}"
+		np, rp := mockPath, reqPath
+		for _, pat := range urlNoise {
+			re, cerr := regexp.Compile(pat)
+			if cerr != nil {
+				h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
+				continue
+			}
+			np = re.ReplaceAllString(np, ph)
+			rp = re.ReplaceAllString(rp, ph)
+		}
+		if np == rp {
+			return true
+		}
+	}
+	// Auto-detected dynamic segments — the zero-config DEFAULT. Used only as a
+	// fallback (autoDynamic is set on the second matching pass, after an exact +
+	// url-noise pass found nothing), so deterministic and genuinely-distinct calls
+	// are never relaxed. A differing segment is wildcarded only when it looks like
+	// a machine id on BOTH sides (see looksDynamicSegment) and every other segment
+	// is identical — so a non-deterministic id (numeric/uuid/hash/long token)
+	// matches without any config, while a different resource still does not.
+	// Disable via OutgoingOptions.DisableAutoURLDynamic. The url-noise config above
+	// covers corner cases the heuristic intentionally leaves alone (e.g. a
+	// word-like variable slug).
+	if autoDynamic && pathMatchesModuloDynamicSegments(mockPath, reqPath) {
+		return true
+	}
+	return false
+}
+
+// pathMatchesModuloDynamicSegments reports whether mockPath and reqPath are
+// identical except for one or more segments that look like machine-generated ids
+// on both sides. Same segment count is required, and every non-id segment must be
+// exactly equal, so it relaxes only the id-shaped positions.
+func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
+	ms := strings.Split(mockPath, "/")
+	rs := strings.Split(reqPath, "/")
+	if len(ms) != len(rs) {
 		return false
 	}
-	const ph = "{{keploy.urlnoise}}"
-	np, rp := mockPath, reqPath
-	for _, pat := range urlNoise {
-		re, cerr := regexp.Compile(pat)
-		if cerr != nil {
-			h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
+	differed := false
+	for i := range ms {
+		if ms[i] == rs[i] {
 			continue
 		}
-		np = re.ReplaceAllString(np, ph)
-		rp = re.ReplaceAllString(rp, ph)
+		if looksDynamicSegment(ms[i]) && looksDynamicSegment(rs[i]) {
+			differed = true
+			continue
+		}
+		return false // a non-id segment differs -> genuinely different path
 	}
-	return np == rp
+	return differed
+}
+
+var (
+	reSegAllDigits = regexp.MustCompile(`^[0-9]+$`)
+	reSegUUID      = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reSegLongHex   = regexp.MustCompile(`^[0-9a-fA-F]{16,}$`)
+)
+
+// looksDynamicSegment reports whether a single URL path segment looks like a
+// machine-generated identifier that legitimately varies between record and
+// replay. Kept CONSERVATIVE (precision over recall): it covers the unambiguous
+// shapes — all-digit ids/timestamps, UUIDs, long hex hashes / Mongo ObjectIds,
+// and LONG (>=16) tokens that mix letters and digits (base62/ULID-ish ids and
+// composite keys like "amit_1781794443438_47ona3" or "<uuid>.txt"). It does NOT
+// match plain alphabetic segments ("users", "profile"), short composite tokens
+// ("v1alpha1", "oauth2"), or word-like slugs — all ambiguous with static path
+// components and left to explicit url-noise config (test.globalNoise.url).
+func looksDynamicSegment(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	if reSegAllDigits.MatchString(s) || reSegUUID.MatchString(s) || reSegLongHex.MatchString(s) {
+		return true
+	}
+	if len(s) >= 16 {
+		hasDigit, hasAlpha := false, false
+		for _, r := range s {
+			switch {
+			case r >= '0' && r <= '9':
+				hasDigit = true
+			case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+				hasAlpha = true
+			}
+		}
+		return hasDigit && hasAlpha
+	}
+	return false
 }
 
 // relaxed header key matcher (presence-only)
@@ -432,7 +524,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 }
 
 // SchemaMatch match the schema of the request with the mocks
-func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string) ([]*models.Mock, error) {
+func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range unfilteredMocks {
@@ -466,7 +558,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 
 		// URL path match
-		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise) {
+		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
 			continue
 		}
