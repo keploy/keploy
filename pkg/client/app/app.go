@@ -489,11 +489,13 @@ func sanitizeAppLogLine(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// composeDown runs docker compose down to remove all containers and networks
+// ComposeDown runs docker compose down to remove all containers and networks
 // created by the compose stack. Without this, stopped containers retain
 // references to image layers; a subsequent docker image prune can delete
-// those layers and corrupt Docker Desktop's overlayfs snapshots.
-func (a *App) composeDown() {
+// those layers and corrupt Docker Desktop's overlayfs snapshots. Exported so the
+// replay loop can tear the stack down on a per-test-set setup failure
+// (agent-readiness timeout) before a retry, not only via run()'s defer.
+func (a *App) ComposeDown() {
 	var downCmd *exec.Cmd
 
 	switch {
@@ -543,6 +545,49 @@ func (a *App) composeDown() {
 	// A force-remove by name is near-instant and idempotent.
 	a.forceRemoveContainerByName(a.keployContainer)
 	a.forceRemoveContainerByName(a.container)
+
+	// Reap-barrier: `compose down` / `rm -f` can return before the daemon has
+	// finished reaping under load, so the next compose up's same-name create
+	// races the async reap and stalls at "Creating". Poll until the names are
+	// gone, BOUNDED so it never reintroduces the unbounded teardown that
+	// --timeout 1 removed. Largely a no-op once the stack is reused across
+	// test-sets (one down per lane), but defends the first/last and
+	// non-keep-alive boundaries.
+	a.waitContainersRemoved([]string{a.keployContainer, a.container}, 5*time.Second)
+}
+
+// waitContainersRemoved polls until the named containers no longer exist (or the
+// budget elapses), converting the daemon's async reap into a bounded synchronous
+// barrier so the next compose up cannot race a still-removing same-named
+// container.
+func (a *App) waitContainersRemoved(names []string, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		allGone := true
+		for _, n := range names {
+			if n == "" {
+				continue
+			}
+			// ContainerInspect returns a non-nil error once the container is
+			// gone; treat any error as "no longer blocking" (best-effort barrier).
+			if _, err := a.docker.ContainerInspect(ctx, n); err == nil {
+				allGone = false // still present
+				break
+			}
+		}
+		if allGone {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			a.logger.Debug("waitContainersRemoved: timed out waiting for reap", zap.Strings("containers", names))
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // forceRemoveContainerByName removes a container by name, ignoring the
@@ -579,7 +624,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 
 	if a.kind == utils.DockerCompose {
-		defer a.composeDown()
+		defer a.ComposeDown()
 	}
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {

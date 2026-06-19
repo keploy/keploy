@@ -34,6 +34,11 @@ type Instrumentation interface {
 	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
 	// When this is called, connection errors will be logged as debug instead of error.
 	NotifyGracefulShutdown(ctx context.Context) error
+	// ComposeDownOnSetupFailure tears down the docker-compose stack (agent + app
+	// + dependency containers + project network) when per-test-set setup fails
+	// (e.g. agent-readiness timeout), so a retry's `compose up` does not hit a
+	// "container name already in use" conflict. No-op for non-compose apps.
+	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
 type Service interface {
