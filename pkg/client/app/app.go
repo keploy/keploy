@@ -489,11 +489,13 @@ func sanitizeAppLogLine(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// composeDown runs docker compose down to remove all containers and networks
+// ComposeDown runs docker compose down to remove all containers and networks
 // created by the compose stack. Without this, stopped containers retain
 // references to image layers; a subsequent docker image prune can delete
-// those layers and corrupt Docker Desktop's overlayfs snapshots.
-func (a *App) composeDown() {
+// those layers and corrupt Docker Desktop's overlayfs snapshots. Exported so the
+// replay loop can tear the stack down on a per-test-set setup failure
+// (agent-readiness timeout) before a retry, not only via run()'s defer.
+func (a *App) ComposeDown() {
 	var downCmd *exec.Cmd
 
 	switch {
@@ -504,13 +506,20 @@ func (a *App) composeDown() {
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"compose", "-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "down")
+		// --timeout 1: stop containers fast instead of the default 10s graceful
+		// wait PER container. Between test-sets `keploy test` restarts the whole
+		// compose stack; under loaded CI a slow `down` was exceeding the
+		// per-test-set teardown drain budget and being abandoned, leaving a
+		// half-removed agent container that the next test-set's `up` then
+		// collided with ("container name already in use" -> dependency
+		// keploy-agent failed to start -> test-set abandoned, no report).
+		args = append(args, "down", "--timeout", "1")
 		downCmd = exec.Command("docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down")
+		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
 	default:
 		return
 	}
@@ -518,6 +527,79 @@ func (a *App) composeDown() {
 	if output, err := downCmd.CombinedOutput(); err != nil {
 		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
 			zap.Error(err), zap.String("output", string(output)))
+	}
+
+	// Coverage safety: this runs only AFTER the app has already been stopped by
+	// run()'s cmdCancel (SIGINT + grace period, force-kill only if it doesn't
+	// exit), so the app's coverage flush has already happened — Go writes
+	// GOCOVERDIR, Java its jacoco .exec (both to host-mounted paths that survive
+	// container removal), and the Java SDK streams coverage over a socket during
+	// the run. The --timeout 1 above and the force-remove below therefore only
+	// reclaim already-stopped containers; they never shorten a runtime's
+	// coverage-flush window (that window is cmdCancel's grace, not down).
+	//
+	// Belt-and-suspenders: guarantee the agent + app container names are free
+	// before the next test-set's compose up reuses them. `compose down` already
+	// removes them, but if it errored or was cut short under load the names
+	// could linger and the next up would hit "container name already in use".
+	// A force-remove by name is near-instant and idempotent.
+	a.forceRemoveContainerByName(a.keployContainer)
+	a.forceRemoveContainerByName(a.container)
+
+	// Reap-barrier: `compose down` / `rm -f` can return before the daemon has
+	// finished reaping under load, so the next compose up's same-name create
+	// races the async reap and stalls at "Creating". Poll until the names are
+	// gone, BOUNDED so it never reintroduces the unbounded teardown that
+	// --timeout 1 removed. Largely a no-op once the stack is reused across
+	// test-sets (one down per lane), but defends the first/last and
+	// non-keep-alive boundaries.
+	a.waitContainersRemoved([]string{a.keployContainer, a.container}, 5*time.Second)
+}
+
+// waitContainersRemoved polls until the named containers no longer exist (or the
+// budget elapses), converting the daemon's async reap into a bounded synchronous
+// barrier so the next compose up cannot race a still-removing same-named
+// container.
+func (a *App) waitContainersRemoved(names []string, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		allGone := true
+		for _, n := range names {
+			if n == "" {
+				continue
+			}
+			// ContainerInspect returns a non-nil error once the container is
+			// gone; treat any error as "no longer blocking" (best-effort barrier).
+			if _, err := a.docker.ContainerInspect(ctx, n); err == nil {
+				allGone = false // still present
+				break
+			}
+		}
+		if allGone {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			a.logger.Debug("waitContainersRemoved: timed out waiting for reap", zap.Strings("containers", names))
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// forceRemoveContainerByName removes a container by name, ignoring the
+// "no such container" case. Used after compose down to guarantee a name is free
+// for reuse on the next per-test-set compose up.
+func (a *App) forceRemoveContainerByName(name string) {
+	if name == "" {
+		return
+	}
+	if output, err := exec.Command("docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		a.logger.Debug("force-remove container finished (may already be gone)",
+			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
 }
 
@@ -542,7 +624,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 
 	if a.kind == utils.DockerCompose {
-		defer a.composeDown()
+		defer a.ComposeDown()
 	}
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {

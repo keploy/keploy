@@ -178,36 +178,39 @@ func (r *Recorder) Start(ctx context.Context) error {
 		r.logger.Info("Stopping Keploy recording...")
 
 		// Notify the agent that we are shutting down gracefully
-		// This will cause connection errors to be logged as debug instead of error
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+		// This will cause connection errors to be logged as debug instead of error.
+		// Bound it: an up-but-unresponsive agent (still booting under contention)
+		// must not block teardown — the path SIGINT takes — indefinitely.
+		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		notifyCancel()
 		// Pcap + keylog flow over long-lived HTTP streams started in
 		// Start() right after the agent's broadcaster came up. The
 		// streams unwind on their own when the agent closes the
 		// response or the recorder context is cancelled — there is
 		// no on-disk file on the agent and no fetch step here.
 
+		// Bounded drains: a goroutine wedged under contention that ignores its
+		// cancel() must not hang teardown forever (which would swallow SIGINT and
+		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
 		runAppCtxCancel()
-		err := runAppErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 
 		reqCtxCancel()
-		err = reqErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-req", reqErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
 
 		setupCtxCancel()
-		err = setupErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-setup", setupErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
-		err = errGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 		if recordingStarted {

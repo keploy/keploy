@@ -63,6 +63,7 @@ type OutgoingOptions struct {
 	Backdate               time.Time                      // used to set backdate in cacert request
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
+	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
 	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
 	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
 	SkipTLSMITM            bool
