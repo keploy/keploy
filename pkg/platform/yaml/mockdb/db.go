@@ -3,7 +3,6 @@ package mockdb
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/gob"
 	"encoding/json"
@@ -70,26 +69,41 @@ type MockYaml struct {
 	idCounter int64
 	Format    yaml.Format
 
-	// Synchronous mock writer. The recording consumer calls InsertMock
-	// (encode + append to the file's in-memory buffer, NO flush) and drives
-	// batching itself: it flushes via FlushMocks when its source channel
-	// momentarily empties, then Close does the final flush + close. A single
-	// consumer goroutine owns this path, so writes are serialized — there is
-	// no background goroutine and no intermediate queue. asyncMu guards the
-	// file-state fields below against the (rare) overlap of a write and the
-	// final Close.
-	asyncNeedsYamlSep bool
-	asyncMu           sync.Mutex
-	asyncFilePath     string
-	asyncFile         *os.File
-	asyncBufw         *bufio.Writer
-	asyncGobEnc       *gob.Encoder
-	// asyncFlushErr holds the terminal flush/close error from
-	// asyncFlushAndClose so that Close() can surface it to its caller
+	// Async gob writer: background goroutine drains gobQueue and
+	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
+	// goroutines never block on disk or gob encoding. Sync fallback
+	// activates when the queue is full so no mock is dropped.
+	//
+	// The writer lifecycle is restartable across Close/InsertMock
+	// cycles so that re-record flows (same Recorder / same mockDB,
+	// multiple Start calls) flush+close between sessions but still
+	// accept mocks for the next session. gobLifecycleMu guards the
+	// transition between "running" and "quiesced"; gobRunning tracks
+	// which state we are in. Do not use sync.Once here — it cannot be
+	// reset, which was the original re-record bug.
+	gobLifecycleMu sync.Mutex
+	gobRunning     bool
+	gobQueue       chan gobWriteJob
+	gobStop        chan struct{}
+	gobDone        chan struct{}
+	gobMu          sync.Mutex
+	gobFilePath    string
+	gobFile        *os.File
+	gobBufw        *bufio.Writer
+	gobEnc         *gob.Encoder
+	gobOverflows   atomic.Uint64
+	// gobStopClosed is true after Close() has invoked close(gobStop).
+	// A subsequent Close() that arrives after the first one timed out
+	// waiting for gobDone must not close the channel a second time
+	// (that would panic). Cleared when the writer finally exits and
+	// we transition back to gobRunning=false.
+	gobStopClosed bool
+	// gobFlushErr holds the terminal flush/close error from
+	// gobFlushAndClose so that Close() can surface it to its caller
 	// (and therefore to the Recorder.Start deferred-cleanup logger)
 	// instead of silently losing the tail of mocks.gob on a disk-full
 	// or permission-change shutdown.
-	asyncFlushErr error
+	gobFlushErr error
 }
 
 // prunedMockInfo is the structured per-mock entry logged when
@@ -110,14 +124,13 @@ type prunedMockInfo struct {
 // on the pruned-count total for the overall picture.
 const maxPrunedMocksLogged = 100
 
-type asyncWriteJob struct {
+type gobWriteJob struct {
 	mock *models.Mock
 	// testSetPath is the full directory path — "<MockPath>/<testSetID>"
 	// — not just the test-set identifier. Kept as a full path because
-	// asyncReopenLocked mkdir's it and reuses it in filepath.Join.
+	// gobReopenLocked mkdir's it and reuses it in filepath.Join.
 	testSetPath string
 	filename    string
-	effFormat   yaml.Format
 }
 
 const mockFileLockStripeCount = 256
@@ -505,8 +518,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.Time("pruneBefore", pruneBefore))
 
 	// Quiesce any in-flight async writer on this MockYaml before we
-	// rewrite the gob file. An active writer holds ys.asyncFile /
-	// ys.asyncBufw / ys.asyncGobEnc; rewriting the file out from under it
+	// rewrite the gob file. An active writer holds ys.gobFile /
+	// ys.gobBufw / ys.gobEnc; rewriting the file out from under it
 	// would corrupt the next Encode. Close drains the queue and
 	// resets lifecycle state; the next InsertMock restarts a fresh
 	// writer via the inline init in insertMockGob.
@@ -811,219 +824,432 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	return nil
 }
 
-func (ys *MockYaml) encodeMockData(job asyncWriteJob) ([]byte, error) {
-	if job.effFormat == yaml.FormatJSON {
-		jsonDoc, handled, err := EncodeMockJSON(job.mock, ys.Logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode mock (json): %w", err)
-		}
-		if !handled {
-			return nil, fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", job.mock.Kind)
-		}
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(jsonDoc); err != nil {
-			return nil, fmt.Errorf("failed to encode mock json: %w", err)
-		}
-		return buf.Bytes(), nil
-	}
-
-	mockYaml, err := EncodeMock(job.mock, ys.Logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode mock (yaml): %w", err)
-	}
-	var buf bytes.Buffer
-	encoder := yamlLib.NewEncoder(&buf)
-	if err := encoder.Encode(&mockYaml); err != nil {
-		_ = encoder.Close()
-		return nil, fmt.Errorf("failed to encode mock yaml: %w", err)
-	}
-	if err := encoder.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close yaml encoder: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
+	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	// gob is the binary record-time format (async writer, ~28% CPU win
+	// over yaml). When selected it is mutually exclusive with yaml/json,
+	// so it gets to short-circuit before the format-detection block.
+	if useGobMockFormat() {
+		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
+	}
 
+	// Resolve the effective mock-file format: if a mocks file in either
+	// format already exists, append to THAT file in ITS format (don't create
+	// a parallel file in the other format). Only when no mocks file exists
+	// yet do we use the configured StorageFormat for a fresh file.
 	effFormat := ys.Format
-	isGob := useGobMockFormat()
-	if !isGob {
-		if existsAny, detected, statErr := yaml.FileExistsAny(context.Background(), ys.Logger, mockPath, mockFileName, ys.Format); statErr == nil && existsAny {
-			effFormat = detected
-		}
+	if existsAny, detected, statErr := yaml.FileExistsAny(ctx, ys.Logger, mockPath, mockFileName, ys.Format); statErr == nil && existsAny {
+		effFormat = detected
 	}
 
-	// Synchronous write: encode + append the mock to the file's in-memory
-	// buffer NOW (asyncWriteOne takes asyncMu and opens/rotates the file as
-	// needed). We deliberately do NOT flush here — the recording consumer
-	// batches flushes via FlushMocks when its source channel momentarily
-	// empties, and Close does the final flush. This replaces the old
-	// queue+background-goroutine writer: one consumer goroutine drives the
-	// whole write path, so there is no separate buffer and no parallelism.
-	job := asyncWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName, effFormat: effFormat}
-	return ys.asyncWriteOne(job)
-}
+	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
+	lock.Lock()
+	defer lock.Unlock()
 
-func (ys *MockYaml) asyncWriteOne(job asyncWriteJob) error {
-	ys.asyncMu.Lock()
-	defer ys.asyncMu.Unlock()
-
-	var currentBase string
-	if ys.asyncFilePath != "" {
-		currentBase = filepath.Base(ys.asyncFilePath)
-		currentBase = strings.TrimSuffix(currentBase, filepath.Ext(currentBase))
+	// Bail before opening the file if the recorder ctx is already cancelled.
+	// Nothing on disk is touched yet — this is the only safe early-exit
+	// point. Past this point we MUST flush the bufio writer before returning
+	// or we leave a truncated mock on disk (yamlLib.Encoder streams into the
+	// bufio.Writer; that writer's internal buffer auto-flushes when full so
+	// partial mock bytes have already hit the file by the time encoder.Encode
+	// returns — skipping writer.Flush() drops the tail of the mock).
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
-	if ys.asyncFile == nil || filepath.Dir(ys.asyncFilePath) != job.testSetPath || currentBase != job.filename {
-		if err := ys.asyncReopenLocked(job.testSetPath, job.filename, job.effFormat); err != nil {
-			return err
-		}
-	}
-
-	isGob := useGobMockFormat()
-	if isGob && ys.asyncGobEnc != nil {
-		if err := ys.asyncGobEnc.Encode(job.mock); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	// Encode the mock to its on-disk bytes inline and append to the buffer.
-	// Called synchronously by the single recording consumer (via InsertMock),
-	// so encoding is serialized — simple and race-free. No flush here; the
-	// consumer batches flushes via FlushMocks.
-	data, err := ys.encodeMockData(job)
+	// Stream the mock directly to the file instead of marshaling to []byte
+	// first. CreateFileF picks the right extension for `effFormat` so the
+	// json pass writes .json and the yaml pass writes .yaml.
+	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
 	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
-	if job.effFormat == yaml.FormatJSON {
-		if _, err := ys.asyncBufw.Write(data); err != nil {
-			return err
-		}
-		if _, err := ys.asyncBufw.WriteString("\n"); err != nil {
-			return err
-		}
-	} else {
+	filePath := filepath.Join(mockPath, mockFileName+"."+effFormat.FileExtension())
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("failed to open mock file for append: %w", err)
+	}
+	defer file.Close()
 
-		if !ys.asyncNeedsYamlSep {
+	writer := bufio.NewWriter(file)
+	// Belt-and-braces: always flush the bufio writer before file.Close,
+	// even on an error return below. file.Close() does NOT drain a
+	// wrapping bufio.Writer — without this defer, any partially-encoded
+	// bytes still in the bufio buffer at return time would be silently
+	// discarded, leaving the mocks.yaml truncated mid-mock. The deferred
+	// Flush is best-effort: errors are logged at debug because the
+	// happy-path Flush below surfaces real flush errors as the function
+	// return value; this defer only catches the early-return paths that
+	// would otherwise drop the buffer on the floor (in particular the
+	// shutdown-race path where InsertMock is invoked with a cancelled
+	// ctx after encoder.Encode has streamed into the buffer).
+	defer func() {
+		if flushErr := writer.Flush(); flushErr != nil && ys.Logger != nil {
+			ys.Logger.Debug("deferred bufio flush returned error",
+				zap.String("path", filePath),
+				zap.Error(flushErr))
+		}
+	}()
+
+	// Encode + stream. Each branch takes a different in-memory representation:
+	// JSON builds NetworkTrafficDocJSON directly (no yaml.Node anywhere),
+	// YAML keeps using EncodeMock -> yamlLib.Encoder for wire compatibility
+	// with pre-existing mocks.yaml files.
+	switch effFormat {
+	case yaml.FormatJSON:
+		jsonDoc, handled, err := EncodeMockJSON(mock, ys.Logger)
+		if err != nil {
+			return fmt.Errorf("failed to encode mock (json): %w", err)
+		}
+		if !handled {
+			return fmt.Errorf("mockdb: unsupported mock kind %q for JSON format", mock.Kind)
+		}
+		if err := json.NewEncoder(writer).Encode(jsonDoc); err != nil {
+			return fmt.Errorf("failed to encode mock json: %w", err)
+		}
+		// json.Encoder appends the trailing '\n' — NDJSON-ready.
+	default:
+		// YAML path — keeps streaming via yamlLib.Encoder for wire
+		// compatibility with pre-existing mocks.yaml files.
+		if isFileEmpty {
 			if version := utils.GetVersionAsComment(); version != "" {
-				if _, err := ys.asyncBufw.WriteString(version); err != nil {
+				if _, err := writer.WriteString(version); err != nil {
 					return fmt.Errorf("failed to write version comment: %w", err)
 				}
 			}
 		} else {
-			if _, err := ys.asyncBufw.WriteString("---\n"); err != nil {
+			if _, err := writer.WriteString("---\n"); err != nil {
 				return fmt.Errorf("failed to write document separator: %w", err)
 			}
 		}
-		if _, err := ys.asyncBufw.Write(data); err != nil {
-			return err
+		mockYaml, err := EncodeMock(mock, ys.Logger)
+		if err != nil {
+			return fmt.Errorf("failed to encode mock (yaml): %w", err)
 		}
-		ys.asyncNeedsYamlSep = true
+		encoder := yamlLib.NewEncoder(writer)
+		if err := encoder.Encode(&mockYaml); err != nil {
+			_ = encoder.Close()
+			return fmt.Errorf("failed to encode mock yaml: %w", err)
+		}
+		if err := encoder.Close(); err != nil {
+			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		}
 	}
+
+	// Always flush — never gate on ctx here. Once encoder.Encode has
+	// run, yamlLib has already streamed bytes into the bufio buffer
+	// (and auto-flushed full pages to the file). Skipping Flush would
+	// leave the file truncated at an arbitrary mid-stream byte offset,
+	// which is exactly the recorder-shutdown-flush truncation bug:
+	// the last mock in flight when SIGINT cancels the recorder ctx
+	// would lose its trailing bytes (rows 2/3 of a multi-row MySQL
+	// binary result set, missing rowNullBuffer, no FinalResponse
+	// marker), tripping wire-encode validation at replay time.
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush mock writer: %w", err)
+	}
+
 	return nil
 }
 
-func (ys *MockYaml) asyncReopenLocked(mockPath, mockFileName string, effFormat yaml.Format) error {
-	if ys.asyncFile != nil {
-		_ = ys.asyncBufw.Flush()
-		_ = ys.asyncFile.Close()
-		ys.asyncFile = nil
-		ys.asyncBufw = nil
-		ys.asyncGobEnc = nil
+// insertMockGob enqueues the mock for async encoding. One background
+// goroutine owns the open file + encoder; parsers never block on
+// disk. Queue-full falls back to synchronous write so mocks are never
+// dropped — tracked via gobOverflows for observability.
+//
+// The writer-alive check and the channel send run under the same
+// lifecycle lock Close uses. This makes the "is the writer still
+// accepting jobs?" invariant atomic across the send: Close cannot
+// transition from running=true to stopClosed in between our check
+// and our send, so any job we enqueue is guaranteed to be drained
+// by the current writer (or by its drainAndClose on the way out).
+func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
+	ys.gobLifecycleMu.Lock()
+	if ys.gobStopClosed {
+		ys.gobLifecycleMu.Unlock()
+		return fmt.Errorf("gob mock writer is closing; the recording session must complete its shutdown before new mocks can be accepted")
+	}
+	if !ys.gobRunning {
+		ys.gobQueue = make(chan gobWriteJob, 4096)
+		ys.gobStop = make(chan struct{})
+		ys.gobDone = make(chan struct{})
+		ys.gobRunning = true
+		go ys.gobWriterLoop()
+	}
+	// Deep-copy before enqueue. InsertMock returns synchronously; a
+	// caller that subsequently mutates the same *Mock (e.g. a
+	// RecordHooks.AfterMockInsert that tags telemetry fields on the
+	// same pointer, or a producer pool that reuses Mock structs)
+	// would otherwise race with the async gob encoder and persist
+	// an unintended payload. DeepCopy clones Mock's top-level
+	// MockSpec slices, maps, and pointers so the usual
+	// after-InsertMock field tagging is safe; it does not
+	// transitively clone every nested object reachable through a
+	// protocol payload, so callers should still avoid mutating
+	// deeply nested state in a mock they have handed off. The copy
+	// cost is bounded by the mock's own size and is acceptable vs.
+	// the alternative (encoding to bytes synchronously on every
+	// InsertMock, which would defeat the whole async-writer win).
+	job := gobWriteJob{mock: mock.DeepCopy(), testSetPath: mockPath, filename: mockFileName}
+	select {
+	case ys.gobQueue <- job:
+		ys.gobLifecycleMu.Unlock()
+		return nil
+	case <-ctx.Done():
+		ys.gobLifecycleMu.Unlock()
+		return ctx.Err()
+	default:
+		ys.gobOverflows.Add(1)
+		// Keep the lifecycle lock held across the sync fallback. If we
+		// released it here, a concurrent Close() could flush+close the
+		// writer (setting gobFile=nil), and then gobWriteSync's
+		// gobWriteOne would call gobReopenLocked — which TRUNCATES
+		// the gob file with O_TRUNC — destroying everything written
+		// earlier in the session. Serializing the sync fallback
+		// against Close() is the cost of the "no dropped mocks"
+		// guarantee on the overflow path; it only kicks in when the
+		// 4096-slot queue is already full, which is already a
+		// degraded-throughput mode.
+		err := ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
+		ys.gobLifecycleMu.Unlock()
+		return err
+	}
+}
+
+func (ys *MockYaml) gobWriterLoop() {
+	defer close(ys.gobDone)
+	for {
+		select {
+		case job, ok := <-ys.gobQueue:
+			if !ok {
+				ys.gobFlushAndClose()
+				return
+			}
+			if err := ys.gobWriteOne(job); err != nil {
+				// Accumulate into gobFlushErr so Close() surfaces any
+				// steady-state encode failures to the recorder's
+				// deferred cleanup log — previously these errors were
+				// only logged and Close() could still return nil even
+				// when one or more mocks had been dropped mid-session.
+				ys.gobMu.Lock()
+				ys.gobFlushErr = errors.Join(ys.gobFlushErr, err)
+				ys.gobMu.Unlock()
+				utils.LogError(ys.Logger, err, "async gob mock writer failed for one mock — continuing with the rest; check disk space on the mocks output directory, verify write permissions on the test-set path, and re-run with --debug to see the exact failing file path. To bypass gob while triaging, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
+					zap.String("testSetPath", job.testSetPath),
+					zap.String("mockName", job.mock.Name),
+					zap.String("mockOutputDir", ys.MockPath))
+			}
+		case <-ys.gobStop:
+			ys.drainAndClose()
+			return
+		}
+	}
+}
+
+// drainAndClose is the shutdown path for the writer goroutine. It
+// consumes every job still buffered in gobQueue and records any
+// encoding failures into gobFlushErr so Close() can surface them to
+// the caller — previously these errors were dropped on the floor and
+// Close would return nil even when the shutdown lost mocks.
+func (ys *MockYaml) drainAndClose() {
+	for {
+		select {
+		case job := <-ys.gobQueue:
+			if err := ys.gobWriteOne(job); err != nil {
+				ys.gobMu.Lock()
+				ys.gobFlushErr = errors.Join(ys.gobFlushErr, err)
+				ys.gobMu.Unlock()
+				utils.LogError(ys.Logger, err, "failed to persist a queued gob mock while shutting down; check disk space on the mocks output directory, verify write permissions on the test-set path, and retry. To keep recording while investigating, set KEPLOY_MOCK_FORMAT=yaml (or remove record.mockFormat from keploy.yml) to fall back to YAML",
+					zap.String("testSetPath", job.testSetPath),
+					zap.String("mockName", job.mock.Name),
+					zap.String("mockOutputDir", ys.MockPath))
+			}
+		default:
+			ys.gobFlushAndClose()
+			return
+		}
+	}
+}
+
+func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
+	want := filepath.Join(job.testSetPath, job.filename+".gob")
+	if ys.gobFilePath != want || ys.gobFile == nil {
+		if err := ys.gobReopenLocked(job.testSetPath, job.filename); err != nil {
+			return err
+		}
+	}
+	return ys.gobEnc.Encode(job.mock)
+}
+
+func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
+	if ys.gobFile != nil {
+		_ = ys.gobBufw.Flush()
+		_ = ys.gobFile.Close()
+		ys.gobFile = nil
+		ys.gobBufw = nil
+		ys.gobEnc = nil
 	}
 	if err := os.MkdirAll(mockPath, 0o777); err != nil {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
-
-	isGob := useGobMockFormat()
-
-	ext := ".gob"
-	if !isGob {
-		ext = "." + effFormat.FileExtension()
-	}
-	filePath := filepath.Join(mockPath, mockFileName+ext)
-
-	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	if !isGob {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_APPEND
-	}
-	f, err := os.OpenFile(filePath, flags, 0o666)
+	filePath := filepath.Join(mockPath, mockFileName+".gob")
+	// Truncate on every open. A gob stream's type table lives in the
+	// encoder; reusing a file across multiple encoder sessions (e.g.
+	// re-record cycles, or a switch-back to an earlier test-set's
+	// file) would embed a second type table mid-file and the reader's
+	// single gob.Decoder would fail with "duplicate type" / garbage.
+	// Each gob session therefore owns its file exclusively: the first
+	// write truncates any prior content and the file carries exactly
+	// one continuous gob stream until Close. Callers that need
+	// append-like semantics must use yaml (the default format).
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
-		return fmt.Errorf("open mock file: %w", err)
+		return fmt.Errorf("open gob mock file for overwrite: %w", err)
 	}
-	ys.asyncFile = f
-	ys.asyncBufw = bufio.NewWriterSize(f, 256*1024)
-
-	if isGob {
-		if _, werr := ys.asyncBufw.WriteString(gobMockMagic); werr != nil {
-			_ = f.Close()
-			ys.asyncFile = nil
-			ys.asyncBufw = nil
-			return fmt.Errorf("write gob magic: %w", werr)
-		}
-		ys.asyncGobEnc = gob.NewEncoder(ys.asyncBufw)
-	} else {
-		info, err := ys.asyncFile.Stat()
-		ys.asyncNeedsYamlSep = err == nil && info.Size() > 0
+	ys.gobFile = f
+	// 256 KB buffer holds dozens of mocks before a syscall; bufio
+	// autoflushes at fill. Shutdown drains explicitly.
+	ys.gobBufw = bufio.NewWriterSize(f, 256*1024)
+	if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
+		_ = f.Close()
+		ys.gobFile = nil
+		ys.gobBufw = nil
+		return fmt.Errorf("write gob magic: %w", werr)
 	}
-	ys.asyncFilePath = filePath
+	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
+	ys.gobFilePath = filePath
 	return nil
 }
 
-func (ys *MockYaml) asyncFlushAndClose() error {
-	ys.asyncMu.Lock()
-	defer ys.asyncMu.Unlock()
+// gobFlushAndClose finalizes the on-disk gob stream. Flush and Close
+// errors are both collected — the tail of the file (the bufio buffer)
+// and the file descriptor itself each can fail independently (e.g.
+// disk full between the last Encode and shutdown, or a permission
+// change on the output directory). gobFlushErr records the combined
+// result so Close() can surface it. Always returns state to nil so
+// the next reopen starts fresh.
+func (ys *MockYaml) gobFlushAndClose() error {
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
 	var flushErr, closeErr error
-	if ys.asyncBufw != nil {
-		flushErr = ys.asyncBufw.Flush()
+	if ys.gobBufw != nil {
+		flushErr = ys.gobBufw.Flush()
 	}
-	if ys.asyncFile != nil {
-		closeErr = ys.asyncFile.Close()
+	if ys.gobFile != nil {
+		closeErr = ys.gobFile.Close()
 	}
-	ys.asyncFile = nil
-	ys.asyncBufw = nil
-	ys.asyncGobEnc = nil
+	ys.gobFile = nil
+	ys.gobBufw = nil
+	ys.gobEnc = nil
 	combined := errors.Join(flushErr, closeErr)
-	ys.asyncFlushErr = errors.Join(ys.asyncFlushErr, combined)
-	return ys.asyncFlushErr
+	// Join with any encode/write errors that gobWriterLoop or
+	// drainAndClose already accumulated, rather than overwriting
+	// them. Otherwise a successful final flush after earlier drops
+	// would mask the real mid-session failures and Close() would
+	// return nil on a partially-lost session.
+	ys.gobFlushErr = errors.Join(ys.gobFlushErr, combined)
+	return ys.gobFlushErr
 }
 
-// FlushMocks pushes everything written so far from the in-memory file buffer
-// to physical disk. The recording consumer calls it to BATCH writes: it keeps
-// calling InsertMock (which only buffers) and then FlushMocks once its source
-// channel momentarily empties — so one disk flush covers a whole batch instead
-// of one flush per mock. Safe to call concurrently with InsertMock (asyncMu).
-func (ys *MockYaml) FlushMocks() error {
-	ys.asyncMu.Lock()
-	defer ys.asyncMu.Unlock()
-	if ys.asyncBufw != nil {
-		return ys.asyncBufw.Flush()
+// gobWriteSync is the sync fallback when the async queue is full.
+// Reuses the async writer's open file + encoder under the mutex so
+// the type-table in the running gob stream stays consistent — the
+// reader uses a single gob.Decoder for the whole file, and creating
+// a fresh encoder here would emit a second type-table that the
+// / reader cannot resume across.
+func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
+	ys.gobMu.Lock()
+	defer ys.gobMu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	return nil
+	want := filepath.Join(mockPath, mockFileName+".gob")
+	if ys.gobFilePath != want || ys.gobFile == nil {
+		if err := ys.gobReopenLocked(mockPath, mockFileName); err != nil {
+			return err
+		}
+	}
+	if err := ys.gobEnc.Encode(mock); err != nil {
+		return fmt.Errorf("failed to encode mock gob: %w", err)
+	}
+	// Flush immediately so the "sync" semantics hold — by the time
+	// this returns, bytes are in the OS buffer, not just the bufio.
+	return ys.gobBufw.Flush()
 }
 
-// Close does the final flush + close of the mocks file. With the synchronous
-// writer there is no background goroutine to wait on — asyncFlushAndClose
-// flushes the buffer, closes the file, and resets the file-state fields so a
-// subsequent recording session (re-record) reopens cleanly on the next
-// InsertMock. Idempotent: once the file is closed, asyncBufw/asyncFile are nil
-// and a second Close is a no-op flush.
+// Close drains the async gob writer and flushes the file. Safe to
+// call multiple times, and safe to call between record sessions —
+// the writer goroutine exits after flushing, and the next InsertMock
+// starts a fresh goroutine via its own inline init (see
+// insertMockGob). This is what makes re-record cycles (multiple
+// Recorder.Start on the same mockDB instance) work without dropping
+// mocks.
 func (ys *MockYaml) Close() error {
-	err := ys.asyncFlushAndClose()
-	if err != nil {
-		return fmt.Errorf("mock writer flush/close during shutdown: %w", err)
+	// Hold the lifecycle lock for the entire teardown. While we wait
+	// for the writer goroutine to drain, no concurrent InsertMock
+	// can start a new writer — ys.gobRunning stays true and
+	// ys.gobQueue / ys.gobStop / ys.gobDone cannot be reassigned out
+	// from under the draining goroutine. A second concurrent Close()
+	// blocks on this same lock and observes gobRunning=false after
+	// the first Close completes, so close(gobStop) is never called
+	// twice.
+	ys.gobLifecycleMu.Lock()
+	defer ys.gobLifecycleMu.Unlock()
+	if !ys.gobRunning {
+		return nil
+	}
+	// Signal the writer to exit. Guarded by gobStopClosed so a retry
+	// after a timeout cannot double-close the channel (which would
+	// panic). The writer's stopClosed+running combination is the
+	// "teardown in progress" state.
+	if !ys.gobStopClosed {
+		close(ys.gobStop)
+		ys.gobStopClosed = true
+	}
+	select {
+	case <-ys.gobDone:
+	case <-time.After(5 * time.Second):
+		// Leave gobRunning=true + gobStopClosed=true so a retry of
+		// Close enters this function, skips the already-closed stop,
+		// and just waits on gobDone again.
+		return fmt.Errorf("timed out waiting for gob writer to flush")
+	}
+	ys.gobRunning = false
+	ys.gobStopClosed = false
+	// Operator visibility: if the async queue filled up during the
+	// session and the sync fallback fired, report the count so disk
+	// stalls / undersized queues are caught at post-run review
+	// instead of requiring the user to notice slower rps.
+	// Swap the overflow counter to zero atomically so re-record cycles
+	// (next Start on the same MockYaml) don't count this session's
+	// overflows again on their own Close.
+	if overflows := ys.gobOverflows.Swap(0); overflows > 0 {
+		if ys.Logger != nil {
+			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
+				zap.Uint64("overflowedMocks", overflows),
+				zap.Int("queueCapacity", cap(ys.gobQueue)),
+				zap.String("hint", "queue capacity is the hard-coded channel size inlined in insertMockGob's writer-init block; raise it in code if disk/encoding is the bottleneck"))
+		}
+	}
+	// Surface the final flush/close error from the writer goroutine so
+	// the Recorder.Start deferred-cleanup log makes a disk-full / perm
+	// change at shutdown visible to the operator instead of silently
+	// dropping the tail of mocks.gob.
+	ys.gobMu.Lock()
+	flushErr := ys.gobFlushErr
+	ys.gobFlushErr = nil
+	ys.gobMu.Unlock()
+	if flushErr != nil {
+		return fmt.Errorf("gob writer flush/close during shutdown: %w", flushErr)
 	}
 	return nil
 }
