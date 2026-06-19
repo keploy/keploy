@@ -88,19 +88,28 @@ func TestNonHTTPNoise_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNonHTTPNoise_HTTPLeavesEnvelopeEmpty confirms HTTP keeps carrying its noise
-// inside HTTPReq.ReqBodyNoise and never populates the shared envelope field (so
-// the two paths can't double-count).
-func TestNonHTTPNoise_HTTPLeavesEnvelopeEmpty(t *testing.T) {
+// TestNonHTTPNoise_HTTPUsesSameEnvelope confirms HTTP now stores schema-noise on
+// the SAME kind-agnostic MockSpec.ReqBodyNoise as every other parser, and that it
+// rides through the shared top-level envelope on encode and round-trips back on
+// decode — i.e. the storage is uniform across protocols.
+func TestNonHTTPNoise_HTTPUsesSameEnvelope(t *testing.T) {
 	mock := noiseTestMock(`{"a":"b"}`)
-	mock.Spec.HTTPReq.ReqBodyNoise = map[string][]string{"body.a": {}}
+	mock.Spec.ReqBodyNoise = map[string][]string{"body.a": {}}
 
 	doc, err := EncodeMock(mock, zap.NewNop())
 	if err != nil {
 		t.Fatalf("EncodeMock: %v", err)
 	}
-	if len(doc.ReqBodyNoise) != 0 {
-		t.Fatalf("HTTP must not use the kind-agnostic envelope field, got %v", doc.ReqBodyNoise)
+	if _, ok := doc.ReqBodyNoise["body.a"]; !ok {
+		t.Fatalf("HTTP noise must ride the shared envelope, got %v", doc.ReqBodyNoise)
+	}
+
+	decoded, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("DecodeMocks: %v", err)
+	}
+	if _, ok := decoded[0].Spec.ReqBodyNoise["body.a"]; !ok {
+		t.Fatalf("HTTP noise lost on round-trip: %v", decoded[0].Spec.ReqBodyNoise)
 	}
 }
 

@@ -2078,13 +2078,9 @@ func (m *MockManager) rebuildHitIndex(slices ...[]*models.Mock) {
 // GetConsumedMocks.
 // reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
 // request (nil when none was detected). Used to carry schema-detected noise out
-// on MockState so UpdateMocks can persist it. HTTP mocks store it on HTTPReq;
-// non-HTTP integrations (Pulsar, etc.) store it on the kind-agnostic
-// MockSpec.ReqBodyNoise field.
+// on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
+// alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
 func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
-	if spec.HTTPReq != nil && len(spec.HTTPReq.ReqBodyNoise) > 0 {
-		return spec.HTTPReq.ReqBodyNoise
-	}
 	return spec.ReqBodyNoise
 }
 

@@ -964,14 +964,13 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 
-	// Attach any request-body noise detected this match onto a FRESH map on
-	// the copy (never the shared pooled mock's map — see the concurrency note
-	// above). flagMockAsUsed reads updatedMock.Spec.HTTPReq.ReqBodyNoise to
-	// carry it out on the MockState; mockdb.UpdateMocks persists it.
-	if len(detectedNoise) > 0 && updatedMock.Spec.HTTPReq != nil {
-		reqCopy := *updatedMock.Spec.HTTPReq
-		reqCopy.ReqBodyNoise = mergeReqBodyNoise(reqCopy.ReqBodyNoise, detectedNoise)
-		updatedMock.Spec.HTTPReq = &reqCopy
+	// Attach any request-body noise detected this match onto a FRESH map on the
+	// copy (never the shared pooled mock's map — see the concurrency note above).
+	// flagMockAsUsed reads updatedMock.Spec.ReqBodyNoise to carry it out on the
+	// MockState; mockdb.UpdateMocks persists it. Stored on the kind-agnostic
+	// MockSpec.ReqBodyNoise, same as every other parser.
+	if len(detectedNoise) > 0 {
+		updatedMock.Spec.ReqBodyNoise = mergeReqBodyNoise(updatedMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
@@ -993,15 +992,13 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
 	// delete-key mock MUST keep the original (unmutated) TestModeInfo —
 	// we pass a copy that retains it but carries the detected noise on a
-	// fresh HTTPReq, so flagMockAsUsed reports the noise on the consumed
-	// per-test mock (it would otherwise be lost: the original matchedMock
-	// has no noise, and updatedMock's mutated TestModeInfo wouldn't match
-	// the tree node).
+	// fresh MockSpec.ReqBodyNoise map, so flagMockAsUsed reports the noise on
+	// the consumed per-test mock (it would otherwise be lost: the original
+	// matchedMock has no noise, and updatedMock's mutated TestModeInfo wouldn't
+	// match the tree node).
 	deleteMock := *matchedMock
-	if len(detectedNoise) > 0 && deleteMock.Spec.HTTPReq != nil {
-		reqCopy := *deleteMock.Spec.HTTPReq
-		reqCopy.ReqBodyNoise = mergeReqBodyNoise(reqCopy.ReqBodyNoise, detectedNoise)
-		deleteMock.Spec.HTTPReq = &reqCopy
+	if len(detectedNoise) > 0 {
+		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
@@ -1275,7 +1272,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
 	// matcher itself ignores (learned req_body_noise + user body noise).
 	if len(liveBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(liveBody) {
-		ignore := mergeNoiseMaps(stripBodyPrefix(mockReq.ReqBodyNoise), userBodyNoise)
+		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
 		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(liveBody), ignore)...)
 	}
 

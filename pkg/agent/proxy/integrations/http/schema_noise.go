@@ -9,10 +9,10 @@ import (
 
 // httpNoiseAdapter is the HTTP implementation of schemanoise.Adapter, making
 // HTTP a first-class client of the shared schema-noise engine (the same engine
-// Pulsar and any future parser use). HTTP keeps its noise on HTTPReq.ReqBodyNoise
-// (not the kind-agnostic MockSpec.ReqBodyNoise), and supplies a Diff that handles
-// BOTH JSON and form-urlencoded bodies — the form path is HTTP's own concern, so
-// it lives here in the adapter rather than leaking into the shared engine.
+// Pulsar and any future parser use). Like every parser, HTTP stores its learned
+// noise on the kind-agnostic MockSpec.ReqBodyNoise. It supplies a Diff that
+// handles BOTH JSON and form-urlencoded bodies — the form path is HTTP's own
+// concern, so it lives here in the adapter rather than leaking into the engine.
 //
 // HTTP does NOT use Engine.Learn: its learn carry-out (updateMock) clones the
 // matched mock and routes the noise through DeleteFilteredMock/UpdateUnFilteredMock
@@ -28,21 +28,22 @@ func (httpNoiseAdapter) RecordedBody(m *models.Mock) ([]byte, bool) {
 	return []byte(m.Spec.HTTPReq.Body), true
 }
 
-// StoredNoise returns the noise learned on this HTTP mock (HTTPReq.ReqBodyNoise).
+// StoredNoise returns the noise learned on this mock (kind-agnostic
+// MockSpec.ReqBodyNoise).
 func (httpNoiseAdapter) StoredNoise(m *models.Mock) map[string][]string {
-	if m == nil || m.Spec.HTTPReq == nil {
+	if m == nil {
 		return nil
 	}
-	return m.Spec.HTTPReq.ReqBodyNoise
+	return m.Spec.ReqBodyNoise
 }
 
-// SetLearnedNoise writes merged noise back onto HTTPReq.ReqBodyNoise. Unused on
+// SetLearnedNoise writes merged noise back onto MockSpec.ReqBodyNoise. Unused on
 // the HTTP match path (see updateMock's copy-on-learn); present for completeness.
 func (httpNoiseAdapter) SetLearnedNoise(m *models.Mock, merged map[string][]string) {
-	if m == nil || m.Spec.HTTPReq == nil {
+	if m == nil {
 		return
 	}
-	m.Spec.HTTPReq.ReqBodyNoise = merged
+	m.Spec.ReqBodyNoise = merged
 }
 
 // RecordedValueIsNoise excludes recorded values the enterprise obfuscator already

@@ -17,12 +17,14 @@ func httpMockWithReq(name, method, rawURL, body string, header map[string]string
 		Name: name,
 		Kind: models.Kind(models.HTTP),
 		Spec: models.MockSpec{
+			// Schema-noise lives on the kind-agnostic MockSpec.ReqBodyNoise for
+			// every parser, HTTP included.
+			ReqBodyNoise: reqBodyNoise,
 			HTTPReq: &models.HTTPReq{
-				Method:       models.Method(method),
-				URL:          rawURL,
-				Body:         body,
-				Header:       header,
-				ReqBodyNoise: reqBodyNoise,
+				Method: models.Method(method),
+				URL:    rawURL,
+				Body:   body,
+				Header: header,
 			},
 		},
 	}

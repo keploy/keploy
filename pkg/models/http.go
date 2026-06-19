@@ -28,13 +28,10 @@ type HTTPReq struct {
 	Binary     string            `json:"binary" yaml:"binary,omitempty"`
 	Form       []FormData        `json:"form" yaml:"form,omitempty"`
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
-	// ReqBodyNoise holds field-path-based noise detected on the request body
-	// during schema-based auto-replay matching (config.Test.SchemaNoiseDetection).
-	// Same shape as TestCase.Noise: fieldpath ("body.user.id") -> regex list,
-	// where an empty list means "ignore this whole field". Distinct from
-	// Mock.Noise ([]string value-regexes written by the enterprise obfuscator):
-	// this records which request-body fields drift between recording and replay.
-	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty" yaml:"req_body_noise,omitempty"`
+	// NOTE: schema-noise (req_body_noise) is NOT stored here. It lives on the
+	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
+	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
+	// integrations/schemanoise).
 }
 
 type HTTPSchema struct {
@@ -99,7 +96,6 @@ type httpReqBSON struct {
 	Binary       string              `bson:"binary"`
 	Form         []FormData          `bson:"form"`
 	Timestamp    string              `bson:"timestamp"`
-	ReqBodyNoise map[string][]string `bson:"reqbodynoise,omitempty"`
 }
 
 type httpReqBSONReader struct {
@@ -114,7 +110,6 @@ type httpReqBSONReader struct {
 	Binary       string              `bson:"binary"`
 	Form         []FormData          `bson:"form"`
 	Timestamp    bson.RawValue       `bson:"timestamp"`
-	ReqBodyNoise map[string][]string `bson:"reqbodynoise,omitempty"`
 }
 
 // MarshalBSON writes HTTPReq with the Timestamp field serialised as an
@@ -133,7 +128,6 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 		Binary:       h.Binary,
 		Form:         h.Form,
 		Timestamp:    FormatMockTimestamp(h.Timestamp),
-		ReqBodyNoise: h.ReqBodyNoise,
 	})
 }
 
@@ -163,7 +157,6 @@ func (h *HTTPReq) UnmarshalBSON(data []byte) error {
 		Binary:       raw.Binary,
 		Form:         raw.Form,
 		Timestamp:    ts,
-		ReqBodyNoise: raw.ReqBodyNoise,
 	}
 	return nil
 }
