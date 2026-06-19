@@ -457,7 +457,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// unstarted), and the per-test-set waitForAppReady skip below
 	// stays armed only when the one-shot spawn actually fired.
 	// Single computed predicate so all three gates move together.
-	effectiveKeepAlive := r.config.Test.KeepAppAlive && r.instrument && cmdType != utils.Empty
+	//
+	// Docker-compose replay reuses the stack across test-sets BY DEFAULT (when
+	// mocking is on): otherwise keploy tears down + recreates the whole
+	// agent+app+network+volumes for every test-set, multiplying docker-daemon
+	// create/destroy churn N-fold and re-paying a per-test-set agent-readiness
+	// window — under loaded CI that churn is what blows past the readiness
+	// timeout. The agent is reused safely: each test-set's mocks are re-scoped
+	// in-band per set (MockOutgoing→ResetForReplaySession, StoreMocks,
+	// SendMockFilterParamsToAgent), the same contract the runner already relies
+	// on. Gated on Mocking so a replay against a real (unmocked) dependency —
+	// where surviving app state across the boundary could change expected
+	// before-state — still restarts per test-set. An explicit --keep-app-alive
+	// keeps working unchanged (OR can only widen).
+	composeReuse := cmdType == utils.DockerCompose && r.config.Test.Mocking
+	effectiveKeepAlive := (r.config.Test.KeepAppAlive || composeReuse) && r.instrument && cmdType != utils.Empty
 	if effectiveKeepAlive {
 		g.Go(func() error {
 			defer utils.Recover(r.logger)
@@ -1142,19 +1156,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(runTestSetCtx, 120*time.Second)
-		defer cancel()
+		// When the stack is reused across test-sets (serveTest), the agent is
+		// started once and stays healthy — only the first test-set needs to wait
+		// for readiness. Re-paying a 120s window per test-set is dead time where a
+		// transient daemon stall can land. Mirrors the waitForAppReady gating.
+		if !serveTest || r.isFirstTestSet {
+			agentCtx, cancel := context.WithTimeout(runTestSetCtx, 120*time.Second)
+			defer cancel()
 
-		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
+			agentReadyCh := make(chan bool, 1)
+			go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 
-		select {
-		case <-runTestSetCtx.Done():
-			// Parent context cancelled (user pressed Ctrl+C)
-			return models.TestSetStatusUserAbort, runTestSetCtx.Err()
-		case <-agentCtx.Done():
-			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
-		case <-agentReadyCh:
+			select {
+			case <-runTestSetCtx.Done():
+				// Parent context cancelled (user pressed Ctrl+C)
+				return models.TestSetStatusUserAbort, runTestSetCtx.Err()
+			case <-agentCtx.Done():
+				// Tear down the compose stack we already created before returning,
+				// so a retry's `compose up` doesn't hit "container name already in
+				// use" — the readiness timeout otherwise leaves the dependency
+				// containers + project network behind. Fresh ctx since
+				// runTestSetCtx is being torn down; composeDown bounds itself.
+				if downErr := r.instrumentation.ComposeDownOnSetupFailure(context.Background()); downErr != nil {
+					r.logger.Debug("composeDown after agent-ready timeout failed", zap.Error(downErr))
+				}
+				return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
+			case <-agentReadyCh:
+			}
 		}
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
