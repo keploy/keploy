@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
@@ -131,7 +132,7 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
@@ -189,7 +190,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		// Matching process
-		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise)
+		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise)
 		if err != nil {
 			return false, nil, nil, err
 		}
@@ -293,13 +294,41 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	return mockBodyType == reqBodyType
 }
 
-func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
+func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string) bool {
 	parsedURL, err := url.Parse(mockURL)
 	if err != nil {
 		return false
 	}
 	h.Logger.Debug("parsed URL", zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
-	return parsedURL.Path == reqPath
+	mockPath := parsedURL.Path
+	if mockPath == reqPath {
+		return true
+	}
+	// URL-path noise (test.globalNoise.url): the only request field keploy
+	// matched by EXACT value with no noise hook — so a non-deterministic path
+	// segment (an id / uuid / timestamp / object key that changes every run,
+	// e.g. S3 PutObject receipts/<user>/<uuid>.txt) rejected the recorded mock
+	// and produced a "no matching mock -> 502" on replay. Bring the URL path in
+	// line with the key+noise model used for headers/body: replace every
+	// configured noise pattern with a placeholder in BOTH the mock path and the
+	// live request path, then compare. A variable segment thus matches while the
+	// rest of the path stays strict. No url noise configured => exact match as
+	// before (fully backward compatible).
+	if len(urlNoise) == 0 {
+		return false
+	}
+	const ph = "{{keploy.urlnoise}}"
+	np, rp := mockPath, reqPath
+	for _, pat := range urlNoise {
+		re, cerr := regexp.Compile(pat)
+		if cerr != nil {
+			h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
+			continue
+		}
+		np = re.ReplaceAllString(np, ph)
+		rp = re.ReplaceAllString(rp, ph)
+	}
+	return np == rp
 }
 
 // relaxed header key matcher (presence-only)
@@ -390,7 +419,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 }
 
 // SchemaMatch match the schema of the request with the mocks
-func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string) ([]*models.Mock, error) {
+func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range unfilteredMocks {
@@ -424,7 +453,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 
 		// URL path match
-		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path) {
+		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise) {
 			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
 			continue
 		}

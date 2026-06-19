@@ -190,10 +190,29 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
+			// User URL-path noise from test.globalNoise.url. The URL path is the
+			// one request field matched by EXACT value with no noise hook, so a
+			// non-deterministic path segment (id/uuid/timestamp/object key) made
+			// the recorded mock unmatchable and produced a "no matching mock -> 502"
+			// on replay. Each key here is a regex that wildcards the matching
+			// segment in both the mock and request paths (see MatchURLPath). The
+			// value slice is unused — like requestbody, matching is by pattern, not
+			// by a value-regex — so an entry is presence-only.
+			var urlNoise []string
+			if opts.NoiseConfig != nil {
+				if un, ok := opts.NoiseConfig["url"]; ok {
+					urlNoise = make([]string, 0, len(un))
+					for k := range un {
+						urlNoise = append(urlNoise, k)
+					}
+				}
+			}
+
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
+			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
+			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
