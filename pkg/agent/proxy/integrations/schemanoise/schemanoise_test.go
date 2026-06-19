@@ -21,7 +21,7 @@ type fakeAdapter struct {
 	isNoiseFn func(*models.Mock) func(string) bool
 }
 
-func (f *fakeAdapter) RecordedBody(*models.Mock) ([]byte, bool) { return f.body, f.hasBody }
+func (f *fakeAdapter) RecordedBody(*models.Mock) ([]byte, bool)     { return f.body, f.hasBody }
 func (f *fakeAdapter) StoredNoise(*models.Mock) map[string][]string { return f.stored }
 func (f *fakeAdapter) SetLearnedNoise(_ *models.Mock, merged map[string][]string) {
 	f.written = merged
@@ -35,12 +35,12 @@ func (f *fakeAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
 
 func TestDetectJSONDrift(t *testing.T) {
 	tests := []struct {
-		name         string
-		recorded     string
-		live         string
-		known        map[string][]string
-		wantDrift    map[string][]string
-		wantCompare  bool
+		name        string
+		recorded    string
+		live        string
+		known       map[string][]string
+		wantDrift   map[string][]string
+		wantCompare bool
 	}{
 		{
 			name:        "value drift on one field",
@@ -133,8 +133,8 @@ type binaryAdapter struct {
 	written map[string][]string
 }
 
-func (b *binaryAdapter) RecordedBody(*models.Mock) ([]byte, bool)         { return b.body, true }
-func (b *binaryAdapter) StoredNoise(*models.Mock) map[string][]string     { return b.stored }
+func (b *binaryAdapter) RecordedBody(*models.Mock) ([]byte, bool)              { return b.body, true }
+func (b *binaryAdapter) StoredNoise(*models.Mock) map[string][]string          { return b.stored }
 func (b *binaryAdapter) SetLearnedNoise(_ *models.Mock, m map[string][]string) { b.written = m }
 func (b *binaryAdapter) RecordedValueIsNoise(*models.Mock) func(string) bool   { return nil }
 
@@ -260,5 +260,47 @@ func TestEngineStrictAllows(t *testing.T) {
 	}
 	if New(binAdapter, false, true).StrictAllows(mock, []byte("bin-v2"), nil) {
 		t.Fatalf("differing non-JSON bodies must be rejected under strict")
+	}
+}
+
+// StrictReject must name the offending non-noise field(s) so the rejection can
+// be logged with the drifted path (e.g. "body.content") — callers and CI rely
+// on that detail, not just the boolean verdict.
+func TestEngineStrictReject(t *testing.T) {
+	mock := &models.Mock{}
+
+	// Allowed => no drift reported.
+	allowAdapter := &fakeAdapter{
+		body:    []byte(`{"a":1,"updatedAt":1}`),
+		hasBody: true,
+		stored:  map[string][]string{"body.updatedAt": {}},
+	}
+	if allowed, drift := New(allowAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"updatedAt":2}`), nil); !allowed || drift != nil {
+		t.Fatalf("allowed mock must report no drift; got allowed=%v drift=%v", allowed, drift)
+	}
+
+	// Rejected => the non-noise field that drifted is reported, prefixed.
+	rejAdapter := &fakeAdapter{
+		body:    []byte(`{"a":1,"updatedAt":1}`),
+		hasBody: true,
+		stored:  map[string][]string{"body.updatedAt": {}},
+	}
+	allowed, drift := New(rejAdapter, false, true).StrictReject(mock, []byte(`{"a":99,"updatedAt":2}`), nil)
+	if allowed {
+		t.Fatalf("non-noise drift must be rejected")
+	}
+	if _, ok := drift["body.a"]; !ok {
+		t.Fatalf("rejection drift must name body.a; got %v", drift)
+	}
+
+	// Opaque (non-JSON) byte mismatch => rejected with the "body" sentinel.
+	binAdapter := &fakeAdapter{
+		body:    []byte("bin-v1"),
+		hasBody: true,
+		stored:  map[string][]string{"body.x": {}},
+	}
+	allowed, drift = New(binAdapter, false, true).StrictReject(mock, []byte("bin-v2"), nil)
+	if allowed || len(drift) == 0 {
+		t.Fatalf("opaque byte mismatch must be rejected with non-empty drift; got allowed=%v drift=%v", allowed, drift)
 	}
 }

@@ -173,24 +173,41 @@ func (e *Engine) Learn(m *models.Mock, drift map[string][]string) int {
 // learned set drifted (an unmarked change), or when the bodies aren't JSON-
 // comparable yet differ byte-for-byte (a non-learnable mismatch).
 func (e *Engine) StrictAllows(m *models.Mock, liveBody []byte, userNoise map[string][]string) bool {
+	allowed, _ := e.StrictReject(m, liveBody, userNoise)
+	return allowed
+}
+
+// StrictReject is the diagnostic-bearing form of StrictAllows: alongside the
+// allow/reject verdict it returns the "body."-prefixed non-noise field paths
+// that caused a rejection, so callers can log WHY a candidate was dropped
+// (e.g. "body.content"). allowed == true always comes with drift == nil. For an
+// opaque (non-comparable) body that differs byte-for-byte, drift carries the
+// single sentinel key "body" since there is no field structure to name.
+func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
 	if e == nil {
-		return true
+		return true, nil
 	}
 	stored := e.adapter.StoredNoise(m)
 	if len(stored) == 0 {
-		return true
+		return true, nil
 	}
 	recorded, ok := e.adapter.RecordedBody(m)
 	if !ok {
-		return true
+		return true, nil
 	}
-	drift, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
+	d, comparable := e.adapter.Diff(m, recorded, liveBody, e.KnownNoise(m, userNoise), e.adapter.RecordedValueIsNoise(m))
 	if !comparable {
 		// No field structure to diff — fall back to byte equality so unequal
 		// opaque bodies are a real mismatch rather than a silent pass.
-		return string(recorded) == string(liveBody)
+		if string(recorded) == string(liveBody) {
+			return true, nil
+		}
+		return false, map[string][]string{"body": nil}
 	}
-	return len(drift) == 0
+	if len(d) == 0 {
+		return true, nil
+	}
+	return false, d
 }
 
 // DetectJSONDrift compares a recorded request body against the live one and

@@ -85,31 +85,31 @@ type HTTPResp struct {
 // before this change continue to decode.
 
 type httpReqBSON struct {
-	Method       Method              `bson:"method"`
-	ProtoMajor   int                 `bson:"protomajor"`
-	ProtoMinor   int                 `bson:"protominor"`
-	URL          string              `bson:"url"`
-	URLParams    map[string]string   `bson:"urlparams"`
-	Header       map[string]string   `bson:"header"`
-	Body         string              `bson:"body"`
-	BodyRef      BodyRef             `bson:"bodyref"`
-	Binary       string              `bson:"binary"`
-	Form         []FormData          `bson:"form"`
-	Timestamp    string              `bson:"timestamp"`
+	Method     Method            `bson:"method"`
+	ProtoMajor int               `bson:"protomajor"`
+	ProtoMinor int               `bson:"protominor"`
+	URL        string            `bson:"url"`
+	URLParams  map[string]string `bson:"urlparams"`
+	Header     map[string]string `bson:"header"`
+	Body       string            `bson:"body"`
+	BodyRef    BodyRef           `bson:"bodyref"`
+	Binary     string            `bson:"binary"`
+	Form       []FormData        `bson:"form"`
+	Timestamp  string            `bson:"timestamp"`
 }
 
 type httpReqBSONReader struct {
-	Method       Method              `bson:"method"`
-	ProtoMajor   int                 `bson:"protomajor"`
-	ProtoMinor   int                 `bson:"protominor"`
-	URL          string              `bson:"url"`
-	URLParams    map[string]string   `bson:"urlparams"`
-	Header       map[string]string   `bson:"header"`
-	Body         string              `bson:"body"`
-	BodyRef      BodyRef             `bson:"bodyref"`
-	Binary       string              `bson:"binary"`
-	Form         []FormData          `bson:"form"`
-	Timestamp    bson.RawValue       `bson:"timestamp"`
+	Method     Method            `bson:"method"`
+	ProtoMajor int               `bson:"protomajor"`
+	ProtoMinor int               `bson:"protominor"`
+	URL        string            `bson:"url"`
+	URLParams  map[string]string `bson:"urlparams"`
+	Header     map[string]string `bson:"header"`
+	Body       string            `bson:"body"`
+	BodyRef    BodyRef           `bson:"bodyref"`
+	Binary     string            `bson:"binary"`
+	Form       []FormData        `bson:"form"`
+	Timestamp  bson.RawValue     `bson:"timestamp"`
 }
 
 // MarshalBSON writes HTTPReq with the Timestamp field serialised as an
@@ -117,17 +117,17 @@ type httpReqBSONReader struct {
 // it.
 func (h HTTPReq) MarshalBSON() ([]byte, error) {
 	return bson.Marshal(httpReqBSON{
-		Method:       h.Method,
-		ProtoMajor:   h.ProtoMajor,
-		ProtoMinor:   h.ProtoMinor,
-		URL:          h.URL,
-		URLParams:    h.URLParams,
-		Header:       h.Header,
-		Body:         h.Body,
-		BodyRef:      h.BodyRef,
-		Binary:       h.Binary,
-		Form:         h.Form,
-		Timestamp:    FormatMockTimestamp(h.Timestamp),
+		Method:     h.Method,
+		ProtoMajor: h.ProtoMajor,
+		ProtoMinor: h.ProtoMinor,
+		URL:        h.URL,
+		URLParams:  h.URLParams,
+		Header:     h.Header,
+		Body:       h.Body,
+		BodyRef:    h.BodyRef,
+		Binary:     h.Binary,
+		Form:       h.Form,
+		Timestamp:  FormatMockTimestamp(h.Timestamp),
 	})
 }
 
@@ -146,17 +146,17 @@ func (h *HTTPReq) UnmarshalBSON(data []byte) error {
 	}
 
 	*h = HTTPReq{
-		Method:       raw.Method,
-		ProtoMajor:   raw.ProtoMajor,
-		ProtoMinor:   raw.ProtoMinor,
-		URL:          raw.URL,
-		URLParams:    raw.URLParams,
-		Header:       raw.Header,
-		Body:         raw.Body,
-		BodyRef:      raw.BodyRef,
-		Binary:       raw.Binary,
-		Form:         raw.Form,
-		Timestamp:    ts,
+		Method:     raw.Method,
+		ProtoMajor: raw.ProtoMajor,
+		ProtoMinor: raw.ProtoMinor,
+		URL:        raw.URL,
+		URLParams:  raw.URLParams,
+		Header:     raw.Header,
+		Body:       raw.Body,
+		BodyRef:    raw.BodyRef,
+		Binary:     raw.Binary,
+		Form:       raw.Form,
+		Timestamp:  ts,
 	}
 	return nil
 }

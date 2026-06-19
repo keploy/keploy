@@ -1149,19 +1149,21 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 // learned noise are kept unchanged (lenient schema/key behaviour), so this
 // never tightens matching for mocks the auto-replay never learned noise for.
 //
-// It delegates to schemanoise.Engine.StrictAllows: a candidate with no learned
+// It delegates to schemanoise.Engine.StrictReject: a candidate with no learned
 // noise is always kept (lenient), and a candidate WITH learned noise is dropped
 // when a field outside that learned set drifted. The JSON/form comparison and
-// known-noise merge are owned by the shared engine + httpNoiseAdapter.
+// known-noise merge are owned by the shared engine + httpNoiseAdapter; the
+// returned drift names the offending field path(s) for the rejection log.
 func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
 	var kept []*models.Mock
 	for _, m := range candidates {
-		if eng.StrictAllows(m, reqBody, userBodyNoise) {
+		allowed, drift := eng.StrictReject(m, reqBody, userBodyNoise)
+		if allowed {
 			kept = append(kept, m)
 			continue
 		}
 		h.Logger.Debug("strict req-body match rejected mock: non-noise field drift",
-			zap.String("mock name", m.Name))
+			zap.String("mock name", m.Name), zap.Any("drift", drift))
 	}
 	return kept
 }
