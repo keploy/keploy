@@ -777,8 +777,14 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
 	defer func() {
-		err := runAppErrGrp.Wait()
-		if err != nil {
+		// Bound the wait. app.run's teardown (cmdCancel grace + cmd.WaitDelay +
+		// waitTillExit + composeDown) runs on internal timers that are not bounded
+		// by ctx, so an unbounded Wait() here can outlive cancellation and blow
+		// past the caller's per-test-set drain budget — which false-FAILs an
+		// otherwise-passing run on "teardown drain timed out ... a goroutine is
+		// ignoring context cancellation". Bound it under that budget; any teardown
+		// still in flight finishes in the background and is reaped at process exit.
+		if err := utils.DrainErrGroup(a.logger, "agent-run-app", runAppErrGrp, 20*time.Second); err != nil {
 			utils.LogError(a.logger, err, "failed to stop the app")
 		}
 	}()

@@ -305,7 +305,7 @@ func (a *App) RecentLogs(ctx context.Context) string {
 	return a.recentAppLogs(ctx)
 }
 
-func (a *App) waitTillExit() {
+func (a *App) waitTillExit(ctx context.Context) {
 	timeout := time.NewTimer(30 * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
@@ -314,9 +314,14 @@ func (a *App) waitTillExit() {
 	containerID := a.container
 	for {
 		select {
+		// Honor cancellation so this (up to 30s) wait cannot outlive a teardown
+		// the caller is draining — otherwise it pushes the app-run goroutine past
+		// the caller's drain budget and false-FAILs an otherwise-passing run.
+		case <-ctx.Done():
+			return
 		case <-logTicker.C:
 			// Inspect the container status
-			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			containerJSON, err := a.docker.ContainerInspect(ctx, containerID)
 			if err != nil {
 				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
 				return
@@ -645,7 +650,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	if utils.IsDockerCmd(a.kind) {
-		a.waitTillExit()
+		a.waitTillExit(ctx)
 	}
 
 	select {
