@@ -300,23 +300,30 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		// Notify the agent that we are shutting down gracefully. It covers early exits before RunTestSet runs
-		// and shutdown paths where the per‑test‑set defer doesn’t execute (or never starts)
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+		// and shutdown paths where the per‑test‑set defer doesn’t execute (or never starts).
+		// Bound it: context.Background() with no deadline meant an up-but-unresponsive
+		// agent (common while it is still booting under CPU contention) could block this
+		// POST — and therefore the whole teardown, which is the path SIGINT takes — forever.
+		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		notifyCancel()
 
 		if hookCancel != nil {
 			hookCancel()
 		}
 		cancel()
-		err := g.Wait()
-		if err != nil {
+		// Bounded drain: a setup/run goroutine that wedges under contention and does
+		// not observe cancel() must not be able to block this teardown forever, or
+		// SIGINT (which runs through this same defer) is swallowed and the process
+		// hangs until an external SIGKILL. See utils.DrainErrGroup.
+		if err := utils.DrainErrGroup(r.logger, "replay", g, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 
 		setupCtxCancel()
-		err = setupErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "replay-setup", setupErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 	}()
@@ -925,13 +932,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	defer func() {
 		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
 		if r.instrument && !serveTest {
-			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
 				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 			}
+			notifyCancel()
 		}
 		runTestSetCtxCancel()
-		err := runTestSetErrGrp.Wait()
-		if err != nil {
+		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
+		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 		close(exitLoopChan)
