@@ -2678,6 +2678,37 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
+// AgentReadyTimeout returns how long the CLI waits for the agent to report
+// ready (via AgentHealthTicker) before giving up. Default 120s; override with
+// KEPLOY_AGENT_READY_TIMEOUT, which accepts either a Go duration ("180s", "3m")
+// or a bare integer number of seconds. Invalid/zero/negative values fall back
+// to the default (with a warning).
+//
+// This bounds only the FAILSAFE ceiling that gates every agent-readiness wait
+// (record, replay, runner, and non-docker-compose setup): AgentHealthTicker
+// polls /agent/ready every second and unblocks the instant the agent is up, so
+// raising this never slows a healthy run — it only grants a slow/heavily-loaded
+// host (e.g. CI arming eBPF for many concurrent pipelines on one box) more
+// grace before the "keploy-agent did not become ready in time" error.
+func AgentReadyTimeout(logger *zap.Logger) time.Duration {
+	const def = 120 * time.Second
+	v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT"))
+	if v == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	if logger != nil {
+		logger.Warn("ignoring invalid KEPLOY_AGENT_READY_TIMEOUT (want a Go duration like \"180s\" or an integer number of seconds)",
+			zap.String("value", v), zap.Duration("using", def))
+	}
+	return def
+}
+
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.

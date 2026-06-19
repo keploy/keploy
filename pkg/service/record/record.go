@@ -297,7 +297,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		agentReadyTimeout := pkg.AgentReadyTimeout(r.logger)
+		agentCtx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -308,7 +309,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
+			return fmt.Errorf("keploy-agent did not become ready in time (waited %s; if this host is heavily loaded, raise KEPLOY_AGENT_READY_TIMEOUT)", agentReadyTimeout)
 		case <-agentReadyCh:
 		}
 	}

@@ -1142,7 +1142,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(runTestSetCtx, 120*time.Second)
+		agentReadyTimeout := pkg.AgentReadyTimeout(r.logger)
+		agentCtx, cancel := context.WithTimeout(runTestSetCtx, agentReadyTimeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1153,7 +1154,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Parent context cancelled (user pressed Ctrl+C)
 			return models.TestSetStatusUserAbort, runTestSetCtx.Err()
 		case <-agentCtx.Done():
-			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
+			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time (waited %s; if this host is heavily loaded, raise KEPLOY_AGENT_READY_TIMEOUT)", agentReadyTimeout)
 		case <-agentReadyCh:
 		}
 
