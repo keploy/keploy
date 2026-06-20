@@ -305,6 +305,23 @@ func (a *App) RecentLogs(ctx context.Context) string {
 	return a.recentAppLogs(ctx)
 }
 
+// containerStopped reports whether the named container has exited/dead, using a
+// SHORT-deadline inspect. Teardown runs under the record/replay
+// utils.DrainErrGroup 30s budget, and under a contended docker daemon a single
+// ContainerInspect on context.Background() could block long enough to overrun
+// that budget — tripping a spurious "teardown drain timed out" error that fails
+// an otherwise-green run. Bounding the inspect keeps every teardown poll fast
+// regardless of daemon load.
+func (a *App) containerStopped(name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	info, err := a.docker.ContainerInspect(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	return info.State.Status == "exited" || info.State.Status == "dead", nil
+}
+
 func (a *App) waitTillExit() {
 	timeout := time.NewTimer(30 * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
@@ -315,16 +332,13 @@ func (a *App) waitTillExit() {
 	for {
 		select {
 		case <-logTicker.C:
-			// Inspect the container status
-			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			// Inspect the container status (short-deadline; see containerStopped).
+			stopped, err := a.containerStopped(containerID)
 			if err != nil {
 				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
 				return
 			}
-
-			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
-			// Check if container is stopped or dead
-			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
+			if stopped {
 				return
 			}
 		case <-timeout.C:
@@ -673,8 +687,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 						}
 						// App container has exited -> its coverage flush is done; no
 						// need to keep waiting on the slower sibling services.
-						if info, err := a.docker.ContainerInspect(context.Background(), a.container); err == nil &&
-							(info.State.Status == "exited" || info.State.Status == "dead") {
+						if stopped, err := a.containerStopped(a.container); err == nil && stopped {
 							a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
 							break
 						}
@@ -695,8 +708,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 					// Check the actual container status via Docker API
 					// This handles cases where 'docker run' is dead but container is alive
-					info, err := a.docker.ContainerInspect(context.Background(), a.container)
-					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
+					if stopped, err := a.containerStopped(a.container); err == nil && stopped {
 						a.logger.Debug("container stopped gracefully")
 						return nil
 					}
@@ -706,8 +718,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// We tell the Docker Daemon explicitly to kill this container.
 				a.logger.Debug("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
 
-				// "SIGKILL" string is standard for Docker API to force kill
-				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
+				// "SIGKILL" string is standard for Docker API to force kill. Bound it
+				// so a contended daemon can't block teardown past the drain budget.
+				killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				err = a.docker.ContainerKill(killCtx, a.container, "SIGKILL")
+				killCancel()
 				if err != nil {
 					warning := fmt.Sprintf("error killing container: %s", err)
 					a.logger.Debug(warning)
