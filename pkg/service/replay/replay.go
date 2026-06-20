@@ -1170,7 +1170,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// for readiness. Re-paying a 120s window per test-set is dead time where a
 		// transient daemon stall can land. Mirrors the waitForAppReady gating.
 		if !serveTest || r.isFirstTestSet {
-			agentCtx, cancel := context.WithTimeout(runTestSetCtx, 120*time.Second)
+			// Wait up to ~the agent's compose healthcheck readiness budget (~310s),
+			// not 120s: under heavy CI daemon contention the agent can take longer
+			// than two minutes to become ready; giving up early tore the stack down
+			// with "keploy-agent did not become ready in time" on an infra-bringup
+			// that would have succeeded.
+			agentCtx, cancel := context.WithTimeout(runTestSetCtx, 300*time.Second)
 			defer cancel()
 
 			agentReadyCh := make(chan bool, 1)

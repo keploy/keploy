@@ -303,7 +303,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		// Wait up to ~the agent's compose healthcheck readiness budget (~310s), not
+		// 120s: under heavy CI daemon contention the agent can take longer than two
+		// minutes to become ready, and giving up early tore the stack down with
+		// "keploy-agent did not become ready in time" on an infra-bringup that would
+		// have succeeded.
+		agentCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)

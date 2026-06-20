@@ -1249,7 +1249,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
+		// Wait up to ~the agent's own compose healthcheck readiness budget (retries
+		// 60 x 5s + 10s start_period ≈ 310s). Under heavy CI daemon contention the
+		// agent (eBPF load + container start) can take well over a minute to become
+		// ready; a 60s wait gave up prematurely and tore the stack down with
+		// "keploy-agent did not become ready in time" on an infra-bringup that
+		// would have succeeded.
+		agentCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
