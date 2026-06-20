@@ -652,6 +652,16 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
+		// Clear any container left over from a prior run with the same --name
+		// before starting. --rm removes the container on exit, but under heavy
+		// docker-daemon contention that reap can lag past the next
+		// `docker run --name`, so a re-run (e.g. dedup record -> replay) hits
+		// "Conflict. The container name is already in use" (docker exit 125).
+		// Force-removing first is bounded + best-effort (a no-op when nothing is
+		// lingering), so the re-run never collides with a still-reaping container.
+		if a.container != "" {
+			a.forceRemoveContainerByName(a.container)
+		}
 	}
 
 	// Define the function to cancel the command
