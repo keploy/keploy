@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-
+	"sort"
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	matcher "go.keploy.io/server/v3/pkg/matcher"
@@ -14,6 +14,25 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+// StatusCodeComparison represents the comparison result for a single status code
+type StatusCodeComparison struct {
+    StatusCode    string  // e.g., "200", "400", "500"
+    Exists        bool    // Whether status code exists in both schemas
+    IsMatched     bool    // Whether response bodies match
+    Score         float64 // Similarity score
+    ErrorMessage  string  // Detailed error if not matched
+}
+
+// SchemaValidationResult aggregates all status code validations
+type SchemaValidationResult struct {
+    AllStatusCodesValid bool                    // Overall result
+    ComparisonResults   []StatusCodeComparison  // Individual results
+    OverallScore        float64                 // Average score
+    TotalStatusCodes    int                     // Total status codes checked
+    MatchedCount        int                     // How many matched
+    ValidStatusCodes    []string                // List of valid status codes
+    InvalidStatusCodes  []string                // List of invalid status codes
+}
 
 type ValidatedJSONWrapper struct {
 	Expected    interface{} `json:"expected"`
@@ -139,6 +158,153 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 	}
 	return differencesCount / overallScore, pass, matched, nil
 }
+
+// compareAllResponseStatusCodes validates ALL status codes in the mock against test
+func compareAllResponseStatusCodes(
+    mockOperation *models.Operation,
+    testOperation *models.Operation,
+    logDiffs matcher.DiffsPrinter,
+    newLogger *pp.PrettyPrinter,
+    logger *zap.Logger,
+    testName, mockName, testSetID, mockSetID string,
+    mode models.SchemaMatchMode,
+) SchemaValidationResult {
+    
+    result := SchemaValidationResult{
+        AllStatusCodesValid: true,
+        ComparisonResults:   make([]StatusCodeComparison, 0),
+        ValidStatusCodes:    make([]string, 0),
+        InvalidStatusCodes:  make([]string, 0),
+    }
+
+    // ✅ STEP 1: Extract all status codes from mock
+    mockStatusCodes := make([]string, 0, len(mockOperation.Responses))
+    for status := range mockOperation.Responses {
+        mockStatusCodes = append(mockStatusCodes, status)
+    }
+    
+    // ✅ STEP 2: IMPORTANT - Sort for deterministic behavior
+    // Without sorting, Go map iteration is random
+    sort.Strings(mockStatusCodes)
+    
+    logger.Debug("Validating response status codes",
+        zap.Strings("statusCodes", mockStatusCodes),
+        zap.Int("count", len(mockStatusCodes)))
+
+    totalScore := 0.0
+    matchedCount := 0
+
+    // ✅ STEP 3: Validate EACH status code
+    for _, statusCode := range mockStatusCodes {
+        comparison := StatusCodeComparison{
+            StatusCode: statusCode,
+        }
+
+        // ✅ STEP 4: Check if status code exists in test schema
+        if _, exists := testOperation.Responses[statusCode]; !exists {
+            logger.Warn(
+                "Status code present in mock but missing in test",
+                zap.String("statusCode", statusCode),
+                zap.String("mockName", mockName),
+                zap.String("testName", testName),
+            )
+            
+            comparison.Exists = false
+            comparison.IsMatched = false
+            comparison.ErrorMessage = fmt.Sprintf(
+                "Status code %s exists in mock schema but not in test schema",
+                statusCode,
+            )
+            
+            result.AllStatusCodesValid = false
+            result.InvalidStatusCodes = append(result.InvalidStatusCodes, statusCode)
+            result.ComparisonResults = append(result.ComparisonResults, comparison)
+            continue
+        }
+
+        comparison.Exists = true
+
+        // ✅ STEP 5: Compare response bodies for this specific status code
+        score, isMatched, _, err := compareResponseBodies(
+            statusCode,
+            mockOperation,
+            testOperation,
+            logDiffs,
+            newLogger,
+            logger,
+            testName,
+            mockName,
+            testSetID,
+            mockSetID,
+            mode,
+        )
+
+        if err != nil {
+            comparison.IsMatched = false
+            comparison.ErrorMessage = fmt.Sprintf("Error comparing status %s: %v", statusCode, err)
+            result.AllStatusCodesValid = false
+            result.InvalidStatusCodes = append(result.InvalidStatusCodes, statusCode)
+            
+            logger.Error("Failed to compare response body",
+                zap.String("statusCode", statusCode),
+                zap.Error(err))
+        } else {
+            // ✅ IMPORTANT: A score of 0 or negative means NO MATCH
+            // Even if isMatched is true, treat score <= 0 as failed match
+            if isMatched && score > 0 {
+                comparison.IsMatched = true
+                comparison.Score = score
+                matchedCount++
+                result.ValidStatusCodes = append(result.ValidStatusCodes, statusCode)
+                totalScore += score
+                
+                logger.Debug("Status code validated successfully",
+                    zap.String("statusCode", statusCode),
+                    zap.Float64("score", score))
+            } else {
+                // Score is 0 or negative, or isMatched is false
+                comparison.IsMatched = false
+                comparison.Score = score
+                result.AllStatusCodesValid = false
+                result.InvalidStatusCodes = append(result.InvalidStatusCodes, statusCode)
+                
+                logger.Warn("Status code validation failed",
+                    zap.String("statusCode", statusCode),
+                    zap.Float64("score", score),
+                    zap.Bool("matched", isMatched))
+            }
+        }
+
+        result.ComparisonResults = append(result.ComparisonResults, comparison)
+    }
+
+    result.TotalStatusCodes = len(mockStatusCodes)
+    result.MatchedCount = matchedCount
+    
+    // ✅ STEP 6: Calculate overall score
+    if result.TotalStatusCodes > 0 {
+        result.OverallScore = totalScore / float64(result.TotalStatusCodes)
+    } else {
+        result.OverallScore = -1.0
+    }
+
+    // ✅ STEP 7: Log comprehensive summary
+    logger.Info(
+        "Schema validation completed",
+        zap.String("mockName", mockName),
+        zap.String("testName", testName),
+        zap.Int("totalStatusCodes", result.TotalStatusCodes),
+        zap.Int("matchedCount", matchedCount),
+        zap.Float64("overallScore", result.OverallScore),
+        zap.Bool("allValid", result.AllStatusCodesValid),
+        zap.Strings("validStatusCodes", result.ValidStatusCodes),
+        zap.Strings("invalidStatusCodes", result.InvalidStatusCodes),
+    )
+
+    return result
+}
+
+
 func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode models.SchemaMatchMode) (float64, bool, error) {
 	pass := false
 
@@ -173,17 +339,61 @@ func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger
 					continue
 				}
 			}
-			var statusCode string
-			for status := range mockOperation.Responses {
-				statusCode = status
-				break
+			// var statusCode string
+			// for status := range mockOperation.Responses {
+			// 	statusCode = status
+			// 	break
 
+			// }
+
+			// if candidateScore, pass, _, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
+			// 	return candidateScore, false, err
+			// }
+			validationResult := compareAllResponseStatusCodes(
+    mockOperation,
+    testOperation,
+    logDiffs,
+    newLogger,
+    logger,
+    test.Info.Title,
+    mock.Info.Title,
+    testSetID,
+    mockSetID,
+    mode,
+)
+
+// ALL status codes must be valid for schemas to match
+if !validationResult.AllStatusCodesValid {
+    if mode == models.CompareMode {
+        // In CompareMode, log detailed failure information
+        logger.Error(
+            "Schema validation failed",
+            zap.String("mockName", mock.Info.Title),
+            zap.String("testName", test.Info.Title),
+            zap.Strings("invalidStatusCodes", validationResult.InvalidStatusCodes),
+        )
+        
+        // Log each invalid status code's error
+        for _, comp := range validationResult.ComparisonResults {
+            if !comp.IsMatched || !comp.Exists {
+                logger.Error(
+                    "Status code validation details",
+                    zap.String("statusCode", comp.StatusCode),
+                    zap.Bool("exists", comp.Exists),
+                    zap.Bool("matched", comp.IsMatched),
+                    zap.String("error", comp.ErrorMessage),
+                )
+            }
 			}
-
-			if candidateScore, pass, _, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
-				return candidateScore, false, err
-			}
-
+    }
+    
+    candidateScore = -1.0
+    pass = false
+} else {
+    // All status codes validated successfully
+    candidateScore = validationResult.OverallScore
+    pass = true
+}
 		} else {
 			pass = false
 
