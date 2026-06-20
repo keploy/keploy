@@ -196,7 +196,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// cancel() must not hang teardown forever (which would swallow SIGINT and
 		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
 		runAppCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
+		// 120s (not 30s): the app teardown is `docker compose up` returning after a
+		// SIGINT, which under a heavily contended CI daemon completes slowly but DOES
+		// complete (the run already succeeded). A tight budget force-fails those
+		// otherwise-green runs; the teardown's own ops are individually bounded
+		// (ComposeDown, container inspects/kill), so this only adds headroom for the
+		// genuinely-slow-under-load case, not for a truly stuck goroutine.
+		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 120*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 

@@ -318,7 +318,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// not observe cancel() must not be able to block this teardown forever, or
 		// SIGINT (which runs through this same defer) is swallowed and the process
 		// hangs until an external SIGKILL. See utils.DrainErrGroup.
-		if err := utils.DrainErrGroup(r.logger, "replay", g, 30*time.Second); err != nil {
+		// 120s (not 30s): the app teardown is `docker compose up` returning after a
+		// SIGINT, which under a heavily contended CI daemon completes slowly but DOES
+		// complete (the run already succeeded). A tight budget force-fails those
+		// otherwise-green runs; the teardown's own ops are individually bounded
+		// (ComposeDown, container inspects/kill), so this only adds headroom for the
+		// genuinely-slow-under-load case, not for a truly stuck goroutine.
+		if err := utils.DrainErrGroup(r.logger, "replay", g, 120*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 
@@ -954,7 +960,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		runTestSetCtxCancel()
 		// Bounded drain so a wedged per-test-set goroutine can't hang teardown/SIGINT.
-		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, 30*time.Second); err != nil {
+		// 120s: the per-test-set app teardown (compose down) is slow-but-completing
+		// under a contended daemon; its ops are individually bounded, so this is
+		// headroom for load, not for a stuck goroutine.
+		if err := utils.DrainErrGroup(r.logger, "replay-testset", runTestSetErrGrp, 120*time.Second); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 		close(exitLoopChan)

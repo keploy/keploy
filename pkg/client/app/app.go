@@ -510,6 +510,12 @@ func sanitizeAppLogLine(line string) string {
 // replay loop can tear the stack down on a per-test-set setup failure
 // (agent-readiness timeout) before a retry, not only via run()'s defer.
 func (a *App) ComposeDown() {
+	// Bound `docker compose down` so a severely contended docker daemon (all CI
+	// lanes up at once) cannot block teardown — which runs under the record/replay
+	// DrainErrGroup budget — indefinitely. Best-effort: if it is cut short, the
+	// force-remove below and the next lane's cleanup reclaim anything left.
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
 	var downCmd *exec.Cmd
 
 	switch {
@@ -528,12 +534,12 @@ func (a *App) ComposeDown() {
 		// collided with ("container name already in use" -> dependency
 		// keploy-agent failed to start -> test-set abandoned, no report).
 		args = append(args, "down", "--timeout", "1")
-		downCmd = exec.Command("docker", args...)
+		downCmd = exec.CommandContext(ctx, "docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
+		downCmd = exec.CommandContext(ctx, "docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
 	default:
 		return
 	}
@@ -611,7 +617,10 @@ func (a *App) forceRemoveContainerByName(name string) {
 	if name == "" {
 		return
 	}
-	if output, err := exec.Command("docker", "rm", "-f", name).CombinedOutput(); err != nil {
+	// Bounded so a contended daemon can't block teardown on the force-remove.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
 		a.logger.Debug("force-remove container finished (may already be gone)",
 			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
