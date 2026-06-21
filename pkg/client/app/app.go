@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -306,7 +307,11 @@ func (a *App) RecentLogs(ctx context.Context) string {
 }
 
 func (a *App) waitTillExit() {
-	timeout := time.NewTimer(30 * time.Second)
+	// Bounded overall (waitTillExitBudget) AND per-inspect (dockerInspectBudget)
+	// so a saturated daemon can't wedge this on the teardown goroutine — an
+	// unbounded ContainerInspect here would also block the select so even the
+	// overall timeout couldn't fire. Only reached on the non-compose docker path.
+	timeout := time.NewTimer(waitTillExitBudget)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
 	defer timeout.Stop()
@@ -315,8 +320,10 @@ func (a *App) waitTillExit() {
 	for {
 		select {
 		case <-logTicker.C:
-			// Inspect the container status
-			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			// Inspect the container status (bounded; see the note above)
+			ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+			containerJSON, err := a.docker.ContainerInspect(ictx, containerID)
+			icancel()
 			if err != nil {
 				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
 				return
@@ -489,11 +496,28 @@ func sanitizeAppLogLine(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// composeDown runs docker compose down to remove all containers and networks
+// ComposeDown runs docker compose down to remove all containers and networks
 // created by the compose stack. Without this, stopped containers retain
 // references to image layers; a subsequent docker image prune can delete
-// those layers and corrupt Docker Desktop's overlayfs snapshots.
-func (a *App) composeDown() {
+// those layers and corrupt Docker Desktop's overlayfs snapshots. Exported so the
+// replay loop can tear the stack down on a per-test-set setup failure
+// (agent-readiness timeout) before a retry, not only via run()'s defer.
+func (a *App) ComposeDown() {
+	// Bound each docker CLI call below on its OWN deadline so a daemon saturated
+	// by a high-stress CI run cannot wedge the teardown. The record/replay
+	// teardown drains the app-runner goroutine under utils.DrainErrGroup's 30s
+	// budget; an UNBOUNDED `docker compose down` / `docker rm -f` blocked that
+	// goroutine well past 30s, tripping a spurious "teardown drain timed out … a
+	// goroutine is ignoring context cancellation" error on an otherwise-green
+	// run. (`--timeout 1` only bounds compose's per-container *stop* grace, not
+	// the `docker compose down` process itself.) Per-call budgets — not one
+	// shared deadline — so the force-remove + reap barrier still free the
+	// agent/app container names even when the down consumes its full budget
+	// (that name-freeing is exactly what avoids "container name already in use"
+	// on the next compose up).
+	downCtx, downCancel := context.WithTimeout(context.Background(), composeDownCmdBudget)
+	defer downCancel()
+
 	var downCmd *exec.Cmd
 
 	switch {
@@ -504,20 +528,123 @@ func (a *App) composeDown() {
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"compose", "-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
-		args = append(args, "down")
-		downCmd = exec.Command("docker", args...)
+		// --timeout 1: stop containers fast instead of the default 10s graceful
+		// wait PER container. Between test-sets `keploy test` restarts the whole
+		// compose stack; under loaded CI a slow `down` was exceeding the
+		// per-test-set teardown drain budget and being abandoned, leaving a
+		// half-removed agent container that the next test-set's `up` then
+		// collided with ("container name already in use" -> dependency
+		// keploy-agent failed to start -> test-set abandoned, no report).
+		args = append(args, "down", "--timeout", "1")
+		downCmd = exec.CommandContext(downCtx, "docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		downCmd = exec.Command("docker", "compose", "-f", a.composeFile, "down")
+		downCmd = exec.CommandContext(downCtx, "docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
 	default:
 		return
 	}
 
 	if output, err := downCmd.CombinedOutput(); err != nil {
-		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
+		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed, or the bounded teardown deadline elapsed under load)",
 			zap.Error(err), zap.String("output", string(output)))
+	}
+
+	// Coverage safety: this runs only AFTER the app has already been stopped by
+	// run()'s cmdCancel (SIGINT + grace period, force-kill only if it doesn't
+	// exit), so the app's coverage flush has already happened — Go writes
+	// GOCOVERDIR, Java its jacoco .exec (both to host-mounted paths that survive
+	// container removal), and the Java SDK streams coverage over a socket during
+	// the run. The --timeout 1 above and the force-remove below therefore only
+	// reclaim already-stopped containers; they never shorten a runtime's
+	// coverage-flush window (that window is cmdCancel's grace, not down).
+	//
+	// Belt-and-suspenders: guarantee the agent + app container names are free
+	// before the next test-set's compose up reuses them. `compose down` already
+	// removes them, but if it errored or was cut short under load the names
+	// could linger and the next up would hit "container name already in use".
+	// A force-remove by name is near-instant and idempotent.
+	a.forceRemoveContainerByName(a.keployContainer)
+	a.forceRemoveContainerByName(a.container)
+
+	// Reap-barrier: `compose down` / `rm -f` can return before the daemon has
+	// finished reaping under load, so the next compose up's same-name create
+	// races the async reap and stalls at "Creating". Poll until the names are
+	// gone, BOUNDED so it never reintroduces the unbounded teardown that
+	// --timeout 1 removed. Largely a no-op once the stack is reused across
+	// test-sets (one down per lane), but defends the first/last and
+	// non-keep-alive boundaries.
+	a.waitContainersRemoved([]string{a.keployContainer, a.container}, reapBarrierBudget)
+}
+
+// Teardown budgets. The record/replay teardown drains the app-runner goroutine
+// under utils.DrainErrGroup's 30s budget (pkg/service/record/record.go,
+// pkg/service/replay/replay.go). Every docker CLI call on the teardown path is
+// bounded so the goroutine returns well inside 30s even when the daemon is
+// saturated. Worst-case compose teardown (run()'s cmdCancel): the grace loop
+// (graceBudget + up to one last-iteration overshoot of sleep+inspect ≈ 2.5s,
+// since the deadline is checked at the loop top) + composeDownCmdBudget +
+// 2×forceRemoveBudget + reapBarrierBudget ≈ (5+2.5) + 8 + 2×2 + 3 ≈ 22.5s;
+// waitTillExit is then skipped on the compose path and the ctx-cancelled run
+// returns before recentAppLogs — comfortably under 30s.
+const (
+	composeDownCmdBudget = 8 * time.Second // `docker compose down`
+	forceRemoveBudget    = 2 * time.Second // each `docker rm -f`
+	reapBarrierBudget    = 3 * time.Second // waitContainersRemoved poll
+	graceBudget          = 5 * time.Second // cmdCancel coverage-flush grace
+	waitTillExitBudget   = 8 * time.Second // non-compose post-cancel container wait
+	dockerInspectBudget  = 2 * time.Second // any single teardown ContainerInspect
+)
+
+// waitContainersRemoved polls until the named containers no longer exist (or the
+// budget elapses), converting the daemon's async reap into a bounded synchronous
+// barrier so the next compose up cannot race a still-removing same-named
+// container.
+func (a *App) waitContainersRemoved(names []string, budget time.Duration) {
+	// Bounded on its own deadline so the reap barrier can never push ComposeDown
+	// past the teardown budget.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		allGone := true
+		for _, n := range names {
+			if n == "" {
+				continue
+			}
+			// ContainerInspect returns a non-nil error once the container is
+			// gone; treat any error as "no longer blocking" (best-effort barrier).
+			if _, err := a.docker.ContainerInspect(ctx, n); err == nil {
+				allGone = false // still present
+				break
+			}
+		}
+		if allGone {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			a.logger.Debug("waitContainersRemoved: timed out waiting for reap", zap.Strings("containers", names))
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// forceRemoveContainerByName removes a container by name, ignoring the
+// "no such container" case. Used after compose down to guarantee a name is free
+// for reuse on the next per-test-set compose up.
+func (a *App) forceRemoveContainerByName(name string) {
+	if name == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), forceRemoveBudget)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		a.logger.Debug("force-remove container finished (may already be gone, or the bounded teardown deadline elapsed)",
+			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
 }
 
@@ -541,8 +668,17 @@ func extractProjectFlags(cmd string) []string {
 func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 
+	// ComposeDown can fire on two paths within a single run() — cmdCancel below
+	// (SIGINT/teardown) and this deferred call (normal exit / the
+	// --abort-on-container-exit path). Collapse them with a run-local Once so a
+	// bounded ComposeDown never runs twice and risks overrunning the drain
+	// budget; whichever path fires first does the teardown, the other is a
+	// no-op. External callers (the replay per-test-set loop) invoke
+	// a.ComposeDown directly and are unaffected by this run-local guard.
+	var downOnce sync.Once
+	composeDown := func() { downOnce.Do(a.ComposeDown) }
 	if a.kind == utils.DockerCompose {
-		defer a.composeDown()
+		defer composeDown()
 	}
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
@@ -559,8 +695,57 @@ func (a *App) run(ctx context.Context) models.AppError {
 					warning := fmt.Sprintf("error sending SIGINT: %s", err)
 					a.logger.Debug(warning)
 				}
-				gracePeriod := 5
-				for i := 0; i < gracePeriod; i++ {
+
+				// Docker Compose teardown differs from a single `docker run`: the
+				// stack has several containers (the app, its dependencies, and the
+				// injected keploy-agent). The SIGINT above makes `docker compose up`
+				// stop them gracefully in the foreground, but the app container
+				// usually exits first — e.g. a Go server with no SIGTERM handler
+				// exits immediately on Go's default signal disposition — while the
+				// SLOWER services keep stopping, most notably the eBPF agent.
+				// `docker compose up` does not return until every service has
+				// stopped, and os/exec's WaitDelay then blocks the teardown for ~25s
+				// waiting on it. When the app is kept alive on the outer replay
+				// errgroup (compose + mocking), that teardown runs under
+				// utils.DrainErrGroup's 30s budget, so the overrun trips a spurious
+				// "teardown drain timed out … a goroutine is ignoring context
+				// cancellation" error and fails an otherwise-green run.
+				//
+				// So for compose: give the app a short grace to flush coverage during
+				// the graceful stop, then bring the WHOLE project down fast via
+				// ComposeDown (`docker compose down --timeout 1`) so `docker compose
+				// up` returns promptly instead of blocking on the slow agent. The
+				// run()-deferred ComposeDown then becomes an idempotent no-op.
+				if a.kind == utils.DockerCompose {
+					// Wall-clock-bounded grace (not iteration×inspect): a saturated
+					// daemon must not let the per-tick inspect sum past the teardown
+					// budget. Break as soon as the compose process or the app
+					// container has exited (coverage flush done).
+					graceDeadline := time.Now().Add(graceBudget)
+					for time.Now().Before(graceDeadline) {
+						time.Sleep(500 * time.Millisecond)
+						// `docker compose up` already returned (all services stopped).
+						if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+							a.logger.Debug("docker compose process exited")
+							break
+						}
+						// App container has exited -> its coverage flush is done; no
+						// need to keep waiting on the slower sibling services. Bound the
+						// inspect so a saturated daemon can't stall the grace loop.
+						ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+						info, ierr := a.docker.ContainerInspect(ictx, a.container)
+						icancel()
+						if ierr == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
+							a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
+							break
+						}
+					}
+					composeDown()
+					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
+				}
+
+				graceDeadline := time.Now().Add(graceBudget)
+				for time.Now().Before(graceDeadline) {
 					time.Sleep(1 * time.Second)
 
 					// Check if the 'docker run' command has exited
@@ -570,8 +755,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 					}
 
 					// Check the actual container status via Docker API
-					// This handles cases where 'docker run' is dead but container is alive
-					info, err := a.docker.ContainerInspect(context.Background(), a.container)
+					// This handles cases where 'docker run' is dead but container is alive.
+					// Bound the inspect so a saturated daemon can't stall the grace loop.
+					ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+					info, err := a.docker.ContainerInspect(ictx, a.container)
+					icancel()
 					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
 						a.logger.Debug("container stopped gracefully")
 						return nil
@@ -582,8 +770,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// We tell the Docker Daemon explicitly to kill this container.
 				a.logger.Debug("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
 
-				// "SIGKILL" string is standard for Docker API to force kill
-				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
+				// "SIGKILL" string is standard for Docker API to force kill.
+				// Bounded so a saturated daemon can't wedge the teardown past the
+				// record/replay drain budget.
+				killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err = a.docker.ContainerKill(killCtx, a.container, "SIGKILL")
+				killCancel()
 				if err != nil {
 					warning := fmt.Sprintf("error killing container: %s", err)
 					a.logger.Debug(warning)
@@ -607,7 +799,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 	}
 
-	if utils.IsDockerCmd(a.kind) {
+	// Skip on the compose path: cmdCancel's ComposeDown already brought the
+	// whole stack down and waitContainersRemoved confirmed the app/agent
+	// containers are gone, so waiting again here would only add an inspect loop
+	// to the teardown and risk overrunning the drain budget.
+	if utils.IsDockerCmd(a.kind) && a.kind != utils.DockerCompose {
 		a.waitTillExit()
 	}
 

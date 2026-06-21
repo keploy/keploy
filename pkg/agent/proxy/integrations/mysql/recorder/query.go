@@ -148,15 +148,16 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
-	// forwardClient/forwardDest replay the steady-state forwarding
-	// logic (write to peer + non-blocking copy into the decoder) so
-	// the drain helpers below can reuse it without duplication.
+	// forwardClient/forwardDest: always feed bytes to the decoder for
+	// connections that started in recording mode. The entry-point check
+	// above handles new connections under pressure (passthrough); once
+	// recording started, dropping mid-connection bytes creates orphan TCs.
 	forwardClient := func(buf []byte) {
 		if buf == nil {
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
@@ -170,7 +171,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+		if len(decodeChan) < cap(decodeChan) {
 			cp := make([]byte, len(buf))
 			copy(cp, buf)
 			select {
@@ -260,6 +261,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	//      under normal operation; it exists only to release the
 	//      context resources cleanly.
 	cleanup := func() {
+		// Drain any chunks the read-relays still hold, close the decode
+		// channel, and wait for the decoder to finish so no ordering is lost.
 		drainBuffChans()
 		close(decodeChan)
 		<-decodeDone
@@ -293,7 +296,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// Non-blocking send to async decode. Check channel capacity
 			// before copying to avoid allocation/GC churn when the decoder
 			// can't keep up (the copy would just be dropped).
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {
@@ -320,7 +323,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			}
 
 			// Non-blocking send to async decode.
-			if !memoryguard.IsRecordingPaused() && len(decodeChan) < cap(decodeChan) {
+			if len(decodeChan) < cap(decodeChan) {
 				buf := make([]byte, len(buffer))
 				copy(buf, buffer)
 				select {

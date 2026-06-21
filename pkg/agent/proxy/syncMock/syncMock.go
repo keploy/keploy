@@ -20,6 +20,17 @@ const defaultMockBufferCapacity = 100
 // staleness cutoff keeps reachable, while staying O(1) memory.
 const maxRecentWindows = 256
 
+// pressureRangeStaleness bounds how long a CLOSED memory-pressure interval is
+// retained in SyncMockManager.pressureRanges. It is the same 7 s staleness
+// horizon the mock buffer and recentWindows already use: a pressure range that
+// ended longer ago than this can no longer overlap any still-live mock or test
+// window (both are stale-dropped at the same cutoff), so it is safe to prune.
+// Without this, the slice would grow by one entry per pressure transition for
+// the entire recording — under continuous recording that is an unbounded memory
+// leak and an ever-slower WasPressureActiveInWindow / pressureActiveAtLocked
+// scan (both loop over every range).
+const pressureRangeStaleness = 7 * time.Second
+
 // resolvedWindow is one already-resolved per-test window retained so a
 // late-arriving mock (decoded after the window closed) can still be
 // attributed to the test that actually owns its ReqTimestampMock.
@@ -47,12 +58,24 @@ func generateRandomString(n int) string {
 
 type SyncMockManager struct {
 	// mu guards buffer, firstReqSeen, memoryPause, mappingChan,
-	// recentWindows.
+	// recentWindows, resolvedTestCount.
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
 	memoryPause  bool
+
+	// resolvedTestCount is the number of UNIQUE recorded test cases resolved so
+	// far (incremented once per kept ResolveRange — duplicates skipped by static
+	// dedup resolve with keep=false and do NOT advance it). It defines the
+	// startup window: while it is < models.StartupMockTestCaseWindow, every mock
+	// AddMock ingests is tagged TestModeInfo.IsStartup, so the dedup reapers
+	// (DeleteMocksStrictlyBefore, the ResolveRange keep=false / out-of-window
+	// rescues, the memory-pressure wipe) preserve it instead of pruning. The
+	// effect is that static-dedup pruning only begins from the (N+1)-th test
+	// case, keeping the boot-through-Nth-test mock corpus complete. Mirrors
+	// firstReqSeen's lifecycle (set forward-only within a record session).
+	resolvedTestCount int
 
 	// recentWindows is a bounded, time-pruned ring of the most recently
 	// RESOLVED per-test windows. It exists to close the async-emit vs
@@ -101,12 +124,52 @@ type SyncMockManager struct {
 	// package-global instance leaves this nil, and DedupQueue() falls back
 	// to the package-global queue — preserving single-session behaviour.
 	dedupQueue *DedupQueue
+	// pressureDropped / totalAdded track mocks dropped vs added under memory
+	// pressure. Both are atomic so they can be read without holding m.mu.
+	pressureDropped atomic.Int64
+	totalAdded      atomic.Int64
+
+	// outChanClosedDrops counts mocks that were already counted in
+	// totalAdded (they passed the pressure gate) but were then dropped
+	// because the outChan was already closed by CloseOutChan — i.e.
+	// the mock arrived AFTER shutdown sealed the stream. This is a
+	// real post-count drop, so without this counter totalAdded would
+	// over-report deliverable mocks. Accounting identity at shutdown:
+	//   totalAdded = forwarded + still_in_buffer + outChanClosedDrops
+	//                + sendBudget drops (dropCount)
+	outChanClosedDrops atomic.Int64
+
+	// pressureRanges records every [start, end] interval during which memory
+	// pressure was active. Appended on the false→true transition in
+	// SetMemoryPressure, closed on the true→false transition. The most recent
+	// entry has end == zero while pressure is still active. Guarded by mu.
+	//
+	// This is the join key for the Bug 0 TC-suppression fix:
+	// WasPressureActiveInWindow checks whether any range overlaps a TC's
+	// [HTTPReq.Timestamp, HTTPResp.Timestamp] window. Using pressure ranges
+	// instead of per-mock drop timestamps is RACE-FREE — memoryguard records
+	// the start the instant it flips memoryPause, BEFORE any mock-parser
+	// goroutine sees the result; so even if the paired AddMock fires AFTER
+	// the TC has reached routes/record.go, the overlap is already visible.
+	//
+	// Bounded, not unbounded: SetMemoryPressure prunes closed ranges older
+	// than pressureRangeStaleness on every call, so the slice stays small
+	// (~the last few seconds) no matter how long recording runs. This keeps
+	// continuous recording from accumulating millions of intervals and
+	// slowing every overlap scan.
+	pressureRanges []pressureRange
 
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+}
+
+// pressureRange is one [start, end] interval during which memory pressure was
+// active. end is zero while the interval is still open (pressure not cleared yet).
+type pressureRange struct {
+	start, end time.Time
 }
 
 // Global instance is initialized at package load time
@@ -307,19 +370,36 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	}
 	m.mu.Lock()
 	if m.memoryPause {
-		m.mu.Unlock()
-		return
+		// Pressure is on at decode time, but this mock may have been decoded
+		// late for a request that happened during calm — its TC was captured
+		// at the ingress, so dropping the mock would orphan it. Decide by the
+		// request time, not now: drop only if the request ITSELF happened
+		// during pressure (the ingress never captured it, so there is no TC).
+		if m.pressureActiveAtLocked(mock.Spec.ReqTimestampMock) {
+			m.mu.Unlock()
+			m.pressureDropped.Add(1)
+			return
+		}
+		// Request was during calm → its TC was captured → keep this mock;
+		// fall through to the normal buffer/forward path.
 	}
+	// Mock is being kept — count it as successfully added.
+	m.totalAdded.Add(1)
 
-	// Tag app-bootstrap traffic. Any mock captured before the first
-	// inbound request is startup/init traffic (e.g. an AWS Secret Manager
-	// fetch at boot) that ran before any test window exists. It can never
-	// claim a per-test window, so the reapers below (dedup DeleteMocks-
-	// StrictlyBefore, the ResolveRange stale-cutoff, FlushOwnedWindows and
-	// the memory-pressure wipe) would otherwise drop it. firstReqSeen,
-	// flipped on the first inbound request, is the boot-vs-test boundary;
-	// tagging here is the sole signal isStartupMock keys off.
-	if mock != nil && !m.firstReqSeen {
+	// Tag startup-window traffic. A mock is "startup" when it is captured
+	// either (a) before the first inbound request — classic app-bootstrap
+	// traffic (e.g. an AWS Secret Manager fetch at boot) that ran before any
+	// test window exists — or (b) while we are still inside the startup window,
+	// i.e. fewer than models.StartupMockTestCaseWindow unique test cases have
+	// been recorded. Case (b) widens the old "before firstReqSeen" rule so the
+	// boot-through-Nth-test mock corpus is preserved wholesale: the IsStartup
+	// tag is the single signal every reaper below keys off (dedup DeleteMocks-
+	// StrictlyBefore, the ResolveRange keep=false / out-of-window / stale-cutoff
+	// rescues, FlushOwnedWindows, and the memory-pressure wipe), so tagging here
+	// makes static-dedup pruning a no-op until the (N+1)-th test case. (firstReqSeen
+	// is subsumed by the count test — count is 0 before the first request — but
+	// is kept explicit so the boot case still holds if the window is ever 0.)
+	if mock != nil && (!m.firstReqSeen || m.resolvedTestCount < models.StartupMockTestCaseWindow) {
 		mock.TestModeInfo.IsStartup = true
 	}
 
@@ -355,6 +435,10 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	switch {
 	case closed:
 		m.mu.Unlock()
+		// Count this post-totalAdded drop so the accounting identity
+		// holds and we can see exactly how many mocks were lost to the
+		// "arrived after outChan closed" race.
+		closedDrops := m.outChanClosedDrops.Add(1)
 		// Per-mock diagnostic: visible signal when AddMock drops a
 		// mock because the outChan has already been closed by
 		// CloseOutChan. This usually only fires during shutdown but
@@ -364,11 +448,12 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// receiver — it ALWAYS resolves to a non-nil logger and is
 		// safe under the m.mu unlock.
 		if logger := m.dropLogger(); logger != nil {
-			logger.Info("diag/AddMock: outChan already closed, mock dropped",
+			logger.Debug("diag/AddMock: outChan already closed, mock dropped",
 				zap.String("mock_kind", string(mock.Kind)),
 				zap.String("connID", mock.ConnectionID),
 				zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
 				zap.Time("mock_req_ts", mock.Spec.ReqTimestampMock),
+				zap.Int64("outchan_closed_drops_total", closedDrops),
 			)
 		}
 		return
@@ -404,13 +489,37 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
 	m.sendToOutChan(mock)
 }
 
-// CloseOutChan closes the outgoing mock channel under the writer
-// lock so an in-flight sendToOutChan cannot race the close.
-// Idempotent; safe to call with outChan still nil.
+// CloseOutChan flushes any still-attributable buffered mocks and then
+// closes the outgoing mock channel under the writer lock so an in-flight
+// sendToOutChan cannot race the close. Idempotent; safe to call with
+// outChan still nil.
+//
+// The final FlushOwnedWindows is the shutdown twin of the periodic flush
+// ticker the proxy runs while recording is live (see proxy.go): that
+// ticker stops one step earlier in the shutdown sequence (its
+// clientConnCancel), so a mock that finished decoding after the ticker's
+// last tick — the classic teardown-phase late mock, a DB response still
+// being decoded when recording is asked to stop — would otherwise sit in
+// the buffer and be discarded here, orphaning its already-recorded test
+// case at replay. Flushing first persists every mock the buffer can still
+// attribute (session/connection mocks and per-test mocks whose
+// ReqTimestampMock falls inside an already-resolved window).
+//
+// FlushOwnedWindows takes outChanMu.RLock (via sendToOutChan); it runs to
+// completion and releases that lock BEFORE we take the write lock below,
+// so the two never deadlock. The proxy calls CloseOutChan only after all
+// connection handlers have drained, so no new mocks enter the buffer
+// between the flush and the close.
 func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
+	// Graceful-stop drain: flush every still-attributable buffered mock
+	// before sealing the channel. The periodic flush ticker stops one step
+	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
+	// discarded here and orphan its test case.
+	m.FlushOwnedWindows()
+
 	m.outChanMu.Lock()
 	defer m.outChanMu.Unlock()
 	if m.outChanClosed {
@@ -483,11 +592,12 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			mocksToSend = append(mocksToSend, mock)
 			continue
 		}
-		// STARTUP RESCUE: app-bootstrap traffic owns no window (it ran
-		// before any test) so the ownerWindow check above never claims it.
-		// Flush it to disk proactively on the ticker rather than leaving it
-		// parked in the buffer where a dedup cleanup, stale-cutoff, or
-		// memory-pressure wipe could reap it before it is ever persisted.
+		// STARTUP RESCUE: a startup-window mock the ownerWindow check above
+		// didn't claim (boot traffic owns no window; an early-test mock whose
+		// window hasn't resolved yet on this ticker tick). Flush it to disk
+		// proactively rather than leaving it parked in the buffer where a dedup
+		// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
+		// is ever persisted.
 		if isStartupMock(mock) {
 			mock.Name = "mock-" + generateRandomString(8)
 			mocksToSend = append(mocksToSend, mock)
@@ -534,50 +644,209 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	return m.firstReqSeen
 }
 
+// GetDropStats returns a snapshot of the current pressure state and drop counters.
+func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped int64, totalAdded int64, bufferSize int) {
+	m.mu.Lock()
+	pressureActive = m.memoryPause
+	bufferSize = len(m.buffer)
+	m.mu.Unlock()
+	pressureDropped = m.pressureDropped.Load()
+	totalAdded = m.totalAdded.Load()
+	return
+}
+
+// WasPressureActiveInWindow returns (true, overlapCount) if memory pressure
+// was active at any moment during [start, end].
+//
+// Called by the TC-send path in routes/record.go right before forwarding a
+// TC to the CLI: if it returns true, the TC is suppressed and never reaches
+// disk, so replay cannot encounter a missing-mock EOF for it.
+//
+// Why this is race-free unlike a per-mock-drop ledger:
+//   - memoryguard calls SetMemoryPressure(true) and the range is appended
+//     under mu in the SAME critical section that flips m.memoryPause = true.
+//   - Any mock-parser goroutine that subsequently sees memoryPause==true
+//     (and therefore drops its mock) does so BECAUSE the range was already
+//     committed. The "open" event happens-before any drop it causes.
+//   - The TC's HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp] is
+//     bounded by wall-clock time; if any pressure range overlaps that
+//     window, the TC was at risk of losing a mock to pressure regardless
+//     of when AddMock actually fires for that mock.
+//
+// Two intervals [a, b] and [c, d] overlap iff a <= d AND c <= b. An open
+// (still-active) range's end is treated as time.Now().
+func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool, int) {
+	if m == nil {
+		return false, 0
+	}
+	// Defensive: a zero start or end would either match every range or none
+	// depending on direction. Refuse to make a claim on degenerate inputs —
+	// the caller should fall back to "send the TC" rather than over-suppress.
+	if start.IsZero() || end.IsZero() {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		rEnd := r.end
+		if rEnd.IsZero() {
+			rEnd = now
+		}
+		// Standard interval-overlap test: [r.start, rEnd] vs [start, end]
+		if !r.start.After(end) && !rEnd.Before(start) {
+			count++
+		}
+	}
+	return count > 0, count
+}
+
+// pressureActiveAtLocked reports whether instant t fell inside any recorded
+// pressure interval. Caller MUST hold m.mu (this is the unlocked twin of
+// WasPressureActiveInWindow, used on the AddMock / SetMemoryPressure paths
+// that already hold the lock). A still-open interval extends to now.
+func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
+	now := time.Now()
+	for _, r := range m.pressureRanges {
+		end := r.end
+		if end.IsZero() {
+			end = now
+		}
+		if !t.Before(r.start) && !t.After(end) {
+			return true
+		}
+	}
+	return false
+}
+
+// PressureRangeCount returns the total number of pressure intervals recorded
+// so far. Exposed for the session-summary log in routes/record.go.
+func (m *SyncMockManager) PressureRangeCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pressureRanges)
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
 	}
 
+	// time.Now() OUTSIDE the lock: cheap, and avoids holding mu across the
+	// syscall. Reused for both the new-range open AND the close, so the two
+	// transitions can never produce a range with end < start due to clock skew.
+	now := time.Now()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
-	if !enabled {
-		return
+
+	// Prune the pressure-range history to the staleness horizon so it stays
+	// bounded under continuous recording (mentor review #4220, syncMock.go:119).
+	// Keep the currently-open range (end == zero) and any range that ended
+	// within the last pressureRangeStaleness; drop the rest. memoryguard calls
+	// this every 500 ms, so the slice never holds more than ~the last few
+	// seconds of history regardless of recording length. In-place filter,
+	// preserving order (the open range, if any, is newest so stays last).
+	if cutoff := now.Add(-pressureRangeStaleness); len(m.pressureRanges) > 0 {
+		kept := m.pressureRanges[:0]
+		for _, r := range m.pressureRanges {
+			if r.end.IsZero() || r.end.After(cutoff) {
+				kept = append(kept, r)
+			}
+		}
+		m.pressureRanges = kept
 	}
 
-	// Drop buffered mocks to relieve memory pressure, but PRESERVE startup
-	// mocks. They were captured before the first inbound request, own no
-	// test window, and the periodic FlushOwnedWindows drain is their only
-	// remaining route to disk — wiping them here would silently lose the
-	// once-per-boot startup mock, the exact data loss the IsStartup tag
-	// exists to prevent (mirrors the rescues in DeleteMocksStrictlyBefore,
-	// ResolveRange and FlushOwnedWindows). They are few (typically one per
-	// boot), so the memory relief is effectively unchanged.
-	var kept []*models.Mock
-	for i := range m.buffer {
-		if isStartupMock(m.buffer[i]) {
-			kept = append(kept, m.buffer[i])
+	var clearedFromBuffer int
+	if enabled {
+		if !wasEnabled {
+			// false→true transition: open a new pressure interval.
+			// memoryguard fires SetMemoryPressure(true) once per 500ms tick,
+			// but only the first call (when wasEnabled is false) is a real
+			// transition; subsequent ticks while pressure is held are no-ops
+			// for range tracking — they would otherwise spam the slice.
+			m.pressureRanges = append(m.pressureRanges, pressureRange{start: now})
 		}
-		m.buffer[i] = nil
+		// Don't wipe the whole buffer. Two classes of mock must survive:
+		//   1. Startup-window mocks (IsStartup) — boot traffic and everything
+		//      captured within the first StartupMockTestCaseWindow test cases
+		//      (#4282). They own no resolved window and reach disk only via
+		//      FlushOwnedWindows; wiping them is the exact loss the IsStartup
+		//      tag exists to prevent.
+		//   2. Mocks whose request happened during calm — they belong to an
+		//      already-captured TC and must survive or replay orphans it
+		//      (#4220 Bug-0). Only mocks whose request was during pressure are
+		//      dropped: the ingress never captured those, so there is no TC to
+		//      orphan.
+		// Unknown timestamp → keep (safe default). In-place filter, nil the tail.
+		before := len(m.buffer)
+		keep := m.buffer[:0]
+		for _, mk := range m.buffer {
+			if mk == nil {
+				continue
+			}
+			if isStartupMock(mk) {
+				keep = append(keep, mk)
+				continue
+			}
+			if !m.pressureActiveAtLocked(mk.Spec.ReqTimestampMock) {
+				keep = append(keep, mk)
+			}
+		}
+		for i := len(keep); i < before; i++ {
+			m.buffer[i] = nil
+		}
+		m.buffer = keep
+		clearedFromBuffer = before - len(keep)
+	} else if wasEnabled {
+		// true→false transition: close the most recent open interval.
+		// The defensive len check covers the degenerate case where
+		// SetMemoryPressure(false) is somehow called without a prior (true),
+		// e.g. a partial state restore in tests.
+		if n := len(m.pressureRanges); n > 0 && m.pressureRanges[n-1].end.IsZero() {
+			m.pressureRanges[n-1].end = now
+		}
 	}
-	// Re-home survivors into a fresh, small backing array so the (possibly
-	// large) old one is released to the GC.
-	m.buffer = append(make([]*models.Mock, 0, defaultMockBufferCapacity), kept...)
+	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
+
+	// Debug-level, and only on state TRANSITIONS (not on every 500ms memoryguard
+	// tick): these are internal pressure-mechanism diagnostics. The operator-facing
+	// "how many mocks were dropped" signal is surfaced once per session by the
+	// recording-complete summary in routes/record.go, so Info here would be noise.
+	if logger := m.dropLogger(); logger != nil {
+		if enabled && !wasEnabled {
+			// Pressure just turned ON (false→true transition)
+			logger.Debug("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
+				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
+				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
+			)
+		} else if !enabled && wasEnabled {
+			logger.Debug("agent: memory pressure cleared",
+				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
+				zap.Int64("mocks_added_total", m.totalAdded.Load()),
+			)
+		}
+	}
 }
 
-// isStartupMock reports whether a buffered per-test mock is app-bootstrap
-// traffic that can never legitimately claim a test window: it was captured
-// before the first inbound request (tagged IsStartup at ingest in AddMock).
-// Such mocks (e.g. an AWS Secret Manager fetch at boot) must be flushed to
-// disk so replay's startup tier can serve them, NOT reaped as duplicate
-// debris or stale-cutoff. The tag — rather than a "request pre-dates the
-// first window" timestamp test — is deliberately the only signal: a mock
-// captured before the FIRST inbound request is unambiguously startup
-// traffic, whereas a per-test mock that merely lands before its window
-// (genuine stale cross-test bleed) must still be reaped to bound buffer
-// growth. Conflating the two would resurrect that bleed.
+// isStartupMock reports whether a buffered mock falls in the startup window
+// and must be preserved by every reaper instead of pruned. A mock is tagged
+// IsStartup at ingest in AddMock when it is captured before the first inbound
+// request (classic app-bootstrap, e.g. an AWS Secret Manager fetch) OR while
+// fewer than models.StartupMockTestCaseWindow unique test cases have been
+// recorded. Such mocks must be flushed to disk so replay's startup tier can
+// serve them, NOT reaped as duplicate debris or stale-cutoff. The tag — rather
+// than a timestamp test — is deliberately the only signal: it captures the
+// "recorded inside the startup window" intent precisely (including mocks that
+// land inside a static-dedup duplicate's window), whereas a per-test mock that
+// merely lands before its window once we are PAST the startup window (genuine
+// stale cross-test bleed) is untagged and still reaped to bound buffer growth.
 func isStartupMock(mk *models.Mock) bool {
 	return mk != nil && mk.TestModeInfo.IsStartup
 }
@@ -606,6 +875,17 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// send itself when outChanClosed is true.
 	outChanBound, _ := m.outChanStatus()
 	mappingChan := m.mappingChan
+
+	// A kept resolve (keep==true) is one UNIQUE recorded test case; advance the
+	// startup-window counter so AddMock stops tagging mocks IsStartup once we are
+	// past the Nth test. Duplicates resolve with keep==false (static dedup) and
+	// must NOT count — the window is measured in recorded tests, not requests.
+	// Incrementing here only gates FUTURE ingests; the mocks processed in this
+	// call were already tagged (or not) at AddMock time, and the rescues below
+	// key off that per-mock tag, not the live counter.
+	if keep {
+		m.resolvedTestCount++
+	}
 
 	// Stale-buffer safety valve.
 	//
@@ -723,6 +1003,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
 				mocksToSend = append(mocksToSend, mock)
+			} else if isStartupMock(mock) {
+				// STARTUP RESCUE (static-dedup duplicate window): keep==false
+				// means the enterprise static-dedup deemed THIS test case a
+				// duplicate, so its in-window mocks are normally pruned (the
+				// drop-via-continue below). But a startup-window mock must
+				// survive — until the Nth unique test is recorded, dedup pruning
+				// is suppressed wholesale (a once-per-boot init call that fires
+				// inside a duplicate's window would otherwise be lost, corrupting
+				// the startup recording). Retain when outChan isn't bound yet,
+				// else flush to disk. No associatedMockIDs entry: a duplicate's
+				// testName is synthetic ("test-0"), so it owns no real mapping —
+				// the same treatment the window-less startup rescue below gives.
+				if !outChanBound {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
+				mock.Name = "mock-" + generateRandomString(8)
+				mocksToSend = append(mocksToSend, mock)
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -764,16 +1063,16 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			continue
 		}
 
-		// STARTUP RESCUE: a mock captured before the first inbound request
-		// (IsStartup) is app-bootstrap traffic — an AWS Secret Manager
-		// fetch, DB/driver handshake, config load, etc. fired at boot. It
-		// can never claim a window, so the stale-cutoff below would
-		// silently reap it (the "present in some test sets, missing in
-		// others" bug). Flush it to disk instead so replay's startup tier
-		// can serve it. Placed BEFORE the cutoff so a slow boot (>7 s to
-		// the first request) can't lose it. A per-test mock that merely
-		// lands before the current window (genuine stale cross-test bleed)
-		// is NOT tagged IsStartup and still falls to the cutoff.
+		// STARTUP RESCUE (out-of-window): a startup-window mock (IsStartup) that
+		// didn't match the current window — boot traffic like an AWS Secret
+		// Manager fetch / DB handshake / config load, or an early-test mock
+		// whose own window isn't the one resolving now. The stale-cutoff below
+		// would otherwise silently reap it (the "present in some test sets,
+		// missing in others" bug). Flush it to disk instead so replay's startup
+		// tier can serve it. Placed BEFORE the cutoff so a slow boot (>7 s to the
+		// first request) can't lose it. A per-test mock captured PAST the startup
+		// window that merely lands before the current window (genuine stale
+		// cross-test bleed) is NOT tagged IsStartup and still falls to the cutoff.
 		if isStartupMock(mock) {
 			if !outChanBound {
 				m.buffer[keepIdx] = mock
@@ -802,7 +1101,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			// post-hoc CI analysis. Sampled via dropLogger to honour
 			// the same flood-prevention as the outChan-overflow path.
 			if logger := m.dropLogger(); logger != nil {
-				logger.Info("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
+				logger.Debug("diag/ResolveRange: stale-cutoff drop (out-of-window per-test mock older than 7s)",
 					zap.String("mock_name", mock.Name),
 					zap.String("mock_kind", string(mock.Kind)),
 					zap.String("connID", mock.ConnectionID),
@@ -874,7 +1173,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// for buffer-flow events on this manager. Only logged when there
 	// was actual state change to avoid log noise on idle resolves.
 	if logger := m.dropLogger(); logger != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0) {
-		logger.Info("diag/ResolveRange: buffer transition",
+		logger.Debug("diag/ResolveRange: buffer transition",
 			zap.String("test_name", testName),
 			zap.Time("window_start", start),
 			zap.Time("window_end", end),
@@ -1010,14 +1309,15 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			continue
 		}
 
-		// STARTUP RESCUE: app-bootstrap traffic (captured before the first
-		// inbound request, or pre-dating the first resolved test window) is
-		// NOT the skipped duplicate's debris — it owns no window because it
-		// ran before any test existed. Without this, a once-per-boot init
-		// call (e.g. AWS Secret Manager) is dropped here whenever the first
-		// inbound request happens to hash as a dedup duplicate (recentWindows
-		// is still empty, so the ownerWindow rescue above can't save it) —
-		// the root of the flaky per-test-set capture. Flush it instead.
+		// STARTUP RESCUE: a startup-window mock (boot traffic, or anything
+		// captured within the first StartupMockTestCaseWindow test cases) is NOT
+		// the skipped duplicate's debris and must survive this cleanup. Without
+		// this, a once-per-boot init call (e.g. AWS Secret Manager) is dropped
+		// whenever an early request hashes as a dedup duplicate while
+		// recentWindows can't yet claim it (empty at boot, or the mock landed in
+		// a duplicate's own window) — the root of the flaky per-test-set capture,
+		// and exactly what keeps static dedup from pruning the startup corpus.
+		// Flush it instead.
 		if isStartupMock(mock) {
 			if !outChanBound {
 				m.buffer[keepIdx] = mock

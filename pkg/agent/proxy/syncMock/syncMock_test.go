@@ -12,43 +12,46 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-func TestSetMemoryPressureClearsBufferedMocksAndDropsNewOnes(t *testing.T) {
+func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testing.T) {
 	t.Parallel()
+
+	// Requests from before pressure: their TCs were captured at the ingress,
+	// so their mocks must survive pressure or replay orphans those TCs.
+	calmTime := time.Now().Add(-10 * time.Second)
 
 	mgr := &SyncMockManager{
 		buffer: []*models.Mock{
-			{
-				Spec: models.MockSpec{ReqTimestampMock: time.Now()},
-			},
-			{
-				Spec: models.MockSpec{ReqTimestampMock: time.Now()},
-			},
+			{Spec: models.MockSpec{ReqTimestampMock: calmTime}},
+			{Spec: models.MockSpec{ReqTimestampMock: calmTime}},
 		},
 	}
-	oldBuffer := mgr.buffer
 
 	mgr.SetMemoryPressure(true)
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected memory pressure to clear buffered mocks, got %d items", len(mgr.buffer))
-	}
-	if cap(mgr.buffer) != defaultMockBufferCapacity {
-		t.Fatalf("expected buffer capacity to reset to %d, got %d", defaultMockBufferCapacity, cap(mgr.buffer))
-	}
-	for i, mock := range oldBuffer {
-		if mock != nil {
-			t.Fatalf("expected cleared buffer entry %d to be nil", i)
-		}
+
+	// Calm-captured buffered mocks must NOT be wiped by pressure.
+	if len(mgr.buffer) != 2 {
+		t.Fatalf("expected calm-captured buffered mocks to survive pressure, got %d", len(mgr.buffer))
 	}
 
+	// A mock whose request happened DURING pressure was never captured at the
+	// ingress (no TC) → safe to drop.
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	if len(mgr.buffer) != 0 {
-		t.Fatalf("expected memory pressure to drop new mocks, got %d buffered items", len(mgr.buffer))
+	if len(mgr.buffer) != 2 {
+		t.Fatalf("expected pressure-request mock to be dropped, buffer changed to %d", len(mgr.buffer))
 	}
 
+	// A mock decoded late DURING pressure but whose request was during calm
+	// belongs to a captured TC → must be kept (the orphan fix).
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: calmTime}})
+	if len(mgr.buffer) != 3 {
+		t.Fatalf("expected late calm-request mock to be kept during pressure, got %d", len(mgr.buffer))
+	}
+
+	// After recovery, mocks buffer normally again.
 	mgr.SetMemoryPressure(false)
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	if len(mgr.buffer) != 1 {
-		t.Fatalf("expected buffer to accept mocks after recovery, got %d buffered items", len(mgr.buffer))
+	if len(mgr.buffer) != 4 {
+		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
 	}
 }
 
@@ -1020,6 +1023,228 @@ func drainChan(t *testing.T, ch chan *models.Mock, max int) {
 	}
 }
 
+// TestWasPressureActiveInWindow exercises the join-key for the Bug 0
+// TC-suppression fix. Every case is constructed by hand-setting
+// pressureRanges so the test does not depend on real wall-clock timing.
+func TestWasPressureActiveInWindow(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	at := func(offsetMs int) time.Time { return base.Add(time.Duration(offsetMs) * time.Millisecond) }
+
+	cases := []struct {
+		name        string
+		ranges      []pressureRange
+		windowStart time.Time
+		windowEnd   time.Time
+		wantOverlap bool
+		wantCount   int
+	}{
+		{
+			name:        "no ranges → no overlap",
+			ranges:      nil,
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure ended before window started → no overlap",
+			ranges:      []pressureRange{{start: at(0), end: at(50)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure starts after window ends → no overlap",
+			ranges:      []pressureRange{{start: at(300), end: at(400)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: false, wantCount: 0,
+		},
+		{
+			name:        "pressure fully inside window → overlap",
+			ranges:      []pressureRange{{start: at(120), end: at(180)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "window fully inside pressure → overlap",
+			ranges:      []pressureRange{{start: at(0), end: at(500)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure overlaps left edge → overlap",
+			ranges:      []pressureRange{{start: at(50), end: at(150)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure overlaps right edge → overlap",
+			ranges:      []pressureRange{{start: at(150), end: at(250)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure ends exactly at window start → overlap (touching counts)",
+			ranges:      []pressureRange{{start: at(0), end: at(100)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name:        "pressure starts exactly at window end → overlap (touching counts)",
+			ranges:      []pressureRange{{start: at(200), end: at(300)}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name: "two ranges, one overlaps → count 1",
+			ranges: []pressureRange{
+				{start: at(0), end: at(50)},    // before
+				{start: at(150), end: at(160)}, // inside
+				{start: at(300), end: at(400)}, // after
+			},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+		{
+			name: "two ranges, both overlap → count 2",
+			ranges: []pressureRange{
+				{start: at(120), end: at(140)},
+				{start: at(150), end: at(180)},
+			},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 2,
+		},
+		{
+			name:        "open range (still active) → end treated as now → overlap if start <= windowEnd",
+			ranges:      []pressureRange{{start: at(150), end: time.Time{}}},
+			windowStart: at(100), windowEnd: at(200),
+			wantOverlap: true, wantCount: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &SyncMockManager{pressureRanges: tc.ranges}
+			gotOverlap, gotCount := mgr.WasPressureActiveInWindow(tc.windowStart, tc.windowEnd)
+			if gotOverlap != tc.wantOverlap || gotCount != tc.wantCount {
+				t.Fatalf("WasPressureActiveInWindow = (%v, %d), want (%v, %d)",
+					gotOverlap, gotCount, tc.wantOverlap, tc.wantCount)
+			}
+		})
+	}
+}
+
+// TestWasPressureActiveInWindowRejectsZeroInputs verifies the defensive
+// guard: a zero start or end produces no claim (false, 0). Caller falls
+// back to "send the TC" rather than over-suppress on garbage input.
+func TestWasPressureActiveInWindowRejectsZeroInputs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	mgr := &SyncMockManager{pressureRanges: []pressureRange{{start: now.Add(-time.Second), end: now}}}
+
+	if ok, c := mgr.WasPressureActiveInWindow(time.Time{}, now); ok || c != 0 {
+		t.Fatalf("zero start: got (%v, %d), want (false, 0)", ok, c)
+	}
+	if ok, c := mgr.WasPressureActiveInWindow(now, time.Time{}); ok || c != 0 {
+		t.Fatalf("zero end: got (%v, %d), want (false, 0)", ok, c)
+	}
+}
+
+// TestWasPressureActiveInWindowNilReceiver verifies the nil-receiver guard
+// — calling on a nil *SyncMockManager must not panic.
+func TestWasPressureActiveInWindowNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var mgr *SyncMockManager
+	if ok, c := mgr.WasPressureActiveInWindow(time.Now(), time.Now().Add(time.Second)); ok || c != 0 {
+		t.Fatalf("nil receiver: got (%v, %d), want (false, 0)", ok, c)
+	}
+}
+
+// TestSetMemoryPressureRecordsRanges verifies that the false→true transition
+// opens a new range, the true→false transition closes it, and repeated calls
+// in the same state are no-ops for range tracking (no spam on every tick).
+func TestSetMemoryPressureRecordsRanges(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+
+	// Initially no ranges
+	if got := mgr.PressureRangeCount(); got != 0 {
+		t.Fatalf("initial range count: got %d, want 0", got)
+	}
+
+	// First false→true: opens one range
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after first true: got %d ranges, want 1", got)
+	}
+	if !mgr.pressureRanges[0].end.IsZero() {
+		t.Fatalf("first range should be open (end zero), got end=%v", mgr.pressureRanges[0].end)
+	}
+
+	// Redundant true call while already active: no-op for range tracking
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after redundant true: got %d ranges, want still 1", got)
+	}
+
+	// true→false: closes the open range
+	mgr.SetMemoryPressure(false)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after false: got %d ranges, want still 1", got)
+	}
+	if mgr.pressureRanges[0].end.IsZero() {
+		t.Fatalf("first range should be closed after false call, end still zero")
+	}
+
+	// Redundant false: no-op
+	mgr.SetMemoryPressure(false)
+	if got := mgr.PressureRangeCount(); got != 1 {
+		t.Fatalf("after redundant false: got %d ranges, want still 1", got)
+	}
+
+	// Second cycle: opens a new range
+	mgr.SetMemoryPressure(true)
+	if got := mgr.PressureRangeCount(); got != 2 {
+		t.Fatalf("after second true: got %d ranges, want 2", got)
+	}
+}
+
+// TestSetMemoryPressureRaceWithTC documents the core happens-before claim
+// behind the Bug 0 fix:
+//
+//  1. SetMemoryPressure(true) records the pressure-range start under mu.
+//  2. A separate goroutine reads the range via WasPressureActiveInWindow,
+//     also under mu.
+//  3. The reader is guaranteed to see the range as long as it ran AFTER
+//     the writer's mu.Unlock() — which is enforced here by a sync.WaitGroup.
+//
+// This is what makes the fix race-free: the TC handler's
+// WasPressureActiveInWindow call happens-after the SetMemoryPressure write
+// that caused the mock to be dropped, even if AddMock itself is still in
+// flight on a third goroutine.
+func TestSetMemoryPressureRaceWithTC(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	tcStart := time.Now()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		mgr.SetMemoryPressure(true)
+	}()
+	wg.Wait()
+
+	tcEnd := time.Now().Add(time.Second) // ensure the open range falls inside
+	ok, count := mgr.WasPressureActiveInWindow(tcStart, tcEnd)
+	if !ok || count != 1 {
+		t.Fatalf("expected overlap with open range: got (%v, %d), want (true, 1)", ok, count)
+	}
+}
+
 // TestResolveRangeRetroactivelyBinsLateMock is the regression for the
 // async-emit vs window-close race (the Mongo cursor getMore case): a
 // mock whose presaved ReqTimestampMock falls inside a window whose
@@ -1095,6 +1320,10 @@ func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
 	mgr := &SyncMockManager{}
 	mgr.SetOutputChannel(ch)
 	mgr.SetFirstRequestSignaled()
+	// Past the startup window, so the orphan below is a genuine non-startup
+	// orphan and the stale-cutoff drop (this test's invariant) still applies —
+	// inside the window every ingest is tagged IsStartup and rescued.
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
 
 	// An old window, well past the 7 s cutoff.
 	old := time.Now().Add(-30 * time.Second)
@@ -1444,29 +1673,87 @@ func TestStartupMockSurvivesStaleCutoffInResolveRange(t *testing.T) {
 }
 
 // TestSetMemoryPressurePreservesStartupMocks pins the memory-wipe reaper:
-// SetMemoryPressure must drop ordinary buffered mocks to relieve pressure
-// but PRESERVE startup mocks, which own no window and rely on the later
-// FlushOwnedWindows drain to reach disk. Wiping them would reintroduce the
-// once-per-boot loss the IsStartup tag exists to prevent.
+// under pressure SyncMockManager drops a buffered mock whose request happened
+// DURING a pressure window (it never had a TC captured at the ingress, so
+// dropping it orphans nothing), but it must PRESERVE a startup mock EVEN WHEN
+// that startup mock's request timestamp also falls inside a pressure window.
+// Startup mocks own no test window and rely on the later FlushOwnedWindows
+// drain to reach disk; wiping them would reintroduce the once-per-boot loss
+// the IsStartup tag exists to prevent. (The calm-captured-vs-pressure-request
+// distinction for ordinary mocks is covered by
+// TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks.)
 func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	t.Parallel()
 
-	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
-	startup.TestModeInfo.IsStartup = true
-	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
+	// A closed pressure window in the recent past, within the staleness
+	// horizon so SetMemoryPressure's prune retains it. Both buffered mocks
+	// below carry a request timestamp INSIDE it, so the request-time filter
+	// alone would drop both — only the IsStartup tag rescues the startup mock.
+	now := time.Now()
+	inPressure := now.Add(-3 * time.Second)
 
-	mgr := &SyncMockManager{buffer: []*models.Mock{perTest, startup}}
+	startup := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
+	startup.TestModeInfo.IsStartup = true
+	pressureCaptured := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: inPressure}}
+
+	mgr := &SyncMockManager{
+		buffer:         []*models.Mock{pressureCaptured, startup},
+		pressureRanges: []pressureRange{{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)}},
+	}
 
 	mgr.SetMemoryPressure(true)
 
+	// The pressure-window mock is dropped; the startup mock survives despite
+	// its request also landing inside the pressure window.
 	if len(mgr.buffer) != 1 || mgr.buffer[0] != startup {
 		t.Fatalf("expected only the startup mock preserved after memory wipe; buffer=%d", len(mgr.buffer))
 	}
 
-	// New non-startup mocks are still dropped while paused.
+	// New non-startup mocks whose request is during the now-active pressure
+	// are still dropped.
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	if len(mgr.buffer) != 1 {
 		t.Fatalf("new mocks must still be dropped under memory pressure; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestSetMemoryPressurePrunesStaleRanges asserts the pressureRanges history is
+// bounded: SetMemoryPressure drops CLOSED ranges that ended longer ago than the
+// staleness horizon, but always keeps a still-open range. Without this the slice
+// would grow unbounded under continuous recording (mentor review #4220:119).
+func TestSetMemoryPressurePrunesStaleRanges(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	// Two stale closed ranges (ended well before the horizon) + one recent one.
+	mgr := &SyncMockManager{
+		pressureRanges: []pressureRange{
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale → prune
+			{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)}, // stale → prune
+			{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},   // recent → keep
+		},
+	}
+	// memoryPause is already false, so calling with false is a no-op transition
+	// that still runs the prune.
+	mgr.SetMemoryPressure(false)
+	if got := len(mgr.pressureRanges); got != 1 {
+		t.Fatalf("expected stale closed ranges pruned to 1 recent range; got %d", got)
+	}
+
+	// A still-open range (end == zero) must never be pruned, even if it started
+	// long ago (a single long pressure spell).
+	mgr2 := &SyncMockManager{
+		memoryPause: true,
+		pressureRanges: []pressureRange{
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale closed → prune
+			{start: now.Add(-40 * time.Second)},                                  // open → keep
+		},
+	}
+	// true→true: no new range opened, just the prune.
+	mgr2.SetMemoryPressure(true)
+	if got := len(mgr2.pressureRanges); got != 1 || !mgr2.pressureRanges[0].end.IsZero() {
+		t.Fatalf("expected only the open range kept; got %d ranges", got)
 	}
 }
 
@@ -1499,22 +1786,25 @@ func TestStartupMockFlushedByFlushOwnedWindows(t *testing.T) {
 	}
 }
 
-// TestDuplicateDebrisStillDroppedAfterFirstReqSeen is the negative control:
-// an outbound mock captured AFTER firstReqSeen that owns no window is the
-// skipped duplicate's own debris — it is NOT a startup mock and the dedup
-// cleanup must still drop it, so the startup rescue does not over-rescue.
-func TestDuplicateDebrisStillDroppedAfterFirstReqSeen(t *testing.T) {
+// TestDuplicateDebrisStillDroppedAfterStartupWindow is the negative control:
+// once we are PAST the startup window (>= N unique recorded test cases), an
+// outbound mock captured after firstReqSeen that owns no window is the skipped
+// duplicate's own debris — it is NOT a startup mock and the dedup cleanup must
+// still drop it, so the widened startup rescue does not over-rescue forever.
+func TestDuplicateDebrisStillDroppedAfterStartupWindow(t *testing.T) {
 	t.Parallel()
 
 	out := make(chan *models.Mock, 4)
 	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
 	mgr.SetOutputChannel(out)
-	mgr.SetFirstRequestSignaled() // request-driven traffic, not startup
+	mgr.SetFirstRequestSignaled() // request-driven traffic, not boot
+	// Advance past the startup window so new ingests are no longer tagged.
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
 
 	debris := startupHTTPMock(time.Now().Add(-1 * time.Second))
 	mgr.AddMock(debris)
 	if mgr.buffer[0].TestModeInfo.IsStartup {
-		t.Fatalf("a mock captured after firstReqSeen must NOT be tagged IsStartup")
+		t.Fatalf("a mock captured past the startup window must NOT be tagged IsStartup")
 	}
 
 	mgr.DeleteMocksStrictlyBefore(time.Now())
@@ -1526,5 +1816,124 @@ func TestDuplicateDebrisStillDroppedAfterFirstReqSeen(t *testing.T) {
 	}
 	if len(mgr.buffer) != 0 {
 		t.Fatalf("debris must be dropped from the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestStartupWindowTagsMocksAfterFirstReqSeen pins the widened tagging: while
+// fewer than N unique test cases have been recorded, AddMock tags ingested
+// mocks IsStartup EVEN after firstReqSeen — that is what makes the first N
+// tests' mocks survive the dedup reapers.
+func TestStartupWindowTagsMocksAfterFirstReqSeen(t *testing.T) {
+	t.Parallel()
+
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetFirstRequestSignaled() // past boot, but still inside the startup window
+
+	mgr.AddMock(startupHTTPMock(time.Now()))
+	if !mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("a mock captured within the startup window must be tagged IsStartup")
+	}
+}
+
+// TestResolvedTestCountClosesStartupWindowOnKeptResolves verifies the boundary:
+// only kept resolves (keep==true, one per UNIQUE recorded test) advance the
+// counter, and a keep==false (duplicate) resolve does not. After N kept
+// resolves the window closes and new ingests are no longer tagged.
+func TestResolvedTestCountClosesStartupWindowOnKeptResolves(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+
+	now := time.Now()
+	// A duplicate resolve must NOT advance the counter.
+	mgr.ResolveRange(now.Add(-time.Second), now, "test-0", false, false)
+	if mgr.resolvedTestCount != 0 {
+		t.Fatalf("duplicate (keep=false) resolve must not advance the counter; got %d", mgr.resolvedTestCount)
+	}
+
+	// N kept resolves close the window.
+	for i := range models.StartupMockTestCaseWindow {
+		base := now.Add(time.Duration(i+1) * time.Second)
+		mgr.ResolveRange(base, base.Add(10*time.Millisecond), "test", true, false)
+	}
+	if mgr.resolvedTestCount != models.StartupMockTestCaseWindow {
+		t.Fatalf("expected counter == %d after kept resolves, got %d", models.StartupMockTestCaseWindow, mgr.resolvedTestCount)
+	}
+
+	// Past the window: ingests are no longer startup.
+	mgr.AddMock(startupHTTPMock(now.Add(10 * time.Second)))
+	last := mgr.buffer[len(mgr.buffer)-1]
+	if last.TestModeInfo.IsStartup {
+		t.Fatalf("ingest past the startup window must NOT be tagged IsStartup")
+	}
+}
+
+// TestStartupMockRescuedFromDuplicateWindowResolve is the core static-dedup
+// regression: a startup-window mock captured inside the window of a test case
+// that static-dedup deems a DUPLICATE (ResolveRange keep=false) must be flushed
+// to disk, not pruned with the rest of the duplicate's window. This is the
+// in-window keep=false rescue that the OSS path lacked.
+func TestStartupMockRescuedFromDuplicateWindowResolve(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled() // inside the startup window (count == 0)
+
+	now := time.Now()
+	inWindowTS := now.Add(-20 * time.Millisecond)
+	mgr.AddMock(startupHTTPMock(inWindowTS))
+	if !mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("mock captured inside the startup window must be tagged IsStartup")
+	}
+
+	// Duplicate resolve (keep=false) over the window that contains the mock.
+	mgr.ResolveRange(now.Add(-50*time.Millisecond), now, "test-0", false, false)
+
+	select {
+	case got := <-out:
+		if !got.Spec.ReqTimestampMock.Equal(inWindowTS) {
+			t.Fatalf("rescued wrong mock: ts=%v want %v", got.Spec.ReqTimestampMock, inWindowTS)
+		}
+	default:
+		t.Fatalf("startup mock inside a duplicate window must be rescued, not pruned")
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("rescued mock should leave the buffer; buffer=%d", len(mgr.buffer))
+	}
+}
+
+// TestNonStartupMockPrunedFromDuplicateWindowResolve is the matching negative
+// control: past the startup window, a non-startup mock inside a duplicate's
+// window (ResolveRange keep=false) is pruned as before — the rescue is scoped to
+// the startup window only.
+func TestNonStartupMockPrunedFromDuplicateWindowResolve(t *testing.T) {
+	t.Parallel()
+
+	out := make(chan *models.Mock, 4)
+	mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow // past the window
+
+	now := time.Now()
+	mgr.AddMock(startupHTTPMock(now.Add(-20 * time.Millisecond)))
+	if mgr.buffer[0].TestModeInfo.IsStartup {
+		t.Fatalf("mock past the startup window must NOT be tagged IsStartup")
+	}
+
+	mgr.ResolveRange(now.Add(-50*time.Millisecond), now, "test-0", false, false)
+
+	select {
+	case got := <-out:
+		t.Fatalf("non-startup mock in a duplicate window must be pruned, but it was flushed: ts=%v", got.Spec.ReqTimestampMock)
+	default:
+	}
+	if len(mgr.buffer) != 0 {
+		t.Fatalf("pruned mock should leave the buffer; buffer=%d", len(mgr.buffer))
 	}
 }

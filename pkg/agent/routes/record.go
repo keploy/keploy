@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
@@ -73,6 +74,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
+		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
@@ -339,6 +341,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
+	var tcsSentSoFar int       // TCs sent to CLI this session
+	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
 	for {
 		select {
 		case <-r.Context().Done():
@@ -346,8 +350,40 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		case t, ok := <-tc:
 			if !ok {
+				// Channel closed = recording session over.
+				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
+				a.logger.Info("agent: recording complete",
+					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+					zap.Int("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar),
+					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
+					zap.Int64("mocks_dropped_by_pressure", finalDropped),
+					zap.Int64("mocks_added_successfully", finalAdded),
+				)
 				return
 			}
+
+			// Skip this test case if memory pressure overlapped its HTTP window
+			// [request, response]: under pressure the paired mock may have been
+			// dropped, so sending the TC would orphan it at replay. We check the
+			// TC window against recorded pressure ranges (not individual mock
+			// drops) because that check is race-free regardless of when the
+			// mock's goroutine runs relative to this handler.
+			tcRespTime := t.HTTPResp.Timestamp
+			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+
+			if hasOverlap {
+				tcsSuppressedSoFar++
+				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
+					zap.String("tc_name", t.Name),
+					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+					zap.Int("pressure_overlaps", overlapCount),
+					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+				)
+				continue
+			}
+
+			tcsSentSoFar++
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
