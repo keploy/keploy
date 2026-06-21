@@ -439,10 +439,10 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// keep=false releases them from the buffer so they don't accumulate as
 	// orphans. Must run before the isDuplicate early-return below.
 	if synchronous {
-		currentID := int64(0)
-		if !isDuplicate {
-			currentID = atomic.AddInt64(&GlobalTestCounter, 1)
-		}
+		// Always increment the counter so every stream — duplicate or not —
+		// gets a unique window name. Concurrent duplicates would otherwise all
+		// share "test-0" and collide in the mock manager's window map.
+		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 		testName = fmt.Sprintf("test-%d", currentID)
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.ResolveRange(

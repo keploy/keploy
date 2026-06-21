@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"strings"
@@ -233,7 +234,10 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 					if s.grpcResp == nil {
 						s.grpcResp = &models.GrpcResp{}
 					}
-					s.grpcResp.Trailers = s.grpcResp.Headers
+					s.grpcResp.Trailers = models.GrpcHeaders{
+						PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
+						OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
+					}
 					s.respTrailersReceived = true
 				}
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {

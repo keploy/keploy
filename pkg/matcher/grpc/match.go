@@ -454,6 +454,11 @@ func parseGrpcStatus(s string) int {
 	if s == "" {
 		return 0
 	}
-	n, _ := strconv.Atoi(s)
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		// Non-numeric grpc-status trailer — treat as unknown error so it
+		// causes a mismatch rather than silently passing as OK (0).
+		return -1
+	}
 	return n
 }
