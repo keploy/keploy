@@ -163,12 +163,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.objectsMutex.Unlock()
 	// ---------------
 
-	socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
-		return err
+	// In DaemonSet mode the CRD-scoped SessionReconciler is the SOLE owner of
+	// target_namespace_pids — it arms exactly the recorded pods' TGIDs, and the
+	// proxyless capture reads that map. The sys_enter_socket tracepoint, by
+	// contrast, AUTO-REGISTERS any process doing socket() that passes the
+	// in-eBPF namespace check into target_namespace_pids. On a hostPID +
+	// hostNetwork DS agent that namespace check matches HOST processes
+	// (init/PID 1, node daemons, short-lived forks), so the tracepoint pollutes
+	// the shared map and the capture records non-target host traffic — the
+	// "test-set-0 / node-daemon traffic" leak. The reconciler-armed TGIDs
+	// already capture the app's ingress (no auto-detection needed), so skip the
+	// tracepoint entirely in DS mode.
+	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" {
+		h.logger.Info("daemonset mode: skipping sys_enter_socket PID auto-registration (SessionReconciler owns target_namespace_pids)")
+	} else {
+		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
+			return err
+		}
+		h.socket = socket
 	}
-	h.socket = socket
 
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
