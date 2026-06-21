@@ -27,6 +27,22 @@ import (
 
 var GlobalTestCounter int64
 
+// resolveTestWindow stamps a synthetic "test-N" name, fires ResolveRange to bin
+// buffered mocks into this window, and returns the name as a local string.
+// Callers assign the return value directly to testCase.Name rather than reading
+// testCase.Name back — this severs any CodeQL taint flow: testCase may carry
+// HTTP/gRPC-sourced data so reads from its fields are flagged, but the return
+// value here is always a synthetic "test-N" identifier derived only from the
+// atomic counter and is safe to forward to ResolveRange's diagnostic logs.
+func resolveTestWindow(reqTime, resTime time.Time, mapping bool) string {
+	currentID := atomic.AddInt64(&GlobalTestCounter, 1)
+	testName := fmt.Sprintf("test-%d", currentID)
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.ResolveRange(reqTime, resTime, testName, true, mapping)
+	}
+	return testName
+}
+
 // mapping (last bool before appPort) controls whether the synchronous
 // branch tells SyncMockManager.ResolveRange to emit a TestMockMapping
 // entry onto the agent's mappingChan. Mirrors !cfg.DisableMapping —
@@ -35,6 +51,11 @@ var GlobalTestCounter int64
 type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16)
 
 var CaptureHook CaptureFunc = Capture
+
+// GRPCCaptureHook is called in CaptureGRPC before a test case is built.
+// Returns true if the request is a duplicate and should be dropped.
+// Enterprise sets this when --static-dedup is enabled; nil means no dedup.
+var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) bool
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
@@ -180,20 +201,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if synchronous {
-		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
-		testName := fmt.Sprintf("test-%d", currentID)
-		testCase.Name = testName
-		// Pass testName (the locally-synthesised "test-N" identifier),
-		// not testCase.Name. CodeQL flow analysis treats testCase as
-		// HTTP-sourced and any read from its fields as potentially
-		// sensitive — even though we just wrote a synthetic ID into
-		// .Name a line earlier. Forwarding the local string severs
-		// the taint flow and stops the go/clear-text-logging false
-		// positives that fire downstream (syncMock.go diag/Info
-		// logs include test_name for ResolveRange traceability).
-		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testName, true, mapping)
-		}
+		testCase.Name = resolveTestWindow(reqTimeTest, resTimeTest, mapping)
 	}
 	select {
 	case <-ctx.Done():
@@ -402,8 +410,13 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	return formData
 }
 
-// CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
+// CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
+// Mirrors NewCapture (HTTP) exactly:
+//   - GRPCCaptureHook is evaluated as a boolean so ResolveRange always runs,
+//     even for duplicates (with keep=false to flush their mocks cleanly).
+//   - Counter is only incremented for non-duplicates, matching HTTP behaviour.
+//   - Duplicate streams return after ResolveRange, before the test case is sent.
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
 	if memoryguard.IsRecordingPaused() {
 		return
 	}
@@ -418,10 +431,48 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
-	// Create test case from stream data
+	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
+	isDuplicate := GRPCCaptureHook != nil && GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+
+	// Bin buffered outgoing mocks into this stream's window before any early
+	// return. For non-duplicates keep=true attributes the mocks; for duplicates
+	// keep=false releases them from the buffer so they don't accumulate as
+	// orphans. Must run before the isDuplicate early-return below.
+	if synchronous {
+		currentID := int64(0)
+		if !isDuplicate {
+			currentID = atomic.AddInt64(&GlobalTestCounter, 1)
+		}
+		testName = fmt.Sprintf("test-%d", currentID)
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.ResolveRange(
+				http2Stream.GRPCReq.Timestamp,
+				http2Stream.GRPCResp.Timestamp,
+				testName,
+				!isDuplicate,
+				mapping,
+			)
+		}
+	}
+
+	if isDuplicate {
+		return
+	}
+
+	// Reuse the same 5 MB cap as HTTP. DecodedData is the protoscope text
+	// representation of the binary payload — large protobuf messages can
+	// easily exceed this threshold.
+	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
+	if totalSize > MaxTestCaseSize {
+		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
+			zap.Int("totalSize", totalSize),
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+		return
+	}
+
 	testCase := &models.TestCase{
 		Version:  models.GetVersion(),
-		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Name:     testName,
 		Kind:     models.GRPC_EXPORT,
 		Created:  time.Now().Unix(),
 		GrpcReq:  *http2Stream.GRPCReq,
