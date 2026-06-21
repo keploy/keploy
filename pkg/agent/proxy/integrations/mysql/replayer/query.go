@@ -133,6 +133,22 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					Diff:          diff,
 					NextSteps:     "Re-record mocks if the SQL query has changed.",
 				}
+				if closestMockName == "" {
+					// closest_mock=="" → no candidate mock exists for this query at all.
+					// The TC is failing because its mock was NEVER RECORDED — lost at
+					// record time (teardown decode-lag or memory-pressure drop).
+					// Log the SQL query so you know exactly which query has no mock.
+					sqlSnippet := actualQuery
+					if len(sqlSnippet) > 150 {
+						sqlSnippet = sqlSnippet[:150] + "…"
+					}
+					logger.Error("REPLAY-ORPHAN: TC failing — mock NEVER RECORDED for this query (lost at record time, not a content mismatch)",
+						zap.String("sql_query", sqlSnippet),
+						zap.String("request_type", req.Header.Type),
+						zap.Int("commands_processed", commandCount),
+						zap.String("hint", "check mappings.yaml: this TC has 0 mock_entries — its mock was dropped at record time (teardown lag or memory pressure)"),
+					)
+				}
 				logger.Error("Connection closing due to no matching mock found. Re-record mocks if the SQL query has changed.",
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
