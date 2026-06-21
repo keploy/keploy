@@ -161,6 +161,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var err error
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
+	// mockCountMap is written by the mock-consumer goroutine and read at
+	// teardown for telemetry. Guard both with a mutex so that if teardown
+	// ever runs while the consumer is still draining (e.g. a force-shutdown),
+	// it can't trigger a concurrent map read/write. correlationMap beside it
+	// is already a sync.Map.
+	var mockCountMapMu sync.Mutex
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
 
@@ -214,11 +220,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 		if recordingStarted {
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+			mockCountMapMu.Lock()
+			mockCountSnapshot := make(map[string]int, len(mockCountMap))
+			for k, v := range mockCountMap {
+				mockCountSnapshot[k] = v
+			}
+			mockCountMapMu.Unlock()
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountSnapshot, map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
 			})
 			totalMocks := 0
-			for _, c := range mockCountMap {
+			for _, c := range mockCountSnapshot {
 				totalMocks += c
 			}
 			// "completed" for a clean exit / user Ctrl+C, "aborted"
@@ -444,7 +456,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 					})
 				}
+				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
+				mockCountMapMu.Unlock()
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}

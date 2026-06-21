@@ -18,6 +18,15 @@ jobs:
           - name: go-memory-load
             path: go-memory-load
             script_dir: go_memory_load
+          - name: go-memory-load-mysql
+            path: go-memory-load-mysql
+            script_dir: go_memory_load_mysql
+          - name: go-memory-load-mongo
+            path: go-memory-load-mongo
+            script_dir: go_memory_load_mongo
+          - name: go-memory-load-grpc
+            path: go-memory-load-grpc
+            script_dir: go_memory_load_grpc
           - name: proxy-stress-test
             path: proxy-stress-test
             script_dir: proxy_stress_test
@@ -75,7 +84,11 @@ jobs:
         # also cover proxy-stress-test while diagnosing the
         # record_build_replay_build mock under-capture (only 1/21
         # batch-transfer LIMIT-SQL invocations land in mocks.yaml).
-        if: ${{ always() && (matrix.app.name == 'echo-sql' || matrix.app.name == 'proxy-stress-test') }}
+        # Also upload the memory-load recordings (mongo/mysql) so we can
+        # inspect them for Bug 2 (mid-pressure mock truncation/corruption)
+        # — these fail, and the recordings are needed to tell a corrupt
+        # mock (Bug 2) apart from an absent mock (Bug 0).
+        if: ${{ always() && (matrix.app.name == 'echo-sql' || matrix.app.name == 'proxy-stress-test' || matrix.app.name == 'go-memory-load-mongo' || matrix.app.name == 'go-memory-load-mysql') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.app.name }}-${{ matrix.config.job }}-recordings
