@@ -414,7 +414,8 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 // Mirrors NewCapture (HTTP) exactly:
 //   - GRPCCaptureHook is evaluated as a boolean so ResolveRange always runs,
 //     even for duplicates (with keep=false to flush their mocks cleanly).
-//   - Counter is only incremented for non-duplicates, matching HTTP behaviour.
+//   - Counter is always incremented so concurrent duplicate streams each get a
+//     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
 	if memoryguard.IsRecordingPaused() {
