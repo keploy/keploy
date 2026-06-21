@@ -67,6 +67,18 @@ const (
 	MockNamePostgresV3Session = "PostgresV3Session"
 )
 
+// StartupMockTestCaseWindow is the number of leading UNIQUE recorded test cases
+// whose mocks are treated as "startup mocks". Every mock captured from app boot
+// up to and including the recording of the Nth unique test case is preserved
+// wholesale: it is exempt from the record-side static-dedup pruning (so dedup
+// effectively begins at test N+1) and from replay-side RemoveUnusedMocks
+// pruning. The record side keys off this via SyncMockManager.resolvedTestCount
+// (it tags such mocks TestModeInfo.IsStartup); the replay side derives an
+// equivalent timestamp boundary from the on-disk test cases. Both must agree on
+// N, so it lives here as the single source of truth. Fixed in code rather than
+// exposed as a flag — change here to retune.
+const StartupMockTestCaseWindow = 5
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
@@ -125,23 +137,28 @@ type TestModeInfo struct {
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
 
-	// IsStartup marks app-bootstrap traffic captured before the first
-	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
-	// Such an outbound call can never claim a per-test window — it ran
-	// before any test — so the record-side syncMock reapers (dedup
-	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
-	// instead of dropping it as debris.
+	// IsStartup marks startup-window traffic: a mock captured either before
+	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
+	// Manager fetch at process boot) OR while fewer than
+	// StartupMockTestCaseWindow unique test cases have been recorded. Such
+	// mocks must survive the record-side syncMock reapers (dedup cleanup,
+	// the ResolveRange keep=false / out-of-window / stale-cutoff rescues, the
+	// memory-pressure wipe) rather than being dropped — that is what keeps
+	// the boot-through-Nth-test mock corpus complete and effectively defers
+	// static-dedup pruning to the (N+1)-th test case.
 	//
 	// This is a RECORD-side cleanup signal only, with no replay-time
 	// meaning, which is why it is NOT modelled as a Lifetime value:
 	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
 	// replay-time pool routing, whereas IsStartup is set live at ingest in
 	// SyncMockManager.AddMock and is only ever read on buffered, live-
-	// captured mocks before they are persisted. Like the sibling
-	// runtime-only fields, the json/bson tags keep it out of the text
-	// formats; gob (which ignores struct tags) does encode it, but a value
-	// carried on a reloaded mock is inert — the reapers run only on the
-	// live record buffer, never on disk-loaded mocks.
+	// captured mocks before they are persisted. (Replay's own startup-mock
+	// preservation is timestamp-based — see replay.startupMockCutoff — not
+	// keyed off this flag.) Like the sibling runtime-only fields, the
+	// json/bson tags keep it out of the text formats; gob (which ignores
+	// struct tags) does encode it, but a value carried on a reloaded mock is
+	// inert — the reapers run only on the live record buffer, never on
+	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
 }
 

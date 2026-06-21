@@ -1310,6 +1310,21 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	return h, nil
 }
 
+// ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
+// retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
+// not hit a "container name already in use" conflict from the dependency
+// containers/network left behind. No-op when there is no managed app or it is
+// not a compose app (App.ComposeDown self-guards on kind == DockerCompose).
+func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		a.logger.Debug("ComposeDownOnSetupFailure: no managed app to tear down")
+		return nil
+	}
+	ap.ComposeDown()
+	return nil
+}
+
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
@@ -1456,6 +1471,37 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 		return nil, fmt.Errorf("failed to decode mock errors response: %s", err.Error())
 	}
 	return mockErrors, nil
+}
+
+// BeginTestErrorCapture asks the agent to open a per-test mock-error capture
+// window so the next GetMockErrors returns only this test's misses. A missing
+// endpoint (older agent) returns 404 and is treated as a no-op, preserving the
+// legacy global-queue behaviour.
+func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to begin test error capture: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for begin-test-error-capture; safe to ignore once")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil // older agent without the endpoint — fall back to legacy behaviour
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
+	}
+	return nil
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
