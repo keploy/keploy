@@ -1968,3 +1968,36 @@ func TestFilterByTimeStampThreeTier(t *testing.T) {
 	assert.ElementsMatch(t, []string{"conn", "startup-init", "legacy-conn"}, names(startup),
 		"connection-lifetime + startup-init PerTest + legacy connection-tagged land in startup")
 }
+
+func TestAgentReadyTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		set  bool
+		want time.Duration
+	}{
+		{name: "default when unset", set: false, want: DefaultAgentReadyTimeout},
+		{name: "valid override", env: "300", set: true, want: 300 * time.Second},
+		{name: "whitespace trimmed", env: "  90 ", set: true, want: 90 * time.Second},
+		{name: "zero falls back to default", env: "0", set: true, want: DefaultAgentReadyTimeout},
+		{name: "negative falls back to default", env: "-5", set: true, want: DefaultAgentReadyTimeout},
+		{name: "garbage falls back to default", env: "soon", set: true, want: DefaultAgentReadyTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", tc.env)
+			} else {
+				os.Unsetenv("KEPLOY_AGENT_READY_TIMEOUT")
+			}
+			if got := AgentReadyTimeout(); got != tc.want {
+				t.Fatalf("AgentReadyTimeout() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// The default must cover the agent container's own healthcheck budget
+	// (~310s), otherwise the CLI gives up while the agent is still starting.
+	if DefaultAgentReadyTimeout < 310*time.Second {
+		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
+	}
+}
