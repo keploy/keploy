@@ -504,6 +504,43 @@ func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mappi
 	return added
 }
 
+// retainNonPassingTestMocks preserves the expected mocks of every test that did
+// NOT pass this run (failed, obsolete, or not executed) by adding them to the
+// prune keep-set. Such a test still keeps a written/retained mapping
+// (UpdateTestMapping), so UpdateMocks must not delete the mocks that mapping
+// references — otherwise the mapping is left pointing at deleted mocks and that
+// test can never find its mocks on replay (the missing-mock failure that breaks
+// both the legacy and smart-set cloud-replay paths). Passed tests are skipped:
+// their actual consumption is already in the keep-set. This generalizes the
+// prior not-executed-only preservation to also cover executed-but-failed tests.
+// Returns the number of mocks newly added to keep.
+func retainNonPassingTestMocks(expectedTestMockMappings map[string][]models.MockEntry, passedTests map[string]bool, keep map[string]models.MockState) int {
+	if len(expectedTestMockMappings) == 0 || keep == nil {
+		return 0
+	}
+	added := 0
+	for testID, mocks := range expectedTestMockMappings {
+		if passedTests[testID] {
+			continue
+		}
+		for _, m := range mocks {
+			if m.Name == "" {
+				continue
+			}
+			if _, exists := keep[m.Name]; exists {
+				continue
+			}
+			keep[m.Name] = models.MockState{
+				Name:      m.Name,
+				Kind:      models.Kind(m.Kind),
+				Timestamp: m.Timestamp,
+			}
+			added++
+		}
+	}
+	return added
+}
+
 // isMockSubsetWithConfig reports whether the streaming-path replay consumed a
 // mock set consistent with the test's mapping: a consumed mock that is NOT in
 // the expected set flags a mismatch — UNLESS it is a mock that doesn't
