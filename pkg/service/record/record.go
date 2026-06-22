@@ -309,7 +309,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		// Aligned with the agent's own healthcheck budget; a fixed 120s wait gave
+		// up while the agent container was still starting under CI daemon
+		// contention. See pkg.AgentReadyTimeout (KEPLOY_AGENT_READY_TIMEOUT).
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)

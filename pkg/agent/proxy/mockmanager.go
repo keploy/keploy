@@ -1949,6 +1949,10 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		Lifetime:         mock.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+		// Carry schema-detected request noise for non-HTTP integrations
+		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
+		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
+		ReqBodyNoise: reqBodyNoiseOf(mock.Spec),
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
@@ -2072,14 +2076,12 @@ func (m *MockManager) rebuildHitIndex(slices ...[]*models.Mock) {
 // order; subsequent calls for the same name update the stored state in-place
 // without changing its position. This preserves true network call order in
 // GetConsumedMocks.
-// reqBodyNoiseOf returns the field-path request-body noise detected on an HTTP
-// mock's request (nil for non-HTTP mocks or when none was detected). Used to
-// carry schema-detected noise out on MockState so UpdateMocks can persist it.
+// reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
+// request (nil when none was detected). Used to carry schema-detected noise out
+// on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
+// alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
 func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
-	if spec.HTTPReq == nil {
-		return nil
-	}
-	return spec.HTTPReq.ReqBodyNoise
+	return spec.ReqBodyNoise
 }
 
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {

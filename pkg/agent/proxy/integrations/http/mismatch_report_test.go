@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -16,12 +17,14 @@ func httpMockWithReq(name, method, rawURL, body string, header map[string]string
 		Name: name,
 		Kind: models.Kind(models.HTTP),
 		Spec: models.MockSpec{
+			// Schema-noise lives on the kind-agnostic MockSpec.ReqBodyNoise for
+			// every parser, HTTP included.
+			ReqBodyNoise: reqBodyNoise,
 			HTTPReq: &models.HTTPReq{
-				Method:       models.Method(method),
-				URL:          rawURL,
-				Body:         body,
-				Header:       header,
-				ReqBodyNoise: reqBodyNoise,
+				Method: models.Method(method),
+				URL:    rawURL,
+				Body:   body,
+				Header: header,
 			},
 		},
 	}
@@ -136,11 +139,10 @@ func TestBuildHTTPMismatchReport_RespectsLearnedAndUserNoise(t *testing.T) {
 // User-configured body noise must thread into detectReqBodyNoise so manual
 // noise config and learned noise share one vocabulary.
 func TestDetectReqBodyNoise_UserNoiseExcluded(t *testing.T) {
-	h := newHTTP()
 	mock := httpMockWithReq("mock-1", "POST", "http://x/y",
 		`{"ts":"111","real":"a"}`, map[string]string{"Content-Type": "application/json"}, nil)
 
-	got := h.detectReqBodyNoise(true, mock, []byte(`{"ts":"222","real":"b"}`), map[string][]string{"ts": {}})
+	got, _ := schemanoise.New(httpNoiseAdapter{}, true, false).Detect(mock, []byte(`{"ts":"222","real":"b"}`), map[string][]string{"ts": {}})
 	if _, ok := got["body.ts"]; ok {
 		t.Errorf("user-noised field must not be re-learned as noise: %+v", got)
 	}
@@ -157,13 +159,14 @@ func TestFilterStrictNoiseMatches_UserNoiseAllowsDrift(t *testing.T) {
 		`{"request_id":"r-1","ts":"111"}`, map[string]string{"Content-Type": "application/json"},
 		map[string][]string{"body.request_id": {}})
 
+	eng := schemanoise.New(httpNoiseAdapter{}, false, true)
 	// ts drifted; without user noise the candidate must be rejected.
 	live := []byte(`{"request_id":"r-9","ts":"222"}`)
-	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, live, nil); len(kept) != 0 {
+	if kept := h.filterStrictNoiseMatches(eng, []*models.Mock{mock}, live, nil); len(kept) != 0 {
 		t.Fatalf("expected strict rejection without user noise, kept %d", len(kept))
 	}
 	// With user noise on ts the drift is allowed.
-	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, live, map[string][]string{"ts": {}}); len(kept) != 1 {
+	if kept := h.filterStrictNoiseMatches(eng, []*models.Mock{mock}, live, map[string][]string{"ts": {}}); len(kept) != 1 {
 		t.Fatalf("expected candidate kept with user noise, kept %d", len(kept))
 	}
 }

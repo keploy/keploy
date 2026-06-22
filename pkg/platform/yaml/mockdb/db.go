@@ -474,9 +474,10 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -593,9 +594,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -741,20 +743,23 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	lock.Lock()
 	defer lock.Unlock()
 
-	// merge applies the learned noise; returns true when any mock changed
-	// so unchanged files are never rewritten.
+	// merge applies the learned noise; returns true when any mock changed so
+	// unchanged files are never rewritten. Every parser (HTTP included) stores
+	// noise uniformly on the kind-agnostic MockSpec.ReqBodyNoise. Previously this
+	// path skipped every non-HTTP mock, so learning under --schema-noise-detection
+	// WITHOUT --remove-unused-mocks silently discarded the learned noise at exit.
 	merge := func(mocks []*models.Mock) bool {
 		changed := false
 		for _, mock := range mocks {
 			noise, ok := withNoise[mock.Name]
-			if !ok || mock.Kind != models.Kind(models.HTTP) || mock.Spec.HTTPReq == nil {
+			if !ok {
 				continue
 			}
-			merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
-			if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+			merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+			if len(merged) != len(mock.Spec.ReqBodyNoise) {
 				changed = true
 			}
-			mock.Spec.HTTPReq.ReqBodyNoise = merged
+			mock.Spec.ReqBodyNoise = merged
 		}
 		return changed
 	}

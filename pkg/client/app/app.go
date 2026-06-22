@@ -590,11 +590,17 @@ func (a *App) ComposeDown() {
 // returns before recentAppLogs — comfortably under 30s.
 const (
 	composeDownCmdBudget = 8 * time.Second // `docker compose down`
-	forceRemoveBudget    = 2 * time.Second // each `docker rm -f`
+	forceRemoveBudget    = 2 * time.Second // each `docker rm -f` in the teardown drain path
 	reapBarrierBudget    = 3 * time.Second // waitContainersRemoved poll
 	graceBudget          = 5 * time.Second // cmdCancel coverage-flush grace
 	waitTillExitBudget   = 8 * time.Second // non-compose post-cancel container wait
 	dockerInspectBudget  = 2 * time.Second // any single teardown ContainerInspect
+	// preRunRemoveBudget bounds the startup-time force-remove of a leftover
+	// --name container before a docker-run. Unlike the teardown force-remove it
+	// is NOT in the SIGINT drain path, so it can afford to wait for a still-
+	// running prior container to actually go away under daemon contention; the
+	// 2s teardown cap is too short here and lets "name already in use" through.
+	preRunRemoveBudget = 30 * time.Second
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
@@ -637,13 +643,21 @@ func (a *App) waitContainersRemoved(names []string, budget time.Duration) {
 // "no such container" case. Used after compose down to guarantee a name is free
 // for reuse on the next per-test-set compose up.
 func (a *App) forceRemoveContainerByName(name string) {
+	a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+}
+
+// forceRemoveContainerByNameWithin is forceRemoveContainerByName with a caller-
+// chosen deadline. Teardown callers pass the tight forceRemoveBudget (drain
+// path); the startup pre-run cleanup passes preRunRemoveBudget so it can wait
+// out a still-running prior container under contention.
+func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration) {
 	if name == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), forceRemoveBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	if output, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
-		a.logger.Debug("force-remove container finished (may already be gone, or the bounded teardown deadline elapsed)",
+		a.logger.Debug("force-remove container finished (may already be gone, or the bounded deadline elapsed)",
 			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
 }
@@ -683,6 +697,22 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
+		// Clear any container left over from a prior run with the same --name
+		// before starting. --rm removes the container on exit, but under heavy
+		// docker-daemon contention that reap can lag past the next
+		// `docker run --name`, so a re-run (e.g. a dedup lane re-running the app
+		// per test-set) hits "Conflict. The container name ... is already in use"
+		// (docker exit 125). Resolve the name from --container-name (a.container)
+		// or, when that isn't set, the --name in the command itself, then
+		// force-remove it with preRunRemoveBudget — generous because this is a
+		// startup cleanup, and a still-running prior container can take more than
+		// the 2s teardown cap to remove under contention. Best-effort: a no-op
+		// when nothing is lingering.
+		removeName := a.container
+		if removeName == "" {
+			removeName = utils.ContainerNameFromDockerRun(userCmd)
+		}
+		a.forceRemoveContainerByNameWithin(removeName, preRunRemoveBudget)
 	}
 
 	// Define the function to cancel the command
