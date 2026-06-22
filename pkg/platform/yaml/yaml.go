@@ -43,6 +43,13 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
+	// ReqBodyNoise carries the kind-agnostic MockSpec.ReqBodyNoise on the shared
+	// top-level doc — the single storage location every parser uses (HTTP and
+	// non-HTTP alike), since the per-kind specs (GenericSchema, GrpcSpec, …) have
+	// no field for it. Only populated for a kind whose parser implements the
+	// schema-noise adapter and learned drift (HTTP, plus Pulsar in enterprise);
+	// other kinds (DNS, Mongo, …) leave it empty. Restored to MockSpec on decode.
+	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty" yaml:"req_body_noise,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support

@@ -197,6 +197,17 @@ type MockSpec struct {
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
+
+	// ReqBodyNoise is the single, kind-agnostic home for field-path request-body
+	// noise detected during schema-based auto-replay matching
+	// (config.Test.SchemaNoiseDetection). EVERY parser stores it here — HTTP and
+	// non-HTTP (Pulsar/Kafka/Redis/…) alike — so the learn/enforce flow is
+	// uniform across protocols (see pkg/agent/proxy/integrations/schemanoise).
+	// fieldpath ("body.user.id") -> regex list, where an empty list means
+	// "ignore this whole field". Distinct from Mock.Noise ([]string value-regexes
+	// written by the enterprise obfuscator): this records which request-body
+	// fields drift between recording and replay.
+	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -714,9 +725,11 @@ type MockState struct {
 	Lifetime Lifetime `json:"lifetime,omitempty"`
 	// ReqBodyNoise carries field-path request-body noise detected during
 	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
-	// back from the agent to the replay service so UpdateMocks can persist
-	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
-	// -> regex list; empty list means "ignore the whole field".
+	// back from the agent to the replay service so UpdateMocks /
+	// PersistMockNoise can persist it onto the mock. HTTP mocks store it on
+	// HTTPReq.ReqBodyNoise; non-HTTP integrations (Pulsar/Kafka/Redis/Generic)
+	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
+	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
@@ -771,6 +784,21 @@ func (m *Mock) DeepCopy() *Mock {
 		}
 	}
 
+	// Deep copy the kind-agnostic request-body schema-noise map (used by EVERY
+	// parser — HTTP and non-HTTP alike). Started from m.Spec by value above, so
+	// the clone would otherwise share this map and its value slices — and
+	// DeepCopy runs before async gob writes and when building runtime mock
+	// pools, so a learned-noise mutation on one copy could bleed into another or
+	// race a persistence read.
+	if m.Spec.ReqBodyNoise != nil {
+		c.Spec.ReqBodyNoise = make(map[string][]string, len(m.Spec.ReqBodyNoise))
+		for k, v := range m.Spec.ReqBodyNoise {
+			vc := make([]string, len(v))
+			copy(vc, v)
+			c.Spec.ReqBodyNoise[k] = vc
+		}
+	}
+
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
 	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
@@ -800,16 +828,6 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
-		// Deep copy the request-body noise map so a clone's detected noise
-		// can't mutate the shared pooled mock's map (and vice versa).
-		if m.Spec.HTTPReq.ReqBodyNoise != nil {
-			httpReqCopy.ReqBodyNoise = make(map[string][]string, len(m.Spec.HTTPReq.ReqBodyNoise))
-			for k, v := range m.Spec.HTTPReq.ReqBodyNoise {
-				vc := make([]string, len(v))
-				copy(vc, v)
-				httpReqCopy.ReqBodyNoise[k] = vc
-			}
-		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {
