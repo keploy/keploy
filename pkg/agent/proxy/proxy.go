@@ -1381,15 +1381,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	// Delete-on-close (O7): drop this source port's TLS dest mapping when
-	// the connection finishes. This defer runs at return — after the
-	// parserErrGrp.Wait() below — so no parser goroutine can still be
-	// reading the entry. It bounds SrcPortToDstURL and, critically for the
-	// multi-app agent, stops a recycled source port from reading a previous
-	// (possibly different-app) connection's stale destination when its
-	// ClientHello carries no SNI. Deleting an absent key is a no-op, so
-	// this is harmless for non-CONNECT/non-TLS connections.
-	defer pTls.SrcPortToDstURL.Delete(sourcePort)
+	// Claim this source port for the current connection (O7). The owner token
+	// is this connection's unique destConnID; ClaimSrcPort overwrites any stale
+	// owner left by a previous connection that reused this (recycled) port.
+	pTls.ClaimSrcPort(sourcePort, destConnID)
+
+	// Delete-on-close (O7): drop this source port's TLS dest mapping when the
+	// connection finishes — but ONLY if this connection still owns the port.
+	// The source port is released at the OS level when srcConn is closed (the
+	// defer below), which runs BEFORE this one (LIFO), so a recycled port whose
+	// NEW connection has already re-Stored its mapping must not be clobbered by
+	// this older connection's cleanup. ReleaseSrcPortIfOwner's CompareAndDelete
+	// on the owner token enforces that. It still bounds SrcPortToDstURL and,
+	// critically for the multi-app agent, stops a recycled source port from
+	// reading a previous (possibly different-app) connection's stale
+	// destination when its ClientHello carries no SNI. Harmless for
+	// non-CONNECT/non-TLS connections (the keys are simply absent).
+	defer pTls.ReleaseSrcPortIfOwner(sourcePort, destConnID)
 
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
