@@ -1757,6 +1757,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
+			QueryNoise:       queryNoiseOf(new.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -1806,6 +1807,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			QueryNoise:       queryNoiseOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -1846,6 +1848,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			QueryNoise:       queryNoiseOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2080,6 +2083,17 @@ func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 		return nil
 	}
 	return spec.HTTPReq.ReqBodyNoise
+}
+
+// queryNoiseOf returns the per-position COM_QUERY literal noise detected on a
+// MySQL mock's first request (nil when none). Used to carry schema-detected
+// literal noise out on MockState so UpdateMocks / PersistMockNoise can persist
+// it onto the mock's MySQLRequests[0].QueryNoise.
+func queryNoiseOf(spec models.MockSpec) map[string][]string {
+	if len(spec.MySQLRequests) == 0 {
+		return nil
+	}
+	return spec.MySQLRequests[0].QueryNoise
 }
 
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {

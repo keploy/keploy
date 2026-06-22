@@ -2,6 +2,7 @@ package replayer
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,7 +24,9 @@ type fakeMockDb struct {
 	session    []*models.Mock
 	winStart   time.Time
 	winEnd     time.Time
-	deletedFil []string // names passed to DeleteFilteredMock
+	deletedFil []string                // names passed to DeleteFilteredMock
+	deletedMk  []models.Mock           // full mocks passed to DeleteFilteredMock
+	updatedNew map[string]*models.Mock // name -> updated copy passed to UpdateUnFilteredMock
 }
 
 func (f *fakeMockDb) GetSessionMocks() ([]*models.Mock, error)         { return f.session, nil }
@@ -44,11 +47,18 @@ func (f *fakeMockDb) GetStartupMocksByKind(models.Kind) ([]*models.Mock, error) 
 }
 func (f *fakeMockDb) GetSessionScopedMocks() ([]*models.Mock, error) { return nil, nil }
 func (f *fakeMockDb) SessionMockHitCounts() map[string]uint64        { return nil }
-func (f *fakeMockDb) UpdateUnFilteredMock(*models.Mock, *models.Mock) bool {
+func (f *fakeMockDb) UpdateUnFilteredMock(_ *models.Mock, n *models.Mock) bool {
+	if n != nil {
+		if f.updatedNew == nil {
+			f.updatedNew = map[string]*models.Mock{}
+		}
+		f.updatedNew[n.Name] = n
+	}
 	return true // session mocks are reusable: re-stamped, not removed
 }
 func (f *fakeMockDb) DeleteFilteredMock(m models.Mock) bool {
 	f.deletedFil = append(f.deletedFil, m.Name)
+	f.deletedMk = append(f.deletedMk, m)
 	// Real semantics: a per-test mock present in the filtered pool is consumed
 	// (removed) and returns true; a per-test mock that has been lax-staged into
 	// the session pool is not in the filtered tree, so DeleteFilteredMock misses
@@ -143,7 +153,7 @@ func TestMatchCommand_OrphanPrepareSynthesizesPrepareOk(t *testing.T) {
 	db := &fakeMockDb{session: []*models.Mock{filler}}
 	dctx := newDecodeCtx()
 
-	resp, ok, _, _, err := matchCommand(context.Background(), logger, stmtPrepareReq(sql), db, dctx)
+	resp, ok, _, _, err := matchCommand(context.Background(), logger, stmtPrepareReq(sql), db, dctx, false, false)
 	if err != nil || !ok || resp == nil {
 		t.Fatalf("orphaned PREPARE must synthesize a PREPARE_OK, got ok=%v err=%v resp=%v", ok, err, resp)
 	}
@@ -189,7 +199,7 @@ func TestMatchCommand_SendLongDataAcceptedGracefully(t *testing.T) {
 			Message: &mysql.StmtSendLongDataPacket{StatementID: 3, ParameterID: 0},
 		},
 	}
-	_, ok, _, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx())
+	_, ok, _, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), false, false)
 	if err != nil {
 		t.Fatalf("unmocked COM_STMT_SEND_LONG_DATA must not error, got %v", err)
 	}
@@ -228,7 +238,7 @@ func TestMatchCommand_SendLongDataConsumesRecordedMock(t *testing.T) {
 		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12, SequenceID: 0}, Type: "COM_STMT_SEND_LONG_DATA"},
 		Message: &mysql.StmtSendLongDataPacket{StatementID: 3},
 	}}
-	_, ok, _, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx())
+	_, ok, _, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), false, false)
 	if err != nil || !ok {
 		t.Fatalf("SLD must be accepted, got ok=%v err=%v", ok, err)
 	}
@@ -272,7 +282,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 			winStart: base.Add(5 * time.Second),  // [t1 < winStart < t2 < winEnd < t3]
 			winEnd:   base.Add(15 * time.Second), // only readback-2 is in-window
 		}
-		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx())
+		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), false, false)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected a match, got ok=%v err=%v resp=%v", ok, err, resp)
 		}
@@ -283,7 +293,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 
 	t.Run("no active window falls back to first-recorded (no behavior change)", func(t *testing.T) {
 		db := &fakeMockDb{session: mocks} // zero window => windowActive == false
-		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx())
+		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), false, false)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected a match, got ok=%v err=%v resp=%v", ok, err, resp)
 		}
@@ -301,7 +311,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 			winStart: base.Add(100 * time.Second),
 			winEnd:   base.Add(200 * time.Second),
 		}
-		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx())
+		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), false, false)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected the reusable recording to still match, got ok=%v err=%v", ok, err)
 		}
@@ -309,4 +319,139 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 			t.Errorf("expected out-of-window fallback to serve row=only, got %q", resp.Payload)
 		}
 	})
+}
+
+// dmlMock builds a per-test COM_QUERY DML mock (consumable via
+// DeleteFilteredMock) carrying the given recorded SQL and optional learned
+// QueryNoise. Equal payload length to the live request drives the matcher into
+// the structure-equal branch.
+func dmlMock(name, sql string, learned map[string][]string) *models.Mock {
+	m := readbackMock(name, sql, "served", time.Time{})
+	m.TestModeInfo.Lifetime = models.LifetimePerTest
+	m.Spec.Metadata = map[string]string{"type": "mocks"}
+	m.Spec.MySQLRequests[0].QueryNoise = learned
+	return m
+}
+
+// TestMatchCommand_ComQueryLiteralNoise exercises the end-to-end COM_QUERY
+// request-literal noise wiring through matchCommand: detection learns and
+// attaches noise onto the consumed mock; strict enforcement consumes a
+// structurally-identical mock iff every literal drift is in the learned-noise
+// set; and a WHERE-only drift never matches under strict.
+func TestMatchCommand_ComQueryLiteralNoise(t *testing.T) {
+	logger := zap.NewNop()
+	recorded := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='north'"
+	liveSetDrift := "update orders set views=5, updated_at='2026-06-17 14:00:24' where region='north'"
+	liveWhereDrift := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='south'"
+
+	t.Run("detection attaches learned noise onto consumed mock", func(t *testing.T) {
+		mock := dmlMock("upd", recorded, nil)
+		db := &fakeMockDb{perTest: []*models.Mock{mock}}
+
+		// Detection ON, strict OFF. The structurally-equal mock is served via
+		// the score-based partial path (ok=true overall because matchedResp is
+		// set), and the detected updated_at noise must be attached to the mock
+		// that DeleteFilteredMock consumed.
+		resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(liveSetDrift), db, newDecodeCtx(), true, false)
+		if err != nil || !ok || resp == nil {
+			t.Fatalf("expected a served response on detection path, got ok=%v err=%v resp=%v", ok, err, resp)
+		}
+		if len(db.deletedMk) == 0 {
+			t.Fatalf("expected the mock to be consumed via DeleteFilteredMock")
+		}
+		got := db.deletedMk[0].Spec.MySQLRequests[0].QueryNoise
+		want := map[string][]string{"set:updated_at#0": {"2026-01-01 12:48:36"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("detected noise attached to consumed mock mismatch:\n want %v\n got  %v", want, got)
+		}
+		// The original pooled mock's map must be untouched (fresh copy).
+		if mock.Spec.MySQLRequests[0].QueryNoise != nil {
+			t.Errorf("detection mutated the shared pooled mock's QueryNoise: %v", mock.Spec.MySQLRequests[0].QueryNoise)
+		}
+	})
+
+	t.Run("strict consumes mock when only learned-noise literal drifts", func(t *testing.T) {
+		learned := map[string][]string{"set:updated_at#0": {"2026-01-01 12:48:36"}}
+		db := &fakeMockDb{perTest: []*models.Mock{dmlMock("upd", recorded, learned)}}
+
+		_, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(liveSetDrift), db, newDecodeCtx(), false, true)
+		if err != nil || !ok {
+			t.Fatalf("strict: expected within-noise match to be consumed, got ok=%v err=%v", ok, err)
+		}
+		if len(db.deletedFil) == 0 {
+			t.Errorf("strict within-noise match should consume the mock (DeleteFilteredMock)")
+		}
+	})
+
+	t.Run("strict rejects WHERE-only drift (never learnable)", func(t *testing.T) {
+		learned := map[string][]string{"set:updated_at#0": {"2026-01-01 12:48:36"}}
+		db := &fakeMockDb{perTest: []*models.Mock{dmlMock("upd", recorded, learned)}}
+
+		_, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(liveWhereDrift), db, newDecodeCtx(), false, true)
+		if ok {
+			t.Errorf("strict: a changed WHERE predicate must NOT match (err=%v)", err)
+		}
+	})
+}
+
+// TestMatchCommand_ComQueryStrictHardRejectForcesMiss is the regression guard
+// for Finding 3: when the live query's structural counterpart is found but
+// drifted in a non-noise / predicate literal (a real regression), strict mode
+// must force an OVERALL MISS — it must NOT fall back to serving an unrelated
+// candidate that merely scored a payload-length partial.
+func TestMatchCommand_ComQueryStrictHardRejectForcesMiss(t *testing.T) {
+	logger := zap.NewNop()
+	// Same skeleton as the live query; only the WHERE region literal drifts ->
+	// hard reject under strict (region is non-eligible).
+	counterpart := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='north'"
+	live := "update orders set views=5, updated_at='2026-01-01 12:48:36' where region='south'"
+	// Unrelated query (different table/columns) that still scores a payload-
+	// length partial (matchCount=1). Without the hard-reject, matchCommand would
+	// serve THIS as the best partial for the live query.
+	unrelated := "update events set code='x' where id=1"
+
+	learned := map[string][]string{"set:updated_at#0": {"2026-01-01 12:48:36"}}
+	db := &fakeMockDb{perTest: []*models.Mock{
+		dmlMock("unrelated", unrelated, nil),
+		dmlMock("counterpart", counterpart, learned),
+	}}
+
+	resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(live), db, newDecodeCtx(), false, true)
+	if ok || resp != nil {
+		t.Fatalf("strict: WHERE-drift counterpart must force an overall MISS even with a competing partial; got ok=%v resp=%v err=%v", ok, resp, err)
+	}
+	if len(db.deletedFil) != 0 || len(db.deletedMk) != 0 {
+		t.Errorf("nothing should be consumed on a hard-reject miss; deletedFil=%v deletedMk=%d", db.deletedFil, len(db.deletedMk))
+	}
+}
+
+// TestMatchCommand_StrictNoPartialForDifferentSkeleton is the regression guard
+// for the follow-up finding: under strict, a candidate whose redacted skeleton
+// differs from the live query (changed column / operator, or a different
+// statement shape) must NOT be served through matchCommand's score-based
+// partial fallback even when payload lengths coincide. Strict serves only an
+// exact or within-noise match; otherwise it must MISS so the real query-shape
+// regression surfaces.
+func TestMatchCommand_StrictNoPartialForDifferentSkeleton(t *testing.T) {
+	logger := zap.NewNop()
+	cases := []struct{ name, recorded, live string }{
+		// same AST node-type signature, different column in WHERE
+		{"column", "update t set a=1 where id=1", "update t set a=1 where ix=1"},
+		// same node-type signature, different operator in WHERE
+		{"operator", "update t set a=1 where id=1", "update t set a=1 where id>1"},
+		// different statement shape (extra SET column) — falls to the score path
+		{"shape", "update t set a=1, b=2 where id=1", "update t set a=1 where id=1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := &fakeMockDb{perTest: []*models.Mock{dmlMock("cand", c.recorded, nil)}}
+			resp, ok, _, _, err := matchCommand(context.Background(), logger, comQueryReq(c.live), db, newDecodeCtx(), false, true)
+			if ok || resp != nil {
+				t.Fatalf("strict: %s drift must MISS, never serve a score partial; got ok=%v resp=%v err=%v", c.name, ok, resp, err)
+			}
+			if len(db.deletedFil) != 0 || len(db.deletedMk) != 0 {
+				t.Errorf("%s: nothing should be consumed on a strict miss; deletedFil=%v", c.name, db.deletedFil)
+			}
+		})
+	}
 }

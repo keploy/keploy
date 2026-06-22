@@ -396,8 +396,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		for _, v := range mock.Spec.MySQLRequests {
 
 			req := mysql.RequestYaml{
-				Header: v.Header,
-				Meta:   v.Meta,
+				Header:     v.Header,
+				Meta:       v.Meta,
+				QueryNoise: v.QueryNoise,
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
@@ -811,6 +812,7 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 				Header: v.Header,
 				Meta:   v.Meta,
 			},
+			QueryNoise: v.QueryNoise,
 		}
 
 		switch v.Header.Type {

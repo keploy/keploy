@@ -476,7 +476,7 @@ func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn 
 	}
 
 	//update the config mock (since it can be reused in case of more connections compared to record mode)
-	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb)
+	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb, nil)
 	if !ok {
 		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during native password")
 	}
@@ -599,7 +599,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 
 	//update the config mock (since it can be reused in case of more connections compared to record mode)
 	//TODO: need to check when updateMock is unsuccessful
-	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb)
+	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb, nil)
 	if !ok {
 		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during fast auth success")
 	}

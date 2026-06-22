@@ -334,6 +334,21 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 	return out
 }
 
+// mergeQueryNoiseOntoMySQLMock merges schema-detected COM_QUERY literal noise
+// (st.QueryNoise) onto a MySQL mock's first request before the mock is
+// re-serialised to disk. No-op for non-MySQL mocks, empty noise, or mocks with
+// no MySQL request. Returns true when the mock's QueryNoise changed (so callers
+// can skip rewriting unchanged files). Mirrors the HTTP ReqBodyNoise merge.
+func mergeQueryNoiseOntoMySQLMock(mock *models.Mock, noise map[string][]string) bool {
+	if len(noise) == 0 || mock.Kind != models.Kind(models.MySQL) || len(mock.Spec.MySQLRequests) == 0 {
+		return false
+	}
+	before := len(mock.Spec.MySQLRequests[0].QueryNoise)
+	merged := mergeReqBodyNoise(mock.Spec.MySQLRequests[0].QueryNoise, noise)
+	mock.Spec.MySQLRequests[0].QueryNoise = merged
+	return len(merged) != before
+}
+
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
 // mockNames is a keep-set keyed by mock name (values carry models.MockState details).
@@ -455,6 +470,9 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
 				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
 			}
+			// MySQL request-literal noise (COM_QUERY) detected during
+			// schema-based auto-replay matching.
+			mergeQueryNoiseOntoMySQLMock(mock, st.QueryNoise)
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -574,6 +592,9 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
 				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
 			}
+			// MySQL request-literal noise (COM_QUERY) detected during
+			// schema-based auto-replay matching.
+			mergeQueryNoiseOntoMySQLMock(mock, st.QueryNoise)
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -691,21 +712,26 @@ func writeGobMocksAtomically(ctx context.Context, gobPath string, mocks []*model
 	return nil
 }
 
-// PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
-// detected under --schema-noise-detection) into the on-disk mocks WITHOUT
-// pruning anything. This is the persistence path when mock pruning
-// (--remove-unused-mocks) is not enabled — previously the learned noise rode
-// only inside UpdateMocks, so running detection without pruning silently
-// discarded everything that was learned at process exit.
+// PersistMockNoise merges learned noise (MockState.ReqBodyNoise for HTTP and
+// MockState.QueryNoise for MySQL COM_QUERY, detected under
+// --schema-noise-detection) into the on-disk mocks WITHOUT pruning anything.
+// This is the persistence path when mock pruning (--remove-unused-mocks) is not
+// enabled — previously the learned noise rode only inside UpdateMocks, so
+// running detection without pruning silently discarded everything that was
+// learned at process exit.
 func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
 	// Only mocks that actually carry learned noise matter.
-	withNoise := make(map[string]map[string][]string)
+	withNoise := make(map[string]map[string][]string)      // HTTP req-body noise
+	withQueryNoise := make(map[string]map[string][]string) // MySQL COM_QUERY literal noise
 	for name, st := range mockStates {
 		if len(st.ReqBodyNoise) > 0 {
 			withNoise[name] = st.ReqBodyNoise
 		}
+		if len(st.QueryNoise) > 0 {
+			withQueryNoise[name] = st.QueryNoise
+		}
 	}
-	if len(withNoise) == 0 {
+	if len(withNoise) == 0 && len(withQueryNoise) == 0 {
 		return nil
 	}
 
@@ -723,15 +749,18 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	merge := func(mocks []*models.Mock) bool {
 		changed := false
 		for _, mock := range mocks {
-			noise, ok := withNoise[mock.Name]
-			if !ok || mock.Kind != models.Kind(models.HTTP) || mock.Spec.HTTPReq == nil {
-				continue
+			if noise, ok := withNoise[mock.Name]; ok && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
+				merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
+				if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+					changed = true
+				}
+				mock.Spec.HTTPReq.ReqBodyNoise = merged
 			}
-			merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
-			if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
-				changed = true
+			if qnoise, ok := withQueryNoise[mock.Name]; ok {
+				if mergeQueryNoiseOntoMySQLMock(mock, qnoise) {
+					changed = true
+				}
 			}
-			mock.Spec.HTTPReq.ReqBodyNoise = merged
 		}
 		return changed
 	}

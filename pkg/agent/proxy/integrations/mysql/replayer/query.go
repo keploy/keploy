@@ -97,8 +97,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				PacketBundle: *commandPkt,
 			}
 
-			// Match the request with the mock
-			resp, ok, closestQuery, closestMockName, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
+			// Match the request with the mock. Thread the schema-noise flags
+			// from OutgoingOptions so the COM_QUERY matcher can learn (detection)
+			// or enforce (strict) MySQL request-literal noise, mirroring HTTP.
+			resp, ok, closestQuery, closestMockName, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
