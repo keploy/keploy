@@ -37,7 +37,6 @@ import (
 )
 
 const (
-	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
 )
 
@@ -1249,7 +1248,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
+		// Wait up to the agent's own healthcheck budget for it to become ready.
+		// Under heavy CI docker-daemon contention the agent container can take
+		// well over a minute just to start (observed: a local-image `docker run`
+		// taking 126s), so a 60s wait gave up prematurely and tore down a
+		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1546,7 +1550,8 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	// Aligned with the agent's own healthcheck budget; see pkg.AgentReadyTimeout.
+	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 	defer cancel()
 
 	ticker := time.NewTicker(agentReadyRetryInterval)
