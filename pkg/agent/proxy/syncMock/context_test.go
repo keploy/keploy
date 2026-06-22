@@ -39,7 +39,7 @@ func TestFromContextOrGlobal(t *testing.T) {
 // fakeStaticDeduper is a minimal StaticDeduper for the context round-trip.
 type fakeStaticDeduper struct{}
 
-func (fakeStaticDeduper) IsDuplicate(string) bool                          { return false }
+func (fakeStaticDeduper) IsDuplicate(string) bool                                 { return false }
 func (fakeStaticDeduper) GetCustomFieldsForEndpoint(string, string, int) []string { return nil }
 
 // TestStaticDeduperContext verifies the per-app static-deduper context
