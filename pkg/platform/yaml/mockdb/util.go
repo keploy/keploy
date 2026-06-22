@@ -36,6 +36,13 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Name:         mock.Name,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Generic passthrough of the kind-agnostic MockSpec.ReqBodyNoise (the one
+		// storage location every parser uses, HTTP included). It is only non-empty
+		// for a kind whose parser implements the schema-noise adapter and actually
+		// learned drift (HTTP, plus Pulsar in enterprise); kinds with no such
+		// adapter — DNS, Mongo, MySQL, Postgres, etc. — leave it nil, so omitempty
+		// keeps it out of the doc entirely.
+		ReqBodyNoise: mock.Spec.ReqBodyNoise,
 	}
 
 	var spec any
@@ -235,6 +242,11 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Name:         mock.Name,
 		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Kind-agnostic schema-noise, carried on the shared top-level doc for
+		// every parser (HTTP included). Set before the mapper/per-kind projection
+		// runs so it survives regardless of the spec envelope. Empty for any kind
+		// whose parser never learned drift, so omitempty drops it.
+		ReqBodyNoise: mock.Spec.ReqBodyNoise,
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
@@ -620,6 +632,11 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			return nil, wrapped
 		}
 		if mapped {
+			// Restore kind-agnostic schema-noise carried on the doc envelope
+			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			if len(m.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = m.ReqBodyNoise
+			}
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -786,6 +803,12 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
 			continue
+		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope onto the
+		// freshly-built spec (the per-kind switch above replaced mock.Spec
+		// wholesale). Uniform across parsers — HTTP included.
+		if len(m.ReqBodyNoise) > 0 {
+			mock.Spec.ReqBodyNoise = m.ReqBodyNoise
 		}
 		mocks = append(mocks, &mock)
 	}
@@ -1484,6 +1507,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 		default:
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
 			continue
+		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope (the
+		// per-kind switch above replaced mock.Spec wholesale). Uniform across
+		// parsers — HTTP included.
+		if len(m.ReqBodyNoise) > 0 {
+			mock.Spec.ReqBodyNoise = m.ReqBodyNoise
 		}
 		mocks = append(mocks, &mock)
 	}
