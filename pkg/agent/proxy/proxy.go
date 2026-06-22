@@ -2247,7 +2247,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
+			// Hand the parser a reporter so it can record a mock-mismatch
+			// out-of-band — surfacing the miss to the test report without
+			// returning the error that closes this connection. Returning the
+			// error is fine for most protocols, but a Pulsar SEND mismatch must
+			// keep the connection alive (a close makes pulsar-client-go
+			// reconnect the producer and crash on a nil schema); such a parser
+			// reports via this hook, replies normally, and keeps serving.
+			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
+			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
