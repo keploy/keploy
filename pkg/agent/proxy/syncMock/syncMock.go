@@ -104,6 +104,12 @@ type SyncMockManager struct {
 	outChan       chan<- *models.Mock
 	outChanClosed bool
 
+	// unboundWarnOnce fires a single warning the first time a mock is buffered
+	// while outChan was never wired (a New() manager whose owner forgot to call
+	// SetOutputChannel). Without it the failure is silent: mocks pile up in the
+	// buffer and are never emitted.
+	unboundWarnOnce sync.Once
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -183,14 +189,24 @@ func Get() *SyncMockManager {
 	return instance
 }
 
-// New constructs an independent SyncMockManager with its own buffer,
-// window ring, drop counter, and output channel. It shares no state
-// with the package global returned by Get(). Use it when a single
-// process runs more than one concurrent capture session (e.g. the
-// enterprise multi-app DaemonSet agent, where each app owns its own
-// manager); Get() remains the single-session default and is unchanged.
-// The dedup queue is supplied separately at ResolveJob time, so callers
-// that want per-session dedup pair this with their own DedupQueue.
+// New constructs an independent SyncMockManager with its own buffer, window
+// ring, drop counter, and per-session dedup queue. It shares no state with the
+// package global returned by Get(). Use it when a single process runs more
+// than one concurrent capture session (e.g. the enterprise multi-app DaemonSet
+// agent, where each app owns its own manager); Get() remains the single-session
+// default and is unchanged.
+//
+// The returned manager has NO output channel wired: callers MUST call
+// SetOutputChannel before mocks are added, otherwise AddMock buffers every mock
+// and nothing is ever emitted (a one-time warning is logged if a mock arrives
+// while still unwired).
+//
+// Per-app isolation of dedup and static-dedup is OPT-IN by the consumer. This
+// manager owns a private DedupQueue() and the package exposes the
+// WithStaticDeduper / StaticDeduperFromContext context seam, but OSS code paths
+// do not consult them — they use the package globals. The isolation only
+// materializes once a multi-app consumer threads mgr.DedupQueue() into
+// ResolveJob and the per-app deduper through the parser context.
 func New(logger *zap.Logger) *SyncMockManager {
 	m := &SyncMockManager{
 		buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
@@ -204,10 +220,12 @@ func New(logger *zap.Logger) *SyncMockManager {
 }
 
 // DedupQueue returns this manager's dedup queue: its own private one for
-// instances built by New(), or the package-global queue for the
-// single-session default instance (which leaves dedupQueue nil). Callers
-// that previously used the package-global GetDedupQueue() can switch to
-// mgr.DedupQueue() to get per-session dedup for free.
+// instances built by New(), or the package-global queue for the single-session
+// default instance (which leaves dedupQueue nil). It is the per-app isolation
+// carrier — a multi-app consumer calls mgr.DedupQueue() and threads the result
+// into ResolveJob so one app's dedup FIFO can't bleed into another's. OSS code
+// paths use the package-global GetDedupQueue() and never call this, so the
+// isolation only materializes once the consumer opts in.
 func (m *SyncMockManager) DedupQueue() *DedupQueue {
 	if m == nil || m.dedupQueue == nil {
 		return globalDedupQueue
@@ -464,6 +482,18 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	default:
 		m.buffer = append(m.buffer, mock)
 		m.mu.Unlock()
+		// !bound here means outChan was never wired (closed was handled
+		// above). For the package-global manager the proxy binds outChan
+		// before any AddMock, so this only trips a New() manager whose owner
+		// forgot SetOutputChannel — surface it once instead of silently
+		// buffering forever.
+		if !bound {
+			m.unboundWarnOnce.Do(func() {
+				if logger := m.dropLogger(); logger != nil {
+					logger.Warn("syncMock: mock buffered before SetOutputChannel was wired; if this manager's output channel is never set, buffered mocks will not be emitted — call SetOutputChannel after New()")
+				}
+			})
+		}
 	}
 }
 
