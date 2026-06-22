@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"sync/atomic"
-
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -25,6 +23,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// Deprecated: GlobalTestCounter is the legacy process-global test-ID
+// counter. The per-session path now uses SyncMockManager.NextTestID()
+// (resolved via syncMock.FromContextOrGlobal). Retained for the
+// enterprise async capture path until it migrates to the per-runtime
+// manager (E6). Do not use in new code.
 var GlobalTestCounter int64
 
 // mapping (last bool before appPort) controls whether the synchronous
@@ -153,6 +156,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:          models.HTTP,
 		Created:       time.Now().Unix(),
+		SourcePod:     SourcePodFromContext(ctx),
 		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
@@ -180,7 +184,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if synchronous {
-		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
+		// Per-session counter: resolves to the ctx-carried manager for
+		// multi-app callers, or the package-global manager otherwise —
+		// the latter reproduces the old GlobalTestCounter sequence.
+		currentID := syncMock.FromContextOrGlobal(ctx).NextTestID()
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
 		// Pass testName (the locally-synthesised "test-N" identifier),
@@ -420,14 +427,15 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	// Create test case from stream data
 	testCase := &models.TestCase{
-		Version:  models.GetVersion(),
-		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
-		Kind:     models.GRPC_EXPORT,
-		Created:  time.Now().Unix(),
-		GrpcReq:  *http2Stream.GRPCReq,
-		GrpcResp: *http2Stream.GRPCResp,
-		Noise:    map[string][]string{},
-		AppPort:  appPort,
+		Version:   models.GetVersion(),
+		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:      models.GRPC_EXPORT,
+		Created:   time.Now().Unix(),
+		SourcePod: SourcePodFromContext(ctx),
+		GrpcReq:   *http2Stream.GRPCReq,
+		GrpcResp:  *http2Stream.GRPCResp,
+		Noise:     map[string][]string{},
+		AppPort:   appPort,
 	}
 
 	select {

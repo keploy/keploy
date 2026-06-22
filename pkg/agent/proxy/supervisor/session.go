@@ -143,6 +143,12 @@ type Session struct {
 	// final handoff.
 	RouteMocksViaSyncMock bool
 
+	// Mgr is the per-session sync-mock manager EmitMock routes through when
+	// RouteMocksViaSyncMock is set. Lets a multi-app caller give each app its
+	// own manager (so the V2 emit path is per-app, matching the legacy
+	// parsers). nil ⇒ the package-global manager (single-session default).
+	Mgr *syncMock.SyncMockManager
+
 	// --- Internal bookkeeping ---
 
 	mockIncomplete   atomic.Bool
@@ -368,7 +374,13 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	// the direct-channel fallback below runs. Production
 	// recordViaSupervisor sets it true.
 	if s.RouteMocksViaSyncMock {
-		if mgr := syncMock.Get(); mgr != nil {
+		// Prefer this session's own manager (per-app); fall back to the
+		// package-global for the single-session default.
+		mgr := s.Mgr
+		if mgr == nil {
+			mgr = syncMock.Get()
+		}
+		if mgr != nil {
 			// Best-effort ctx probe. mgr.AddMock (the SyncMock
 			// manager method obtained from syncMock.Get()) doesn't
 			// observe s.Ctx — it takes its own mutex and may sit
