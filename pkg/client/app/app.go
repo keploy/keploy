@@ -601,6 +601,10 @@ const (
 	// running prior container to actually go away under daemon contention; the
 	// 2s teardown cap is too short here and lets "name already in use" through.
 	preRunRemoveBudget = 30 * time.Second
+	// dockerRunNameConflictRetries bounds how many times a user-app `docker run`
+	// is re-issued after a transient container-name conflict (docker exit 125)
+	// before the error is surfaced; the name is force-removed between attempts.
+	dockerRunNameConflictRetries = 3
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
@@ -744,6 +748,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 		defer composeDown()
 	}
 
+	// dockerRunName is the resolved user-app container name; reused by the
+	// post-run container-name-conflict retry below.
+	var dockerRunName string
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 		// Clear any container left over from a prior run with the same --name
@@ -757,11 +764,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// startup cleanup, and a still-running prior container can take more than
 		// the 2s teardown cap to remove under contention. Best-effort: a no-op
 		// when nothing is lingering.
-		removeName := a.container
-		if removeName == "" {
-			removeName = utils.ContainerNameFromDockerRun(userCmd)
+		dockerRunName = a.container
+		if dockerRunName == "" {
+			dockerRunName = utils.ContainerNameFromDockerRun(userCmd)
 		}
-		a.ensureContainerNameFreeWithin(removeName, preRunRemoveBudget)
+		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
 	}
 
 	// Define the function to cancel the command
@@ -869,6 +876,22 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	var err error
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	// A user-app `docker run --name X` can still lose the container-name race to
+	// the prior test-set's --rm reaper on a saturated CI daemon even after the
+	// pre-run ensureContainerNameFreeWithin verified the name was free — the
+	// reaper can re-touch the name in the narrow window before the run, and
+	// docker then exits 125 without starting the app ("Conflict. The container
+	// name ... is already in use"). Force-remove the name and retry rather than
+	// failing the whole test-set on a transient race; bounded so a genuine 125
+	// (bad image, missing mount, …) still surfaces after a few attempts.
+	for attempt := 1; dockerRunName != "" && attempt <= dockerRunNameConflictRetries &&
+		cmdErr.Err != nil && cmdErr.Type == utils.Runtime && ctx.Err() == nil &&
+		strings.Contains(cmdErr.Err.Error(), "exit status 125"); attempt++ {
+		a.logger.Warn("docker run exited 125 (likely a container-name conflict); force-removing the name and retrying",
+			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
+		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	}
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
