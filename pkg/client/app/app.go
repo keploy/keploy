@@ -590,11 +590,17 @@ func (a *App) ComposeDown() {
 // returns before recentAppLogs — comfortably under 30s.
 const (
 	composeDownCmdBudget = 8 * time.Second // `docker compose down`
-	forceRemoveBudget    = 2 * time.Second // each `docker rm -f`
+	forceRemoveBudget    = 2 * time.Second // each `docker rm -f` in the teardown drain path
 	reapBarrierBudget    = 3 * time.Second // waitContainersRemoved poll
 	graceBudget          = 5 * time.Second // cmdCancel coverage-flush grace
 	waitTillExitBudget   = 8 * time.Second // non-compose post-cancel container wait
 	dockerInspectBudget  = 2 * time.Second // any single teardown ContainerInspect
+	// preRunRemoveBudget bounds the startup-time force-remove of a leftover
+	// --name container before a docker-run. Unlike the teardown force-remove it
+	// is NOT in the SIGINT drain path, so it can afford to wait for a still-
+	// running prior container to actually go away under daemon contention; the
+	// 2s teardown cap is too short here and lets "name already in use" through.
+	preRunRemoveBudget = 30 * time.Second
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
@@ -637,15 +643,72 @@ func (a *App) waitContainersRemoved(names []string, budget time.Duration) {
 // "no such container" case. Used after compose down to guarantee a name is free
 // for reuse on the next per-test-set compose up.
 func (a *App) forceRemoveContainerByName(name string) {
+	a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+}
+
+// forceRemoveContainerByNameWithin is forceRemoveContainerByName with a caller-
+// chosen deadline. Teardown callers pass the tight forceRemoveBudget (drain
+// path); the startup pre-run cleanup passes preRunRemoveBudget so it can wait
+// out a still-running prior container under contention.
+func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration) {
 	if name == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), forceRemoveBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	if output, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
-		a.logger.Debug("force-remove container finished (may already be gone, or the bounded teardown deadline elapsed)",
+		a.logger.Debug("force-remove container finished (may already be gone, or the bounded deadline elapsed)",
 			zap.String("container", name), zap.Error(err), zap.String("output", string(output)))
 	}
+}
+
+// ensureContainerNameFreeWithin force-removes the named container and then
+// VERIFIES the name is actually free before returning, retrying within the
+// budget. A bare `docker rm -f` returns as soon as it has *initiated* removal,
+// but under docker-daemon contention the `--rm` async reaper (kicked off when
+// the prior per-test-set container exits) can keep holding the name for a brief
+// window after that — long enough for the immediately following
+// `docker run --name` to hit "Conflict. The container name ... is already in
+// use" (docker exit 125), which fails the test set. Polling `docker ps` until
+// the name is gone closes that window deterministically instead of racing into
+// the conflict. Best-effort: if the name still isn't free at the deadline we
+// warn and proceed (a still-stuck name is a deeper docker problem the run will
+// surface anyway).
+func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
+	if name == "" {
+		return
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+		if a.containerNameFree(name) {
+			return
+		}
+		if time.Now().After(deadline) {
+			a.logger.Warn("container name still in use after the pre-run remove budget; the next docker run may conflict",
+				zap.String("container", name), zap.Duration("budget", budget))
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// containerNameFree reports whether no container (in any state, including one
+// the `--rm` reaper is mid-way through removing) currently holds the given
+// name. Docker stores container names with a leading slash, so the filter is
+// anchored to an exact `^/<name>$` match to avoid matching name substrings. A
+// query error is treated as "not free" so the caller keeps waiting rather than
+// racing into a `docker run --name` conflict.
+func (a *App) containerNameFree(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+name+"$").CombinedOutput()
+	if err != nil {
+		a.logger.Debug("could not query container-name availability; treating as still-in-use",
+			zap.String("container", name), zap.Error(err), zap.String("output", string(out)))
+		return false
+	}
+	return len(bytes.TrimSpace(out)) == 0
 }
 
 // extractProjectFlags returns any project-scoping flags (-p/--project-name,
@@ -686,12 +749,19 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// Clear any container left over from a prior run with the same --name
 		// before starting. --rm removes the container on exit, but under heavy
 		// docker-daemon contention that reap can lag past the next
-		// `docker run --name`, so a re-run (e.g. a dedup/timefreeze lane's
-		// record -> replay) hits "Conflict. The container name ... is already in
-		// use" (docker exit 125). Force-removing first is bounded + best-effort
-		// (a no-op when nothing is lingering), so the re-run never collides with a
-		// still-reaping container. Mirrors the compose force-remove in ComposeDown.
-		a.forceRemoveContainerByName(a.container)
+		// `docker run --name`, so a re-run (e.g. a dedup lane re-running the app
+		// per test-set) hits "Conflict. The container name ... is already in use"
+		// (docker exit 125). Resolve the name from --container-name (a.container)
+		// or, when that isn't set, the --name in the command itself, then
+		// force-remove it with preRunRemoveBudget — generous because this is a
+		// startup cleanup, and a still-running prior container can take more than
+		// the 2s teardown cap to remove under contention. Best-effort: a no-op
+		// when nothing is lingering.
+		removeName := a.container
+		if removeName == "" {
+			removeName = utils.ContainerNameFromDockerRun(userCmd)
+		}
+		a.ensureContainerNameFreeWithin(removeName, preRunRemoveBudget)
 	}
 
 	// Define the function to cancel the command

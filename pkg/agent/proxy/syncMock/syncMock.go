@@ -104,6 +104,12 @@ type SyncMockManager struct {
 	outChan       chan<- *models.Mock
 	outChanClosed bool
 
+	// unboundWarnOnce fires a single warning the first time a mock is buffered
+	// while outChan was never wired (a New() manager whose owner forgot to call
+	// SetOutputChannel). Without it the failure is silent: mocks pile up in the
+	// buffer and are never emitted.
+	unboundWarnOnce sync.Once
+
 	// dropCount tracks send-path drops caused by outChan being full
 	// past the bounded send budget. Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
@@ -112,6 +118,18 @@ type SyncMockManager struct {
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
 
+	// testCounter generates this session's sequential test IDs
+	// ("test-1", "test-2", …). Per-instance so concurrent capture
+	// sessions in one process number their testcases independently.
+	// On the per-session path this replaces the package-global
+	// conn.GlobalTestCounter (see NextTestID).
+	testCounter atomic.Int64
+
+	// dedupQueue is this session's private dedup FIFO. Per-instance so
+	// concurrent capture sessions don't share dedup ordering. The
+	// package-global instance leaves this nil, and DedupQueue() falls back
+	// to the package-global queue — preserving single-session behaviour.
+	dedupQueue *DedupQueue
 	// pressureDropped / totalAdded track mocks dropped vs added under memory
 	// pressure. Both are atomic so they can be read without holding m.mu.
 	pressureDropped atomic.Int64
@@ -169,6 +187,59 @@ var instance = &SyncMockManager{
 // Get returns the global manager.
 func Get() *SyncMockManager {
 	return instance
+}
+
+// New constructs an independent SyncMockManager with its own buffer, window
+// ring, drop counter, and per-session dedup queue. It shares no state with the
+// package global returned by Get(). Use it when a single process runs more
+// than one concurrent capture session (e.g. the enterprise multi-app DaemonSet
+// agent, where each app owns its own manager); Get() remains the single-session
+// default and is unchanged.
+//
+// The returned manager has NO output channel wired: callers MUST call
+// SetOutputChannel before mocks are added, otherwise AddMock buffers every mock
+// and nothing is ever emitted (a one-time warning is logged if a mock arrives
+// while still unwired).
+//
+// Per-app isolation of dedup and static-dedup is OPT-IN by the consumer. This
+// manager owns a private DedupQueue() and the package exposes the
+// WithStaticDeduper / StaticDeduperFromContext context seam, but OSS code paths
+// do not consult them — they use the package globals. The isolation only
+// materializes once a multi-app consumer threads mgr.DedupQueue() into
+// ResolveJob and the per-app deduper through the parser context.
+func New(logger *zap.Logger) *SyncMockManager {
+	m := &SyncMockManager{
+		buffer:       make([]*models.Mock, 0, defaultMockBufferCapacity),
+		firstReqSeen: false,
+		dedupQueue:   NewDedupQueue(),
+	}
+	if logger != nil {
+		m.logger = logger
+	}
+	return m
+}
+
+// DedupQueue returns this manager's dedup queue: its own private one for
+// instances built by New(), or the package-global queue for the single-session
+// default instance (which leaves dedupQueue nil). It is the per-app isolation
+// carrier — a multi-app consumer calls mgr.DedupQueue() and threads the result
+// into ResolveJob so one app's dedup FIFO can't bleed into another's. OSS code
+// paths use the package-global GetDedupQueue() and never call this, so the
+// isolation only materializes once the consumer opts in.
+func (m *SyncMockManager) DedupQueue() *DedupQueue {
+	if m == nil || m.dedupQueue == nil {
+		return globalDedupQueue
+	}
+	return m.dedupQueue
+}
+
+// NextTestID returns this session's next sequential test ID. Per-instance
+// so two concurrent capture sessions number testcases independently
+// (each starts at 1). On the single-session path it runs against the
+// package-global manager, reproducing the old conn.GlobalTestCounter
+// behaviour exactly.
+func (m *SyncMockManager) NextTestID() int64 {
+	return m.testCounter.Add(1)
 }
 
 // SetOutputChannel plugs an outgoing mock channel into the manager.
@@ -411,6 +482,18 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	default:
 		m.buffer = append(m.buffer, mock)
 		m.mu.Unlock()
+		// !bound here means outChan was never wired (closed was handled
+		// above). For the package-global manager the proxy binds outChan
+		// before any AddMock, so this only trips a New() manager whose owner
+		// forgot SetOutputChannel — surface it once instead of silently
+		// buffering forever.
+		if !bound {
+			m.unboundWarnOnce.Do(func() {
+				if logger := m.dropLogger(); logger != nil {
+					logger.Warn("syncMock: mock buffered before SetOutputChannel was wired; if this manager's output channel is never set, buffered mocks will not be emitted — call SetOutputChannel after New()")
+				}
+			})
+		}
 	}
 }
 
@@ -1330,6 +1413,17 @@ var globalDedupQueue = &DedupQueue{
 
 func GetDedupQueue() *DedupQueue {
 	return globalDedupQueue
+}
+
+// NewDedupQueue constructs an independent dedup queue. Pair it with a
+// syncMock.New() manager when a process runs multiple concurrent capture
+// sessions, so each session's strict-FIFO dedup ordering is isolated and
+// one app's requests cannot mark another app's first occurrence a
+// duplicate. GetDedupQueue() remains the single-session global default.
+func NewDedupQueue() *DedupQueue {
+	return &DedupQueue{
+		queue: make([]*DedupJob, 0),
+	}
 }
 
 // Enqueue adds a request to the end of the queue as soon as it's encountered.

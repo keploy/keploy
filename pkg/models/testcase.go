@@ -62,6 +62,13 @@ type TestCase struct {
 	Assertions    map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
 	HasBinaryFile bool                          `json:"has_binary_file" bson:"has_binary_file"`
 	AppPort       uint16                        `json:"app_port" bson:"app_port"`
+	// SourcePod is a transient, never-persisted routing tag: the name of the
+	// pod whose traffic produced this test case. Reentrancy seam for the
+	// enterprise DaemonSet agent's per-pod attribution — it stamps this from
+	// the capture context so the uploader can carry a per-pod source to the
+	// control plane. json/yaml/bson "-" so it never lands in stored test-case
+	// files or the upload body.
+	SourcePod string `json:"-" yaml:"-" bson:"-"`
 }
 
 func (tc *TestCase) GetKind() string {

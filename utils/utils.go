@@ -1179,6 +1179,23 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
+// ContainerNameFromDockerRun extracts the value of the --name flag from a
+// `docker run` command, supporting both "--name foo" and "--name=foo". It
+// returns "" when no --name is present. Used to free a leftover container name
+// before a re-run when the --container-name flag wasn't supplied.
+func ContainerNameFromDockerRun(cmd string) string {
+	parts := strings.Fields(cmd)
+	for i, part := range parts {
+		if part == "--name" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+		if name, ok := strings.CutPrefix(part, "--name="); ok {
+			return name
+		}
+	}
+	return ""
+}
+
 func isGoBinary(logger *zap.Logger, filePath string) bool {
 	f, err := elf.Open(filePath)
 	if err != nil {

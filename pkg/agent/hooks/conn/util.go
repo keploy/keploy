@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"sync/atomic"
-
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -25,6 +23,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// Deprecated: GlobalTestCounter is the legacy process-global test-ID
+// counter. The per-session path now uses SyncMockManager.NextTestID()
+// (resolved via syncMock.FromContextOrGlobal). Retained for the
+// enterprise async capture path until it migrates to the per-runtime
+// manager (E6). Do not use in new code.
 var GlobalTestCounter int64
 
 // resolveTestWindow stamps a synthetic "test-N" name, fires ResolveRange to bin
@@ -174,6 +177,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:          models.HTTP,
 		Created:       time.Now().Unix(),
+		SourcePod:     SourcePodFromContext(ctx),
 		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
@@ -201,7 +205,23 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if synchronous {
-		testCase.Name = resolveTestWindow(reqTimeTest, resTimeTest, mapping)
+		// Per-session counter: resolves to the ctx-carried manager for
+		// multi-app callers, or the package-global manager otherwise —
+		// the latter reproduces the old GlobalTestCounter sequence.
+		currentID := syncMock.FromContextOrGlobal(ctx).NextTestID()
+		testName := fmt.Sprintf("test-%d", currentID)
+		testCase.Name = testName
+		// Pass testName (the locally-synthesised "test-N" identifier),
+		// not testCase.Name. CodeQL flow analysis treats testCase as
+		// HTTP-sourced and any read from its fields as potentially
+		// sensitive — even though we just wrote a synthetic ID into
+		// .Name a line earlier. Forwarding the local string severs
+		// the taint flow and stops the go/clear-text-logging false
+		// positives that fire downstream (syncMock.go diag/Info
+		// logs include test_name for ResolveRange traceability).
+		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testName, true, mapping)
+		}
 	}
 	select {
 	case <-ctx.Done():
@@ -472,14 +492,15 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	testCase := &models.TestCase{
-		Version:  models.GetVersion(),
-		Name:     testName,
-		Kind:     models.GRPC_EXPORT,
-		Created:  time.Now().Unix(),
-		GrpcReq:  *http2Stream.GRPCReq,
-		GrpcResp: *http2Stream.GRPCResp,
-		Noise:    map[string][]string{},
-		AppPort:  appPort,
+		Version:   models.GetVersion(),
+		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:      models.GRPC_EXPORT,
+		Created:   time.Now().Unix(),
+		SourcePod: SourcePodFromContext(ctx),
+		GrpcReq:   *http2Stream.GRPCReq,
+		GrpcResp:  *http2Stream.GRPCResp,
+		Noise:     map[string][]string{},
+		AppPort:   appPort,
 	}
 
 	select {
