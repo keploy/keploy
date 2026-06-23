@@ -76,19 +76,35 @@ func NewCtx() context.Context {
 		// proxy and every parser goroutine are still live (ctx not yet
 		// cancelled), so in-flight streams keep completing for the window —
 		// exactly what a preStop sleep bought — and only then do we tear
-		// down. A second signal cuts the wait short for an impatient
-		// operator (or a kubelet escalating toward SIGKILL). Unset / zero
-		// (the default, and every non-sidecar invocation) skips the wait
+		// down.
+		//
+		// The drain window is RESPECTED: additional SIGTERM/SIGINT signals
+		// that arrive while draining are logged but do NOT cut it short.
+		// The kubelet sends exactly one SIGTERM and never a second one — it
+		// escalates to SIGKILL at terminationGracePeriodSeconds, which is
+		// uncatchable and is the real hard stop (so keep the pod's
+		// terminationGracePeriodSeconds >= this drain; the webhook bumps it
+		// to 45s for a 15s drain). A repeat `kubectl delete` (the usual
+		// source of a second SIGTERM) therefore won't truncate an in-flight
+		// drain; an operator who truly wants an immediate kill uses
+		// `kubectl delete --grace-period=0 --force`. Unset / zero (the
+		// default, and every non-sidecar invocation) skips the wait
 		// entirely, preserving the historical immediate-cancel behaviour.
 		if d := sidecarDrainDuration(); d > 0 {
 			fmt.Printf("Draining in-flight connections for %s before shutdown (KEPLOY_SIDECAR_DRAIN_SECONDS)...\n", d)
-			t := time.NewTimer(d)
-			select {
-			case <-t.C:
-			case sig2 := <-sigs:
-				t.Stop()
-				fmt.Printf("Second signal received: %s, ending drain early...\n", sig2)
+			drainTimer := time.NewTimer(d)
+			for draining := true; draining; {
+				select {
+				case <-drainTimer.C:
+					draining = false
+				case sig2 := <-sigs:
+					fmt.Printf("Signal %s received during shutdown drain; ignoring to honour the %s drain window "+
+						"(SIGKILL at terminationGracePeriodSeconds is the hard stop; use "+
+						"`kubectl delete --grace-period=0 --force` to force an immediate kill).\n", sig2, d)
+				}
 			}
+			drainTimer.Stop()
+			fmt.Printf("Drain window elapsed; proceeding with shutdown.\n")
 		}
 
 		// Run pre-cancel hooks SYNCHRONOUSLY while live state is still
