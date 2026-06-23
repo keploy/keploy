@@ -1,6 +1,7 @@
 package http
 
 import (
+	"strings"
 	"testing"
 
 	"errors"
@@ -318,4 +319,166 @@ func TestMatch_CompareAll_JSONStillCompared(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// ── Level 2: Match() Integration Tests ───────────────────────────────────────
+
+// TestMatch_HTML_SemanticMatch verifies that two HTML bodies that differ only in
+// whitespace and attribute ordering are treated as equal via CanonicalizeHTML.
+// NOTE: Bodies must begin with an HTML tag AND contain a void element like <br>
+// so that IsXML() returns false and DetectContentType() classifies them as text/html.
+// Pure XHTML like <html><body>text</body></html> is valid XML and would be mis-classified.
+func TestMatch_HTML_SemanticMatch(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-html-semantic-match",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			// <br> is a void element — makes this invalid XML, so IsXML returns false
+			// and GuessContentType correctly returns models.HTML.
+			Body: `<html><body><br><div class="a" id="1">Hello   World</div></body></html>`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		// Same document — attributes reordered + whitespace collapsed — semantically identical.
+		Body: `<html><body><br><div id="1" class="a">Hello World</div></body></html>`,
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, true, logger, false)
+
+	assert.True(t, pass, "semantically identical HTML should pass")
+	require.NotNil(t, result)
+	assert.True(t, result.BodyResult[0].Normal)
+}
+
+
+// TestMatch_HTML_DifferentContent verifies that HTML bodies with genuinely different
+// text content fail comparison even with compareAll=true.
+func TestMatch_HTML_DifferentContent(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-html-different-content",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `<html><body><br><h1>Expected</h1></body></html>`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `<html><body><br><h1>Different</h1></body></html>`,
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, true, logger, false)
+
+	assert.False(t, pass, "HTML with different text content must fail")
+	require.NotNil(t, result)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_HTML_TypeMismatch verifies that when the expected body is plain text
+// but the actual body is HTML, the implementation falls back to raw string comparison
+// (no false positive from html.Parse wrapping both in an identical skeleton).
+func TestMatch_HTML_TypeMismatch(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-html-type-mismatch",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `Hello World`, // plain text
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `<html><body>Hello World</body></html>`, // HTML
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, true, logger, false)
+
+	// Different raw strings → must fail (raw fallback, not HTML canonicalization).
+	assert.False(t, pass, "plain-text expected vs HTML actual must not produce a false positive")
+	require.NotNil(t, result)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_HTML_SizeGuard verifies that when the HTML body exceeds 1MB, the
+// canonicalization error is handled gracefully and raw string comparison takes over.
+func TestMatch_HTML_SizeGuard(t *testing.T) {
+	logger := zap.NewNop()
+
+	// 3 MB of valid-looking HTML — above the 1MB guard in CanonicalizeHTML.
+	bigHTML := `<html><body>` + strings.Repeat(`<div>test</div>`, 200_000) + `</body></html>`
+
+	tc := &models.TestCase{
+		Name: "test-html-size-guard",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       bigHTML,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       bigHTML, // identical — raw comparison must still pass
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, true, logger, false)
+
+	// Bodies are identical strings — even with the canonicalization error,
+	// the raw fallback `tc.HTTPResp.Body != actualResponse.Body` is false → pass.
+	assert.True(t, pass, "identical oversized HTML should pass via raw string fallback")
+	require.NotNil(t, result)
+	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_JSON_Regression ensures the JSON comparison path still works exactly
+// as before — HTML integration must not disturb it.
+func TestMatch_JSON_HTMLIntegration_Regression(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-json-regression",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"status": "ok", "count": 42}`,
+		},
+	}
+
+	t.Run("identical JSON passes", func(t *testing.T) {
+		actual := &models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"status": "ok", "count": 42}`,
+		}
+		pass, result := Match(tc, actual, map[string]map[string][]string{}, false, false, logger, false)
+		assert.True(t, pass)
+		require.NotNil(t, result)
+		assert.True(t, result.BodyResult[0].Normal)
+	})
+
+	t.Run("different JSON fails", func(t *testing.T) {
+		actual := &models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"status": "ok", "count": 99}`,
+		}
+		pass, result := Match(tc, actual, map[string]map[string][]string{}, false, false, logger, false)
+		assert.False(t, pass)
+		require.NotNil(t, result)
+		assert.False(t, result.BodyResult[0].Normal)
+	})
+
+	t.Run("noised JSON field passes despite difference", func(t *testing.T) {
+		actual := &models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"status": "ok", "count": 999}`,
+		}
+		noiseConfig := map[string]map[string][]string{
+			"body": {"count": {".*"}},
+		}
+		pass, result := Match(tc, actual, noiseConfig, false, false, logger, false)
+		assert.True(t, pass, "noised field difference should be ignored")
+		require.NotNil(t, result)
+		assert.True(t, result.BodyResult[0].Normal)
+	})
 }
