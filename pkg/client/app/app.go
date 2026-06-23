@@ -662,6 +662,55 @@ func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration
 	}
 }
 
+// ensureContainerNameFreeWithin force-removes the named container and then
+// VERIFIES the name is actually free before returning, retrying within the
+// budget. A bare `docker rm -f` returns as soon as it has *initiated* removal,
+// but under docker-daemon contention the `--rm` async reaper (kicked off when
+// the prior per-test-set container exits) can keep holding the name for a brief
+// window after that — long enough for the immediately following
+// `docker run --name` to hit "Conflict. The container name ... is already in
+// use" (docker exit 125), which fails the test set. Polling `docker ps` until
+// the name is gone closes that window deterministically instead of racing into
+// the conflict. Best-effort: if the name still isn't free at the deadline we
+// warn and proceed (a still-stuck name is a deeper docker problem the run will
+// surface anyway).
+func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
+	if name == "" {
+		return
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+		if a.containerNameFree(name) {
+			return
+		}
+		if time.Now().After(deadline) {
+			a.logger.Warn("container name still in use after the pre-run remove budget; the next docker run may conflict",
+				zap.String("container", name), zap.Duration("budget", budget))
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// containerNameFree reports whether no container (in any state, including one
+// the `--rm` reaper is mid-way through removing) currently holds the given
+// name. Docker stores container names with a leading slash, so the filter is
+// anchored to an exact `^/<name>$` match to avoid matching name substrings. A
+// query error is treated as "not free" so the caller keeps waiting rather than
+// racing into a `docker run --name` conflict.
+func (a *App) containerNameFree(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+name+"$").CombinedOutput()
+	if err != nil {
+		a.logger.Debug("could not query container-name availability; treating as still-in-use",
+			zap.String("container", name), zap.Error(err), zap.String("output", string(out)))
+		return false
+	}
+	return len(bytes.TrimSpace(out)) == 0
+}
+
 // extractProjectFlags returns any project-scoping flags (-p/--project-name,
 // --project-directory) found in the given docker compose command.
 func extractProjectFlags(cmd string) []string {
@@ -712,7 +761,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if removeName == "" {
 			removeName = utils.ContainerNameFromDockerRun(userCmd)
 		}
-		a.forceRemoveContainerByNameWithin(removeName, preRunRemoveBudget)
+		a.ensureContainerNameFreeWithin(removeName, preRunRemoveBudget)
 	}
 
 	// Define the function to cancel the command
