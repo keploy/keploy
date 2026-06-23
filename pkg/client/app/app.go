@@ -683,8 +683,23 @@ func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
 		return
 	}
 	deadline := time.Now().Add(budget)
+	// Each force-remove gets a generous slice of the overall budget rather than
+	// the tight teardown-drain forceRemoveBudget. Under heavy docker-daemon
+	// contention a single `docker rm -f` of a still-running prior container can
+	// run well past 2s; SIGKILLing it there (CommandContext) tears the docker
+	// CLI down mid-request, so the removal may not complete, the name never
+	// frees, and the whole budget is burned on repeated stillborn 2s attempts
+	// (the observed "container name still in use after the pre-run remove
+	// budget" → next `docker run --name` Conflict → got=0). Size the per-attempt
+	// deadline to ~1/3 of the budget (floored at forceRemoveBudget) so the rm
+	// can actually finish while still leaving room for a couple of retries
+	// against the async --rm reaper.
+	perAttempt := budget / 3
+	if perAttempt < forceRemoveBudget {
+		perAttempt = forceRemoveBudget
+	}
 	for {
-		a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+		a.forceRemoveContainerByNameWithin(name, perAttempt)
 		if a.containerNameFree(name) {
 			return
 		}
