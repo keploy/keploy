@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -65,6 +67,30 @@ func NewCtx() context.Context {
 		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
 		fmt.Printf("Signal received: %s, canceling context...\n", sig)
 
+		// App-managed graceful-shutdown drain (Kubernetes sidecar path).
+		// When the injecting webhook runs in app-managed-drain mode it sets
+		// KEPLOY_SIDECAR_DRAIN_SECONDS on the agent instead of a native
+		// `sleep` lifecycle (SleepAction) preStop hook — that field is GA
+		// only in k8s 1.30 and some older apiservers reject it, which would
+		// fail pod admission. We honour the drain HERE, before cancel(): the
+		// proxy and every parser goroutine are still live (ctx not yet
+		// cancelled), so in-flight streams keep completing for the window —
+		// exactly what a preStop sleep bought — and only then do we tear
+		// down. A second signal cuts the wait short for an impatient
+		// operator (or a kubelet escalating toward SIGKILL). Unset / zero
+		// (the default, and every non-sidecar invocation) skips the wait
+		// entirely, preserving the historical immediate-cancel behaviour.
+		if d := sidecarDrainDuration(); d > 0 {
+			fmt.Printf("Draining in-flight connections for %s before shutdown (KEPLOY_SIDECAR_DRAIN_SECONDS)...\n", d)
+			t := time.NewTimer(d)
+			select {
+			case <-t.C:
+			case sig2 := <-sigs:
+				t.Stop()
+				fmt.Printf("Second signal received: %s, ending drain early...\n", sig2)
+			}
+		}
+
 		// Run pre-cancel hooks SYNCHRONOUSLY while live state is still
 		// readable. fmt.Fprintf to stderr inside hooks is the right
 		// choice — it goes straight to the syscall and survives even
@@ -120,4 +146,25 @@ func ExecCancel() {
 
 func SetCancel(c context.CancelFunc) {
 	cancel = c
+}
+
+// sidecarDrainDuration returns the graceful-shutdown drain window the
+// Kubernetes injecting webhook sets, in app-managed-drain mode, via the
+// KEPLOY_SIDECAR_DRAIN_SECONDS env var. It is the in-process replacement for
+// a native `sleep` lifecycle preStop hook on the keploy-agent sidecar.
+//
+// Returns 0 (no wait) when the var is unset, non-numeric, or non-positive —
+// so only an explicit positive value can delay shutdown, and every
+// non-sidecar / older-deployment invocation keeps the historical
+// cancel-immediately-on-signal behaviour.
+func sidecarDrainDuration() time.Duration {
+	v := os.Getenv("KEPLOY_SIDECAR_DRAIN_SECONDS")
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
