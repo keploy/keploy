@@ -5,7 +5,7 @@ inputs:
   ssh-private-key:
     description: 'The private SSH deploy key for the integrations repository.'
     required: true
-  go-cache:
+  go-cache: 
     description: 'Whether to enable Go module caching (default: true).'
     required: false
     default: 'true'
