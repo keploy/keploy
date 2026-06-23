@@ -771,6 +771,21 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
 	}
 
+	// Compose mode: before `docker compose up`, make sure the keploy agent
+	// container from a prior compose up/phase is fully gone. keploy injects the
+	// agent as a compose service AND force-removes it by name on teardown, so a
+	// fresh up that starts while the previous compose is still "Stopping
+	// Gracefully" (the keep-app-alive recovery, and the atg sandbox's per-phase
+	// re-record) reads the stale project state and tries to Recreate the
+	// being-removed agent container — failing with "Error response from daemon:
+	// No such container: <stale-id>" and aborting the whole run (the
+	// atg-with-mocks flake). Polling the agent name free first (force-remove +
+	// wait) serializes teardown -> up so the up always creates a fresh agent.
+	// Mirrors the docker-run pre-run guard above; a no-op on the first up.
+	if a.kind == utils.DockerCompose && a.keployContainer != "" {
+		a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
+	}
+
 	// Define the function to cancel the command
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
