@@ -730,6 +730,38 @@ func (a *App) containerNameFree(name string) bool {
 	return len(bytes.TrimSpace(out)) == 0
 }
 
+// isExit125 reports whether a finished user-app command failed at runtime with
+// docker's exit code 125 — the code docker returns when the daemon refuses to
+// create/start the container (a name conflict, but also a bad image reference,
+// an unsatisfiable mount, a malformed flag, …). It is a NECESSARY-but-not-
+// sufficient signal for the name-conflict retry; isDockerRunNameConflict layers
+// the name-occupied check on top to separate the conflict from those other 125s.
+func isExit125(runErr error, errType utils.ErrType) bool {
+	if runErr == nil || errType != utils.Runtime {
+		return false
+	}
+	return strings.Contains(runErr.Error(), "exit status 125")
+}
+
+// isDockerRunNameConflict reports whether a failed user-app `docker run` failed
+// SPECIFICALLY because its --name was still taken by a leftover container — the
+// only exit-125 cause that force-removing the name + retrying can clear. It
+// guards against blanket-retrying every exit 125: a genuinely broken run (bad
+// image, missing mount, bad flag) also exits 125 but must fail fast, not be
+// re-issued repeatedly.
+//
+// docker's name-conflict message ("Conflict. The container name ... is already
+// in use by container ...") is written to the run's stderr, which keploy streams
+// straight to the terminal rather than capturing, so the returned CmdError only
+// carries the exit code ("exit status 125"). The conflict is instead confirmed
+// positively from docker's own state: nameOccupied is true exactly when a
+// container still holds the name at the moment the run failed — which is the
+// precondition docker reports as the name conflict. Requiring BOTH the 125 exit
+// and an occupied name keeps the retry strictly scoped to the recreate race.
+func isDockerRunNameConflict(runErr error, errType utils.ErrType, nameOccupied bool) bool {
+	return isExit125(runErr, errType) && nameOccupied
+}
+
 // extractProjectFlags returns any project-scoping flags (-p/--project-name,
 // --project-directory) found in the given docker compose command.
 func extractProjectFlags(cmd string) []string {
@@ -912,12 +944,17 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// reaper can re-touch the name in the narrow window before the run, and
 	// docker then exits 125 without starting the app ("Conflict. The container
 	// name ... is already in use"). Force-remove the name and retry rather than
-	// failing the whole test-set on a transient race; bounded so a genuine 125
-	// (bad image, missing mount, …) still surfaces after a few attempts.
+	// failing the whole test-set on a transient race.
+	//
+	// The retry is gated STRICTLY on the name-conflict signature: an exit-125
+	// run whose --name is still held by a leftover container (isDockerRunNameConflict).
+	// Every other exit-125 cause (bad image, missing mount, malformed flag) leaves
+	// the name free, so it is NOT retried and fails fast with its real error —
+	// re-issuing it would only burn the remove budget and bury the root cause.
 	for attempt := 1; dockerRunName != "" && attempt <= dockerRunNameConflictRetries &&
-		cmdErr.Err != nil && cmdErr.Type == utils.Runtime && ctx.Err() == nil &&
-		strings.Contains(cmdErr.Err.Error(), "exit status 125"); attempt++ {
-		a.logger.Warn("docker run exited 125 (likely a container-name conflict); force-removing the name and retrying",
+		ctx.Err() == nil && isExit125(cmdErr.Err, cmdErr.Type) &&
+		isDockerRunNameConflict(cmdErr.Err, cmdErr.Type, !a.containerNameFree(dockerRunName)); attempt++ {
+		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
 			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
 		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
