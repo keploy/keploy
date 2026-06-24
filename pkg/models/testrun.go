@@ -246,6 +246,11 @@ const (
 	StatusCodeChanged FailureCategory = "STATUS_CODE_CHANGED" // status code changed
 	HeaderChanged     FailureCategory = "HEADER_CHANGED"      // header changed
 	InternalFailure   FailureCategory = "INTERNAL_FAILURE"    // internal error in the tool
+	// AppConnectionError means the app produced NO response at all (connection
+	// refused/reset/EOF/host unreachable) — a transport/availability failure, not
+	// a content regression. The synthetic status_code=0 such a failure records
+	// must not be read as a STATUS_CODE_CHANGED regression.
+	AppConnectionError FailureCategory = "APP_CONNECTION_ERROR"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.

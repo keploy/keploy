@@ -3551,6 +3551,30 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 }
 
 // CreateFailedTestResult creates a test result for failed test cases
+// isAppConnectionErrorMsg reports whether a simulate-request error string is a
+// transport/connection-level failure (the app produced no response) rather than
+// a content diff. CreateFailedTestResult only receives the error message, so this
+// matches the stable net/syscall error texts (same string-classification
+// approach as isDockerComposeReplayShutdown above).
+func isAppConnectionErrorMsg(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "connection refused") ||
+		strings.Contains(m, "connection reset by peer") ||
+		strings.Contains(m, "broken pipe") ||
+		strings.Contains(m, "no such host") ||
+		strings.Contains(m, ": eof")
+}
+
+// appendCategoryUnique appends c only if it is not already present.
+func appendCategoryUnique(cats []models.FailureCategory, c models.FailureCategory) []models.FailureCategory {
+	for _, x := range cats {
+		if x == c {
+			return cats
+		}
+	}
+	return append(cats, c)
+}
+
 func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
 	testCaseResult := &models.TestResult{
 		Kind:         testCase.Kind,
@@ -3654,6 +3678,16 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 	if result != nil && result.FailureInfo.Risk != models.None {
 		testCaseResult.FailureInfo.Risk = result.FailureInfo.Risk
 		testCaseResult.FailureInfo.Category = result.FailureInfo.Category
+	}
+
+	// Attribute a connection-level failure distinctly: the status_code=0 recorded
+	// above is the synthetic value we use when the app produced NO response. If the
+	// cause is a transport error (refused/reset/EOF/host unreachable) it is an
+	// app-unreachable/availability failure, NOT a content regression — label it so
+	// operators and downstream (k8s-proxy reads TestResult.FailureInfo) triage it
+	// as infra rather than a STATUS_CODE_CHANGED regression. Raw StatusCode stays 0.
+	if isAppConnectionErrorMsg(errorMessage) {
+		testCaseResult.FailureInfo.Category = appendCategoryUnique(testCaseResult.FailureInfo.Category, models.AppConnectionError)
 	}
 
 	return testCaseResult
