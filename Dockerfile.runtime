@@ -19,8 +19,11 @@ ARG TARGETARCH
 
 ENV KEPLOY_INDOCKER=true
 
+# libcap2-bin → setcap (granting CAP_BPF/CAP_PERFMON/etc to the binary so
+# the agent can run as a non-root UID when the container runtime puts
+# those caps in the bounding set — the k8s PSA-restricted path).
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl sudo && \
+    apt-get install -y ca-certificates curl sudo libcap2-bin && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -28,8 +31,30 @@ COPY dist/keploy-linux-${TARGETARCH}/keploy /app/keploy
 COPY entrypoint.sh /app/entrypoint.sh
 
 # windows compatibility (strip CRLF if the file picked it up on a
-# Windows checkout) + make executable.
+# Windows checkout) + make executable + grant file capabilities so a
+# non-root container user can still exercise the eBPF data-plane caps
+# the runtime adds via --cap-add / securityContext.capabilities.add.
+#
+# +eip = effective + inheritable + permitted. Docker/runc honour file
+# caps when launching a non-root process; capability is no-op for root
+# (already has everything), so this is safe for the docker-compose
+# (root) path too.
+#
+# A non-root sidecar in k8s gets these via the chain:
+#   image setcap → bounding set (k8s capabilities.add) → effective set
+#                  (file caps make them effective on exec)
+#
+# NOT included: CAP_SYS_ADMIN. The sidecar should never need it on
+# kernels >= 5.8. Sysctl writes / mount calls are delegated to the
+# privileged keploy-node-setup DaemonSet (host-bootstrap init container).
 RUN sed -i 's/\r$//' /app/entrypoint.sh && \
-    chmod +x /app/entrypoint.sh /app/keploy
+    chmod +x /app/entrypoint.sh /app/keploy && \
+    setcap cap_bpf,cap_perfmon,cap_net_admin,cap_sys_ptrace,cap_sys_resource+eip /app/keploy && \
+    # Non-root user is created but NOT applied via USER directive. The image
+    # default stays root so docker-compose (sudo docker run …) keeps working
+    # unchanged; k8s deployments opt into non-root by setting
+    # securityContext.runAsUser=65532 (the webhook's AgentRunAsUser knob).
+    groupadd --system --gid 65532 keploy && \
+    useradd  --system --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin keploy
 
 ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent", "--is-docker"]
