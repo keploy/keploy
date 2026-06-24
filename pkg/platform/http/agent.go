@@ -37,7 +37,6 @@ import (
 )
 
 const (
-	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
 )
 
@@ -1249,7 +1248,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
+		// Wait up to the agent's own healthcheck budget for it to become ready.
+		// Under heavy CI docker-daemon contention the agent container can take
+		// well over a minute just to start (observed: a local-image `docker run`
+		// taking 126s), so a 60s wait gave up prematurely and tore down a
+		// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1308,6 +1312,21 @@ func (a *AgentClient) getApp() (*app.App, error) {
 	}
 
 	return h, nil
+}
+
+// ComposeDownOnSetupFailure tears down the managed docker-compose stack so a
+// retry after a per-test-set setup failure (e.g. agent-readiness timeout) does
+// not hit a "container name already in use" conflict from the dependency
+// containers/network left behind. No-op when there is no managed app or it is
+// not a compose app (App.ComposeDown self-guards on kind == DockerCompose).
+func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
+	ap, err := a.getApp()
+	if err != nil {
+		a.logger.Debug("ComposeDownOnSetupFailure: no managed app to tear down")
+		return nil
+	}
+	ap.ComposeDown()
+	return nil
 }
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
@@ -1458,6 +1477,37 @@ func (a *AgentClient) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall
 	return mockErrors, nil
 }
 
+// BeginTestErrorCapture asks the agent to open a per-test mock-error capture
+// window so the next GetMockErrors returns only this test's misses. A missing
+// endpoint (older agent) returns 404 and is treated as a no-op, preserving the
+// legacy global-queue behaviour.
+func (a *AgentClient) BeginTestErrorCapture(ctx context.Context) error {
+	url := fmt.Sprintf("%s/test-capture/begin", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to begin test error capture: %s", err.Error())
+	}
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			utils.LogError(a.logger, closeErr, "failed to close response body for begin-test-error-capture; safe to ignore once")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound {
+		return nil // older agent without the endpoint — fall back to legacy behaviour
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("begin test error capture returned status %d: %s", res.StatusCode, string(body))
+	}
+	return nil
+}
+
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
 // This should be called before cancelling contexts during application shutdown.
 // When the flag is set, connection errors will be logged as debug instead of error.
@@ -1500,7 +1550,8 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	// Aligned with the agent's own healthcheck budget; see pkg.AgentReadyTimeout.
+	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 	defer cancel()
 
 	ticker := time.NewTicker(agentReadyRetryInterval)

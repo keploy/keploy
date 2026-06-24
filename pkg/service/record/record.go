@@ -161,6 +161,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var err error
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
+	// mockCountMap is written by the mock-consumer goroutine and read at
+	// teardown for telemetry. Guard both with a mutex so that if teardown
+	// ever runs while the consumer is still draining (e.g. a force-shutdown),
+	// it can't trigger a concurrent map read/write. correlationMap beside it
+	// is already a sync.Map.
+	var mockCountMapMu sync.Mutex
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
 
@@ -178,44 +184,53 @@ func (r *Recorder) Start(ctx context.Context) error {
 		r.logger.Info("Stopping Keploy recording...")
 
 		// Notify the agent that we are shutting down gracefully
-		// This will cause connection errors to be logged as debug instead of error
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+		// This will cause connection errors to be logged as debug instead of error.
+		// Bound it: an up-but-unresponsive agent (still booting under contention)
+		// must not block teardown — the path SIGINT takes — indefinitely.
+		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
+		notifyCancel()
 		// Pcap + keylog flow over long-lived HTTP streams started in
 		// Start() right after the agent's broadcaster came up. The
 		// streams unwind on their own when the agent closes the
 		// response or the recorder context is cancelled — there is
 		// no on-disk file on the agent and no fetch step here.
 
+		// Bounded drains: a goroutine wedged under contention that ignores its
+		// cancel() must not hang teardown forever (which would swallow SIGINT and
+		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
 		runAppCtxCancel()
-		err := runAppErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 
 		reqCtxCancel()
-		err = reqErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-req", reqErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
 
 		setupCtxCancel()
-		err = setupErrGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record-setup", setupErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
-		err = errGrp.Wait()
-		if err != nil {
+		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 		if recordingStarted {
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+			mockCountMapMu.Lock()
+			mockCountSnapshot := make(map[string]int, len(mockCountMap))
+			for k, v := range mockCountMap {
+				mockCountSnapshot[k] = v
+			}
+			mockCountMapMu.Unlock()
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountSnapshot, map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
 			})
 			totalMocks := 0
-			for _, c := range mockCountMap {
+			for _, c := range mockCountSnapshot {
 				totalMocks += c
 			}
 			// "completed" for a clean exit / user Ctrl+C, "aborted"
@@ -294,7 +309,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		// Aligned with the agent's own healthcheck budget; a fixed 120s wait gave
+		// up while the agent container was still starting under CI daemon
+		// contention. See pkg.AgentReadyTimeout (KEPLOY_AGENT_READY_TIMEOUT).
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -441,7 +459,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 					})
 				}
+				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
+				mockCountMapMu.Unlock()
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}

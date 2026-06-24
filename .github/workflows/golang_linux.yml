@@ -33,6 +33,12 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+          - name: mock-mismatch
+            path: http-pokeapi
+            script_dir: mock_mismatch
+          - name: mock-mismatch-streaming
+            path: sse-redis
+            script_dir: mock_mismatch_streaming
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile

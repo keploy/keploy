@@ -67,6 +67,18 @@ const (
 	MockNamePostgresV3Session = "PostgresV3Session"
 )
 
+// StartupMockTestCaseWindow is the number of leading UNIQUE recorded test cases
+// whose mocks are treated as "startup mocks". Every mock captured from app boot
+// up to and including the recording of the Nth unique test case is preserved
+// wholesale: it is exempt from the record-side static-dedup pruning (so dedup
+// effectively begins at test N+1) and from replay-side RemoveUnusedMocks
+// pruning. The record side keys off this via SyncMockManager.resolvedTestCount
+// (it tags such mocks TestModeInfo.IsStartup); the replay side derives an
+// equivalent timestamp boundary from the on-disk test cases. Both must agree on
+// N, so it lives here as the single source of truth. Fixed in code rather than
+// exposed as a flag — change here to retune.
+const StartupMockTestCaseWindow = 5
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
@@ -125,23 +137,28 @@ type TestModeInfo struct {
 	// a long-lived mock hints at dead recordings worth re-capturing.
 	HitCount uint64 `json:"-" bson:"-"`
 
-	// IsStartup marks app-bootstrap traffic captured before the first
-	// inbound request (e.g. an AWS Secret Manager fetch at process boot).
-	// Such an outbound call can never claim a per-test window — it ran
-	// before any test — so the record-side syncMock reapers (dedup
-	// cleanup, stale-cutoff, memory-pressure wipe) must rescue it to disk
-	// instead of dropping it as debris.
+	// IsStartup marks startup-window traffic: a mock captured either before
+	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
+	// Manager fetch at process boot) OR while fewer than
+	// StartupMockTestCaseWindow unique test cases have been recorded. Such
+	// mocks must survive the record-side syncMock reapers (dedup cleanup,
+	// the ResolveRange keep=false / out-of-window / stale-cutoff rescues, the
+	// memory-pressure wipe) rather than being dropped — that is what keeps
+	// the boot-through-Nth-test mock corpus complete and effectively defers
+	// static-dedup pruning to the (N+1)-th test case.
 	//
 	// This is a RECORD-side cleanup signal only, with no replay-time
 	// meaning, which is why it is NOT modelled as a Lifetime value:
 	// Lifetime is derived from the on-disk Spec.Metadata tag and drives
 	// replay-time pool routing, whereas IsStartup is set live at ingest in
 	// SyncMockManager.AddMock and is only ever read on buffered, live-
-	// captured mocks before they are persisted. Like the sibling
-	// runtime-only fields, the json/bson tags keep it out of the text
-	// formats; gob (which ignores struct tags) does encode it, but a value
-	// carried on a reloaded mock is inert — the reapers run only on the
-	// live record buffer, never on disk-loaded mocks.
+	// captured mocks before they are persisted. (Replay's own startup-mock
+	// preservation is timestamp-based — see replay.startupMockCutoff — not
+	// keyed off this flag.) Like the sibling runtime-only fields, the
+	// json/bson tags keep it out of the text formats; gob (which ignores
+	// struct tags) does encode it, but a value carried on a reloaded mock is
+	// inert — the reapers run only on the live record buffer, never on
+	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
 }
 
@@ -180,6 +197,17 @@ type MockSpec struct {
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
+
+	// ReqBodyNoise is the single, kind-agnostic home for field-path request-body
+	// noise detected during schema-based auto-replay matching
+	// (config.Test.SchemaNoiseDetection). EVERY parser stores it here — HTTP and
+	// non-HTTP (Pulsar/Kafka/Redis/…) alike — so the learn/enforce flow is
+	// uniform across protocols (see pkg/agent/proxy/integrations/schemanoise).
+	// fieldpath ("body.user.id") -> regex list, where an empty list means
+	// "ignore this whole field". Distinct from Mock.Noise ([]string value-regexes
+	// written by the enterprise obfuscator): this records which request-body
+	// fields drift between recording and replay.
+	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -697,9 +725,11 @@ type MockState struct {
 	Lifetime Lifetime `json:"lifetime,omitempty"`
 	// ReqBodyNoise carries field-path request-body noise detected during
 	// schema-based auto-replay matching (config.Test.SchemaNoiseDetection)
-	// back from the agent to the replay service so UpdateMocks can persist
-	// it onto the mock's HTTPReq.ReqBodyNoise. fieldpath ("body.user.id")
-	// -> regex list; empty list means "ignore the whole field".
+	// back from the agent to the replay service so UpdateMocks /
+	// PersistMockNoise can persist it onto the mock. HTTP mocks store it on
+	// HTTPReq.ReqBodyNoise; non-HTTP integrations (Pulsar/Kafka/Redis/Generic)
+	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
+	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
 }
 
@@ -754,6 +784,21 @@ func (m *Mock) DeepCopy() *Mock {
 		}
 	}
 
+	// Deep copy the kind-agnostic request-body schema-noise map (used by EVERY
+	// parser — HTTP and non-HTTP alike). Started from m.Spec by value above, so
+	// the clone would otherwise share this map and its value slices — and
+	// DeepCopy runs before async gob writes and when building runtime mock
+	// pools, so a learned-noise mutation on one copy could bleed into another or
+	// race a persistence read.
+	if m.Spec.ReqBodyNoise != nil {
+		c.Spec.ReqBodyNoise = make(map[string][]string, len(m.Spec.ReqBodyNoise))
+		for k, v := range m.Spec.ReqBodyNoise {
+			vc := make([]string, len(v))
+			copy(vc, v)
+			c.Spec.ReqBodyNoise[k] = vc
+		}
+	}
+
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
 	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
@@ -783,16 +828,6 @@ func (m *Mock) DeepCopy() *Mock {
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {
 		httpReqCopy := *m.Spec.HTTPReq
-		// Deep copy the request-body noise map so a clone's detected noise
-		// can't mutate the shared pooled mock's map (and vice versa).
-		if m.Spec.HTTPReq.ReqBodyNoise != nil {
-			httpReqCopy.ReqBodyNoise = make(map[string][]string, len(m.Spec.HTTPReq.ReqBodyNoise))
-			for k, v := range m.Spec.HTTPReq.ReqBodyNoise {
-				vc := make([]string, len(v))
-				copy(vc, v)
-				httpReqCopy.ReqBodyNoise[k] = vc
-			}
-		}
 		c.Spec.HTTPReq = &httpReqCopy
 	}
 	if m.Spec.HTTPResp != nil {

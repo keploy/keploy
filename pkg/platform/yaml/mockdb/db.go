@@ -62,12 +62,35 @@ func useGobMockFormat() bool {
 	return configuredMockFormat == mockFormatGob
 }
 
+// useGobFormat is the per-instance gob-vs-structured decision: the
+// KEPLOY_MOCK_FORMAT env override wins, then this db's per-session
+// MockFormat (set by multi-app callers), then the package-global default.
+// Single-session callers leave MockFormat empty and get exactly the old
+// useGobMockFormat() behaviour.
+func (ys *MockYaml) useGobFormat() bool {
+	if v := os.Getenv("KEPLOY_MOCK_FORMAT"); v != "" {
+		return v == mockFormatGob
+	}
+	if ys.MockFormat != "" {
+		return ys.MockFormat == mockFormatGob
+	}
+	return useGobMockFormat()
+}
+
 type MockYaml struct {
 	MockPath  string
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
 	Format    yaml.Format
+
+	// MockFormat is the per-instance record-time format (yaml vs gob),
+	// orthogonal to Format (the yaml/json storage encoding). Empty means
+	// "use the package-global default" (configuredMockFormat), preserving
+	// single-session behaviour. Multi-app/per-session callers set this so
+	// each session honours its own spec.MockFormat instead of the process
+	// global — see useGobFormat.
+	MockFormat string
 
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
@@ -339,7 +362,13 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // mockNames is a keep-set keyed by mock name (values carry models.MockState details).
 // Mocks present in mockNames are retained; other mocks may still be retained by
 // timestamp-based exemptions (for replay writes and startup/init traffic).
-func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error {
+//
+// startupCutoffTime is the startup-mock exemption boundary: any mock recorded
+// before it is a "startup mock" (captured from app boot up to and including the
+// first StartupMockTestCaseWindow test cases) and is kept even when no executed
+// test consumes it. The caller (replay) computes it from the per-test-case
+// request timestamps; a zero value disables the exemption.
+func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, startupCutoffTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -355,7 +384,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	// to the format-detection logic below for yaml/json.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		return ys.updateMocksGob(ctx, testSetID, gobPath, mockNames, pruneBefore, firstTestCaseTime)
+		return ys.updateMocksGob(ctx, testSetID, gobPath, mockNames, pruneBefore, startupCutoffTime)
 	}
 
 	// Detect the format the mocks file is actually stored in (may differ
@@ -445,9 +474,10 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -457,13 +487,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		// Keep startup/init mocks: mocks recorded before the first test case
-		// are connection-level or app-init traffic (DNS, TLS, DB handshake,
-		// config fetch, etc.) that only fires once at app startup. In multi-
-		// test-set replays without app restart, these won't be consumed in
-		// later test-sets but are still needed for future replays.
-		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
-			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+		// Keep startup/init mocks: every mock recorded before startupCutoffTime
+		// (app boot up to and including the first StartupMockTestCaseWindow test
+		// cases) is connection-level or app-init traffic (DNS, TLS, DB handshake,
+		// config fetch, etc.) plus the outbound calls of those early tests. In
+		// multi-test-set replays without app restart, these won't be consumed in
+		// later test-sets but are still needed for app startup on future replays.
+		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -496,14 +527,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 // updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
 // filter decision matches the YAML path exactly (keep config mocks,
-// mocks named in mockNames, post-replay mocks, and pre-first-test
-// startup mocks — prune everything else). The rewrite rules are
-// different because gob doesn't support append: we read the whole
-// file, filter, and atomically rewrite a fresh single-encoder
-// stream with the magic header. An existing gob writer on this
-// MockYaml must be quiesced before we touch the file so a
+// mocks named in mockNames, post-replay mocks, and startup mocks
+// recorded before startupCutoffTime — prune everything else). The
+// rewrite rules are different because gob doesn't support append: we
+// read the whole file, filter, and atomically rewrite a fresh
+// single-encoder stream with the magic header. An existing gob writer
+// on this MockYaml must be quiesced before we touch the file so a
 // concurrent InsertMock doesn't race the truncate-and-rewrite.
-func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath string, mockNames map[string]models.MockState, pruneBefore, firstTestCaseTime time.Time) error {
+func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath string, mockNames map[string]models.MockState, pruneBefore, startupCutoffTime time.Time) error {
 	ys.Logger.Debug("pruning unused mocks (gob)",
 		zap.Any("consumedMocks", mockNames),
 		zap.String("testSetID", testSetID),
@@ -563,9 +594,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -574,8 +606,11 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 			newMocks = append(newMocks, mock)
 			continue
 		}
-		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
-			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
+		// Keep startup mocks (see the YAML path): everything recorded before
+		// startupCutoffTime is app-init traffic plus the early tests' outbound
+		// calls, needed for startup on future replays even when unconsumed here.
+		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(startupCutoffTime) {
 			newMocks = append(newMocks, mock)
 			continue
 		}
@@ -589,29 +624,43 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		}
 	}
 
-	// Atomic rewrite: write to a sibling tmp file under the same
-	// directory, then rename over gobPath. os.Rename on the same
-	// filesystem is atomic, so a concurrent reader either sees the
-	// full old file or the full new one.
-	//
-	// Preserve the existing file's permissions across the rewrite.
-	// os.CreateTemp creates its file 0600, so without the chmod below
-	// pruning would quietly narrow mocks.gob from whatever mode the
-	// record writer produced (typically 0644 via umask 0022) down to
-	// owner-only, which breaks replay for any other user/process on
-	// the box. Stat before CreateTemp: if the source file is gone,
-	// fall back to the same mode the gob writer uses when it opens
-	// mocks.gob fresh (0644) so we do not introduce a new
-	// mode-inheritance path.
+	if err := writeGobMocksAtomically(ctx, gobPath, newMocks); err != nil {
+		return err
+	}
+
+	ys.Logger.Debug("pruned mocks successfully (gob)",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", len(mocks)),
+		zap.Int("kept", len(newMocks)),
+		zap.Int("pruned", prunedCount),
+		zap.Any("prunedMocks", prunedMocks),
+		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
+		zap.Time("pruneBefore", pruneBefore))
+	return nil
+}
+
+// writeGobMocksAtomically rewrites gobPath with the given mocks via a
+// sibling tmp file + rename. os.Rename on the same filesystem is atomic, so
+// a concurrent reader either sees the full old file or the full new one.
+//
+// Preserve the existing file's permissions across the rewrite.
+// os.CreateTemp creates its file 0600, so without the chmod below the
+// rewrite would quietly narrow mocks.gob from whatever mode the record
+// writer produced (typically 0644 via umask 0022) down to owner-only, which
+// breaks replay for any other user/process on the box. Stat before
+// CreateTemp: if the source file is gone, fall back to the same mode the gob
+// writer uses when it opens mocks.gob fresh (0644) so we do not introduce a
+// new mode-inheritance path.
+func writeGobMocksAtomically(ctx context.Context, gobPath string, mocks []*models.Mock) error {
 	dir := filepath.Dir(gobPath)
 	base := filepath.Base(gobPath)
 	var originalMode os.FileMode = 0644
 	if info, statErr := os.Stat(gobPath); statErr == nil {
 		originalMode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(dir, base+".prune.*.tmp")
+	tmp, err := os.CreateTemp(dir, base+".rewrite.*.tmp")
 	if err != nil {
-		return fmt.Errorf("create gob prune tmp: %w", err)
+		return fmt.Errorf("create gob rewrite tmp: %w", err)
 	}
 	tmpPath := tmp.Name()
 	cleanup := true
@@ -625,19 +674,19 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// renamed file.
 	if err := os.Chmod(tmpPath, originalMode); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("chmod gob prune tmp to %o: %w", originalMode, err)
+		return fmt.Errorf("chmod gob rewrite tmp to %o: %w", originalMode, err)
 	}
 
 	bw := bufio.NewWriterSize(tmp, 256*1024)
 	if _, err := bw.WriteString(gobMockMagic); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write gob magic to prune tmp: %w", err)
+		return fmt.Errorf("write gob magic to rewrite tmp: %w", err)
 	}
 	enc := gob.NewEncoder(bw)
-	for i, mock := range newMocks {
-		// Same cancellation cadence as the filter loop above — the
-		// encode pass is the expensive one (reflect-heavy) so an
-		// op at cancellation is worth the early exit cost.
+	for i, mock := range mocks {
+		// Check ctx every 1024 entries — the encode pass is the
+		// expensive one (reflect-heavy) so an op at cancellation is
+		// worth the early exit cost.
 		if i&0x3ff == 0 {
 			if err := ctx.Err(); err != nil {
 				_ = tmp.Close()
@@ -646,33 +695,160 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		}
 		if err := enc.Encode(mock); err != nil {
 			_ = tmp.Close()
-			return fmt.Errorf("encode mock during gob prune: %w", err)
+			return fmt.Errorf("encode mock during gob rewrite: %w", err)
 		}
 	}
 	if err := bw.Flush(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("flush gob prune tmp: %w", err)
+		return fmt.Errorf("flush gob rewrite tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync gob prune tmp: %w", err)
+		return fmt.Errorf("sync gob rewrite tmp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close gob prune tmp: %w", err)
+		return fmt.Errorf("close gob rewrite tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, gobPath); err != nil {
-		return fmt.Errorf("rename gob prune tmp over %s: %w", gobPath, err)
+		return fmt.Errorf("rename gob rewrite tmp over %s: %w", gobPath, err)
 	}
 	cleanup = false
+	return nil
+}
 
-	ys.Logger.Debug("pruned mocks successfully (gob)",
-		zap.String("testSetID", testSetID),
-		zap.Int("total", len(mocks)),
-		zap.Int("kept", len(newMocks)),
-		zap.Int("pruned", prunedCount),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
-		zap.Time("pruneBefore", pruneBefore))
+// PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
+// detected under --schema-noise-detection) into the on-disk mocks WITHOUT
+// pruning anything. This is the persistence path when mock pruning
+// (--remove-unused-mocks) is not enabled — previously the learned noise rode
+// only inside UpdateMocks, so running detection without pruning silently
+// discarded everything that was learned at process exit.
+func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
+	// Only mocks that actually carry learned noise matter.
+	withNoise := make(map[string]map[string][]string)
+	for name, st := range mockStates {
+		if len(st.ReqBodyNoise) > 0 {
+			withNoise[name] = st.ReqBodyNoise
+		}
+	}
+	if len(withNoise) == 0 {
+		return nil
+	}
+
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
+	lock.Lock()
+	defer lock.Unlock()
+
+	// merge applies the learned noise; returns true when any mock changed so
+	// unchanged files are never rewritten. Every parser (HTTP included) stores
+	// noise uniformly on the kind-agnostic MockSpec.ReqBodyNoise. Previously this
+	// path skipped every non-HTTP mock, so learning under --schema-noise-detection
+	// WITHOUT --remove-unused-mocks silently discarded the learned noise at exit.
+	merge := func(mocks []*models.Mock) bool {
+		changed := false
+		for _, mock := range mocks {
+			noise, ok := withNoise[mock.Name]
+			if !ok {
+				continue
+			}
+			merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+			if len(merged) != len(mock.Spec.ReqBodyNoise) {
+				changed = true
+			}
+			mock.Spec.ReqBodyNoise = merged
+		}
+		return changed
+	}
+
+	logPersisted := func(total int) {
+		ys.Logger.Info("persisted learned request-body noise onto mocks",
+			zap.String("testSetID", testSetID),
+			zap.Int("mocksWithLearnedNoise", len(withNoise)),
+			zap.Int("totalMocks", total))
+	}
+
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	if _, err := os.Stat(gobPath); err == nil {
+		// Quiesce any in-flight async gob writer before the rewrite —
+		// same reasoning as updateMocksGob.
+		if err := ys.Close(); err != nil {
+			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
+			return err
+		}
+		mocks, err := readGobMocks(gobPath)
+		if err != nil {
+			return err
+		}
+		if !merge(mocks) {
+			return nil
+		}
+		if err := writeGobMocksAtomically(ctx, gobPath, mocks); err != nil {
+			return err
+		}
+		logPersisted(len(mocks))
+		return nil
+	}
+
+	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	if err != nil {
+		return err
+	}
+	if !existsAny {
+		return nil
+	}
+
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	var mocks []*models.Mock
+	if reader.Format() == yaml.FormatJSON {
+		var jsonDocs []*yaml.NetworkTrafficDocJSON
+		for {
+			jd, err := reader.ReadNextDocJSON()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to decode the file documents for noise persistence: %w", err)
+			}
+			jsonDocs = append(jsonDocs, jd)
+		}
+		mocks, err = DecodeMocksJSON(jsonDocs, ys.Logger)
+		if err != nil {
+			return err
+		}
+	} else {
+		var docs []*yaml.NetworkTrafficDoc
+		for {
+			doc, err := reader.ReadNextDoc()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to decode the file documents for noise persistence: %w", err)
+			}
+			docs = append(docs, doc)
+		}
+		mocks, err = DecodeMocks(docs, ys.Logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	if !merge(mocks) {
+		return nil
+	}
+	if err := ys.writeMocksAtomically(path, mockFileName, mocks, detectedFormat); err != nil {
+		return err
+	}
+	logPersisted(len(mocks))
 	return nil
 }
 
@@ -686,7 +862,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
-	if useGobMockFormat() {
+	if ys.useGobFormat() {
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 

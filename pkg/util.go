@@ -2678,6 +2678,30 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
+// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
+// keploy-agent to report ready before giving up. It is sized to the agent
+// container's OWN healthcheck budget (start_period 10s + interval 5s × retries
+// 60 ≈ 310s, see pkg/platform/docker): under heavy CI docker-daemon contention
+// the agent container can take ~2 minutes just to start — observed in CI as a
+// `docker run` of an already-local image taking 126s before the agent process
+// ran. A shorter CLI wait gives up while the agent's own healthcheck still
+// considers it starting, tearing down a bring-up that would have succeeded.
+const DefaultAgentReadyTimeout = 330 * time.Second
+
+// AgentReadyTimeout returns how long to wait for the keploy-agent to become
+// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
+// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
+// slow or fast hosts. A non-positive / unparsable value falls back to the
+// default.
+func AgentReadyTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return DefaultAgentReadyTimeout
+}
+
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
