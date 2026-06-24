@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -83,6 +84,36 @@ func TestDoRequestWithConnRefusedRetry_StopsAfterMaxWithoutFabricating(t *testin
 	}
 	if got := int(atomic.LoadInt32(&rt.attempts)); got != maxConnRefusedRetries+1 {
 		t.Fatalf("expected %d attempts, got %d", maxConnRefusedRetries+1, got)
+	}
+}
+
+// IsTransportConnReset must classify the docker-proxy / mid-exchange reset
+// family (ECONNRESET, broken pipe, bare EOF/unexpected-EOF) and nothing else,
+// so the replay orchestration can mock-consumption-gate a re-send of exactly
+// this transport class.
+func TestIsTransportConnReset(t *testing.T) {
+	resetLike := []error{
+		connResetErr("http://x/a"),
+		&url.Error{Op: "Post", URL: "http://x/a", Err: &net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.EPIPE)}},
+		&url.Error{Op: "Get", URL: "http://x/a", Err: io.EOF},
+		&url.Error{Op: "Get", URL: "http://x/a", Err: io.ErrUnexpectedEOF},
+	}
+	for _, e := range resetLike {
+		if !IsTransportConnReset(e) {
+			t.Errorf("expected reset classification for: %v", e)
+		}
+	}
+
+	notReset := []error{
+		nil,
+		connRefusedErr("http://x/a"), // refused is handled by its own path, not this one
+		errors.New("response body mismatch"),
+		context.DeadlineExceeded,
+	}
+	for _, e := range notReset {
+		if IsTransportConnReset(e) {
+			t.Errorf("did NOT expect reset classification for: %v", e)
+		}
 	}
 }
 

@@ -630,6 +630,45 @@ func isPreResponseConnRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
+// IsTransportConnReset reports whether err is a transport-level connection
+// reset / unexpected close while exchanging the request with the app — i.e.
+// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
+// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
+// connection.
+//
+// This class is dominated, under loaded CI replaying a DOCKER app, by docker's
+// userland proxy (docker-proxy) resetting a freshly-accepted host-side
+// connection during connection setup / before the backend app ever processes
+// the request. The CLI dials the published host port ([::1]:<port>) and sees
+//
+//	read tcp [::1]:<ephem>-><[::1]:<port>: read: connection reset by peer
+//
+// even for a request whose handler makes no downstream calls — proving the
+// reset is in the host<->proxy hop, not the app's response logic.
+//
+// IMPORTANT: a reset is, by the error alone, AMBIGUOUS about whether the app
+// already consumed single-use mocks (a mid-stream reset after the handler ran
+// looks identical). So this predicate only CLASSIFIES the error; the decision
+// to re-send is made by the caller (replay orchestration) and is gated on the
+// app having consumed ZERO new mocks for this request — the same "provably
+// nothing irreversible happened" invariant that makes the ECONNREFUSED re-send
+// safe. Without that gate this must NEVER drive a retry.
+func IsTransportConnReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// net/http surfaces a peer-side drop during the response read as a bare
+	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
+	// reset frequently lands here too (see the "EOF" hits in the reproduction).
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
 // pre-response connection-refused (bounded, ctx-aware backoff, request body
 // rewound via GetBody). Any other error, or a real response, returns
