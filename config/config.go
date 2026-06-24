@@ -55,6 +55,26 @@ type Config struct {
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
 	InMemoryCompose []byte `json:"-" yaml:"-" mapstructure:"-"`
+
+	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
+	//
+	// At record time the shim attaches eBPF uprobes to libcrypto's X509_digest
+	// and rewrites the cert-hash libpq folds into the SCRAM proof, so postgres
+	// clients running with channel_binding=require still authenticate through
+	// keploy's TLS MITM against the REAL upstream postgres.
+	//
+	// At test/replay time the same flag activates a downgrade path that
+	// rewrites channel_binding=require → disable on libpq, so the mocked
+	// trust-mode auth is accepted (postgres traffic is served from mocks at
+	// replay; no real SCRAM handshake completes).
+	//
+	// Top-level (not under record:) because the same flag governs both modes.
+	// OSS builds register no cbshim factory and treat this as a no-op; builds
+	// with a factory respect it. Requires CAP_BPF + a kernel that allows
+	// bpf_probe_write_user (effectively CAP_SYS_ADMIN on Linux ≥ 5.8); without
+	// those the factory returns an error and the proxy keeps working for non-
+	// PLUS clients. Defaults to false.
+	ChannelBindingShim bool `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 }
 
 type Agent struct {
@@ -76,20 +96,7 @@ type Record struct {
 	TestCaseNaming string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
 	Synchronous    bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
 	EnableSampling int    `json:"enableSampling" yaml:"enableSampling"`
-	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
-	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
-	// cert-hash libpq folds into the SCRAM proof, so postgres clients running
-	// with channel_binding=require still authenticate through keploy's TLS MITM
-	// against the REAL upstream postgres at record time. Replay does not forward
-	// to the real database — postgres traffic is served from mocks, no SCRAM
-	// handshake actually completes against postgres — so the shim is record-only.
-	// OSS builds have no implementation registered and ignore this flag entirely;
-	// builds with a registered factory respect it. Defaults to false; flip to
-	// true in keploy.yml under record: to opt in. Requires CAP_BPF + a kernel
-	// that allows bpf_probe_write_user; without those the factory returns an
-	// error and the proxy keeps working for non-PLUS clients.
-	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
-	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
+	MemoryLimit    uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// MockFormat selects the on-disk format for recorded mocks.

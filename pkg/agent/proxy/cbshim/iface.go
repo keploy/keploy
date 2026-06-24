@@ -9,11 +9,11 @@
 // existed: SCRAM-SHA-256-PLUS clients connecting through keploy's TLS
 // MITM will fail with "SCRAM channel binding check failed". Users who
 // need PLUS support must run a build that registers a CBShim
-// implementation AND set config.Record.ChannelBindingShim to true
-// (record.channelBindingShim in keploy.yml — nested YAML, i.e.
-// `record:\n  channelBindingShim: true`); the agent subprocess
-// receives the same value via the hidden --channel-binding-shim flag
-// the orchestrator forwards on argv.
+// implementation AND set config.ChannelBindingShim to true
+// (top-level `channelBindingShim: true` in keploy.yml — the flag
+// governs both record AND test/replay symmetrically). The agent
+// subprocess receives the same value via the hidden
+// --channel-binding-shim flag the orchestrator forwards on argv.
 package cbshim
 
 import (

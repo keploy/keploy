@@ -125,10 +125,10 @@ type SetupOptions struct {
 	GlobalPassthrough         bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
-	// ChannelBindingShim mirrors config.Record.ChannelBindingShim. Forwarded
-	// from orchestrator → agent via the --channel-binding-shim argv flag, the
-	// same propagation channel CapturePackets / OpportunisticTLSIntercept use,
-	// so containerised agents honour the user's choice without seeing the
+	// ChannelBindingShim mirrors the top-level config.ChannelBindingShim.
+	// Forwarded from orchestrator → agent via the --channel-binding-shim argv
+	// flag, the same propagation channel CapturePackets / OpportunisticTLSIntercept
+	// use, so containerised agents honour the user's choice without seeing the
 	// host's keploy.yml.
 	ChannelBindingShim bool
 	AgentPort          uint32
