@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -605,6 +607,65 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
+// maxConnRefusedRetries bounds how many times a replay test request is re-sent
+// when the connection is REFUSED before the app accepts it. A refused connection
+// proves the app never received the request — zero bytes sent, zero single-use
+// mocks consumed — so re-sending is safe and does NOT fabricate a result: it
+// obtains the real response the suite must assert on instead of a false
+// status_code=0. We deliberately do NOT retry a mid-response reset (ECONNRESET),
+// EOF, or broken pipe: those can occur AFTER the app read the request and
+// consumed mocks, where a retry would re-run non-idempotent logic against
+// exhausted mocks and fabricate a verdict. Under CI contention an app container
+// can briefly refuse while still coming up; this turns that transient transport
+// failure into the real comparison rather than a flaky false regression.
+const (
+	maxConnRefusedRetries   = 3
+	connRefusedRetryBackoff = 150 * time.Millisecond
+)
+
+// isPreResponseConnRefused reports whether err is a pure "connection refused".
+// errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
+// syscall.Errno chain, so no manual unwrapping is needed.
+func isPreResponseConnRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
+// pre-response connection-refused (bounded, ctx-aware backoff, request body
+// rewound via GetBody). Any other error, or a real response, returns
+// immediately — so a genuinely crashed/unreachable app still fails fast after
+// the bounded retries, and a mid-response reset is never retried.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		// Only retry if we can faithfully re-send the body; otherwise stop so we
+		// never send a truncated/empty body (which would fabricate a result).
+		if req.Body != nil && req.GetBody == nil {
+			return nil, err
+		}
+		if req.GetBody != nil {
+			body, gbErr := req.GetBody()
+			if gbErr != nil {
+				return nil, err
+			}
+			req.Body = body
+		}
+		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
+		}
+	}
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -619,8 +680,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -696,8 +757,8 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
