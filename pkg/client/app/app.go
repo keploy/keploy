@@ -666,6 +666,109 @@ func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration
 	}
 }
 
+// keployAgentComposeService is the FIXED compose service key under which keploy
+// injects its agent (pkg/platform/docker/docker.go AddKeployAgentToCompose). The
+// service's container_name is the per-process-random keploy-v3-<hash>, but the
+// service KEY is constant, so docker-compose identifies the agent across phases
+// by (project, service=keploy-agent) — not by the changing container name.
+const keployAgentComposeService = "keploy-agent"
+
+// removeStaleComposeAgentWithin force-removes any container that docker-compose
+// still tracks as the keploy-agent service of THIS run's project, then waits for
+// the daemon to finish reaping it — all bounded by the budget. It is the compose
+// analogue of ensureContainerNameFreeWithin, but keyed on the compose SERVICE
+// rather than the container name.
+//
+// Root cause it closes: keploy injects the agent under a fixed service key
+// (keploy-agent) with a per-process-random container_name (keploy-v3-<hash>).
+// Across the record -> auto-replay boundary (atg sandbox) and the keep-app-alive
+// recovery, a second `docker compose up` runs in the SAME project while the
+// PRIOR phase's agent container is still present (its async teardown removes it
+// out-of-band by name). Because the new compose-tmp.yaml gives the keploy-agent
+// service a DIFFERENT container_name, compose sees its config drift and plans a
+// Recreate of the keploy-agent service: remove-the-old-container-then-create.
+// That remove races the concurrent out-of-band removal of the same id and loses
+// — "Error response from daemon: No such container: <stale-id>" (or "removal of
+// container <id> is already in progress") — aborting `compose up` and failing
+// the run (the flaky atg-with-mocks "No such container" regression).
+//
+// ensureContainerNameFreeWithin(a.keployContainer) does NOT cover this: on a
+// fresh phase a.keployContainer is the NEW name, which does not exist yet, so it
+// is a no-op; the container that triggers the Recreate is the PRIOR phase's
+// agent under a name this App instance never knew. Resolving it via the compose
+// project/service (the same way the upcoming `up` will) and force-removing +
+// reaping it BEFORE the up guarantees compose only ever CREATES the agent (no
+// Recreate, no remove step, no stale-id race). A no-op on the first up of a
+// project, when no prior keploy-agent container exists.
+func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	ids := a.composeAgentContainerIDs(ctx)
+	if len(ids) == 0 {
+		return // first up of this project, or the prior agent is already gone
+	}
+	a.logger.Debug("removing stale keploy-agent container(s) from a prior compose phase before the next up",
+		zap.Strings("ids", ids))
+	for _, id := range ids {
+		a.forceRemoveContainerByNameWithin(id, forceRemoveBudget)
+	}
+	// Reuse the existing reap barrier so the next up cannot race a still-removing
+	// agent. waitContainersRemoved tolerates ids as well as names (it inspects by
+	// the given string and treats a non-nil error as "gone").
+	a.waitContainersRemoved(ids, budget)
+}
+
+// composeAgentContainerIDs returns the container ids docker-compose currently
+// tracks for the keploy-agent service of this run's project. It shells out to
+// `docker compose ... ps -aq keploy-agent` so compose resolves the project name
+// EXACTLY as the upcoming `up` will (same -f/-p/project-directory flags and same
+// cwd), which is what makes the result line up with the container compose would
+// otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
+// file-based vs in-memory compose source.
+func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
+	var args []string
+	switch {
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-aq", keployAgentComposeService)
+	case a.composeFile != "":
+		args = []string{"compose", "-f", a.composeFile, "ps", "-aq", keployAgentComposeService}
+	default:
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// A non-existent project / no such service is the common "first up" case
+		// and surfaces here as an error or empty output; treat it as "nothing to
+		// clean up" rather than failing the run.
+		a.logger.Debug("could not list the prior keploy-agent compose container (likely the first up of this project)",
+			zap.Error(err), zap.String("output", string(out)))
+		return nil
+	}
+	return parseComposePSIDs(string(out))
+}
+
+// parseComposePSIDs extracts the container ids from `docker compose ps -aq`
+// output: one id per line, ignoring blank lines and surrounding whitespace.
+// Split out as a pure function so the parsing the stale-agent cleanup hinges on
+// is unit-testable without a docker daemon.
+func parseComposePSIDs(out string) []string {
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // ensureContainerNameFreeWithin force-removes the named container and then
 // VERIFIES the name is actually free before returning, retrying within the
 // budget. A bare `docker rm -f` returns as soon as it has *initiated* removal,
@@ -826,11 +929,29 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// re-record) reads the stale project state and tries to Recreate the
 	// being-removed agent container — failing with "Error response from daemon:
 	// No such container: <stale-id>" and aborting the whole run (the
-	// atg-with-mocks flake). Polling the agent name free first (force-remove +
-	// wait) serializes teardown -> up so the up always creates a fresh agent.
-	// Mirrors the docker-run pre-run guard above; a no-op on the first up.
-	if a.kind == utils.DockerCompose && a.keployContainer != "" {
-		a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
+	// atg-with-mocks flake).
+	//
+	// Two complementary guards, because the agent is tracked by compose under a
+	// FIXED service key (keploy-agent) but a per-process-random container_name
+	// (keploy-v3-<hash>):
+	//
+	//   1. removeStaleComposeAgentWithin resolves the prior agent via the compose
+	//      project/service (the same way the upcoming up will) and force-removes +
+	//      reaps it. This is the one that closes the record -> auto-replay race:
+	//      the prior phase's agent has a DIFFERENT random name this App never
+	//      knew, so name-based cleanup can't see it, yet compose still tries to
+	//      Recreate it because the SERVICE key is constant and its container_name
+	//      drifted between phases.
+	//   2. ensureContainerNameFreeWithin frees THIS run's agent name, defending
+	//      the same-name reuse across the per-test-set up/down boundary.
+	//
+	// Both are bounded and a no-op on the first up of a project. Mirror the
+	// docker-run pre-run guard above.
+	if a.kind == utils.DockerCompose {
+		a.removeStaleComposeAgentWithin(preRunRemoveBudget)
+		if a.keployContainer != "" {
+			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
+		}
 	}
 
 	// Define the function to cancel the command

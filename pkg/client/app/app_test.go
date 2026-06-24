@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // exit125 returns a real *exec.ExitError whose Error() is "exit status 125",
@@ -172,4 +174,72 @@ func TestDockerRunNameConflictRetryPath(t *testing.T) {
 			t.Fatalf("empty-name: %+v; want runs=1 removes=0", got)
 		}
 	})
+}
+
+// TestParseComposePSIDs locks the parsing that the stale-agent cleanup hinges
+// on: `docker compose ps -aq keploy-agent` prints one container id per line, and
+// removeStaleComposeAgentWithin must derive an exact id list from it (no blanks,
+// no whitespace). An over-eager parse would force-remove the wrong container or
+// a phantom id; an under-eager one (e.g. dropping a real id on a trailing
+// newline) would leave the prior agent to trip the compose Recreate race.
+func TestParseComposePSIDs(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want []string
+	}{
+		// First up of a project: compose prints nothing.
+		{"empty", "", nil},
+		{"only newlines", "\n\n", nil},
+		{"whitespace only", "   \n\t\n", nil},
+		// The common single-agent case, with the trailing newline the CLI emits.
+		{"single id trailing newline", "fde9a83d78a6\n", []string{"fde9a83d78a6"}},
+		{"single id no newline", "fde9a83d78a6", []string{"fde9a83d78a6"}},
+		// Defensive: more than one tracked agent container (e.g. a half-reaped
+		// prior + a leftover) — every id must be returned so all get removed.
+		{"multiple ids", "id1\nid2\nid3\n", []string{"id1", "id2", "id3"}},
+		// Surrounding whitespace and interleaved blanks are tolerated.
+		{"ids with blanks and spaces", "  id1  \n\n  id2\n", []string{"id1", "id2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseComposePSIDs(tc.out)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseComposePSIDs(%q) = %v (len %d), want %v (len %d)",
+					tc.out, got, len(got), tc.want, len(tc.want))
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("parseComposePSIDs(%q)[%d] = %q, want %q", tc.out, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestComposeAgentContainerIDsNoSource verifies the stale-agent lookup is a
+// no-op when there is no compose source configured (neither a temp compose file
+// nor in-memory content) — i.e. it never shells out to docker for a non-compose
+// run. composeAgentContainerIDs must return nil so removeStaleComposeAgentWithin
+// short-circuits before any docker call.
+func TestComposeAgentContainerIDsNoSource(t *testing.T) {
+	a := &App{logger: zap.NewNop()}
+	if ids := a.composeAgentContainerIDs(context.Background()); ids != nil {
+		t.Fatalf("composeAgentContainerIDs with no compose source = %v, want nil", ids)
+	}
+	// removeStaleComposeAgentWithin must also be a no-op (no panic, returns
+	// promptly) when there is nothing to resolve.
+	a.removeStaleComposeAgentWithin(forceRemoveBudget)
+}
+
+// TestKeployAgentComposeServiceConstant guards the fixed compose service key the
+// stale-agent cleanup resolves against. The cleanup finds the prior agent via
+// `docker compose ps keploy-agent`; if the injected service key (docker.go's
+// AddKeployAgentToCompose) ever changes, this constant must change in lockstep
+// or the cleanup silently stops matching and the Recreate race returns.
+func TestKeployAgentComposeServiceConstant(t *testing.T) {
+	if keployAgentComposeService != "keploy-agent" {
+		t.Fatalf("keployAgentComposeService = %q, want \"keploy-agent\" (must match the injected compose service key in pkg/platform/docker/docker.go)",
+			keployAgentComposeService)
+	}
 }
