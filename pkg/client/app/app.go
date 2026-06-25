@@ -597,14 +597,20 @@ const (
 	dockerInspectBudget  = 2 * time.Second // any single teardown ContainerInspect
 	// preRunRemoveBudget bounds the startup-time force-remove of a leftover
 	// --name container before a docker-run. Unlike the teardown force-remove it
-	// is NOT in the SIGINT drain path, so it can afford to wait for a still-
-	// running prior container to actually go away under daemon contention; the
-	// 2s teardown cap is too short here and lets "name already in use" through.
-	preRunRemoveBudget = 30 * time.Second
+	// is NOT in the SIGINT drain path, so under a SATURATED docker daemon it
+	// should WAIT for the prior container's `docker rm -f` to actually complete
+	// rather than give up and let the next `docker run --name` hit "name already
+	// in use" (the go-docker-timefreeze flake). Work-slow-not-fail: a busy daemon
+	// means a slower removal, never a failed run — sized generously (90s here,
+	// ×dockerRunNameConflictRetries below) to outlast realistic CI oversubscription,
+	// with perAttempt = budget/3 so each individual rm has room to finish.
+	preRunRemoveBudget = 90 * time.Second
 	// dockerRunNameConflictRetries bounds how many times a user-app `docker run`
 	// is re-issued after a transient container-name conflict (docker exit 125)
-	// before the error is surfaced; the name is force-removed between attempts.
-	dockerRunNameConflictRetries = 3
+	// before the error is surfaced; the name is force-removed (waiting up to
+	// preRunRemoveBudget) between attempts. Generous so a saturated daemon is
+	// tolerated as slowness, not surfaced as a hard failure.
+	dockerRunNameConflictRetries = 5
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
