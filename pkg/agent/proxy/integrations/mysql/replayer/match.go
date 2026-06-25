@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -208,7 +209,13 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 	return strings.HasPrefix(hdr.Type, "COM_")
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, string, string, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, schemaNoiseDetection bool, schemaNoiseStrict bool) (*mysql.Response, bool, string, string, error) {
+	// Shared schema-noise engine for this match. MySQL is a full client of the
+	// same engine HTTP and Pulsar use; mysqlNoiseAdapter owns only the COM_QUERY
+	// literal Diff (querynoise.go). Detection rides the engine; strict is
+	// enforced by the bespoke queryMatchesWithinNoise (see schema_noise.go for
+	// why strict is not Engine.StrictAllows).
+	noiseEng := schemanoise.New(mysqlNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -378,6 +385,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
 		bestPartialQuery string       // query of the closest partial match
 
+		// comQueryStrictHardReject is set when a live COM_QUERY's structural
+		// counterpart (same redacted skeleton) was found under strict mode but
+		// drifted in a non-noise / predicate literal — a real regression. It
+		// forces an overall miss so an unrelated score-based partial (e.g. a
+		// different statement that coincidentally scored on payload length) is
+		// NOT served in its place.
+		comQueryStrictHardReject bool
+
 		// COM_STMT_EXECUTE FIFO fallback: when the live bound parameters
 		// match NO recorded mock for the same prepared query (e.g. an
 		// INSERT-then-SELECT read-back of a replay-generated uuid that
@@ -420,6 +435,17 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// genuinely reusable single-recording query.
 		queryExactResp *mysql.Response
 		queryExactMock *models.Mock
+
+		// queryDetectedNoise holds the "body."-prefixed literal noise detected on
+		// the COM_QUERY structurally-equal-but-value-different path for the mock
+		// ultimately served. It is keyed to whichever mock becomes matchedMock so
+		// updateMock can attach it onto a fresh copy and flag it for persistence
+		// (on MockSpec.ReqBodyNoise, the shared store). We track per candidate so
+		// a later in-window winner carries ITS own detected noise, not an
+		// earlier candidate's.
+		queryDetectedNoise        map[string][]string
+		queryExactDetectedNoise   map[string][]string
+		partialQueryDetectedNoise map[string][]string
 	)
 
 	// Single pass: filter & match on the fly. Iterates the merged pool
@@ -462,25 +488,59 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 
 			case sCOM_QUERY:
-				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
-					// Exact query-text match. Prefer the candidate recorded
-					// inside the current test window so a repeated stateful
-					// read-back (same SQL, different row per call) resolves to
-					// THIS test's row instead of the first one recorded. An
-					// out-of-window exact match is kept only as a fallback for
-					// a genuinely reusable single-recording query. When no
-					// window is active (windowActive==false) this collapses to
-					// the previous first-exact-match-wins behaviour.
+				// Thread the shared schema-noise engine + the candidate mock
+				// through so matchQueryPacket can (a) strictly consume a
+				// structurally-equal mock whose only drift is in learned-noise
+				// SET/VALUES positions, and (b) on the detection path surface
+				// newly-detected literal noise for persistence.
+				if ok, c, detected, hardReject := matchQueryPacket(ctx, logger, noiseEng, mock, mockReq.PacketBundle, req.PacketBundle); ok {
+					// Exact query-text match (or a strict within-noise match).
+					// Prefer the candidate recorded inside the current test
+					// window so a repeated stateful read-back (same SQL,
+					// different row per call) resolves to THIS test's row
+					// instead of the first one recorded. An out-of-window exact
+					// match is kept only as a fallback for a genuinely reusable
+					// single-recording query. When no window is active
+					// (windowActive==false) this collapses to the previous
+					// first-exact-match-wins behaviour.
 					if windowActive && !mockInCurrentWindow(mock) {
 						if queryExactMock == nil {
 							queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
+							queryExactDetectedNoise = detected
 						}
 					} else {
 						matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+						queryDetectedNoise = detected
 					}
-				} else if c > maxMatchedCount {
+				} else if hardReject {
+					// Strict mode: this candidate IS the live query's structural
+					// counterpart (same redacted skeleton) but drifted in a
+					// non-noise / predicate literal — a real regression. Record
+					// it for diff reporting and flag the hard reject, but do NOT
+					// let it (or any other candidate) become a served partial via
+					// the score path. Crucially we do NOT touch maxMatchedCount /
+					// matchedResp / matchedMock here.
+					comQueryStrictHardReject = true
+					bestPartialMock = mock
+					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
+						bestPartialQuery = qp.Query
+					}
+				} else if c > maxMatchedCount && !schemaNoiseStrict {
+					// Under strict, a score-based partial must NEVER be served for
+					// COM_QUERY: only an exact or within-noise match (queryMatched)
+					// or the out-of-window exact fallback may satisfy a strict
+					// query. This stops a same-payload-length, different-skeleton
+					// candidate (e.g. a changed column/operator that the redacted-
+					// skeleton gate already refuses to treat as comparable) from
+					// masking a real query-shape regression via the partial path.
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 					bestPartialMock = mock
+					// On the detection path a structurally-equal-but-value-
+					// different COM_QUERY returns ok==false with a high score
+					// (matchCount+6) and the detected literal noise. Carry it on
+					// the partial winner so that if this mock is ultimately
+					// served (no exact match anywhere), the noise is persisted.
+					partialQueryDetectedNoise = detected
 					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 						bestPartialQuery = qp.Query
 					}
@@ -620,6 +680,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// candidate rather than dropping to the score-based partial pick.
 	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
 		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
+		queryDetectedNoise = queryExactDetectedNoise
+	}
+
+	// Strict hard-reject: the live COM_QUERY's structural counterpart was found
+	// but drifted in a non-noise / predicate literal — a real regression. Force
+	// an overall miss instead of serving an unrelated score-based partial.
+	if req.Header.Type == sCOM_QUERY && schemaNoiseStrict && comQueryStrictHardReject && !queryMatched {
+		matchedResp, matchedMock = nil, nil
 	}
 
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
@@ -766,7 +834,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				chosen = sldMock
 			}
 			if chosen != nil {
-				updateMock(ctx, logger, chosen, mockDb)
+				updateMock(ctx, logger, chosen, mockDb, nil)
 			}
 			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
 				zap.Bool("consumed_recorded_mock", chosen != nil))
@@ -913,9 +981,21 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		return nil, false, bestPartialQuery, bestPartialMockName, nil
 	}
 
+	// Resolve the literal noise (if any) detected for the COM_QUERY mock we
+	// are about to serve. A structurally-equal-but-value-different COM_QUERY
+	// is served via the score-based partial path (ok==false, score=matchCount+6),
+	// so when no exact/strict match set queryDetectedNoise but the served mock
+	// is that partial winner, carry the partial's detected noise instead.
+	if len(queryDetectedNoise) == 0 && matchedMock != nil && matchedMock == bestPartialMock {
+		queryDetectedNoise = partialQueryDetectedNoise
+	}
+
 	// Update the mock in the database BEFORE modifying the response
-	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
+	// This ensures we update using the original mock state. When detection
+	// found literal noise on a COM_QUERY mock, updateMock attaches it onto a
+	// fresh copy (MockSpec.ReqBodyNoise) so flagMockAsUsed carries it out for
+	// persistence.
+	if okk := updateMock(ctx, logger, matchedMock, mockDb, queryDetectedNoise); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
 		return nil, false, "", "", fmt.Errorf("failed to update matched mock")
@@ -1012,12 +1092,35 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (bool, int) {
+// matchQuery scores a recorded query packet against a live one. The schema-noise
+// engine (eng) + the candidate mock enable MySQL request-literal noise for the
+// COM_QUERY path (mirroring HTTP ReqBodyNoise on the shared MockSpec.ReqBodyNoise):
+//   - detection (eng.DetectionEnabled): when the two queries are STRUCTURALLY
+//     identical but some literal VALUES differ, the engine-detected per-position
+//     noise (SET/VALUES literals only — default-deny everywhere else, in the
+//     "body."-prefixed vocabulary) is returned as the third value so the caller
+//     can attach it to the matched mock and persist it. Detection does NOT force
+//     a match.
+//   - strict (eng.StrictEnabled): a structurally-identical recorded query MATCHES
+//     (is consumed) iff every differing literal position is already learned noise
+//     (queryMatchesWithinNoise); any non-learned eligible drift, or any
+//     non-eligible (e.g. WHERE) drift, fails. Strict is enforced HERE, not via
+//     Engine.StrictAllows — see schema_noise.go for the eligibility-asymmetry
+//     rationale.
+//
+// detected is non-nil only on the detection path when new eligible drift was
+// found. hardReject (4th return) is TRUE only in the strict branch when this
+// candidate is the live query's actual structural counterpart (same redacted
+// skeleton) but its drift is NOT within learned noise — i.e. a real
+// WHERE/predicate regression. The caller (matchCommand) uses it to force an
+// overall miss for that live query rather than serving an unrelated score-based
+// partial. eng may be nil (e.g. the PREPARE path), which disables both branches.
+func matchQuery(_ context.Context, log *zap.Logger, eng *schemanoise.Engine, mock *models.Mock, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (matched bool, score int, detected map[string][]string, hardReject bool) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		return false, 0
+		return false, 0, nil, false
 	}
 
 	expectedQuery := getQuery(expected)
@@ -1033,7 +1136,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		// 	zap.String("actual_query", actualQuery),
 		// 	zap.Int("expected_placeholders", expectedPlaceholders),
 		// 	zap.Int("actual_placeholders", actualPlaceholders))
-		return false, 0
+		return false, 0, nil, false
 	}
 
 	if actual.Header != nil && actual.Header.Header != nil &&
@@ -1045,7 +1148,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 			log.Debug("Query Exact matched",
 				zap.String("expected query", expectedQuery),
 				zap.String("actual query", actualQuery))
-			return true, matchCount
+			return true, matchCount, nil, false
 		}
 	}
 
@@ -1054,19 +1157,19 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		log.Debug("expected query is dml but actual is not",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
-		return false, 0
+		return false, 0, nil, false
 	} else if !sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery) {
 		log.Debug("actual query is dml but expected is not",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
-		return false, 0
+		return false, 0, nil, false
 	}
 
 	if !(sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery)) {
 		log.Debug("No Query is dml",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
-		return false, matchCount
+		return false, matchCount, nil, false
 	}
 
 	// Here we can compare the structure of the queries, as both are DML queries.
@@ -1079,7 +1182,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		log.Debug("failed to get actual query structure",
 			zap.String("actual Query", actualQuery),
 			zap.Error(err))
-		return false, matchCount
+		return false, matchCount, nil, false
 	}
 
 	expectedSignature, err := getQueryStructureCached(expectedQuery)
@@ -1087,25 +1190,93 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		log.Debug("failed to get expected query structure",
 			zap.String("expected Query", expectedQuery),
 			zap.Error(err))
-		return false, matchCount
+		return false, matchCount, nil, false
 	}
 
 	if expectedSignature == actualSignature {
 		log.Debug("query structure matched",
 			zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
-		return false, matchCount + 6
+
+		// MySQL request-literal noise (COM_QUERY path only — prepared
+		// COM_STMT_EXECUTE is out of scope, see querynoise.go TODO). The two
+		// queries are structurally identical but differ in literal values.
+		//
+		// STRICT enforcement: consume this mock iff every differing literal is
+		// in an eligible position (SET/VALUES) AND already a learned-noise key.
+		// learnedNoise is the mock's stored MockSpec.ReqBodyNoise with the
+		// shared "body." prefix stripped (root-relative clause-role keys).
+		if eng.StrictEnabled() {
+			learnedNoise := eng.KnownNoise(mock, nil)
+			if queryMatchesWithinNoise(expectedQuery, actualQuery, learnedNoise) {
+				log.Debug("query matched within learned literal noise (strict)",
+					zap.String("expected query", expectedQuery),
+					zap.String("actual query", actualQuery),
+					zap.Any("learned_noise", learnedNoise))
+				return true, matchCount + 8, nil, false
+			}
+			// The AST-type structure signature matched, but the drift is NOT
+			// within learned noise. Distinguish two cases via the redacted
+			// skeleton (which preserves tables/columns/operators):
+			//
+			//   - SAME skeleton => this IS the live query's actual counterpart
+			//     and it drifted in a non-noise / predicate (e.g. WHERE) literal:
+			//     a REAL regression. Hard-reject so matchCommand forces an
+			//     overall miss instead of serving an unrelated score-based
+			//     partial.
+			//
+			//   - DIFFERENT skeleton => merely a same-type-signature candidate
+			//     (different table/column/operator). Not this query's
+			//     counterpart; give it a low score and never let it be a
+			//     definitive match or a hard reject.
+			if skeletonsEqual(expectedQuery, actualQuery) {
+				log.Debug("strict: structurally-equal query hard-rejected (non-noise / predicate literal drift)",
+					zap.String("expected query", expectedQuery),
+					zap.String("actual query", actualQuery))
+				return false, 0, nil, true
+			}
+			log.Debug("strict: same-type-signature candidate is not this query's counterpart (different skeleton)",
+				zap.String("expected query", expectedQuery),
+				zap.String("actual query", actualQuery))
+			// Score 0 so a different-skeleton (different table/column/operator)
+			// candidate can never win the score-based partial fallback under
+			// strict. matchCommand additionally suppresses COM_QUERY partials
+			// under strict, but returning 0 keeps the matchQuery contract honest:
+			// this candidate is not the live query's counterpart.
+			return false, 0, nil, false
+		}
+
+		// DETECTION (lenient): learn which eligible literal positions drifted
+		// and surface them so the caller can attach them to the matched mock
+		// and persist them. Detection does NOT force a match — it only learns;
+		// the structurally-equal mock is still served by matchCommand's
+		// score/in-window selection, carrying this noise out for persistence.
+		if eng.DetectionEnabled() {
+			if learned, _ := eng.Detect(mock, []byte(actualQuery), nil); len(learned) > 0 {
+				log.Debug("detected literal noise on structurally-equal query",
+					zap.String("expected query", expectedQuery),
+					zap.String("actual query", actualQuery),
+					zap.Any("detected_noise", learned))
+				return false, matchCount + 6, learned, false
+			}
+		}
+
+		return false, matchCount + 6, nil, false
 	}
 
-	return false, matchCount
+	return false, matchCount, nil, false
 }
 
-func matchQueryPacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
+// matchQueryPacket scores a recorded COM_QUERY against a live one and threads
+// the schema-noise engine + the candidate mock through to matchQuery. The third
+// return value carries any literal noise detected on the structurally-equal-
+// but-value-different path so the caller can persist it (on MockSpec.ReqBodyNoise).
+func matchQueryPacket(ctx context.Context, log *zap.Logger, eng *schemanoise.Engine, mock *models.Mock, expected, actual mysql.PacketBundle) (matched bool, score int, detected map[string][]string, hardReject bool) {
 	getQuery := func(packet mysql.PacketBundle) string {
 		msg, _ := packet.Message.(*mysql.QueryPacket)
 		return msg.Query
 	}
-	return matchQuery(ctx, log, expected, actual, getQuery)
+	return matchQuery(ctx, log, eng, mock, expected, actual, getQuery)
 }
 
 func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
@@ -1113,7 +1284,12 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 		msg, _ := packet.Message.(*mysql.StmtPreparePacket)
 		return msg.Query
 	}
-	return matchQuery(ctx, log, expected, actual, getQuery)
+	// Prepared statements (COM_STMT_PREPARE/EXECUTE) are out of scope for
+	// request-literal noise — pass a nil engine so schema-noise stays disabled.
+	// The hardReject signal only applies to the strict COM_QUERY path, so it is
+	// ignored here.
+	matched, score, _, _ := matchQuery(ctx, log, nil, nil, expected, actual, getQuery)
+	return matched, score
 }
 
 // query-aware EXEC scoring.
@@ -1493,10 +1669,22 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // match.go for the rationale — we build a fresh copy and mutate the
 // copy rather than the pool pointer, so concurrent goroutines that
 // match the same session-lifetime mock don't race on TestModeInfo.
-func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+//
+// detectedNoise (COM_QUERY request-literal noise learned this match, in the
+// shared "body."-prefixed vocabulary — nil/empty otherwise) is attached onto a
+// FRESH copy of the matched mock's MockSpec.ReqBodyNoise, mirroring the HTTP
+// updateMock: flagMockAsUsed reads the copy's ReqBodyNoise to carry it out on
+// the MockState, and mockdb.UpdateMocks/PersistMockNoise persists it. MergeLearned
+// returns a fresh map so the shared pooled mock's map is never mutated (two
+// requests matching the same session mock share the pointer).
+func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+
+	if len(detectedNoise) > 0 {
+		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -1523,7 +1711,19 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// SetMocksWithWindow's isInitialStaging branch) — the mock is
 	// still classified as LifetimePerTest but physically lives in
 	// the session tree until the first real test's re-partition.
-	if mockDb.DeleteFilteredMock(*matchedMock) {
+	//
+	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
+	// delete-key mock MUST keep the original (unmutated) TestModeInfo — we pass
+	// a copy that retains it but carries the detected noise on a fresh
+	// MockSpec.ReqBodyNoise, so flagMockAsUsed reports the noise on the consumed
+	// per-test mock (it would otherwise be lost: the original matchedMock has no
+	// noise, and updatedMock's mutated TestModeInfo wouldn't match the tree
+	// node). Mirrors the HTTP updateMock deleteMock path.
+	deleteMock := *matchedMock
+	if len(detectedNoise) > 0 {
+		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+	}
+	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
 	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
