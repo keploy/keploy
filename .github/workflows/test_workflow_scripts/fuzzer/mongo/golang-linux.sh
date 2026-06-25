@@ -250,7 +250,7 @@ sleep 5
 section "Replaying Tests"
 cd $GO_FUZZERS_PATH
 # The test command must match the record command
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test.txt &
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 --debug 2>&1 | tee test.txt &
 TEST_PID=$!
 echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID
