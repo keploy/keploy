@@ -601,6 +601,10 @@ const (
 	// running prior container to actually go away under daemon contention; the
 	// 2s teardown cap is too short here and lets "name already in use" through.
 	preRunRemoveBudget = 30 * time.Second
+	// dockerRunNameConflictRetries bounds how many times a user-app `docker run`
+	// is re-issued after a transient container-name conflict (docker exit 125)
+	// before the error is surfaced; the name is force-removed between attempts.
+	dockerRunNameConflictRetries = 3
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
@@ -662,6 +666,109 @@ func (a *App) forceRemoveContainerByNameWithin(name string, budget time.Duration
 	}
 }
 
+// keployAgentComposeService is the FIXED compose service key under which keploy
+// injects its agent (pkg/platform/docker/docker.go AddKeployAgentToCompose). The
+// service's container_name is the per-process-random keploy-v3-<hash>, but the
+// service KEY is constant, so docker-compose identifies the agent across phases
+// by (project, service=keploy-agent) — not by the changing container name.
+const keployAgentComposeService = "keploy-agent"
+
+// removeStaleComposeAgentWithin force-removes any container that docker-compose
+// still tracks as the keploy-agent service of THIS run's project, then waits for
+// the daemon to finish reaping it — all bounded by the budget. It is the compose
+// analogue of ensureContainerNameFreeWithin, but keyed on the compose SERVICE
+// rather than the container name.
+//
+// Root cause it closes: keploy injects the agent under a fixed service key
+// (keploy-agent) with a per-process-random container_name (keploy-v3-<hash>).
+// Across the record -> auto-replay boundary (atg sandbox) and the keep-app-alive
+// recovery, a second `docker compose up` runs in the SAME project while the
+// PRIOR phase's agent container is still present (its async teardown removes it
+// out-of-band by name). Because the new compose-tmp.yaml gives the keploy-agent
+// service a DIFFERENT container_name, compose sees its config drift and plans a
+// Recreate of the keploy-agent service: remove-the-old-container-then-create.
+// That remove races the concurrent out-of-band removal of the same id and loses
+// — "Error response from daemon: No such container: <stale-id>" (or "removal of
+// container <id> is already in progress") — aborting `compose up` and failing
+// the run (the flaky atg-with-mocks "No such container" regression).
+//
+// ensureContainerNameFreeWithin(a.keployContainer) does NOT cover this: on a
+// fresh phase a.keployContainer is the NEW name, which does not exist yet, so it
+// is a no-op; the container that triggers the Recreate is the PRIOR phase's
+// agent under a name this App instance never knew. Resolving it via the compose
+// project/service (the same way the upcoming `up` will) and force-removing +
+// reaping it BEFORE the up guarantees compose only ever CREATES the agent (no
+// Recreate, no remove step, no stale-id race). A no-op on the first up of a
+// project, when no prior keploy-agent container exists.
+func (a *App) removeStaleComposeAgentWithin(budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	ids := a.composeAgentContainerIDs(ctx)
+	if len(ids) == 0 {
+		return // first up of this project, or the prior agent is already gone
+	}
+	a.logger.Debug("removing stale keploy-agent container(s) from a prior compose phase before the next up",
+		zap.Strings("ids", ids))
+	for _, id := range ids {
+		a.forceRemoveContainerByNameWithin(id, forceRemoveBudget)
+	}
+	// Reuse the existing reap barrier so the next up cannot race a still-removing
+	// agent. waitContainersRemoved tolerates ids as well as names (it inspects by
+	// the given string and treats a non-nil error as "gone").
+	a.waitContainersRemoved(ids, budget)
+}
+
+// composeAgentContainerIDs returns the container ids docker-compose currently
+// tracks for the keploy-agent service of this run's project. It shells out to
+// `docker compose ... ps -aq keploy-agent` so compose resolves the project name
+// EXACTLY as the upcoming `up` will (same -f/-p/project-directory flags and same
+// cwd), which is what makes the result line up with the container compose would
+// otherwise try to Recreate. Mirrors ComposeDown's branch selection for the
+// file-based vs in-memory compose source.
+func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
+	var args []string
+	switch {
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-aq", keployAgentComposeService)
+	case a.composeFile != "":
+		args = []string{"compose", "-f", a.composeFile, "ps", "-aq", keployAgentComposeService}
+	default:
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// A non-existent project / no such service is the common "first up" case
+		// and surfaces here as an error or empty output; treat it as "nothing to
+		// clean up" rather than failing the run.
+		a.logger.Debug("could not list the prior keploy-agent compose container (likely the first up of this project)",
+			zap.Error(err), zap.String("output", string(out)))
+		return nil
+	}
+	return parseComposePSIDs(string(out))
+}
+
+// parseComposePSIDs extracts the container ids from `docker compose ps -aq`
+// output: one id per line, ignoring blank lines and surrounding whitespace.
+// Split out as a pure function so the parsing the stale-agent cleanup hinges on
+// is unit-testable without a docker daemon.
+func parseComposePSIDs(out string) []string {
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // ensureContainerNameFreeWithin force-removes the named container and then
 // VERIFIES the name is actually free before returning, retrying within the
 // budget. A bare `docker rm -f` returns as soon as it has *initiated* removal,
@@ -679,8 +786,23 @@ func (a *App) ensureContainerNameFreeWithin(name string, budget time.Duration) {
 		return
 	}
 	deadline := time.Now().Add(budget)
+	// Each force-remove gets a generous slice of the overall budget rather than
+	// the tight teardown-drain forceRemoveBudget. Under heavy docker-daemon
+	// contention a single `docker rm -f` of a still-running prior container can
+	// run well past 2s; SIGKILLing it there (CommandContext) tears the docker
+	// CLI down mid-request, so the removal may not complete, the name never
+	// frees, and the whole budget is burned on repeated stillborn 2s attempts
+	// (the observed "container name still in use after the pre-run remove
+	// budget" → next `docker run --name` Conflict → got=0). Size the per-attempt
+	// deadline to ~1/3 of the budget (floored at forceRemoveBudget) so the rm
+	// can actually finish while still leaving room for a couple of retries
+	// against the async --rm reaper.
+	perAttempt := budget / 3
+	if perAttempt < forceRemoveBudget {
+		perAttempt = forceRemoveBudget
+	}
 	for {
-		a.forceRemoveContainerByNameWithin(name, forceRemoveBudget)
+		a.forceRemoveContainerByNameWithin(name, perAttempt)
 		if a.containerNameFree(name) {
 			return
 		}
@@ -709,6 +831,38 @@ func (a *App) containerNameFree(name string) bool {
 		return false
 	}
 	return len(bytes.TrimSpace(out)) == 0
+}
+
+// isExit125 reports whether a finished user-app command failed at runtime with
+// docker's exit code 125 — the code docker returns when the daemon refuses to
+// create/start the container (a name conflict, but also a bad image reference,
+// an unsatisfiable mount, a malformed flag, …). It is a NECESSARY-but-not-
+// sufficient signal for the name-conflict retry; isDockerRunNameConflict layers
+// the name-occupied check on top to separate the conflict from those other 125s.
+func isExit125(runErr error, errType utils.ErrType) bool {
+	if runErr == nil || errType != utils.Runtime {
+		return false
+	}
+	return strings.Contains(runErr.Error(), "exit status 125")
+}
+
+// isDockerRunNameConflict reports whether a failed user-app `docker run` failed
+// SPECIFICALLY because its --name was still taken by a leftover container — the
+// only exit-125 cause that force-removing the name + retrying can clear. It
+// guards against blanket-retrying every exit 125: a genuinely broken run (bad
+// image, missing mount, bad flag) also exits 125 but must fail fast, not be
+// re-issued repeatedly.
+//
+// docker's name-conflict message ("Conflict. The container name ... is already
+// in use by container ...") is written to the run's stderr, which keploy streams
+// straight to the terminal rather than capturing, so the returned CmdError only
+// carries the exit code ("exit status 125"). The conflict is instead confirmed
+// positively from docker's own state: nameOccupied is true exactly when a
+// container still holds the name at the moment the run failed — which is the
+// precondition docker reports as the name conflict. Requiring BOTH the 125 exit
+// and an occupied name keeps the retry strictly scoped to the recreate race.
+func isDockerRunNameConflict(runErr error, errType utils.ErrType, nameOccupied bool) bool {
+	return isExit125(runErr, errType) && nameOccupied
 }
 
 // extractProjectFlags returns any project-scoping flags (-p/--project-name,
@@ -744,6 +898,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 		defer composeDown()
 	}
 
+	// dockerRunName is the resolved user-app container name; reused by the
+	// post-run container-name-conflict retry below.
+	var dockerRunName string
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 		// Clear any container left over from a prior run with the same --name
@@ -757,11 +914,44 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// startup cleanup, and a still-running prior container can take more than
 		// the 2s teardown cap to remove under contention. Best-effort: a no-op
 		// when nothing is lingering.
-		removeName := a.container
-		if removeName == "" {
-			removeName = utils.ContainerNameFromDockerRun(userCmd)
+		dockerRunName = a.container
+		if dockerRunName == "" {
+			dockerRunName = utils.ContainerNameFromDockerRun(userCmd)
 		}
-		a.ensureContainerNameFreeWithin(removeName, preRunRemoveBudget)
+		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
+	}
+
+	// Compose mode: before `docker compose up`, make sure the keploy agent
+	// container from a prior compose up/phase is fully gone. keploy injects the
+	// agent as a compose service AND force-removes it by name on teardown, so a
+	// fresh up that starts while the previous compose is still "Stopping
+	// Gracefully" (the keep-app-alive recovery, and the atg sandbox's per-phase
+	// re-record) reads the stale project state and tries to Recreate the
+	// being-removed agent container — failing with "Error response from daemon:
+	// No such container: <stale-id>" and aborting the whole run (the
+	// atg-with-mocks flake).
+	//
+	// Two complementary guards, because the agent is tracked by compose under a
+	// FIXED service key (keploy-agent) but a per-process-random container_name
+	// (keploy-v3-<hash>):
+	//
+	//   1. removeStaleComposeAgentWithin resolves the prior agent via the compose
+	//      project/service (the same way the upcoming up will) and force-removes +
+	//      reaps it. This is the one that closes the record -> auto-replay race:
+	//      the prior phase's agent has a DIFFERENT random name this App never
+	//      knew, so name-based cleanup can't see it, yet compose still tries to
+	//      Recreate it because the SERVICE key is constant and its container_name
+	//      drifted between phases.
+	//   2. ensureContainerNameFreeWithin frees THIS run's agent name, defending
+	//      the same-name reuse across the per-test-set up/down boundary.
+	//
+	// Both are bounded and a no-op on the first up of a project. Mirror the
+	// docker-run pre-run guard above.
+	if a.kind == utils.DockerCompose {
+		a.removeStaleComposeAgentWithin(preRunRemoveBudget)
+		if a.keployContainer != "" {
+			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
+		}
 	}
 
 	// Define the function to cancel the command
@@ -869,6 +1059,27 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	var err error
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	// A user-app `docker run --name X` can still lose the container-name race to
+	// the prior test-set's --rm reaper on a saturated CI daemon even after the
+	// pre-run ensureContainerNameFreeWithin verified the name was free — the
+	// reaper can re-touch the name in the narrow window before the run, and
+	// docker then exits 125 without starting the app ("Conflict. The container
+	// name ... is already in use"). Force-remove the name and retry rather than
+	// failing the whole test-set on a transient race.
+	//
+	// The retry is gated STRICTLY on the name-conflict signature: an exit-125
+	// run whose --name is still held by a leftover container (isDockerRunNameConflict).
+	// Every other exit-125 cause (bad image, missing mount, malformed flag) leaves
+	// the name free, so it is NOT retried and fails fast with its real error —
+	// re-issuing it would only burn the remove budget and bury the root cause.
+	for attempt := 1; dockerRunName != "" && attempt <= dockerRunNameConflictRetries &&
+		ctx.Err() == nil && isExit125(cmdErr.Err, cmdErr.Type) &&
+		isDockerRunNameConflict(cmdErr.Err, cmdErr.Type, !a.containerNameFree(dockerRunName)); attempt++ {
+		a.logger.Warn("docker run exited 125 with the --name still in use (container-name conflict); force-removing the name and retrying",
+			zap.String("container", dockerRunName), zap.Int("attempt", attempt))
+		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	}
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:

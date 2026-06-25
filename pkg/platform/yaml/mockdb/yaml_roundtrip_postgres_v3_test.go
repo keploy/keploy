@@ -519,6 +519,44 @@ func TestYAMLRoundTrip_PostgresV3_TabBearingFieldsSurvive(t *testing.T) {
 	}
 }
 
+// TestYAMLRoundTrip_PostgresV3_LeadingTabSQLNormalized pins the exact
+// echo-sql CI failure: a SQLNormalized that begins with a tab and
+// carries an embedded newline. yaml.v3 v3.0.1 would emit a literal
+// block scalar for this and then fail to re-parse its own output inside
+// yaml.Node.Encode (the call EncodeMock makes), so EncodeMock returned
+// "found a tab character where an indentation space is expected" BEFORE
+// the post-encode sanitizeYAMLStringNodes walk could run. The
+// PostgresV3QuerySpec.MarshalYAML wrapper routes SQLNormalized through
+// PostgresV3SafeString, forcing DoubleQuotedStyle on the write side so
+// both the self-reparse and the on-disk re-read succeed.
+func TestYAMLRoundTrip_PostgresV3_LeadingTabSQLNormalized(t *testing.T) {
+	leadingTabSQL := "\tSELECT 1\nFROM t"
+	in := &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type: models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{
+					Class:         "APP",
+					Lifetime:      "perTest",
+					SQLAstHash:    "sha256:tab",
+					SQLNormalized: leadingTabSQL,
+					InvocationID:  "0:0",
+				},
+			},
+		},
+	}
+	got := yamlRoundTrip(t, "PostgresV3-LeadingTabSQL", in)
+	if got.Spec.PostgresV3 == nil || got.Spec.PostgresV3.Query == nil {
+		t.Fatal("Query spec went nil after round-trip")
+	}
+	if got.Spec.PostgresV3.Query.SQLNormalized != leadingTabSQL {
+		t.Errorf("SQLNormalized lost data:\n got %q\nwant %q",
+			got.Spec.PostgresV3.Query.SQLNormalized, leadingTabSQL)
+	}
+}
+
 func TestYAMLRoundTrip_PostgresV3Generator(t *testing.T) {
 	in := &models.Mock{
 		Version: "api.keploy.io/v1beta1",

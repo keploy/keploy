@@ -122,6 +122,28 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 // (subject to read deadline and Close).
 func (f *FakeConn) Read(p []byte) (int, error) {
 	if f.closed.Load() {
+		// Close means "no more blocking", NOT "discard bytes already
+		// delivered to me". The relay tee drains its buffered chunks
+		// into f.ch and then Close() fires during teardown; a chunk
+		// that already landed in f.ch (or the stash) is a fully
+		// recorded wire event and must still be readable, otherwise a
+		// response whose body arrived a hair before the connection was
+		// torn down is silently lost (the "server closed before
+		// response" mock-incomplete race on Connection: close traffic
+		// such as the boot-time startup mock). Only return ErrClosed
+		// once nothing buffered remains.
+		if c, ok := f.drainBufferedLocked(); ok {
+			n := copy(p, c.Bytes)
+			if n < len(c.Bytes) {
+				f.mu.Lock()
+				f.buf.Write(c.Bytes[n:])
+				f.bufReadAt = c.ReadAt
+				f.bufWrittenAt = c.WrittenAt
+				f.bufDir = c.Dir
+				f.mu.Unlock()
+			}
+			return n, nil
+		}
 		return 0, ErrClosed
 	}
 	if len(p) == 0 {
@@ -185,9 +207,64 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 // on a single FakeConn to avoid mixing the two.
 func (f *FakeConn) ReadChunk() (Chunk, error) {
 	if f.closed.Load() {
+		// See Read: a chunk already delivered to f.ch (or stashed) is a
+		// recorded wire event and must survive Close. Drain what is
+		// buffered before reporting ErrClosed.
+		if c, ok := f.drainBufferedLocked(); ok {
+			return c, nil
+		}
 		return Chunk{}, ErrClosed
 	}
 	return f.readChunkLocked()
+}
+
+// drainBufferedLocked returns the next chunk that is ALREADY available
+// without blocking: first any residual bytes left in the internal stash
+// by a prior Read, then a single non-blocking receive from f.ch. It is
+// used only on the post-Close read paths so that bytes the relay already
+// handed to this FakeConn are not discarded when Close races the final
+// delivery. Returns ok=false when nothing is immediately available (the
+// caller then returns ErrClosed). It updates the last-read/written
+// timestamps exactly like readChunkLocked so downstream timestamp anchors
+// stay consistent.
+func (f *FakeConn) drainBufferedLocked() (Chunk, bool) {
+	f.mu.Lock()
+	if f.buf.Len() > 0 {
+		out := make([]byte, f.buf.Len())
+		_, _ = f.buf.Read(out)
+		c := Chunk{
+			Dir:       f.bufDir,
+			Bytes:     out,
+			ReadAt:    f.bufReadAt,
+			WrittenAt: f.bufWrittenAt,
+		}
+		f.bufReadAt = time.Time{}
+		f.bufWrittenAt = time.Time{}
+		f.bufDir = 0
+		f.mu.Unlock()
+		if !c.ReadAt.IsZero() {
+			f.lastReadNano.Store(c.ReadAt.UnixNano())
+		}
+		if !c.WrittenAt.IsZero() {
+			f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+		}
+		return c, true
+	}
+	f.mu.Unlock()
+
+	select {
+	case c, ok := <-f.ch:
+		if !ok {
+			return Chunk{}, false
+		}
+		f.lastReadNano.Store(c.ReadAt.UnixNano())
+		if !c.WrittenAt.IsZero() {
+			f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+		}
+		return c, true
+	default:
+		return Chunk{}, false
+	}
 }
 
 func (f *FakeConn) readChunkLocked() (Chunk, error) {

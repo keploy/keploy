@@ -134,6 +134,42 @@ func validateHealthURL(s string) (string, bool) {
 // was canceled (caller should treat as user abort). Specifically, an invalid
 // HealthURL does NOT cause a false return — callers rely on this contract to
 // disambiguate user abort from misconfiguration (see replay.go classification).
+// dockerPublishedHostPort returns the first host (ip, port) that a docker
+// `-p/--publish` mapping in cmd exposes on the host, so a docker-run replay can
+// gate on the app actually listening before firing requests. It handles the
+// common `hostPort:containerPort` and `hostIP:hostPort:containerPort` forms
+// (with an optional `/tcp`|`/udp` suffix). It returns ok=false — keeping the
+// pure --delay behavior — for native apps (no -p), container-only publishes
+// (random host port), port ranges, or anything it cannot parse with
+// confidence, so it never guesses a wrong port to wait on.
+func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
+	fields := strings.Fields(cmd)
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] != "-p" && fields[i] != "--publish" {
+			continue
+		}
+		spec := strings.SplitN(fields[i+1], "/", 2)[0] // drop /tcp,/udp
+		segs := strings.Split(spec, ":")
+		// host port is the second-to-last segment:
+		//   "hp:cp"     -> [hp, cp]
+		//   "ip:hp:cp"  -> [ip, hp, cp]
+		//   "cp"        -> [cp]  (random host port; not waitable -> skip)
+		if len(segs) < 2 {
+			continue
+		}
+		hp := segs[len(segs)-2]
+		h := "127.0.0.1"
+		if len(segs) >= 3 && segs[0] != "" {
+			h = segs[0]
+		}
+		if hp == "" || strings.ContainsAny(hp, "-") { // skip empty / ranges
+			continue
+		}
+		return h, hp, true
+	}
+	return "", "", false
+}
+
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
@@ -174,10 +210,38 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			return true
+			// --delay floor elapsed; fall through to the optional docker
+			// port-readiness gate below.
 		case <-ctx.Done():
 			return false
 		}
+
+		// Docker apps with a published host port: after the --delay floor,
+		// additionally gate on the host port accepting a TCP connection so
+		// replay never fires at a not-yet-listening app (the "status_code
+		// got=0" flake) when the fixed --delay was too short under CI
+		// contention. Best-effort and bounded by a ceiling; native apps and
+		// container-only / unmapped publishes (ok==false) keep the pure
+		// --delay behavior. This can only ever wait LONGER than --delay, never
+		// shorter, and never weakens an assertion — a fast-ready port returns
+		// instantly.
+		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
+			ceiling := cfg.Test.HealthPollTimeout
+			if ceiling <= 0 {
+				ceiling = 60 * time.Second
+			}
+			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.Warn("app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
+					zap.String("host", host),
+					zap.String("port", port),
+					zap.Duration("ceiling", ceiling),
+					zap.Error(err))
+			}
+		}
+		return true
 	}
 
 	pollCeiling := cfg.Test.HealthPollTimeout

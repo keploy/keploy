@@ -158,6 +158,60 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 	}
 }
 
+// TestReadChunkAfterCloseDrainsBuffered is the FakeConn-side regression
+// guard for the startup-mock "server closed before response" drop. The
+// relay tee delivers the final response chunk into f.ch and the relay
+// then calls Close() during teardown. A chunk already sitting in f.ch is
+// a fully recorded wire event: Close means "no more blocking", not
+// "discard bytes already delivered to me". ReadChunk after Close must
+// therefore return the buffered chunk(s) first and only report ErrClosed
+// once nothing buffered remains. Before the fix, the f.closed short
+// circuit returned ErrClosed immediately and the buffered response chunk
+// (carrying the startup mock body) was lost.
+func TestReadChunkAfterCloseDrainsBuffered(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("startup-secret"), WrittenAt: time.Unix(7, 0)}
+	f := New(ch, nil, nil)
+	_ = f.Close()
+
+	c, err := f.ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk after Close with buffered chunk = %v, want the chunk", err)
+	}
+	if string(c.Bytes) != "startup-secret" {
+		t.Fatalf("got %q, want %q", c.Bytes, "startup-secret")
+	}
+
+	// Nothing buffered now → ErrClosed.
+	if _, err := f.ReadChunk(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("second ReadChunk after Close = %v, want ErrClosed", err)
+	}
+}
+
+// TestReadAfterCloseDrainsBuffered is the byte-oriented counterpart:
+// Read (not ReadChunk) after Close must likewise hand back bytes the
+// relay already delivered before reporting ErrClosed.
+func TestReadAfterCloseDrainsBuffered(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("body"), WrittenAt: time.Unix(7, 0)}
+	f := New(ch, nil, nil)
+	_ = f.Close()
+
+	p := make([]byte, 8)
+	n, err := f.Read(p)
+	if err != nil {
+		t.Fatalf("Read after Close with buffered chunk = %v, want bytes", err)
+	}
+	if string(p[:n]) != "body" {
+		t.Fatalf("got %q, want %q", p[:n], "body")
+	}
+	if _, err := f.Read(p); !errors.Is(err, ErrClosed) {
+		t.Fatalf("second Read after Close = %v, want ErrClosed", err)
+	}
+}
+
 func TestReadDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk)
