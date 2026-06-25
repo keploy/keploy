@@ -39,10 +39,21 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		fileName = "mappings"
 	}
 
-	finalMappings := make(map[string][]models.MockEntry)
-
-	// Detect whether a mappings file already exists in either format,
-	// and remember which one so we write back in the same format.
+	// Detect existing file (if any) only to preserve its format on write —
+	// NOT to merge its contents in. Both callers (cloud replay download
+	// phase and Replayer.StoreMappings) pass a complete *models.Mapping
+	// representing the full intended state for this test set, never a
+	// delta. Read-modify-merge was here originally as a "preserve local
+	// edits" gesture, but in practice it caused stale entries to live
+	// forever: when the server no longer returns a (testID → mocks) entry,
+	// the prior local version persists and is replayed against fixtures
+	// the server already considers obsolete.
+	//
+	// Replace-not-merge is the correct semantic for both callers and
+	// closes that staleness gap. Users who legitimately want to hand-edit
+	// the local mappings file should do so via the branch-scoped
+	// `update_mock` / mapping endpoints, which propagate to cloud and
+	// come back through this path authoritatively.
 	exists, detected, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists", zap.String("path", mappingPath))
@@ -52,23 +63,9 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	effFormat := db.Format
 	if exists {
 		effFormat = detected
-		data, err := os.ReadFile(filepath.Join(mappingPath, fileName+"."+effFormat.FileExtension()))
-		if err != nil {
-			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
-			return err
-		}
-
-		var existingConfig models.Mapping
-		if err := yaml.UnmarshalGeneric(effFormat, data, &existingConfig); err != nil {
-			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
-			return err
-		}
-
-		for _, t := range existingConfig.TestCases {
-			finalMappings[t.ID] = t.Mocks
-		}
 	}
 
+	finalMappings := make(map[string][]models.MockEntry, len(mapping.TestCases))
 	for _, t := range mapping.TestCases {
 		finalMappings[t.ID] = t.Mocks
 	}
