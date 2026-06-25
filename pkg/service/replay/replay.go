@@ -3879,10 +3879,19 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 }
 
 // maxResetResends bounds how many times a transport-reset test request is
-// re-sent. Kept small: the reset is a transient docker-proxy / connection-setup
-// race, so a couple of attempts after a brief readiness re-poll is enough; a
-// genuinely broken app still fails fast.
-const maxResetResends = 2
+// re-sent. The reset is docker's userland-proxy resetting freshly-accepted
+// host-port conns in bursts under load; under heavy CI contention that burst
+// outlasts a couple of back-to-back attempts, so re-send work-slow — more
+// attempts, spread by resetResendBackoff, to ride the burst out. Each attempt is
+// gated on no-mock-consumed + port readiness, and a non-reset failure (genuinely
+// broken app) still stops immediately, so the extra attempts only ever add
+// latency on the reset path.
+const maxResetResends = 6
+
+// resetResendBackoff grows the pause between reset re-sends (attempt*backoff) so
+// the bounded attempts spread across the docker-proxy reset window instead of
+// hammering it back-to-back.
+const resetResendBackoff = 300 * time.Millisecond
 
 // resetResendReadyTimeout caps the per-attempt app-port readiness re-poll done
 // before re-sending. It only ever adds latency on the (rare) reset path.
@@ -3971,6 +3980,13 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 			return nil, false, nil
 		}
 		origErr = err
+		// Back off (growing) before the next re-send so the bounded attempts
+		// spread across the docker-proxy reset burst rather than hammering it.
+		select {
+		case <-ctx.Done():
+			return nil, false, nil
+		case <-time.After(time.Duration(attempt) * resetResendBackoff):
+		}
 	}
 	return nil, false, nil
 }
