@@ -2308,6 +2308,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			started := time.Now().UTC()
 			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
 
+			// Mirror the non-streaming reset-resend: a docker userland-proxy reset on
+			// a freshly-accepted host-port conn under CI load never reached the app
+			// (zero mocks consumed), so re-send rather than synthesize a false got=0
+			// failure. retryResetOnce returns a fresh streaming response for a
+			// streaming tc; on the unsafe refusal path we fold its drained mocks into
+			// totalConsumedMocks identically to the non-streaming loop.
+			if simErr != nil && pkg.IsTransportConnReset(simErr) {
+				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, tc, testSetID, simErr)
+				if retried {
+					resp, simErr = retryResp, nil
+				} else {
+					for _, m := range drainedConsumed {
+						totalConsumedMocks[m.Name] = m
+					}
+				}
+			}
+
 			if simErr != nil {
 				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
 				failure++
