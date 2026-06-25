@@ -517,6 +517,30 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
+// dialTCPWithConnRefusedRetry dials authority over TCP, retrying a pure
+// connection-refused (the app is still coming up) up to maxConnRefusedRetries
+// with the shared growing backoff. A refused dial sent zero bytes and consumed
+// zero mocks, so the re-dial is idempotent; any other dial error, exhaustion of
+// the attempts, or a cancelled context returns immediately.
+func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, authority string) (net.Conn, error) {
+	for attempt := 0; ; attempt++ {
+		conn, err := net.Dial("tcp", authority)
+		if err == nil {
+			return conn, nil
+		}
+		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		logger.Debug("gRPC dial refused; the app may still be coming up — retrying",
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
+		}
+	}
+}
+
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, cfg SimulationConfig) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
@@ -570,8 +594,13 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return nil, fmt.Errorf("missing :path header")
 	}
 
-	// Create a TCP connection
-	conn, err := net.Dial("tcp", authority)
+	// Create a TCP connection, retrying a pure connection-refused. A slow-starting
+	// gRPC app (especially a docker app under CI load) can briefly refuse
+	// connections while still coming up; a refused dial sent zero bytes and
+	// consumed zero mocks, so the re-dial is safe. Mirrors the HTTP replay path's
+	// doRequestWithConnRefusedRetry — a genuinely-down app still fails fast after
+	// the bounded attempts.
+	conn, err := dialTCPWithConnRefusedRetry(ctx, logger, authority)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
