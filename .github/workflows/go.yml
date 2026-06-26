@@ -22,10 +22,3 @@ jobs:
 
       - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
-
-      - uses: codfish/semantic-release-action@v3
-        with:
-          dry-run: true
-          additional-packages: '["@semantic-release/exec@7.0.3"]'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
