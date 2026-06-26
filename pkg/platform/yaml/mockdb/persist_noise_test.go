@@ -61,8 +61,11 @@ func TestPersistMockNoise_WritesNoiseWithoutPruning(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "req_body_noise") || !strings.Contains(content, "body.request_id") {
-		t.Errorf("learned noise not persisted; file:\n%s", content)
+	if !strings.Contains(content, "noise:") || !strings.Contains(content, "req:") || !strings.Contains(content, "body.request_id") {
+		t.Errorf("learned noise not persisted under noise.req; file:\n%s", content)
+	}
+	if strings.Contains(content, "req_body_noise") {
+		t.Errorf("legacy req_body_noise key must no longer be written; file:\n%s", content)
 	}
 	// No pruning: both mocks still present.
 	if !strings.Contains(content, `"other"`) {
