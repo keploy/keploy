@@ -55,17 +55,14 @@ type NetworkTrafficDocJSON struct {
 	Kind         models.Kind         `json:"kind"`
 	Name         string              `json:"name"`
 	Spec         json.RawMessage     `json:"spec"`
-	Noise        []string            `json:"noise,omitempty"`
+	Noise        *DocNoise           `json:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
-	// ReqBodyNoise mirrors NetworkTrafficDoc.ReqBodyNoise: the kind-agnostic
-	// MockSpec.ReqBodyNoise, the single storage location every parser uses (HTTP
-	// included), carried on the shared top-level doc because the per-kind specs
-	// have no field for it. Only populated for a kind whose parser implements the
-	// schema-noise adapter and learned drift (HTTP, plus Pulsar in enterprise);
-	// other kinds (DNS, Mongo, …) leave it empty so omitempty drops it. Restored
-	// to MockSpec on decode.
+	// ReqBodyNoise mirrors NetworkTrafficDoc.ReqBodyNoise: the LEGACY top-level
+	// req_body_noise key, no longer written but still read so older on-disk mocks
+	// keep matching. New mocks carry request-body noise under noise.req (DocNoise);
+	// on decode this legacy map's keys are folded in via ResolveReqBodyNoise.
 	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty"`
 }
 
@@ -91,6 +88,7 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
 		ConnectionID: doc.ConnectionID,
+		ReqBodyNoise: doc.ReqBodyNoise, // legacy read-through (see DocNoise)
 	}, nil
 }
 
@@ -155,6 +153,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,
 		ConnectionID: jsonDoc.ConnectionID,
+		ReqBodyNoise: jsonDoc.ReqBodyNoise, // legacy read-through (see DocNoise)
 	}
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node
