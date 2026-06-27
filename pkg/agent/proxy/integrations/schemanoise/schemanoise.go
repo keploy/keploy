@@ -167,11 +167,17 @@ func (e *Engine) Learn(m *models.Mock, drift map[string][]string) int {
 }
 
 // StrictAllows reports whether mock m may still match the live body under strict
-// enforcement. A mock with no learned noise is always allowed — strict only
-// tightens what was explicitly learned, never mocks the auto-replay never
-// touched. A mock WITH learned noise is rejected when a field OUTSIDE that
-// learned set drifted (an unmarked change), or when the bodies aren't JSON-
-// comparable yet differ byte-for-byte (a non-learnable mismatch).
+// enforcement. Every candidate is value-compared against its recorded request
+// body: it is rejected when a field OUTSIDE the known-noise set (global/user
+// body noise ∪ anything the mock already learned) drifted — an unmarked value or
+// type change — or when the bodies aren't JSON-comparable yet differ
+// byte-for-byte (a non-learnable mismatch). A mock with NO learned noise is no
+// longer waved through: in strict mode only configured/learned noise is
+// tolerated, so a value change on an unmarked field fails the match.
+//
+// This value check only runs when the engine was built with strict enforcement.
+// Without it, StrictReject still tightens only what was explicitly learned and
+// leaves un-learned mocks alone, preserving the lenient schema/key behaviour.
 func (e *Engine) StrictAllows(m *models.Mock, liveBody []byte, userNoise map[string][]string) bool {
 	allowed, _ := e.StrictReject(m, liveBody, userNoise)
 	return allowed
@@ -188,7 +194,13 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 		return true, nil
 	}
 	stored := e.adapter.StoredNoise(m)
-	if len(stored) == 0 {
+	// Under strict enforcement every candidate is value-compared against its
+	// recorded body, even one with no learned req_body_noise — so a changed value
+	// (or type) on a field not covered by configured/learned noise rejects the
+	// mock. Without strict enforcement we only tighten what was explicitly
+	// learned, so a mock the auto-replay never touched (no stored noise) is left
+	// alone and stays a match.
+	if !e.strict && len(stored) == 0 {
 		return true, nil
 	}
 	recorded, ok := e.adapter.RecordedBody(m)

@@ -244,13 +244,13 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				return false, nil, nil, err
 			}
 
-			// Strict enforcement (replay path): for any candidate that already
-			// carries learned req_body_noise, every request-body field must
-			// match except those learned-noise paths and the user's configured
-			// body noise. A drift on a non-noise field rejects that candidate,
-			// so a changed-but-unmarked field fails the test instead of being
-			// silently served. Candidates with no learned noise keep the
-			// lenient schema/key behaviour.
+			// Strict enforcement (replay path): every candidate's request-body
+			// fields must match the recorded body except the user's configured
+			// body noise and any learned req_body_noise paths. A drift on a
+			// non-noise field rejects that candidate, so a changed-but-unmarked
+			// field fails the test instead of being silently served. This applies
+			// even to candidates with no learned noise — strict mode value-checks
+			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
 			if schemaNoiseStrict {
 				bodyMatched = h.filterStrictNoiseMatches(noiseEngine, bodyMatched, input.body, userBodyNoise)
@@ -1143,15 +1143,15 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the
-// replay path. A candidate mock is dropped only when it already carries
-// learned req_body_noise AND a field OUTSIDE that learned-noise set drifted
-// from the recorded body — i.e. an unmarked field changed. Candidates with no
-// learned noise are kept unchanged (lenient schema/key behaviour), so this
-// never tightens matching for mocks the auto-replay never learned noise for.
+// replay path. Under strict enforcement EVERY candidate is value-compared
+// against its recorded body — not just those carrying learned req_body_noise.
+// A candidate is dropped when a field OUTSIDE the known-noise set (configured
+// global/user body noise ∪ anything the mock already learned) drifted from the
+// recorded body, i.e. an unmarked value or type changed. So a mock with no
+// learned noise no longer passes by default: only fields explicitly marked as
+// noise may differ.
 //
-// It delegates to schemanoise.Engine.StrictReject: a candidate with no learned
-// noise is always kept (lenient), and a candidate WITH learned noise is dropped
-// when a field outside that learned set drifted. The JSON/form comparison and
+// It delegates to schemanoise.Engine.StrictReject. The JSON/form comparison and
 // known-noise merge are owned by the shared engine + httpNoiseAdapter; the
 // returned drift names the offending field path(s) for the rejection log.
 func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {

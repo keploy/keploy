@@ -1,12 +1,15 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -39,17 +42,148 @@ type NetworkTrafficDoc struct {
 	Kind         models.Kind         `json:"kind" yaml:"kind"`
 	Name         string              `json:"name" yaml:"name"`
 	Spec         yamlLib.Node        `json:"spec" yaml:"spec"`
-	Noise        []string            `json:"noise,omitempty" yaml:"noise,omitempty"`
+	Noise        *DocNoise           `json:"noise,omitempty" yaml:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
-	// ReqBodyNoise carries the kind-agnostic MockSpec.ReqBodyNoise on the shared
-	// top-level doc — the single storage location every parser uses (HTTP and
-	// non-HTTP alike), since the per-kind specs (GenericSchema, GrpcSpec, …) have
-	// no field for it. Only populated for a kind whose parser implements the
-	// schema-noise adapter and learned drift (HTTP, plus Pulsar in enterprise);
-	// other kinds (DNS, Mongo, …) leave it empty. Restored to MockSpec on decode.
+	// ReqBodyNoise is the LEGACY top-level schema-noise key (req_body_noise). It is
+	// no longer written — new mocks carry request-body noise under noise.req (see
+	// DocNoise) — but it is still read so older on-disk mocks keep matching. On
+	// decode its keys are folded into the unified noise via ResolveReqBodyNoise
+	// (regex values dropped, since the strict path only ever honoured whole-field
+	// "ignore"). Kept for backward compatibility only.
 	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty" yaml:"req_body_noise,omitempty"`
+}
+
+// DocNoise is the unified on-disk representation of a mock's noise, written under
+// the single `noise:` key. It supersedes the older layout that split a top-level
+// `noise:` string list (value-regexes) from a separate `req_body_noise:` mapping.
+//
+//   - Req   — request-body field paths to ignore during schema/strict matching
+//     (e.g. "body.tier_type"). A plain list of paths: the strict path only ever
+//     honoured "ignore this whole field", so the legacy per-path regex values are
+//     intentionally dropped.
+//   - Value — exact-match value regexes written by the enterprise obfuscator
+//     (the former top-level `noise:` list, models.Mock.Noise).
+//
+// For backward compatibility the custom unmarshalers also accept the OLD shape
+// where `noise:` was a bare string list — that decodes into Value. The legacy
+// top-level `req_body_noise:` key is still read separately
+// (NetworkTrafficDoc.ReqBodyNoise) and folded into Req on decode. New writes only
+// emit this unified mapping.
+type DocNoise struct {
+	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
+	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
+}
+
+// NewDocNoise builds the unified noise block for encoding from the in-memory
+// model fields: the obfuscator value-regex list (models.Mock.Noise) and the
+// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Only the field
+// PATHS of the schema-noise map are persisted — the per-path regex values are
+// intentionally dropped (unused on the strict path). Returns nil when there is
+// nothing to write so `omitempty` drops the `noise:` key entirely. Req paths are
+// sorted for deterministic output.
+func NewDocNoise(value []string, reqBodyNoise map[string][]string) *DocNoise {
+	var req []string
+	if len(reqBodyNoise) > 0 {
+		req = make([]string, 0, len(reqBodyNoise))
+		for path := range reqBodyNoise {
+			req = append(req, path)
+		}
+		sort.Strings(req)
+	}
+	if len(req) == 0 && len(value) == 0 {
+		return nil
+	}
+	return &DocNoise{Req: req, Value: value}
+}
+
+// ValueNoise returns the obfuscator value-regex list (models.Mock.Noise). nil-safe.
+func (n *DocNoise) ValueNoise() []string {
+	if n == nil {
+		return nil
+	}
+	return n.Value
+}
+
+// pathsToNoiseMap turns a list of field paths into the canonical schema-noise map
+// shape (path -> empty regex list), the only form the strict/detection path honours.
+func pathsToNoiseMap(paths []string) map[string][]string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(paths))
+	for _, p := range paths {
+		out[p] = []string{}
+	}
+	return out
+}
+
+// ResolveReqBodyNoise picks the request-body schema noise for a decoded doc,
+// preferring the new unified noise.req list and falling back to the legacy
+// top-level req_body_noise map (whose keys are kept and regex values dropped, to
+// match the path-only representation). Returns nil when neither is present.
+func ResolveReqBodyNoise(noise *DocNoise, legacy map[string][]string) map[string][]string {
+	if noise != nil && len(noise.Req) > 0 {
+		return pathsToNoiseMap(noise.Req)
+	}
+	if len(legacy) > 0 {
+		paths := make([]string, 0, len(legacy))
+		for k := range legacy {
+			paths = append(paths, k)
+		}
+		return pathsToNoiseMap(paths)
+	}
+	return nil
+}
+
+// UnmarshalYAML accepts both the new mapping shape ({req: [...], value: [...]})
+// and the legacy bare string list (which becomes Value), so old mocks keep
+// decoding.
+func (n *DocNoise) UnmarshalYAML(value *yamlLib.Node) error {
+	if value == nil || value.Tag == "!!null" {
+		return nil
+	}
+	if value.Kind == yamlLib.SequenceNode {
+		var list []string
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		n.Value = list
+		return nil
+	}
+	// Alias type to avoid recursing back into this method.
+	type rawDocNoise DocNoise
+	var raw rawDocNoise
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*n = DocNoise(raw)
+	return nil
+}
+
+// UnmarshalJSON mirrors UnmarshalYAML: it accepts the new object shape and the
+// legacy JSON array (-> Value).
+func (n *DocNoise) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var list []string
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		n.Value = list
+		return nil
+	}
+	type rawDocNoise DocNoise
+	var raw rawDocNoise
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return err
+	}
+	*n = DocNoise(raw)
+	return nil
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support

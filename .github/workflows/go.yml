@@ -22,3 +22,19 @@ jobs:
 
       - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
+
+      # SECURITY: codfish/semantic-release-action was compromised on
+      # 2026-06-24 15:39 UTC — the attacker force-pushed malicious commit
+      # 5792aba (full: 6b9501e1889cc45c91726729610cf69c2442b8c5) and repointed
+      # ALL mutable tags, including v3 and every v3.x, to it. The payload
+      # (Miasma worm) exfiltrates the GITHUB_TOKEN / OIDC token and tries to
+      # backdoor other accessible repos. GitHub took the repo down (TOS block)
+      # on 2026-06-25, so @v3 no longer resolves at all.
+      # Ref: https://www.stepsecurity.io/blog/supply-chain-compromise-codfish-semantic-release-action
+      #
+      # Step disabled. To restore a release dry-run safely, do NOT pin to a tag —
+      # pin a third-party action to a verified pre-compromise full commit SHA, or
+      # run semantic-release directly, e.g.:
+      #   - run: npx -p semantic-release@24 -p @semantic-release/exec@7.0.3 semantic-release --dry-run
+      #     env:
+      #       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
