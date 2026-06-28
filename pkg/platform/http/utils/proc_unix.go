@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -75,7 +76,59 @@ func StartCommand(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
-// StopCommand tries graceful SIGTERM to the process group, then SIGKILL fallback.
+// gracefulStopTimeout bounds how long StopCommand waits for a SIGTERM'd process
+// group to exit before escalating to SIGKILL. StopCommand returns as soon as the
+// group is actually gone, so this is only the ceiling for a process that ignores
+// SIGTERM — the common case (a process that exits on SIGTERM) returns in well
+// under a second.
+const gracefulStopTimeout = 8 * time.Second
+
+// forceKillTimeout bounds the post-SIGKILL wait for the group to disappear.
+const forceKillTimeout = 3 * time.Second
+
+// groupGone reports whether no process remains in process group pgid. kill(-pgid, 0)
+// returns ESRCH once every member has exited and been reaped (keploy's app-watch
+// goroutine reaps the leader, so a graceful exit clears the group promptly).
+func groupGone(pgid int) bool {
+	return errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+// waitGroupGone polls until process group pgid is gone or timeout elapses.
+func waitGroupGone(pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if groupGone(pgid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitPIDGone polls until process pid is gone or timeout elapses (fallback path
+// where the process is not in its own group).
+func waitPIDGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// StopCommand gracefully stops the app's process group: SIGTERM, then WAIT for the
+// group to actually exit so its resources (listening ports, sockets) are released,
+// then SIGKILL if it ignored SIGTERM. The wait is load-bearing: returning before
+// the group has exited races the next app start against a still-bound port and
+// surfaces as "listen tcp :PORT: bind: address already in use" (the
+// go-docker-timefreeze flake). The previous implementation SIGTERM'd the group and
+// returned immediately, doing neither the wait nor the documented SIGKILL fallback.
 func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -86,26 +139,39 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
 		logger.Debug("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
-		// Graceful
-		err = cmd.Process.Signal(syscall.SIGTERM)
-		if err != nil {
+		// Graceful SIGTERM to the leader only.
+		if sigErr := cmd.Process.Signal(syscall.SIGTERM); sigErr != nil {
 			// Process already finished is expected during graceful shutdown, not an error
-			if err.Error() == "os: process already finished" {
+			if sigErr.Error() == "os: process already finished" {
 				logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
 				return nil
 			}
-			logger.Debug("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
+			logger.Debug("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(sigErr))
 		}
-		time.Sleep(3 * time.Second)
-		// Force
+		// Wait (bounded) for exit so the port is released, then force-kill.
+		if waitPIDGone(pid, gracefulStopTimeout) {
+			return nil
+		}
 		return cmd.Process.Kill()
 	}
 
-	// Graceful: SIGTERM group
+	// Graceful: SIGTERM the whole group.
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
 		logger.Debug("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
 
+	// Wait (bounded) for the group to fully exit so its port/sockets are released
+	// before we return — otherwise the next app start races a still-bound port.
+	if waitGroupGone(pgid, gracefulStopTimeout) {
+		return nil
+	}
+
+	// Ignored SIGTERM: force-kill the whole group and confirm it is gone.
+	logger.Debug("process group did not exit after SIGTERM; escalating to SIGKILL", zap.Int("pgid", pgid))
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		logger.Debug("failed to send SIGKILL to process group", zap.Int("pgid", pgid), zap.Error(err))
+	}
+	waitGroupGone(pgid, forceKillTimeout)
 	return nil
 }
 
