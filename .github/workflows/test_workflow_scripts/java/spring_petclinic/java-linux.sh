@@ -32,9 +32,15 @@ wait_for_postgres() {
   # exists. To avoid the race we wait for the entrypoint to finish by looking
   # for its completion log line, then verify the database is queryable.
   for i in {1..120}; do
-    # The official entrypoint prints this line once all init is done.
-    if docker logs mypostgres 2>&1 | grep -q "database system is ready to accept connections"; then
-      # Entrypoint finished — now verify the target DB is reachable.
+    # The official postgres image runs a TEMP server (which logs the FIRST
+    # "ready to accept connections") to create POSTGRES_DB and run init scripts,
+    # then restarts into the REAL server (the SECOND "ready"). Matching only the
+    # first "ready" races the restart: the temp server already has petclinic so
+    # SELECT 1 passes, the check returns "ready", and the next client immediately
+    # hits "FATAL: the database system is starting up". Require the line at least
+    # twice = the temp server has shut down and the real server is up.
+    if [ "$(docker logs mypostgres 2>&1 | grep -c 'database system is ready to accept connections')" -ge 2 ]; then
+      # Real server up — verify the target DB is queryable right now.
       if docker exec mypostgres psql -U petclinic -d petclinic -c "SELECT 1" >/dev/null 2>&1; then
         echo "Postgres is ready and petclinic database is available."
         endsec; return 0
