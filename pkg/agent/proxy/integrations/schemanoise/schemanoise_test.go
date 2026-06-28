@@ -226,10 +226,29 @@ func TestEngineKnownNoiseMergesStoredAndUser(t *testing.T) {
 
 func TestEngineStrictAllows(t *testing.T) {
 	mock := &models.Mock{}
-	// No learned noise => always allowed (strict never tightens un-learned mocks).
-	none := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
-	if !none.StrictAllows(mock, []byte(`{"a":2}`), nil) {
-		t.Fatalf("mock with no learned noise must be allowed under strict")
+	// No learned noise, value drift => rejected under strict. Strict now
+	// value-checks every candidate, not just ones carrying learned noise.
+	noneDrift := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+	if noneDrift.StrictAllows(mock, []byte(`{"a":2}`), nil) {
+		t.Fatalf("value drift on an un-learned, un-noised field must be rejected under strict")
+	}
+
+	// No learned noise, identical body => allowed (nothing drifted).
+	noneSame := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+	if !noneSame.StrictAllows(mock, []byte(`{"a":1}`), nil) {
+		t.Fatalf("identical body must be allowed under strict even with no learned noise")
+	}
+
+	// No learned noise but the drift is on a user-configured noise field => allowed.
+	noneUserNoise := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, true)
+	if !noneUserNoise.StrictAllows(mock, []byte(`{"a":2}`), map[string][]string{"a": {}}) {
+		t.Fatalf("drift on a user-noised field must be allowed under strict even with no learned noise")
+	}
+
+	// Without strict enforcement an un-learned mock is left alone (lenient).
+	lenient := New(&fakeAdapter{body: []byte(`{"a":1}`), hasBody: true}, false, false)
+	if !lenient.StrictAllows(mock, []byte(`{"a":2}`), nil) {
+		t.Fatalf("non-strict engine must keep lenient behaviour for un-learned mocks")
 	}
 
 	// Learned noise covers the only drifting field => allowed.
@@ -302,5 +321,18 @@ func TestEngineStrictReject(t *testing.T) {
 	allowed, drift = New(binAdapter, false, true).StrictReject(mock, []byte("bin-v2"), nil)
 	if allowed || len(drift) == 0 {
 		t.Fatalf("opaque byte mismatch must be rejected with non-empty drift; got allowed=%v drift=%v", allowed, drift)
+	}
+
+	// No learned noise: strict still value-compares and names the drifted field.
+	noNoiseAdapter := &fakeAdapter{
+		body:    []byte(`{"a":1,"tier_type":"STANDARD_LARGE"}`),
+		hasBody: true,
+	}
+	allowed, drift = New(noNoiseAdapter, false, true).StrictReject(mock, []byte(`{"a":1,"tier_type":"regular"}`), nil)
+	if allowed {
+		t.Fatalf("value drift must be rejected under strict even with no learned noise")
+	}
+	if _, ok := drift["body.tier_type"]; !ok {
+		t.Fatalf("rejection drift must name body.tier_type; got %v", drift)
 	}
 }
