@@ -230,7 +230,8 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
 		return err
 	}
-	flag := os.O_WRONLY | os.O_TRUNC
+	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
+
 	if isAppend {
 		var sep []byte
 		if !isFileEmpty {
@@ -241,32 +242,102 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 			}
 		}
 		docData = append(sep, docData...)
-		flag = os.O_WRONLY | os.O_APPEND
+		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, fs.ModePerm)
+		if err != nil {
+			utils.LogError(logger, err, "failed to open file for writing", zap.String("file", filePath))
+			return err
+		}
+		defer func() {
+			if err := file.Close(); err != nil {
+				utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
+			}
+		}()
+
+		cw := &ctxWriter{ctx: ctx, writer: file}
+		if _, err = cw.Write(docData); err != nil {
+			if err == ctx.Err() {
+				return nil // Ignore context cancellation error
+			}
+			utils.LogError(logger, err, "failed to write the document", zap.String("file name", fileName))
+			return err
+		}
+		return nil
 	}
-	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
-	file, err := os.OpenFile(filePath, flag, fs.ModePerm)
+
+	// Non-append (truncate-and-replace): write to a temp file in the same dir and
+	// atomically rename it over the destination, so a concurrent or volume-lagging
+	// reader (report-upload, localTestsPassed, reportdb.GetReport) never observes a
+	// zero-length or mid-document file. The previous O_TRUNC + streaming write left
+	// exactly that window — on overlay/NFS/container-mounted volumes a reader could
+	// catch the file empty or half-written and either hard-fail or silently decode a
+	// partial document. Mirrors mockdb.writeMocksAtomically / testdb.upsert.
+	tmpFile, err := os.CreateTemp(path, fileName+".*.tmp")
 	if err != nil {
-		utils.LogError(logger, err, "failed to open file for writing", zap.String("file", filePath))
+		utils.LogError(logger, err, "failed to create temp file for atomic write", zap.String("path directory", path), zap.String("file", fileName))
 		return err
 	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
 	defer func() {
-		if err := file.Close(); err != nil {
-			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		if cleanup {
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
-	cw := &ctxWriter{
-		ctx:    ctx,
-		writer: file,
-	}
-
-	_, err = cw.Write(docData)
-	if err != nil {
+	cw := &ctxWriter{ctx: ctx, writer: tmpFile}
+	if _, err = cw.Write(docData); err != nil {
+		_ = tmpFile.Close()
 		if err == ctx.Err() {
 			return nil // Ignore context cancellation error
 		}
 		utils.LogError(logger, err, "failed to write the document", zap.String("file name", fileName))
 		return err
+	}
+	// Flush to stable storage before the rename so the replaced file is whole even
+	// across a crash, then preserve the existing file's mode across the replace.
+	if err = tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err = tmpFile.Close(); err != nil {
+		return err
+	}
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(filePath); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err = os.Chmod(tmpPath, mode); err != nil {
+		return err
+	}
+	if err = atomicReplaceFile(tmpPath, filePath); err != nil {
+		utils.LogError(logger, err, "failed to atomically replace the file", zap.String("file", filePath))
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+// atomicReplaceFile renames src over dst. POSIX rename atomically replaces an
+// existing target; on Windows rename fails when dst already exists, so fall back
+// to remove-then-rename. Mirrors mockdb.replaceFile so reports/config/mappings
+// get the same crash- and reader-safe replace the mock/testcase writers have.
+func atomicReplaceFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else {
+		renameErr := err
+		if _, statErr := os.Stat(dst); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return renameErr
+			}
+			return fmt.Errorf("failed to stat target after rename error: %v; initial rename error: %w", statErr, renameErr)
+		}
+		if removeErr := os.Remove(dst); removeErr != nil {
+			return fmt.Errorf("failed to remove target for replace: %v; initial rename error: %w", removeErr, renameErr)
+		}
+		if retryErr := os.Rename(src, dst); retryErr != nil {
+			return fmt.Errorf("failed to replace file after removing existing target: %v; initial rename error: %w", retryErr, renameErr)
+		}
 	}
 	return nil
 }

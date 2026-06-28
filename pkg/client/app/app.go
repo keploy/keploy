@@ -4,6 +4,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -541,7 +542,14 @@ func (a *App) ComposeDown() {
 	case a.composeFile != "":
 		a.logger.Debug("Running docker compose down to clean up containers and networks",
 			zap.String("composeFile", a.composeFile))
-		downCmd = exec.CommandContext(downCtx, "docker", "compose", "-f", a.composeFile, "down", "--timeout", "1")
+		// Carry any -p/--project-name/--project-directory from the run command so
+		// the teardown targets the SAME project the `up` created (a user whose
+		// compose command sets an explicit project would otherwise have `down`
+		// resolve a different, cwd-derived project and leave this stack running).
+		args := []string{"compose", "-f", a.composeFile}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "down", "--timeout", "1")
+		downCmd = exec.CommandContext(downCtx, "docker", args...)
 	default:
 		return
 	}
@@ -597,14 +605,39 @@ const (
 	dockerInspectBudget  = 2 * time.Second // any single teardown ContainerInspect
 	// preRunRemoveBudget bounds the startup-time force-remove of a leftover
 	// --name container before a docker-run. Unlike the teardown force-remove it
-	// is NOT in the SIGINT drain path, so it can afford to wait for a still-
-	// running prior container to actually go away under daemon contention; the
-	// 2s teardown cap is too short here and lets "name already in use" through.
-	preRunRemoveBudget = 30 * time.Second
+	// is NOT in the SIGINT drain path, so under a SATURATED docker daemon it
+	// should WAIT for the prior container's `docker rm -f` to actually complete
+	// rather than give up and let the next `docker run --name` hit "name already
+	// in use" (the go-docker-timefreeze flake). Work-slow-not-fail: a busy daemon
+	// means a slower removal, never a failed run — sized generously (90s here,
+	// ×dockerRunNameConflictRetries below) to outlast realistic CI oversubscription,
+	// with perAttempt = budget/3 so each individual rm has room to finish.
+	preRunRemoveBudget = 90 * time.Second
 	// dockerRunNameConflictRetries bounds how many times a user-app `docker run`
 	// is re-issued after a transient container-name conflict (docker exit 125)
-	// before the error is surfaced; the name is force-removed between attempts.
-	dockerRunNameConflictRetries = 3
+	// before the error is surfaced; the name is force-removed (waiting up to
+	// preRunRemoveBudget) between attempts. Generous so a saturated daemon is
+	// tolerated as slowness, not surfaced as a hard failure.
+	dockerRunNameConflictRetries = 5
+	// composeDepFailureRetries bounds how many times `docker compose up` is
+	// re-issued after a TRANSIENT dependency-startup failure — the case where a
+	// container the app depends_on (a DB/emulator/broker) crashes during compose's
+	// health-wait under CI contention, so compose aborts with "dependency failed
+	// to start: container <dep> exited (N)" before the app service is ever started.
+	// Work-slow-not-fail: a flaky dependency container should slow the recording
+	// (a bounded, backed-off retry from a clean stack), not abort it. Strictly
+	// gated by isTransientComposeDependencyFailure so a genuine app failure is
+	// NEVER retried — see that predicate. Small N: a dependency that fails to come
+	// up on every attempt is a real environment problem the run must still surface.
+	composeDepFailureRetries = 3
+	// composeDepFailureBaseBackoff is the base inter-attempt backoff for the
+	// transient-dependency retry; it grows linearly per attempt (base, 2×base, …)
+	// to give a contention-starved daemon progressively more breathing room
+	// between bring-ups without unbounding the retry.
+	composeDepFailureBaseBackoff = 2 * time.Second
+	// composePsStateBudget bounds the `docker compose ps -a` state probe used to
+	// classify a failed `up` (transient dependency crash vs genuine app failure).
+	composePsStateBudget = 5 * time.Second
 )
 
 // waitContainersRemoved polls until the named containers no longer exist (or the
@@ -734,7 +767,9 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 		args = append(args, extractProjectFlags(a.cmd)...)
 		args = append(args, "ps", "-aq", keployAgentComposeService)
 	case a.composeFile != "":
-		args = []string{"compose", "-f", a.composeFile, "ps", "-aq", keployAgentComposeService}
+		args = []string{"compose", "-f", a.composeFile}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-aq", keployAgentComposeService)
 	default:
 		return nil
 	}
@@ -767,6 +802,196 @@ func parseComposePSIDs(out string) []string {
 		}
 	}
 	return ids
+}
+
+// composeServiceState is one row of `docker compose ps -a` output: the compose
+// SERVICE key (stable across phases, unlike the per-process-random
+// container_name), the container State ("created", "exited", "running", …), and
+// its ExitCode. Only the fields the dependency-failure classifier needs.
+type composeServiceState struct {
+	Service  string `json:"Service"`
+	State    string `json:"State"`
+	ExitCode int    `json:"ExitCode"`
+}
+
+// composeServiceStates returns the per-service container states docker-compose
+// currently tracks for THIS run's project, by shelling out to
+// `docker compose ... ps -a --format json` (the same project-scoping as the
+// `up`/`down` so it sees exactly this stack). Mirrors composeAgentContainerIDs'
+// branch selection for the file-based vs in-memory compose source. A nil/empty
+// result (no source, a daemon error) makes the classifier conservatively report
+// "not a transient dependency failure", so the run fails fast rather than
+// retrying blindly — the safe default.
+func (a *App) composeServiceStates(ctx context.Context) []composeServiceState {
+	var args []string
+	switch {
+	case len(a.composeContent) > 0:
+		args = []string{"compose", "-f", "-"}
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-a", "--format", "json")
+	case a.composeFile != "":
+		args = []string{"compose", "-f", a.composeFile}
+		// Carry any -p/--project-name/--project-directory from the run command so
+		// the probe resolves the SAME project the `up` created. Without this, a user
+		// whose compose command sets an explicit project would have the probe query
+		// the default (cwd-derived) project, see nothing, and the failure would be
+		// (mis)classified as non-transient — silently disabling the retry.
+		args = append(args, extractProjectFlags(a.cmd)...)
+		args = append(args, "ps", "-a", "--format", "json")
+	default:
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(a.composeContent) > 0 {
+		cmd.Stdin = bytes.NewReader(a.composeContent)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		a.logger.Debug("could not list compose service states (treating the failed up as non-transient)",
+			zap.Error(err), zap.String("output", string(out)))
+		return nil
+	}
+	return parseComposeServiceStates(string(out))
+}
+
+// composeServiceStatesWithin is composeServiceStates bounded by its own
+// deadline, so the post-failure state probe can never wedge the run on a
+// saturated daemon. Used by the transient-dependency-failure classifier in
+// run()'s retry loop.
+func (a *App) composeServiceStatesWithin(budget time.Duration) []composeServiceState {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	return a.composeServiceStates(ctx)
+}
+
+// parseComposeServiceStates parses `docker compose ps -a --format json` output.
+// Compose emits NDJSON (one JSON object per line) for `ps`, but older/newer CLIs
+// have emitted a single JSON array; tolerate both. Split out as a pure function
+// so the classifier it feeds is unit-testable without a docker daemon.
+func parseComposeServiceStates(out string) []composeServiceState {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil
+	}
+	// Array form: `[{...},{...}]`.
+	if strings.HasPrefix(out, "[") {
+		var states []composeServiceState
+		if err := json.Unmarshal([]byte(out), &states); err != nil {
+			return nil
+		}
+		return states
+	}
+	// NDJSON form: one object per line.
+	var states []composeServiceState
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var s composeServiceState
+		if err := json.Unmarshal([]byte(line), &s); err != nil {
+			// A malformed line means we can't trust the classification; bail so the
+			// caller treats the failure as non-transient and fails fast.
+			return nil
+		}
+		states = append(states, s)
+	}
+	return states
+}
+
+// isTransientComposeDependencyFailure classifies a FAILED `docker compose up`
+// (runErr != nil, runtime type) as the transient dependency-startup case that a
+// bounded retry can recover — and ONLY that case. It is the gate that keeps the
+// retry from masking a genuine application failure.
+//
+// The signature (verified against docker compose v2): when a service the app
+// `depends_on: condition: service_healthy/completed_successfully` crashes during
+// compose's health-wait, compose prints "dependency failed to start: container
+// <dep> exited (N)" and ABORTS BEFORE EVER STARTING THE APP SERVICE. So the app
+// service is left in state "created" (exit 0), while the dependency is "exited"
+// with a non-zero code. That message is written to the up's STDERR, which keploy
+// streams straight to the terminal rather than capturing (same as the docker-run
+// name-conflict case), so cmdErr carries only "exit status N" — the classifier
+// therefore reads docker's OWN post-mortem state, not the error string.
+//
+// Returns true iff ALL of:
+//  1. the up failed at runtime (runErr != nil, errType == Runtime), AND
+//  2. the APP service (appService) is in state "created" — i.e. compose never
+//     started it because a depended-on container failed its health gate, AND
+//  3. some OTHER service (not the app, not the injected keploy-agent) is in state
+//     "exited" with a NON-ZERO exit code — the dependency that actually crashed.
+//
+// Why it cannot misclassify a genuine app failure: an app that fails to start on
+// its OWN (its container runs and exits non-zero, a bad image, a crash on boot)
+// leaves the APP service in state "exited", NEVER "created". Condition (2) is the
+// firewall — a started-then-failed app can never satisfy it, so it is never
+// retried and fails fast with its real exit code. Condition (3) further requires
+// an actual crashed dependency to recover, so an abort for any other reason
+// (e.g. the app's own dependency is genuinely misconfigured and exits non-zero
+// every time) is bounded by composeDepFailureRetries and then surfaced — the
+// retry can only DELAY a persistent failure, never hide it.
+func isTransientComposeDependencyFailure(runErr error, errType utils.ErrType, appService string, states []composeServiceState) bool {
+	if runErr == nil || errType != utils.Runtime || appService == "" {
+		return false
+	}
+	appCreated := false
+	depCrashed := false
+	for _, s := range states {
+		switch {
+		case s.Service == appService:
+			// The app must NOT have started. "created" is compose's state for a
+			// service it provisioned but never started because a dependency gate
+			// failed. Any other state (running/exited/restarting) means the app
+			// itself ran — not a dependency-abort — so this is not retryable.
+			if s.State == "created" {
+				appCreated = true
+			}
+		case s.Service == keployAgentComposeService:
+			// The injected agent is keploy's own service; never count it as the
+			// user's crashed dependency.
+			continue
+		default:
+			if s.State == "exited" && s.ExitCode != 0 {
+				depCrashed = true
+			}
+		}
+	}
+	return appCreated && depCrashed
+}
+
+// shouldRetryComposeUp is the SINGLE decision the compose-up retry loop turns
+// on, extracted so the production loop in run() and its unit test call the EXACT
+// same predicate (no hand-copied condition that could silently drift). It returns
+// true iff a failed `docker compose up` should be retried as a transient
+// dependency-startup failure:
+//
+//   - the run is a docker-compose run (kind), AND
+//   - we are still within the bounded attempt budget (attempt <= maxRetries), AND
+//   - the run is not being cancelled (ctxErr == nil), AND
+//   - the up failed at runtime (runErr != nil, errType == Runtime), AND
+//   - isTransientComposeDependencyFailure classifies it as the recoverable
+//     dependency-crash case (and ONLY that case).
+//
+// The per-service states are supplied LAZILY via statesFn, which is invoked ONLY
+// after the four cheap predicates above all pass. This matters because the loop
+// re-evaluates this predicate on EVERY iteration (including the success and
+// ctx-cancelled graceful-stop paths); statesFn shells out to `docker compose ps`
+// (up to composePsStateBudget), so gating it behind the cheap checks keeps that
+// subprocess off the non-failure paths — it never runs on a successful up or a
+// cancelled run, only when a transient-dependency retry is actually plausible.
+//
+// kind/maxRetries/statesFn are passed in (rather than read off App) so the whole
+// decision is a pure function exercisable without a docker daemon.
+func shouldRetryComposeUp(kind utils.CmdType, attempt, maxRetries int, ctxErr, runErr error, errType utils.ErrType, appService string, statesFn func() []composeServiceState) bool {
+	if kind != utils.DockerCompose ||
+		attempt > maxRetries ||
+		ctxErr != nil ||
+		runErr == nil ||
+		errType != utils.Runtime {
+		return false
+	}
+	return isTransientComposeDependencyFailure(runErr, errType, appService, statesFn())
 }
 
 // ensureContainerNameFreeWithin force-removes the named container and then
@@ -1080,6 +1305,80 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.ensureContainerNameFreeWithin(dockerRunName, preRunRemoveBudget)
 		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
 	}
+
+	// Compose mode: a `docker compose up` can fail not because the user's app is
+	// broken but because a container it depends_on (a DB/emulator/broker) crashed
+	// during compose's health-wait under CI contention. Compose then aborts with
+	// "dependency failed to start: container <dep> exited (N)" BEFORE the app is
+	// ever started, and `up` COMMONLY exits non-zero — which keploy would otherwise
+	// turn into "user application terminated unexpectedly hence stopping keploy",
+	// aborting the recording over a transient infra hiccup. Work-slow-not-fail:
+	// bring the partial stack down to a clean slate and retry the bring-up, a
+	// bounded number of times with a linear backoff.
+	//
+	// The non-zero exit on a dependency abort is the COMMON case, not guaranteed:
+	// empirically ~1 in 20 `up --abort-on-container-exit --exit-code-from app` runs
+	// report exit 0 for an app that never started (compose returns the app's
+	// exit-code-from value of 0 instead of the dependency-failed error). That race
+	// slips past this retry (cmdErr.Err == nil -> the gate's runErr check is false,
+	// so no retry) — but it fails in the SAFE direction: a never-started app simply
+	// surfaces as a clean stop, never a masked failure. So the retry catches
+	// most-but-not-all of this flake, never the wrong half.
+	//
+	// Gated STRICTLY by isTransientComposeDependencyFailure, which reads docker's
+	// own post-mortem state (the abort message is on the up's stderr, which keploy
+	// streams rather than captures, so the error string alone can't be trusted):
+	// the app service must be in "created" (compose never started it) AND some
+	// non-app, non-agent service must have "exited" non-zero. A genuine app
+	// failure leaves the app service "exited", never "created", so it can NEVER
+	// satisfy the gate — it fails fast with its real error. A dependency that
+	// crashes on EVERY attempt is bounded by composeDepFailureRetries and then
+	// surfaced; the retry can only DELAY a persistent failure, never hide it.
+	for attempt := 1; shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
+		cmdErr.Err, cmdErr.Type, a.composeService,
+		func() []composeServiceState { return a.composeServiceStatesWithin(composePsStateBudget) }); attempt++ {
+		a.logger.Info("a dependency container failed to start transiently during docker compose up (it crashed before the app could start); bringing the stack down and retrying the bring-up",
+			zap.String("appService", a.composeService),
+			zap.Int("attempt", attempt),
+			zap.Int("maxAttempts", composeDepFailureRetries))
+
+		// Clean slate: tear the partial stack (and the injected agent) down so the
+		// retry's `up` re-creates every service fresh — no dangling containers or
+		// half-started dependency, no stale keploy-agent to trip a compose Recreate.
+		a.ComposeDown()
+
+		// Linear backoff, but abort immediately if the run is being cancelled.
+		backoff := time.Duration(attempt) * composeDepFailureBaseBackoff
+		select {
+		case <-ctx.Done():
+			a.logger.Debug("context cancelled during compose dependency-failure backoff", zap.Error(ctx.Err()))
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		case <-time.After(backoff):
+		}
+
+		// Re-run the same pre-up guards run() does before the first up so the retry
+		// starts from a clean, conflict-free project (no leftover agent/app name).
+		// Each guard can wait up to preRunRemoveBudget (90s) under a saturated
+		// daemon, and this whole loop runs on the app-runner goroutine that
+		// record/replay drains under DrainErrGroup's 30s budget. So short-circuit on
+		// ctx cancellation BEFORE and BETWEEN the guards: once the run is being torn
+		// down there is nothing to clean up for a retry, and burning up to ~180s of
+		// guard budget on the drain path would resurrect the very "goroutine
+		// ignoring context cancellation" timeout these guards otherwise prevent.
+		if ctx.Err() != nil {
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		}
+		a.removeStaleComposeAgentWithin(preRunRemoveBudget)
+		if ctx.Err() != nil {
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		}
+		if a.keployContainer != "" {
+			a.ensureContainerNameFreeWithin(a.keployContainer, preRunRemoveBudget)
+		}
+
+		cmdErr = utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	}
+
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
