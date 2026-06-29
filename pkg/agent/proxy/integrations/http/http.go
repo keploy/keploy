@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -127,22 +128,38 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, session *integrations.RecordS
 	return h.recordLegacy(ctx, session)
 }
 
-// recordLegacy is the original RecordOutgoing body preserved unchanged.
-// It consumes the legacy RecordSession fields (Ingress / Egress / Mocks)
-// and forwards bytes between the real sockets itself. The V2 path in
-// recordV2 relies on the supervisor's relay to do the forwarding and
-// only observes teed chunks via FakeConn streams.
+// recordLegacy is the original RecordOutgoing body — semantics are
+// preserved against the pre-V2 implementation (consume RecordSession
+// Ingress / Egress / Mocks, forward bytes between the real sockets,
+// emit one mock per HTTP exchange). The conn lookups go through
+// session.IngressConn() / EgressConn() now that those return
+// (net.Conn, error); errors are wrapped with an "http: " prefix and
+// returned. The V2 path in recordV2 relies on the supervisor's relay
+// to do the forwarding and only observes teed chunks via FakeConn
+// streams.
 func (h *HTTP) recordLegacy(ctx context.Context, session *integrations.RecordSession) error {
+	if session == nil {
+		return errors.New("http: record session is nil; ensure RecordOutgoing is called with a valid session")
+	}
 	logger := session.Logger
 
-	h.Logger.Debug("Recording the outgoing http call in record mode")
+	logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
+	ingress, err := session.IngressConn()
+	if err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+	egress, err := session.EgressConn()
+	if err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.OnMockRecorded)
+	err = h.encodeHTTP(ctx, reqBuf, ingress, egress, session.Mocks, session.Opts, session.OnMockRecorded)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
