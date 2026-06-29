@@ -34,6 +34,23 @@ import (
 // incomplete-mock gate) rather than the syncMock / mocks channel shim
 // the legacy path uses.
 //
+// isBenignIncompleteCapture reports whether err means the recorded exchange was
+// cut off by the peer closing before a full HTTP message was captured — EOF /
+// unexpected EOF (a truncated body, e.g. an SQS ReceiveMessage long-poll that
+// the peer closes at shutdown), the teed FakeConn closing, or context
+// cancellation. These are expected, recoverable conditions: the parser
+// supervisor falls back to passthrough and the relay keeps forwarding, so they
+// must not be logged as errors. A non-benign error (a genuine decode/build
+// failure on a complete exchange) means a mock was dropped and is worth a
+// warning. errors.Is unwraps, so a `fmt.Errorf("...: %w", io.ErrUnexpectedEOF)`
+// from buildHTTPMock is correctly classified as benign.
+func isBenignIncompleteCapture(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, fakeconn.ErrClosed) ||
+		errors.Is(err, context.Canceled)
+}
+
 // recordV2 loops over request/response pairs for HTTP/1.1 keepalive /
 // pipelining. It exits cleanly on either stream reaching EOF or Close,
 // on ctx cancellation, or on a malformed-HTTP decode error (in which
@@ -149,7 +166,20 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
 			sess.MarkMockIncomplete("http decode error: " + err.Error())
-			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
+			// A failed build is ALWAYS recovered by the parser supervisor's
+			// passthrough fallback (the relay keeps forwarding raw bytes until
+			// the peer closes), so it is never fatal — logging it at ERROR is
+			// misleading. Classify by cause: an incomplete/truncated capture
+			// from the peer closing before a full message (long-polls,
+			// streaming, client aborts, shutdown races — e.g. an SQS
+			// ReceiveMessage long-poll) is expected and logs at Debug; a genuine
+			// build failure on a complete exchange dropped a mock that replay
+			// may miss, so it logs at Warn (surfaced, not alarming).
+			if isBenignIncompleteCapture(err) {
+				logger.Debug("V2 HTTP record: skipping mock for an incomplete exchange (peer closed before a full message); relaying via passthrough", zap.Error(err))
+			} else {
+				logger.Warn("V2 HTTP record: failed to build mock; relaying via passthrough (mock dropped, replay may miss this interaction)", zap.Error(err))
+			}
 			return err
 		}
 		if mock != nil {
