@@ -424,6 +424,63 @@ type PostgresV3QuerySpec struct {
 	SideEffects *PostgresV3SideEffects `json:"sideEffects,omitempty" yaml:"sideEffects,omitempty" bson:"side_effects,omitempty"`
 }
 
+// MarshalYAML — see PostgresV3Notice.MarshalYAML for the rationale.
+// SQLNormalized carries the recorded query text, which (after the
+// integrations restoreRawSQL pass) can preserve embedded tabs and
+// newlines from the original statement. Left as a plain string, the
+// yaml.v3 v3.0.1 encoder picks a literal block scalar (`|N-`) for such
+// values; because yaml.Node.Encode marshals then immediately re-parses
+// its own output, that block scalar fails to round-trip with "found a
+// tab character where an indentation space is expected" — and the
+// failure happens inside EncodeMock's `Spec.Encode`, BEFORE the
+// post-encode sanitizeYAMLStringNodes walk can run, so the node-tree
+// sanitizer cannot rescue it. Routing SQLNormalized through
+// PostgresV3SafeString forces DoubleQuotedStyle on the WRITE side
+// (escaping \t / \n) so the self-reparse and the on-disk re-read both
+// succeed. The model field stays `string` so the integrations
+// recorder/replayer assignment sites (NormalizeForHash results,
+// index_loader copies) keep compiling unchanged; the alias is
+// YAML-side only. The alias spells out every YAML field explicitly
+// (mirroring PostgresV3Notice/PostgresV3Error): yaml.v3 v3.0.1 panics
+// on a duplicated key, so the embed-and-shadow idiom is unavailable —
+// the only field whose type changes is SQLNormalized (to the safe
+// wrapper); every other field keeps its original type and tag so the
+// on-disk shape is byte-for-byte identical to the struct-tag encoding.
+func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
+	type alias struct {
+		Class             string                 `yaml:"class,omitempty"`
+		Lifetime          string                 `yaml:"lifetime,omitempty"`
+		SQLAstHash        string                 `yaml:"sqlAstHash"`
+		SQLNormalized     PostgresV3SafeString   `yaml:"sqlNormalized"`
+		Relations         []string               `yaml:"relations,omitempty"`
+		ParamOIDs         []uint32               `yaml:"paramOids,omitempty"`
+		VolatilePositions []int                  `yaml:"volatilePositions,omitempty"`
+		InvocationID      string                 `yaml:"invocationId"`
+		PrecedingTxState  string                 `yaml:"precedingTxState,omitempty"`
+		BindValues        PostgresV3Cells        `yaml:"bindValues,omitempty"`
+		BindFormats       []int                  `yaml:"bindFormats,omitempty"`
+		ResultFormats     []int                  `yaml:"resultFormats,omitempty"`
+		Response          *PostgresV3Response    `yaml:"response,omitempty"`
+		SideEffects       *PostgresV3SideEffects `yaml:"sideEffects,omitempty"`
+	}
+	return alias{
+		Class:             q.Class,
+		Lifetime:          q.Lifetime,
+		SQLAstHash:        q.SQLAstHash,
+		SQLNormalized:     PostgresV3SafeString(q.SQLNormalized),
+		Relations:         q.Relations,
+		ParamOIDs:         q.ParamOIDs,
+		VolatilePositions: q.VolatilePositions,
+		InvocationID:      q.InvocationID,
+		PrecedingTxState:  q.PrecedingTxState,
+		BindValues:        q.BindValues,
+		BindFormats:       q.BindFormats,
+		ResultFormats:     q.ResultFormats,
+		Response:          q.Response,
+		SideEffects:       q.SideEffects,
+	}, nil
+}
+
 type PostgresV3Response struct {
 	RowDescription []PostgresV3ColumnDescriptor `json:"rowDescription,omitempty" yaml:"rowDescription,omitempty" bson:"row_description,omitempty"`
 	// Rows stores each row as a []PostgresV3Cell via PostgresV3Cells.

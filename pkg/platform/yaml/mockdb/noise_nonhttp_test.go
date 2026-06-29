@@ -42,8 +42,8 @@ func TestNonHTTPNoise_YAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeMock: %v", err)
 	}
-	if len(doc.ReqBodyNoise) != 2 {
-		t.Fatalf("envelope must carry req_body_noise, got %v", doc.ReqBodyNoise)
+	if doc.Noise == nil || len(doc.Noise.Req) != 2 {
+		t.Fatalf("envelope must carry noise.req paths, got %#v", doc.Noise)
 	}
 
 	decoded, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop())
@@ -72,8 +72,8 @@ func TestNonHTTPNoise_JSONRoundTrip(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("EncodeMockJSON: ok=%v err=%v", ok, err)
 	}
-	if len(doc.ReqBodyNoise) != 1 {
-		t.Fatalf("JSON envelope must carry req_body_noise, got %v", doc.ReqBodyNoise)
+	if doc.Noise == nil || len(doc.Noise.Req) != 1 {
+		t.Fatalf("JSON envelope must carry noise.req paths, got %#v", doc.Noise)
 	}
 
 	decoded, err := DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, zap.NewNop())
@@ -100,8 +100,8 @@ func TestNonHTTPNoise_HTTPUsesSameEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeMock: %v", err)
 	}
-	if _, ok := doc.ReqBodyNoise["body.a"]; !ok {
-		t.Fatalf("HTTP noise must ride the shared envelope, got %v", doc.ReqBodyNoise)
+	if !reqNoiseHas(doc.Noise, "body.a") {
+		t.Fatalf("HTTP noise must ride noise.req, got %#v", doc.Noise)
 	}
 
 	decoded, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop())
@@ -142,8 +142,11 @@ func TestPersistMockNoise_NonHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "req_body_noise") || !strings.Contains(content, "body.eventTs") {
-		t.Fatalf("non-HTTP learned noise not persisted; file:\n%s", content)
+	if !strings.Contains(content, "noise:") || !strings.Contains(content, "req:") || !strings.Contains(content, "body.eventTs") {
+		t.Fatalf("non-HTTP learned noise not persisted under noise.req; file:\n%s", content)
+	}
+	if strings.Contains(content, "req_body_noise") {
+		t.Fatalf("legacy req_body_noise key must no longer be written; file:\n%s", content)
 	}
 
 	// And it must round-trip back into MockSpec.ReqBodyNoise on read.
@@ -169,5 +172,82 @@ func TestPersistMockNoise_NonHTTP(t *testing.T) {
 	}
 	if _, ok := mocks[0].Spec.ReqBodyNoise["body.eventTs"]; !ok {
 		t.Fatalf("persisted non-HTTP noise did not round-trip: %v", mocks[0].Spec.ReqBodyNoise)
+	}
+}
+
+// reqNoiseHas reports whether the unified noise block lists the given request-body
+// field path under noise.req.
+func reqNoiseHas(n *yaml.DocNoise, path string) bool {
+	if n == nil {
+		return false
+	}
+	for _, p := range n.Req {
+		if p == path {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLegacyNoiseFormats_StillDecode is the backward-compatibility guard: a mock
+// written in the OLD on-disk shape — a top-level `noise:` string list (obfuscator
+// value-regexes) plus a separate `req_body_noise:` map (with per-path regex values)
+// — must still decode. The legacy noise list folds into value-noise (Mock.Noise),
+// the req_body_noise keys fold into MockSpec.ReqBodyNoise, and the now-unused regex
+// values are dropped.
+func TestLegacyNoiseFormats_StillDecode(t *testing.T) {
+	raw := []byte(`version: api.keploy.io/v1beta1
+kind: Http
+name: legacy-1
+spec:
+  metadata: {}
+  req:
+    method: POST
+    url: http://x/y
+    header:
+      Content-Type: application/json
+    body: '{"a":"b"}'
+  resp:
+    status_code: 200
+    header: {}
+    body: '{"ok":true}'
+noise:
+  - "^tok-.*$"
+req_body_noise:
+  body.a: ["^x.*$"]
+  body.b: []
+`)
+
+	doc, err := yaml.UnmarshalDoc(yaml.FormatYAML, raw)
+	if err != nil {
+		t.Fatalf("UnmarshalDoc: %v", err)
+	}
+	// Legacy bare `noise:` list must decode into the unified block's value-noise.
+	if got := doc.Noise.ValueNoise(); len(got) != 1 || got[0] != "^tok-.*$" {
+		t.Fatalf("legacy noise list must decode into value noise, got %v", got)
+	}
+
+	mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("DecodeMocks: %v", err)
+	}
+	if len(mocks) != 1 {
+		t.Fatalf("want 1 decoded mock, got %d", len(mocks))
+	}
+	m := mocks[0]
+
+	if len(m.Noise) != 1 || m.Noise[0] != "^tok-.*$" {
+		t.Fatalf("Mock.Noise must come from the legacy noise list, got %v", m.Noise)
+	}
+	rb := m.Spec.ReqBodyNoise
+	if _, ok := rb["body.a"]; !ok {
+		t.Fatalf("legacy req_body_noise key body.a lost on decode: %v", rb)
+	}
+	if _, ok := rb["body.b"]; !ok {
+		t.Fatalf("legacy req_body_noise key body.b lost on decode: %v", rb)
+	}
+	// The legacy per-path regex value must be dropped (req noise is path-only now).
+	if len(rb["body.a"]) != 0 {
+		t.Fatalf("legacy regex value on body.a must be dropped, got %v", rb["body.a"])
 	}
 }

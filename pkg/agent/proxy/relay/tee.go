@@ -227,12 +227,30 @@ func (t *tee) drain() {
 	defer close(t.out)
 	for c := range t.staging {
 		t.bytes.Add(-int64(len(c.Bytes)))
+		// Prefer delivery. A non-blocking send always succeeds while
+		// out has buffer room, which it does for every chunk that was
+		// admitted to staging: out and staging share the same capacity
+		// and close() stops further pushes, so the bounded tail left in
+		// staging at teardown fits in out. This matters for teardown
+		// correctness: when close() fires shutdown, a plain
+		// `select { case out<-c: case <-shutdown: drop }` would pick
+		// randomly between delivering and dropping a fully-recorded
+		// chunk — that coin flip is the "server closed before response"
+		// mock-drop race for Connection: close traffic (e.g. the boot
+		// startup mock). Only fall back to the shutdown escape when out
+		// is genuinely full and the consumer has stopped reading, which
+		// is the deadlock-avoidance case the escape was built for.
+		select {
+		case t.out <- c:
+			continue
+		default:
+		}
 		select {
 		case t.out <- c:
 		case <-t.shutdown:
-			// Consumer stopped reading before we could deliver;
-			// drop the chunk. The mock is being abandoned either
-			// way (close implies teardown), so suppress the usual
+			// Consumer stopped reading and out is full before we could
+			// deliver; drop the chunk. The mock is being abandoned
+			// either way (close implies teardown), so suppress the usual
 			// onDrop notification to avoid double-counting.
 			t.drops.Add(1)
 		}
