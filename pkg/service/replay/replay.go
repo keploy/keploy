@@ -1273,6 +1273,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
+		if mutator, ok := r.hookImpl.(MockMutator); ok {
+			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+				return models.TestSetStatusFailed, err
+			}
+		}
+
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
@@ -1362,6 +1368,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			for _, m := range unfilteredMocks {
 				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+		}
+		if mutator, ok := r.hookImpl.(MockMutator); ok {
+			if err := mutator.AfterGetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+				return models.TestSetStatusFailed, err
 			}
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
