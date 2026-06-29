@@ -2,8 +2,25 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
+# Retry a command with backoff to ride out transient Docker Hub registry
+# blips (e.g. `i/o timeout` while pulling base images like golang:1.20-bookworm),
+# which otherwise fail the whole job on a flake unrelated to the code under test.
+retry() {
+    local max=5 delay=10 attempt=1
+    until "$@"; do
+        if [ "$attempt" -ge "$max" ]; then
+            echo "::error::command failed after ${max} attempts: $*"
+            return 1
+        fi
+        echo "attempt ${attempt}/${max} failed: $* — retrying in ${delay}s..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
+
 # Build Docker Image
-docker compose build
+retry docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/

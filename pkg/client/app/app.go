@@ -76,6 +76,12 @@ func (a *App) Setup(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// Build, pull, and create the compose stack now — Setup runs BEFORE the
+		// record/replay services arm their fixed agent-readiness timer. Otherwise
+		// `docker compose up` charges that whole build+pull+create phase against the
+		// agent's startup budget (see prepareCompose), which is the root cause of the
+		// "keploy-agent did not become ready in time" flake on large stacks.
+		a.prepareCompose(ctx)
 	default:
 		// setup native binary
 	}
@@ -1105,6 +1111,95 @@ func extractProjectFlags(cmd string) []string {
 		}
 	}
 	return flags
+}
+
+// prepareCompose builds, pulls, and creates the compose stack WITHOUT starting it,
+// so the subsequent `docker compose up` only has to START already-prepared containers.
+//
+// Why this exists: the record and replay services arm a fixed agent-readiness timer
+// (pkg/service/record/record.go and pkg/service/runner/runner.go) at the moment
+// `docker compose up` is launched. But `up` performs build -> pull -> create for the
+// ENTIRE stack globally before it STARTS any container — including the injected
+// keploy-agent, which every app service shares a network/pid namespace with and
+// depends_on. On a large multi-service stack that pre-start work can exceed the
+// readiness budget, so the agent's host port never opens in time and the run fails
+// with "keploy-agent did not become ready in time" even though the agent is perfectly
+// healthy once it actually starts.
+//
+// prepareCompose runs during Setup — before the readiness timer is armed — so the
+// expensive, variable build/pull/create work is no longer charged against the agent's
+// startup SLA; the timer then measures only the agent's real startup. It is
+// best-effort: any failure is logged and tolerated, in which case `up` simply performs
+// this work on-clock exactly as before, so there is no regression.
+//
+// The build/create commands are DERIVED from the real run command (a.cmd) by swapping
+// only the `up` subcommand for the stage (see composePrepareCmd), and they are executed
+// through the same utils.ExecuteCommand path that runs `up`. That keeps the launcher
+// and every global flag identical — `sudo docker compose ...`, the legacy
+// `docker-compose ...` binary, `--profile`, `--env-file`, `-f -` in-memory content,
+// project-scoping flags, etc. — so prepare always targets the exact same project and
+// configuration the subsequent `up` will start.
+func (a *App) prepareCompose(ctx context.Context) {
+	if a.kind != utils.DockerCompose {
+		return
+	}
+
+	// Cancel handler mirrors the docker branch of run(): interrupt the command's
+	// process group on context cancellation; ExecuteCommand's WaitDelay escalates to
+	// a kill if it does not exit. prepare is best-effort, so a failed signal is fine.
+	prepareCancel := func(cmd *exec.Cmd) func() error {
+		return func() error {
+			if cmd.Process == nil {
+				return nil
+			}
+			return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+		}
+	}
+
+	// `build` covers services with a build: section; `create` pulls image-only
+	// services and materialises every container. Together they are the full pre-start
+	// phase that `up` would otherwise do under the readiness clock.
+	for _, stage := range []string{"build", "create"} {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		stageCmd, ok := composePrepareCmd(a.cmd, stage)
+		if !ok {
+			a.logger.Debug("skipping off-clock compose prepare: no 'up' subcommand found in app command",
+				zap.String("cmd", a.cmd))
+			return
+		}
+		a.logger.Debug("Preparing docker compose stack ahead of the agent-readiness check",
+			zap.String("stage", stage), zap.String("cmd", stageCmd))
+		// a.composeContent is non-nil only for the in-memory path; ExecuteCommand pipes
+		// it via stdin (matching how run() feeds the same content to `up`).
+		if cmdErr := utils.ExecuteCommand(ctx, a.logger, stageCmd, prepareCancel, 10*time.Second, a.composeContent); cmdErr.Err != nil {
+			a.logger.Debug("docker compose prepare stage did not complete; the application run will perform this work on-clock as a fallback",
+				zap.String("stage", stage), zap.Error(cmdErr.Err))
+		}
+	}
+}
+
+// composePrepareCmd derives the command for an off-clock prepare `stage` (build or
+// create) from the actual run command cmd, by replacing the `up` subcommand and
+// everything after it (its flags such as --abort-on-container-exit / --exit-code-from
+// and any positional services) with the stage. Everything BEFORE `up` — the launcher
+// (docker / docker-compose / sudo docker compose ...) and all global flags (-f,
+// --profile, --env-file, -p, --project-directory, ...) — is preserved verbatim, so the
+// prepare step runs against the exact same project and configuration as the subsequent
+// `up`. Returns false when no standalone `up` token is present (then prepare is skipped
+// and `up` performs the work on-clock as before).
+func composePrepareCmd(cmd, stage string) (string, bool) {
+	fields := strings.Fields(cmd)
+	for i, f := range fields {
+		if f == "up" {
+			prefix := strings.Join(fields[:i], " ")
+			return strings.TrimSpace(prefix + " " + stage), true
+		}
+	}
+	return "", false
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
