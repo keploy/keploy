@@ -1957,10 +1957,54 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// non-noise request field drifted. The app's response can still
 			// match (e.g. a deterministic dependency), so the response check
 			// alone won't catch it; treat it as a real test failure.
+			//
+			// SchemaNoiseStrict is an HTTP-only contract: only the HTTP
+			// integration consumes the flag and the shared schema-noise engine
+			// (see pkg/agent/proxy/integrations/http/match.go). The MySQL,
+			// redis and gRPC matchers never receive it. A non-HTTP mock can go
+			// unconsumed for reasons strict schema-noise has no say over — e.g.
+			// a value-driven COM_QUERY structural fallback serving a different
+			// same-shape row, or a redis key drift — so force-failing those
+			// under strict would be a false positive. strictHTTPDrift gates the
+			// strict failure to mismatches that actually involve an HTTP mock;
+			// a mismatch made up only of non-HTTP mocks falls through to the
+			// normal (non-strict) handling, exactly as if strict were off.
+			strictHTTPDrift := false
+			if mockSetMismatch && r.config.Test.SchemaNoiseStrict {
+				consumedSet := make(map[string]bool, len(filteredMockNames))
+				for _, n := range filteredMockNames {
+					consumedSet[n] = true
+				}
+				for _, m := range expectedMocks {
+					// mirror the DNS + reusable/startup-tier exclusion used to
+					// build filteredExpectedNames above.
+					isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+					if !isDNS {
+						if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+							isDNS = true
+						}
+					}
+					if isDNS || reusableMockNames[m.Name] || consumedSet[m.Name] {
+						continue
+					}
+					// An unconsumed per-test mock. Strict schema-noise only
+					// owns HTTP request-body drift, so only an HTTP mock here
+					// justifies failing the otherwise-passing testcase.
+					kind := models.Kind(m.Kind)
+					if kind == "" {
+						kind = mockKindByName[m.Name]
+					}
+					if kind == models.HTTP {
+						strictHTTPDrift = true
+						break
+					}
+				}
+			}
+
 			strictMockReject := false
 			if mockSetMismatch {
 				switch {
-				case testPass && r.config.Test.SchemaNoiseStrict:
+				case testPass && r.config.Test.SchemaNoiseStrict && strictHTTPDrift:
 					r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
@@ -1970,7 +2014,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					strictMockReject = true
 					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
 				case testPass:
-					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
+					r.logger.Debug("mock mapping mismatch ignored because testcase passed (no HTTP mock drifted under strict schema-noise)",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", filteredExpectedNames),
