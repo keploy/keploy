@@ -992,14 +992,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		// only handles late-loaded libcrypto files (bundled wheel
 		// libs that appear after worker fork-exec) — its job is
 		// per-file uprobe attach, NOT PID tracking.
-		p.logger.Info("cbshim: scanning process tree for libcrypto/libpq mappings",
+		p.logger.Debug("cbshim: scanning process tree for libcrypto/libpq mappings",
 			zap.Uint32("appPID", p.appPID))
 		if err := p.cbshim.AttachToProcessTree(int(p.appPID)); err != nil {
-			p.logger.Info("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
+			p.logger.Debug("cbshim: AttachToProcessTree returned error (continuing — library refresh will retry)",
 				zap.Uint32("appPID", p.appPID), zap.Error(err),
 				zap.String("next_step", "the first-pass scan of /proc/<appPID>/maps + descendants failed to find or attach a uprobe for libcrypto/libpq; the BPF discovery hook (cbshim's security_mmap_file fentry) will catch them on the next library mmap, so this is non-fatal. If SCRAM-PLUS still fails after a few requests, rerun with --debug to see per-process scanProcessMaps results and confirm the agent has CAP_BPF + the kernel allows bpf_probe_write_user."))
 		} else {
-			p.logger.Info("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
+			p.logger.Debug("cbshim: AttachToProcessTree completed", zap.Uint32("appPID", p.appPID))
 		}
 		// Kick the sched_process_exec ringbuf consumer. The kernel
 		// emits an event every time a process in the agent's PID
