@@ -43,6 +43,13 @@ import (
 
 var Emoji = "\U0001F430" + " Keploy:"
 
+// recordOrderInversionTolerance bounds how much a mock's response timestamp may
+// precede its request timestamp before the recording is treated as corrupt and
+// dropped. The proxy stamps both timestamps from one clock, so a small res<req
+// gap is never clock skew — it's a recorder ordering artifact for fast round-trips
+// (e.g. PostgresV3 extended-query mocks). Such mocks are valid and must be kept.
+const recordOrderInversionTolerance = 2 * time.Second
+
 var SortCounter int64 = -1
 var templateValuesMu sync.RWMutex
 
@@ -3178,12 +3185,15 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// Defensive sanity check: if the response-timestamp is BEFORE the
-		// request-timestamp the recording is inconsistent (clock skew,
-		// serialisation bug, or file corruption). Skip it — keeping such
-		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
+		// Defensive sanity check: a response-timestamp BEFORE the request-timestamp
+		// by more than recordOrderInversionTolerance is a genuinely corrupt recording.
+		// A sub-tolerance inversion is just a same-clock recorder ordering artifact
+		// (the proxy stamps both timestamps from one clock; fast round-trips like
+		// PostgresV3 extended-query mocks can stamp the response a few hundred µs
+		// before the request record is finalized) — such mocks are valid, keep them.
+		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) &&
+			p.Spec.ReqTimestampMock.Sub(p.Spec.ResTimestampMock) > recordOrderInversionTolerance {
+			logger.Debug("mock has response timestamp before request timestamp beyond tolerance; dropping",
 				zap.String("mock", p.Name),
 				zap.Time("req", p.Spec.ReqTimestampMock),
 				zap.Time("res", p.Spec.ResTimestampMock))
