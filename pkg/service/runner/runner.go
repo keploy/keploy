@@ -89,7 +89,7 @@ func (s *testSetSetup) snapshotConsumed() map[string]models.MockState {
 	return out
 }
 
-// NewRunner creates a Runner with all dependencies.
+// New creates a Runner with all dependencies.
 func New(
 	logger *zap.Logger,
 	testCaseDB TestCaseDB,

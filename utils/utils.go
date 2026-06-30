@@ -545,7 +545,6 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	return release, nil
 }
 
-// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 // ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
 // Returns empty string if not found.
 func ExtractCommandFromArgs(args []string) string {
