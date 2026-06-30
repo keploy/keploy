@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"strings"
@@ -224,6 +225,21 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 			}
 			if f.StreamEnded() {
 				s.respEndStreamReceived = true
+				// gRPC error responses send a single HEADERS frame with END_STREAM
+				// that merges initial headers and trailers (grpc-status, grpc-message).
+				// processHeaderBlock treated it as initial headers, so respTrailersReceived
+				// is still false. Promote the initial headers to trailers so that
+				// checkStreamCompletion can mark the stream complete.
+				if s.respHeadersReceived && !s.respTrailersReceived {
+					if s.grpcResp == nil {
+						s.grpcResp = &models.GrpcResp{}
+					}
+					s.grpcResp.Trailers = models.GrpcHeaders{
+						PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
+						OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
+					}
+					s.respTrailersReceived = true
+				}
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
 					return err
 				}
@@ -432,15 +448,16 @@ func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 // processCompleteMessage assembles DATA frames for the given side and parses gRPC payload
 func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOutgoing bool) error {
 	if isOutgoing {
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
 		if len(s.respDataFrames) == 0 {
+			// gRPC error responses have no DATA frame — body is empty.
+			// Leave grpcResp.Body as zero value so the stream is still marked complete.
 			return nil
 		}
 		data := bytes.Join(s.respDataFrames, nil)
 		s.respDataFrames = nil
-
-		if s.grpcResp == nil {
-			s.grpcResp = &models.GrpcResp{}
-		}
 		s.grpcResp.Body = CreateLengthPrefixedMessageFromPayload(data)
 		return nil
 

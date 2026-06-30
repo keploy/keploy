@@ -415,7 +415,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// the preface. RecordIncoming's forwardAndTee will forward everything
 		// (including the preface) to the upstream app, which is what cmux needs
 		// to see the original handshake.
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
