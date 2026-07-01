@@ -32,6 +32,7 @@ func mitmNegotiate(t *testing.T, hsCtx context.Context, clientALPN []string) (cl
 			srvCh <- srvRes{err: aerr}
 			return
 		}
+		defer c.Close() // closes the underlying conn on both paths (tconn wraps c)
 		tconn, _, herr := HandleTLSConnection(hsCtx, zap.NewNop(), c, time.Now())
 		if herr != nil {
 			srvCh <- srvRes{err: herr}

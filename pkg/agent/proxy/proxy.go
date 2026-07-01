@@ -1885,12 +1885,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode == models.MODE_TEST {
 			preferH2 := rule.OutgoingOptions.PreferH2
 			if !preferH2 {
-				// Auto-detect from the loaded mock set: any kind:Http2 mock
+				// Auto-detect from the loaded mock set: any kind:Http2 mock in
+				// any tier (filtered, unfiltered, or startup — an Http2 egress
+				// that happened during app startup lands in the startup tier)
 				// means the recorded egress spoke HTTP/2, so preserve h2.
 				if m := p.getMockManager(); m != nil {
 					if h2f, _ := m.GetFilteredMocksByKind(models.HTTP2); len(h2f) > 0 {
 						preferH2 = true
 					} else if h2u, _ := m.GetUnFilteredMocksByKind(models.HTTP2); len(h2u) > 0 {
+						preferH2 = true
+					} else if h2s, _ := m.GetStartupMocksByKind(models.HTTP2); len(h2s) > 0 {
 						preferH2 = true
 					}
 				}
