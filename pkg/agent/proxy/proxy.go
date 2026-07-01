@@ -1876,7 +1876,31 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			zap.Bool("speculative", speculativeDial != nil),
 		)
 		tlsStart := time.Now()
-		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		// On replay, if the target has recorded kind:Http2 mocks, tell the
+		// MITM to advertise h2 in ALPN so a dual-protocol client stays on
+		// HTTP/2 and its request matches the Http2 mock (instead of being
+		// downgraded to http/1.1 and finding no matching mock). Record and
+		// http/1.1-only recordings are unaffected (PreferH2 stays false).
+		hsCtx := ctx
+		if rule.Mode == models.MODE_TEST {
+			preferH2 := rule.OutgoingOptions.PreferH2
+			if !preferH2 {
+				// Auto-detect from the loaded mock set: any kind:Http2 mock
+				// means the recorded egress spoke HTTP/2, so preserve h2.
+				if m := p.getMockManager(); m != nil {
+					if h2f, _ := m.GetFilteredMocksByKind(models.HTTP2); len(h2f) > 0 {
+						preferH2 = true
+					} else if h2u, _ := m.GetUnFilteredMocksByKind(models.HTTP2); len(h2u) > 0 {
+						preferH2 = true
+					}
+				}
+			}
+			if preferH2 {
+				hsCtx = pTls.WithPreferH2(ctx)
+				p.logger.Debug("replay: advertising h2 ALPN (target has Http2 mocks)", zap.Uint32("dstPort", destInfo.Port))
+			}
+		}
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
 			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),

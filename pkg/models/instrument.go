@@ -68,6 +68,13 @@ type OutgoingOptions struct {
 	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
 	SkipTLSMITM            bool
 	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
+	// (instead of the default http/1.1 downgrade) so a dual-protocol client
+	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
+	// Callers may set it explicitly; the proxy also auto-detects it at the
+	// replay handshake from the loaded mock set (any kind:Http2 mock present),
+	// so it usually need not be set by hand. Ignored on the record path.
+	PreferH2 bool
 	// CapturePackets toggles raw packet capture on the agent's proxy ports
 	// for the duration of a Record() session. The recorder flips this via
 	// --capture-packets; the agent then stages traffic.pcap + sslkeys.log
