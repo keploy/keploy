@@ -157,6 +157,15 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	// http2DestCache memoises the set of DISTINCT destinations that have a
+	// kind:Http2 mock, so the per-connection replay ALPN decision is a small
+	// lookup instead of re-walking every Http2 mock on each TLS handshake. It
+	// is rebuilt (lazily) whenever the mock manager pointer changes. Guarded
+	// by its own mutex, independent of sessionMu.
+	http2DestMu    sync.Mutex
+	http2DestForMM *MockManager
+	http2DestSet   []h2Dest
+
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
 	// composer (the enterprise multi-app agent) routes per-app traffic
@@ -884,44 +893,79 @@ func (p *Proxy) getMockManager() *MockManager {
 	return p.mockManager
 }
 
-// replayTargetHasHTTP2Mock reports whether the loaded mock set contains a
-// kind:Http2 mock for THIS connection's destination (sniHost + port). ALPN is
-// negotiated per-connection before any request is seen, so the decision must
-// be scoped to the destination being dialed: checking the whole session (any
-// Http2 mock anywhere) would push an HTTP/1.1 target onto h2 as soon as the
-// session contains any HTTP/2 target, and its recorded http/1.1 mock would
-// never match. Http2 mocks are scanned across all tiers (filtered, unfiltered,
-// startup — an Http2 egress recorded during app startup lands in startup).
-func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
+// h2Dest is a distinct destination (parsed :authority host + port) that has a
+// recorded kind:Http2 mock. host is lower-cased; port is 0 when unknown.
+type h2Dest struct {
+	host string
+	port int
+}
+
+// http2Destinations returns the DISTINCT set of destinations that have a
+// kind:Http2 mock, memoised per mock-manager. The set is derived once (a single
+// pass over the Http2 mocks across all tiers — filtered, unfiltered, startup)
+// and reused for every subsequent handshake until the manager pointer changes,
+// so a connection to an HTTP/1.1 target no longer re-walks every Http2 mock.
+// The cache never shrinks a destination away as filtered mocks are consumed:
+// a destination that ever spoke HTTP/2 keeps preferring h2 for its later
+// requests, which is what we want.
+func (p *Proxy) http2Destinations() []h2Dest {
 	m := p.getMockManager()
-	if m == nil {
-		return false
+
+	p.http2DestMu.Lock()
+	defer p.http2DestMu.Unlock()
+	if m == p.http2DestForMM {
+		return p.http2DestSet
 	}
-	for _, get := range []func(models.Kind) ([]*models.Mock, error){
-		m.GetFilteredMocksByKind, m.GetUnFilteredMocksByKind, m.GetStartupMocksByKind,
-	} {
-		mocks, _ := get(models.HTTP2)
-		for _, mk := range mocks {
-			if mk == nil || mk.Spec.HTTP2Req == nil {
-				continue
+
+	var dests []h2Dest
+	if m != nil {
+		seen := map[h2Dest]struct{}{}
+		for _, get := range []func(models.Kind) ([]*models.Mock, error){
+			m.GetUnFilteredMocksByKind, m.GetStartupMocksByKind, m.GetFilteredMocksByKind,
+		} {
+			mocks, _ := get(models.HTTP2)
+			for _, mk := range mocks {
+				if mk == nil || mk.Spec.HTTP2Req == nil {
+					continue
+				}
+				h, pt := hostPortFromAuthority(mk.Spec.HTTP2Req.Authority, mk.Spec.HTTP2Req.Scheme)
+				d := h2Dest{host: strings.ToLower(h), port: pt}
+				if _, ok := seen[d]; ok {
+					continue
+				}
+				seen[d] = struct{}{}
+				dests = append(dests, d)
 			}
-			if http2AuthorityMatchesDest(mk.Spec.HTTP2Req.Authority, mk.Spec.HTTP2Req.Scheme, sniHost, port) {
-				return true
-			}
+		}
+	}
+	p.http2DestForMM = m
+	p.http2DestSet = dests
+	return dests
+}
+
+// replayTargetHasHTTP2Mock reports whether a kind:Http2 mock was recorded for
+// THIS connection's destination (sniHost + port). ALPN is negotiated
+// per-connection before any request is seen, so the decision must be scoped to
+// the destination being dialed: a session-global check ("any Http2 mock at
+// all") would push an HTTP/1.1 target onto h2 as soon as the session contains
+// any HTTP/2 target, and its recorded http/1.1 mock would never match.
+func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
+	for _, d := range p.http2Destinations() {
+		if http2DestMatches(d.host, d.port, sniHost, port) {
+			return true
 		}
 	}
 	return false
 }
 
-// http2AuthorityMatchesDest reports whether an HTTP/2 mock whose request
-// :authority is `authority` (scheme `scheme`) targets the destination
-// identified by sniHost:port. A discriminator unknown on either side (missing
-// port, missing SNI/host) is not used to reject, so the match is never
-// stricter than the data allows; but a KNOWN mismatch (different port, or
-// different host) rejects. At least one discriminator must actually match —
-// otherwise we'd fall back to the old session-global behaviour.
-func http2AuthorityMatchesDest(authority, scheme, sniHost string, port uint32) bool {
-	aHost, aPort := hostPortFromAuthority(authority, scheme)
+// http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
+// aHost lower-cased) matches the connection destination sniHost:port. A
+// discriminator unknown on either side (missing port, missing SNI/host) is not
+// used to reject, so the match is never stricter than the data allows; but a
+// KNOWN mismatch (different port, or different host) rejects. At least one
+// discriminator must actually match — otherwise we'd fall back to the old
+// session-global behaviour.
+func http2DestMatches(aHost string, aPort int, sniHost string, port uint32) bool {
 	portKnown := port != 0 && aPort != 0
 	if portKnown && uint32(aPort) != port {
 		return false
@@ -931,6 +975,13 @@ func http2AuthorityMatchesDest(authority, scheme, sniHost string, port uint32) b
 		return false
 	}
 	return portKnown || hostKnown
+}
+
+// http2AuthorityMatchesDest parses a raw :authority and delegates to
+// http2DestMatches. Retained as the unit-test entry point.
+func http2AuthorityMatchesDest(authority, scheme, sniHost string, port uint32) bool {
+	aHost, aPort := hostPortFromAuthority(authority, scheme)
+	return http2DestMatches(strings.ToLower(aHost), aPort, sniHost, port)
 }
 
 // hostPortFromAuthority splits an HTTP/2 :authority (or a stored dst URL) into
