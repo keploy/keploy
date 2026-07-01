@@ -157,15 +157,6 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
-	// http2DestCache memoises the set of DISTINCT destinations that have a
-	// kind:Http2 mock, so the per-connection replay ALPN decision is a small
-	// lookup instead of re-walking every Http2 mock on each TLS handshake. It
-	// is rebuilt (lazily) whenever the mock manager pointer changes. Guarded
-	// by its own mutex, independent of sessionMu.
-	http2DestMu    sync.Mutex
-	http2DestForMM *MockManager
-	http2DestSet   []h2Dest
-
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
 	// composer (the enterprise multi-app agent) routes per-app traffic
@@ -893,69 +884,31 @@ func (p *Proxy) getMockManager() *MockManager {
 	return p.mockManager
 }
 
-// h2Dest is a distinct destination (parsed :authority host + port) that has a
-// recorded kind:Http2 mock. host is lower-cased; port is 0 when unknown.
-type h2Dest struct {
-	host string
-	port int
-}
-
-// http2Destinations returns the DISTINCT set of destinations that have a
-// kind:Http2 mock, memoised per mock-manager. The set is derived once (a single
-// pass over the Http2 mocks across all tiers — filtered, unfiltered, startup)
-// and reused for every subsequent handshake until the manager pointer changes,
-// so a connection to an HTTP/1.1 target no longer re-walks every Http2 mock.
-// The cache never shrinks a destination away as filtered mocks are consumed:
-// a destination that ever spoke HTTP/2 keeps preferring h2 for its later
-// requests, which is what we want.
-func (p *Proxy) http2Destinations() []h2Dest {
-	m := p.getMockManager()
-
-	p.http2DestMu.Lock()
-	defer p.http2DestMu.Unlock()
-	if m == p.http2DestForMM {
-		return p.http2DestSet
-	}
-
-	var dests []h2Dest
-	if m != nil {
-		seen := map[h2Dest]struct{}{}
-		for _, get := range []func(models.Kind) ([]*models.Mock, error){
-			m.GetUnFilteredMocksByKind, m.GetStartupMocksByKind, m.GetFilteredMocksByKind,
-		} {
-			mocks, _ := get(models.HTTP2)
-			for _, mk := range mocks {
-				if mk == nil || mk.Spec.HTTP2Req == nil {
-					continue
-				}
-				h, pt := hostPortFromAuthority(mk.Spec.HTTP2Req.Authority, mk.Spec.HTTP2Req.Scheme)
-				d := h2Dest{host: strings.ToLower(h), port: pt}
-				if _, ok := seen[d]; ok {
-					continue
-				}
-				seen[d] = struct{}{}
-				dests = append(dests, d)
-			}
-		}
-	}
-	p.http2DestForMM = m
-	p.http2DestSet = dests
-	return dests
-}
-
 // replayTargetHasHTTP2Mock reports whether a kind:Http2 mock was recorded for
 // THIS connection's destination (sniHost + port). ALPN is negotiated
 // per-connection before any request is seen, so the decision must be scoped to
 // the destination being dialed: a session-global check ("any Http2 mock at
 // all") would push an HTTP/1.1 target onto h2 as soon as the session contains
 // any HTTP/2 target, and its recorded http/1.1 mock would never match.
+//
+// The check reads the live mock set on every call (via HasMocksByKind, which
+// short-circuits on the first match and allocates nothing). It is intentionally
+// NOT cached: the mock set is replaced between test-sets on the SAME manager,
+// so a cache keyed on manager identity would both miss Http2 mocks that first
+// load after it was built and carry a destination's h2 preference into a later
+// test-set where that destination is HTTP/1.1-only.
 func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
-	for _, d := range p.http2Destinations() {
-		if http2DestMatches(d.host, d.port, sniHost, port) {
-			return true
-		}
+	m := p.getMockManager()
+	if m == nil {
+		return false
 	}
-	return false
+	return m.HasMocksByKind(models.HTTP2, func(mk *models.Mock) bool {
+		if mk.Spec.HTTP2Req == nil {
+			return false
+		}
+		h, pt := hostPortFromAuthority(mk.Spec.HTTP2Req.Authority, mk.Spec.HTTP2Req.Scheme)
+		return http2DestMatches(strings.ToLower(h), pt, sniHost, port)
+	})
 }
 
 // http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
