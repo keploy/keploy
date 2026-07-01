@@ -1958,14 +1958,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		)
 		tlsStart := time.Now()
 		// On replay, decide the MITM's ALPN offer PER-CONNECTION. If THIS
-		// destination (SNI host + port) has a recorded kind:Http2 mock,
-		// advertise h2 so a client offering it stays on HTTP/2 and its request
-		// matches the mock (instead of being downgraded to http/1.1 and finding
-		// no matching mock). The check is scoped to the destination on purpose:
-		// a mixed session (some HTTP/2 targets, some HTTP/1.1) must not push the
-		// HTTP/1.1 targets onto h2, or their recorded http/1.1 mocks would never
-		// match. Record and http/1.1-only recordings are unaffected (PreferH2
-		// stays false).
+		// destination has a recorded kind:Http2 mock, advertise h2 so a client
+		// offering it stays on HTTP/2 and its request matches the mock (instead
+		// of being downgraded to http/1.1 and finding no matching mock). The
+		// check is scoped to the destination on purpose: a mixed session (some
+		// HTTP/2 targets, some HTTP/1.1) must not push the HTTP/1.1 targets onto
+		// h2, or their recorded http/1.1 mocks would never match. Record and
+		// http/1.1-only recordings are unaffected (PreferH2 stays false).
+		//
+		// The destination is (sniHost, port). port (destInfo.Port) is always
+		// known. sniHost is only known pre-handshake when it was pre-stored in
+		// SrcPortToDstURL — the CONNECT-tunnel / sidecar path (connect.go); on
+		// the transparent proxyless path the SNI only becomes available inside
+		// the handshake, so sniHost is empty here and scoping falls back to
+		// port-only (best-effort — see http2DestMatches). Port already
+		// disambiguates the common mixed-session case (services on different
+		// ports); same-port-different-host disambiguation only engages where
+		// sniHost is present.
 		hsCtx := ctx
 		if rule.Mode == models.MODE_TEST {
 			sniHost := ""
