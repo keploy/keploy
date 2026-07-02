@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -24,6 +26,24 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		zap.Int("total_mysql_mocks", total),
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
+
+	// Shared schema-noise engine for this connection's command phase. MySQL is
+	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
+	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
+	noiseEngine := schemanoise.New(mysqlNoiseAdapter{}, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict)
+
+	// User request-body noise from test.globalNoise.requestBody — the same
+	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
+	// why the response "body" bucket must not soften request matching).
+	// Lowercased, presence-only: request-body matching and drift detection are
+	// path-based, a value-regex cannot gate here.
+	var userBodyNoise map[string][]string
+	if bn, ok := opts.NoiseConfig["requestbody"]; ok {
+		userBodyNoise = make(map[string][]string, len(bn))
+		for k := range bn {
+			userBodyNoise[strings.ToLower(k)] = []string{}
+		}
+	}
 
 	commandCount := 0
 	for {
@@ -98,7 +118,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, closestQuery, closestMockName, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
+			resp, ok, miss, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
@@ -116,24 +136,51 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			if !ok {
 				// Build mismatch report for propagation
+				if miss == nil {
+					miss = &mockMiss{}
+				}
 				actualQuery := ""
-				if qp, qok := req.Message.(*mysql.QueryPacket); qok {
-					actualQuery = qp.Query
-				} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
-					actualQuery = sp.Query
+				switch msg := req.Message.(type) {
+				case *mysql.QueryPacket:
+					actualQuery = msg.Query
+				case *mysql.StmtPreparePacket:
+					actualQuery = msg.Query
+				case *mysql.StmtExecutePacket:
+					// EXECUTE carries no SQL text of its own — resolve the
+					// prepared query via the runtime stmtID map and show the
+					// bound parameter values, so the report isn't a blank
+					// "COM_STMT_EXECUTE".
+					if msg != nil {
+						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+							actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[msg.StatementID])
+						}
+						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
+					}
+				case *mysql.StmtSendLongDataPacket:
+					if msg != nil {
+						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+					}
 				}
 				diff := ""
-				if actualQuery != "" || closestQuery != "" {
-					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
+				if actualQuery != "" || miss.closestQuery != "" {
+					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(miss.closestQuery, 200))
+				}
+				// Under schemaNoiseStrict a rejection is a drift verdict, not a
+				// missing recording — say WHICH fields drifted (FieldDiffs) and
+				// how to mark them, instead of the generic re-record hint.
+				nextSteps := "Re-record mocks if the SQL query has changed."
+				if miss.strictRejected > 0 {
+					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
-					ActualSummary: fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 120)),
-					ClosestMock:   closestMockName,
+					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
+					ClosestMock:   miss.closestMock,
 					Diff:          diff,
-					NextSteps:     "Re-record mocks if the SQL query has changed.",
+					FieldDiffs:    miss.fieldDiffs,
+					NextSteps:     nextSteps,
 				}
-				if closestMockName == "" {
+				if miss.closestMock == "" {
 					// closest_mock=="" → no candidate mock exists for this query at all.
 					// The TC is failing because its mock was NEVER RECORDED — lost at
 					// record time (teardown decode-lag or memory-pressure drop).
@@ -152,7 +199,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				logger.Error("Connection closing due to no matching mock found. Re-record mocks if the SQL query has changed.",
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
-					zap.String("closest_mock", closestMockName))
+					zap.String("closest_mock", miss.closestMock),
+					zap.Int("strict_rejected_candidates", miss.strictRejected))
 				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
 				return models.NewMockMismatchError(baseErr, report)
 			}
@@ -225,4 +273,17 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				zap.String("last_request", req.Header.Type))
 		}
 	}
+}
+
+// formatExecParams renders bound parameter values for mismatch reports,
+// bounded per-value and overall so a blob param can't flood the report.
+func formatExecParams(params []mysql.Parameter) string {
+	if len(params) == 0 {
+		return ""
+	}
+	vals := make([]string, 0, len(params))
+	for _, p := range params {
+		vals = append(vals, truncate(fmt.Sprintf("%v", p.Value), 48))
+	}
+	return "params=[" + strings.Join(vals, ", ") + "]"
 }

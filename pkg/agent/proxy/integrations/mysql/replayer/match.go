@@ -12,7 +12,9 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -208,7 +210,25 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 	return strings.HasPrefix(hdr.Type, "COM_")
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, string, string, error) {
+// mockMiss carries the diagnostics of a "no matching mock" outcome so the
+// caller can build a meaningful mismatch report: the closest candidate (name +
+// its recorded query), field-level diffs against the first strict-rejected
+// candidate (noise-vocabulary "body."-paths with recorded/live values), and
+// how many candidates strict enforcement ruled out.
+type mockMiss struct {
+	closestQuery   string
+	closestMock    string
+	fieldDiffs     []models.MockFieldDiff
+	strictRejected int
+}
+
+// matchCommand matches one live command-phase request against the mock pool.
+// noiseEngine carries the resolved schema-noise flags (nil-safe: a nil engine
+// disables both detection and strict). userBodyNoise is the user's
+// test.globalNoise.requestBody bucket (root-relative lowercased paths) so
+// configured noise participates in strict gating with the same vocabulary as
+// learned req_body_noise. miss is non-nil only when ok is false without error.
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -227,7 +247,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 	// Fast path: QUIT may have no mock
 	if req.Header.Type == sCOM_QUIT {
-		return nil, false, "", "", io.EOF
+		return nil, false, nil, io.EOF
 	}
 
 	// Fetch THREE pools and merge. Under strict-mode default and the
@@ -244,18 +264,18 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, "", "", ctx.Err()
+			return nil, false, nil, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to get per-test mocks")
-		return nil, false, "", "", err
+		return nil, false, nil, err
 	}
 	sessionMocks, err := mockDb.GetSessionMocks()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, "", "", ctx.Err()
+			return nil, false, nil, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to get session mocks")
-		return nil, false, "", "", err
+		return nil, false, nil, err
 	}
 
 	// Unification Phase 2.5: prepared-statement setup mocks are tagged
@@ -282,7 +302,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// (connection pool is advisory for them) — log + continue.
 			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
 				utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
-				return nil, false, "", "", fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
+				return nil, false, nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
 			}
 			logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
 				zap.String("connID", connID),
@@ -328,7 +348,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 	if len(pool) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil, false, "", "", fmt.Errorf("no mysql mocks found")
+		return nil, false, nil, fmt.Errorf("no mysql mocks found")
 	}
 
 	// remove this block
@@ -367,6 +387,58 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 		}
 		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
+	}
+
+	// Canonical JSON body of the live request for the schema-noise engine.
+	// liveBodyOK is false for packets with no drift-capable body (utility
+	// commands, CLOSE/RESET) — the engine no-ops for those.
+	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
+
+	// strictAllowed is the strict-enforcement gate consulted before a mock may
+	// become a match candidate. Under schemaNoiseStrict every candidate's
+	// recorded request body is value-compared against the live one: it is
+	// rejected when a field OUTSIDE the known-noise set (user's requestBody
+	// noise ∪ the mock's learned req_body_noise) drifted. Without strict it
+	// always allows, preserving the lenient score/FIFO behaviour so the
+	// auto-replay detection path can still learn.
+	//
+	// Rejections are captured for the mismatch report: the first rejected
+	// candidate gets field-level diffs (noise-vocabulary "body."-paths with
+	// recorded vs live values via matcher.JSONFieldDiffs) so the report can
+	// say exactly WHICH request fields drifted outside noise, not just that
+	// no mock matched.
+	var (
+		strictRejectCount int
+		strictClosestMock string
+		strictFieldDiffs  []models.MockFieldDiff
+	)
+	strictAllowed := func(mock *models.Mock) bool {
+		if !noiseEngine.StrictEnabled() || !liveBodyOK {
+			return true
+		}
+		allowed, drift := noiseEngine.StrictReject(mock, liveBody, userBodyNoise)
+		if allowed {
+			return true
+		}
+		strictRejectCount++
+		if strictClosestMock == "" {
+			strictClosestMock = mock.Name
+			if recorded, rok := (mysqlNoiseAdapter{}).RecordedBody(mock); rok {
+				// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
+				// skips those paths so the report shows only non-noise drift.
+				known := noiseEngine.KnownNoise(mock, userBodyNoise)
+				strictFieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(liveBody), known, "body.", 96)
+			}
+		}
+		paths := make([]string, 0, len(drift))
+		for p := range drift {
+			paths = append(paths, p)
+		}
+		logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
+			zap.String("mock", mock.Name),
+			zap.String("request_type", req.Header.Type),
+			zap.Strings("drifted_fields", paths))
+		return false
 	}
 
 	var (
@@ -443,7 +515,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		for _, mockReq := range mock.Spec.MySQLRequests {
 			select {
 			case <-ctx.Done():
-				return nil, false, "", "", ctx.Err()
+				return nil, false, nil, ctx.Err()
 			default:
 			}
 			switch req.Header.Type {
@@ -471,6 +543,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// a genuinely reusable single-recording query. When no
 					// window is active (windowActive==false) this collapses to
 					// the previous first-exact-match-wins behaviour.
+					//
+					// Even an exact-text match is strict-gated: the query
+					// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
+					// text and may still drift.
+					if !strictAllowed(mock) {
+						continue
+					}
 					if windowActive && !mockInCurrentWindow(mock) {
 						if queryExactMock == nil {
 							queryExactResp, queryExactMock = &mock.Spec.MySQLResponses[0], mock
@@ -479,22 +558,41 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 						matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 					}
 				} else if c > maxMatchedCount {
-					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it as a servable match below.
 					bestPartialMock = mock
 					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 						bestPartialQuery = qp.Query
 					}
+					// Structure-matched-but-text-drifted candidate: under
+					// strict it may only be served when the drift (body.query
+					// / attribute values) is covered by learned/user noise.
+					if !strictAllowed(mock) {
+						continue
+					}
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
 			case sCOM_STMT_PREP:
 				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+					if !strictAllowed(mock) {
+						continue
+					}
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
-					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it as a servable match below.
 					bestPartialMock = mock
 					if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
 						bestPartialQuery = sp.Query
 					}
+					// Structure-matched-but-text-drifted PREPARE (dynamic SQL:
+					// trace comments, generated clauses): strict serves it only
+					// when body.query is covered by learned/user noise.
+					if !strictAllowed(mock) {
+						continue
+					}
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
 			case sCOM_STMT_EXEC:
@@ -555,6 +653,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// lookup recorded before the first test window) is kept only
 					// as a last-resort fallback so a genuinely unique reusable
 					// read still resolves.
+					if !strictAllowed(mock) {
+						continue
+					}
 					if windowActive && mockInCurrentWindow(mock) {
 						matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
 					} else if defExecMock == nil {
@@ -570,6 +671,24 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// matches no recorded parameter) serve the row recorded
 					// for that read-back position rather than an arbitrary
 					// same-shape row chosen by score/first-wins.
+					//
+					// Track the closest candidate for the mismatch report even
+					// when strict rejects it below — a query-exact candidate
+					// beats a score-based one. Pre-strict, EXECUTE mismatches
+					// reported an empty closest mock; this fills it.
+					if queryExact && (bestPartialMock == nil || bestPartialQuery == "") {
+						bestPartialMock, bestPartialQuery = mock, expectedQuery
+					} else if bestPartialMock == nil && c > 0 {
+						bestPartialMock, bestPartialQuery = mock, expectedQuery
+					}
+					// Strict gate: a query-exact candidate with drifted bound
+					// parameters may only become a FIFO/score candidate when
+					// the drifting params (body.parameters.N.value) are
+					// covered by learned/user noise. One gate call covers both
+					// the FIFO and score branches below.
+					if (queryExact || c > maxMatchedCount) && !strictAllowed(mock) {
+						continue
+					}
 					if queryExact {
 						if windowActive && mockInCurrentWindow(mock) {
 							if fifoExecMockWindow == nil {
@@ -713,7 +832,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
 
-					return generic, true, "", "", nil
+					return generic, true, nil, nil
 				}
 			}
 		}
@@ -738,7 +857,15 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			// no-response SLD mocks are marked used instead of being flagged
 			// unused / pruned. Fall back to plain synthetic acceptance when
 			// the record window captured none.
-			var sldMock, sldMockWindow *models.Mock
+			//
+			// Historically the streamed payload was never content-compared at
+			// all. Under schemaNoiseStrict each candidate is now gated through
+			// the engine: a chunk whose data drifted outside learned/user
+			// noise (body.data) cannot be consumed, and when every recorded
+			// candidate is rejected that way the command is a real mismatch
+			// instead of a silent pass. Detection diffs the consumed chunk and
+			// learns the drift, so a later strict replay tolerates it.
+			var sldMock, sldMockWindow, sldClosest *models.Mock
 			for _, mock := range pool {
 				if mock.Kind != models.MySQL {
 					continue
@@ -753,6 +880,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				if !isSLD {
 					continue
 				}
+				if sldClosest == nil {
+					sldClosest = mock
+				}
+				if !strictAllowed(mock) {
+					continue
+				}
 				if windowActive && mockInCurrentWindow(mock) {
 					if sldMockWindow == nil {
 						sldMockWindow = mock
@@ -765,12 +898,27 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			if chosen == nil {
 				chosen = sldMock
 			}
+			if chosen == nil && sldClosest != nil {
+				// Recorded SLD mocks exist but strict rejected every one:
+				// unmarked payload drift is a real mismatch, not a pass.
+				logger.Debug("schema-noise strict: all recorded COM_STMT_SEND_LONG_DATA candidates rejected",
+					zap.String("closest_mock", sldClosest.Name))
+				return nil, false, &mockMiss{
+					closestMock:    sldClosest.Name,
+					fieldDiffs:     strictFieldDiffs,
+					strictRejected: strictRejectCount,
+				}, nil
+			}
 			if chosen != nil {
-				updateMock(ctx, logger, chosen, mockDb)
+				var detected map[string][]string
+				if liveBodyOK {
+					detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
+				}
+				updateMock(ctx, logger, chosen, mockDb, detected)
 			}
 			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
 				zap.Bool("consumed_recorded_mock", chosen != nil))
-			return &mysql.Response{}, true, "", "", nil
+			return &mysql.Response{}, true, nil, nil
 		}
 
 		// COM_STMT_RESET clears the cursor / long-data state of a server
@@ -811,7 +959,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 			logger.Debug("Returning synthetic OK for unmocked COM_STMT_RESET",
 				zap.Uint32("statement_id", stmtID))
-			return generic, true, "", "", nil
+			return generic, true, nil, nil
 		}
 
 		if req.Header.Type == sCOM_STMT_PREP {
@@ -882,7 +1030,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					zap.String("query", truncate(strings.TrimSpace(sp.Query), 200)),
 					zap.Uint32("synthetic_stmt_id", newStmtID),
 					zap.Uint16("num_params", numParams))
-				return synthetic, true, "", "", nil
+				return synthetic, true, nil, nil
 			}
 		}
 
@@ -910,15 +1058,46 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if bestPartialMock != nil {
 			bestPartialMockName = bestPartialMock.Name
 		}
-		return nil, false, bestPartialQuery, bestPartialMockName, nil
+		if bestPartialMockName == "" {
+			bestPartialMockName = strictClosestMock
+		}
+		return nil, false, &mockMiss{
+			closestQuery:   bestPartialQuery,
+			closestMock:    bestPartialMockName,
+			fieldDiffs:     strictFieldDiffs,
+			strictRejected: strictRejectCount,
+		}, nil
+	}
+
+	// Schema-noise detection: diff the winning mock's recorded request body
+	// against the live one and learn any NEW drifted field paths (beyond
+	// user-configured noise and anything already learned) as req_body_noise.
+	// A mock served via the lenient score/FIFO fallbacks is exactly a mock
+	// whose request drifted — this is where that drift gets named. Detect
+	// no-ops when detection is disabled or the winner has no diffable body
+	// (utility commands). The learn is carried out on fresh copies inside
+	// updateMock, never on the shared pooled mock.
+	var detectedNoise map[string][]string
+	if liveBodyOK {
+		detectedNoise, _ = noiseEngine.Detect(matchedMock, liveBody, userBodyNoise)
+		if len(detectedNoise) > 0 {
+			paths := make([]string, 0, len(detectedNoise))
+			for p := range detectedNoise {
+				paths = append(paths, p)
+			}
+			logger.Debug("schema-noise detection: learned request-body drift on matched mock",
+				zap.String("mock", matchedMock.Name),
+				zap.String("request_type", req.Header.Type),
+				zap.Strings("fields", paths))
+		}
 	}
 
 	// Update the mock in the database BEFORE modifying the response
 	// This ensures we update using the original mock state
-	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
+	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
-		return nil, false, "", "", fmt.Errorf("failed to update matched mock")
+		return nil, false, nil, fmt.Errorf("failed to update matched mock")
 	}
 
 	// Create a copy of the response to avoid modifying the original mock
@@ -962,7 +1141,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
-	return responseCopy, true, "", "", nil
+	return responseCopy, true, nil, nil
 }
 
 // func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
@@ -1493,10 +1672,19 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // match.go for the rationale — we build a fresh copy and mutate the
 // copy rather than the pool pointer, so concurrent goroutines that
 // match the same session-lifetime mock don't race on TestModeInfo.
-func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+// updateMock processes the matched mock based on its Lifetime. detectedNoise
+// carries any request-body drift the schema-noise engine detected this match;
+// it is merged onto FRESH copies only (never the shared pooled mock's map —
+// see the HTTP updateMock's concurrency note, the same pooled-pointer race
+// applies here) and reaches persistence through the same
+// DeleteFilteredMock/UpdateUnFilteredMock paths as HTTP's learned noise.
+func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	if len(detectedNoise) > 0 {
+		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -1523,7 +1711,16 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	// SetMocksWithWindow's isInitialStaging branch) — the mock is
 	// still classified as LifetimePerTest but physically lives in
 	// the session tree until the first real test's re-partition.
-	if mockDb.DeleteFilteredMock(*matchedMock) {
+	//
+	// DeleteFilteredMock keys the tree lookup on TestModeInfo, so the
+	// delete-key mock keeps the original (unmutated) TestModeInfo but
+	// carries the detected noise on a fresh ReqBodyNoise map — this is how
+	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
+	deleteMock := *matchedMock
+	if len(detectedNoise) > 0 {
+		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+	}
+	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
 	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {

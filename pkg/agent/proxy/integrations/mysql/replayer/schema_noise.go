@@ -1,0 +1,152 @@
+package replayer
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"strconv"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+)
+
+// mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
+// the MySQL parser a client of the same shared schema-noise engine HTTP uses.
+// MySQL has no single "request body": the drift-carrying content depends on the
+// command packet, so both sides of every comparison are first serialized into a
+// canonical JSON document by mysqlRequestBodyJSON and diffed with the shared
+// JSON kernel. Field-path vocabulary per packet:
+//
+//	COM_QUERY               -> body.query [, body.parameters.N.* query attributes]
+//	COM_STMT_PREPARE        -> body.query
+//	COM_STMT_EXECUTE        -> body.parameters.N.{type,value,unsigned}
+//	COM_STMT_SEND_LONG_DATA -> body.data (field-level body.data.* when the chunk is standalone JSON)
+//
+// Packets whose payload cannot drift (PING, CLOSE, utility commands) or whose
+// drift is neutralized elsewhere (handshake auth, statement ids) serialize to
+// ok=false, which short-circuits the engine into a no-op for them.
+//
+// Like HTTP, MySQL does NOT use Engine.Learn on the match path: detected noise
+// is merged onto a fresh copy in updateMock so the shared pooled mock is never
+// mutated. SetLearnedNoise is implemented for interface completeness.
+type mysqlNoiseAdapter struct {
+	schemanoise.JSONDiffer
+}
+
+// RecordedBody returns the canonical JSON body of the mock's recorded request.
+// Command-phase data mocks carry exactly one request; multi-request bundles
+// (handshake config mocks) and non-drift-capable commands return ok=false.
+func (mysqlNoiseAdapter) RecordedBody(m *models.Mock) ([]byte, bool) {
+	if m == nil || len(m.Spec.MySQLRequests) != 1 {
+		return nil, false
+	}
+	return mysqlRequestBodyJSON(&m.Spec.MySQLRequests[0].PacketBundle)
+}
+
+// StoredNoise returns the noise learned on this mock (kind-agnostic
+// MockSpec.ReqBodyNoise, same storage as every other parser).
+func (mysqlNoiseAdapter) StoredNoise(m *models.Mock) map[string][]string {
+	if m == nil {
+		return nil
+	}
+	return m.Spec.ReqBodyNoise
+}
+
+// SetLearnedNoise writes merged noise back onto MockSpec.ReqBodyNoise. Unused
+// on the MySQL match path (see updateMock's copy-on-learn); present for
+// interface completeness.
+func (mysqlNoiseAdapter) SetLearnedNoise(m *models.Mock, merged map[string][]string) {
+	if m == nil {
+		return
+	}
+	m.Spec.ReqBodyNoise = merged
+}
+
+// RecordedValueIsNoise excludes recorded values already covered by the mock's
+// value-regex noise (Mock.Noise, e.g. enterprise-obfuscated secrets) so they
+// are not re-flagged as schema noise — the same values paramValueEqual already
+// waves through via NoiseChecker.IsNoisyValue.
+func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
+	if m == nil {
+		return nil
+	}
+	nc := util.NewNoiseChecker(m.Noise)
+	if nc == nil {
+		return nil
+	}
+	return func(v string) bool { return nc.IsNoisy(v) }
+}
+
+// mysqlRequestBodyJSON serializes the drift-carrying content of a command
+// packet into a canonical JSON document for the schema-noise engine. ok=false
+// means the packet has no drift-capable body (utility commands, statement-id
+// only packets, handshake elements) and the engine must no-op.
+//
+// Parameters are keyed by index as an OBJECT ("0", "1", …), not an array: the
+// JSON differ collapses array elements to a single "[]" path, which would
+// merge all params into one bucket — an object keeps per-position paths
+// (parameters.0.value) so noise on the uuid param never excuses drift on the
+// customer param. Parameter's custom MarshalJSON preserves value types
+// ($bin/$ts envelopes), so a type flip surfaces as drift, not a false match.
+//
+// Deliberately EXCLUDED fields: StatementID (unstable across runs, remapped
+// query-aware by the matcher), Status/Flags/IterationCount/NullBitmap
+// (protocol plumbing already scored by matchStmtExecutePacketQueryAware, not
+// user data).
+func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
+	if bundle == nil || bundle.Header == nil {
+		return nil, false
+	}
+	var doc map[string]any
+	switch msg := bundle.Message.(type) {
+	case *mysql.QueryPacket:
+		if msg == nil {
+			return nil, false
+		}
+		doc = map[string]any{"query": msg.Query}
+		if len(msg.Parameters) > 0 {
+			doc["parameters"] = parametersByIndex(msg.Parameters)
+		}
+	case *mysql.StmtPreparePacket:
+		if msg == nil {
+			return nil, false
+		}
+		doc = map[string]any{"query": msg.Query}
+	case *mysql.StmtExecutePacket:
+		if msg == nil {
+			return nil, false
+		}
+		doc = map[string]any{"parameters": parametersByIndex(msg.Parameters)}
+	case *mysql.StmtSendLongDataPacket:
+		if msg == nil {
+			return nil, false
+		}
+		// A standalone-JSON chunk is embedded raw so drift resolves to
+		// field-level paths (body.data.updated_at); anything else (binary,
+		// or a JSON document split across chunks) becomes a base64 string,
+		// where any drift is the whole body.data field.
+		if json.Valid(msg.Data) {
+			doc = map[string]any{"data": json.RawMessage(msg.Data)}
+		} else {
+			doc = map[string]any{"data": base64.StdEncoding.EncodeToString(msg.Data)}
+		}
+	default:
+		return nil, false
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// parametersByIndex converts a parameter slice to an index-keyed map (see
+// mysqlRequestBodyJSON for why an object beats an array here).
+func parametersByIndex(params []mysql.Parameter) map[string]mysql.Parameter {
+	out := make(map[string]mysql.Parameter, len(params))
+	for i, p := range params {
+		out[strconv.Itoa(i)] = p
+	}
+	return out
+}
