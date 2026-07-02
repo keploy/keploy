@@ -7,8 +7,10 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 )
 
 // mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
@@ -76,6 +78,79 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 		return nil
 	}
 	return func(v string) bool { return nc.IsNoisy(v) }
+}
+
+// strictGate applies schemaNoiseStrict enforcement while matchCommand scans
+// candidate mocks, and accumulates the diagnostics the mismatch report needs.
+// Consult allows() before a mock may become a match candidate: under
+// schemaNoiseStrict every candidate's recorded request body is value-compared
+// against the live one and rejected when a field OUTSIDE the known-noise set
+// (user's requestBody noise ∪ the mock's learned req_body_noise) drifted.
+// Without strict (or with no diffable live body) it always allows, preserving
+// the lenient score/FIFO behaviour so the auto-replay detection path can
+// still learn.
+type strictGate struct {
+	engine        *schemanoise.Engine
+	logger        *zap.Logger
+	requestType   string
+	liveBody      []byte
+	liveBodyOK    bool
+	userBodyNoise map[string][]string
+
+	// Rejection diagnostics for the mismatch report:
+	//   rejected    — how many candidates strict enforcement ruled out.
+	//   closestMock — the FIRST strict-rejected candidate; it passed the
+	//                 lenient match, so it is the closest mock to name in
+	//                 the report.
+	//   fieldDiffs  — field-level drift vs that first candidate
+	//                 (noise-vocabulary "body."-paths with recorded vs live
+	//                 values via matcher.JSONFieldDiffs) so the report says
+	//                 exactly WHICH request fields drifted outside noise.
+	rejected    int
+	closestMock string
+	fieldDiffs  []models.MockFieldDiff
+}
+
+func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+	return &strictGate{
+		engine:        engine,
+		logger:        logger,
+		requestType:   requestType,
+		liveBody:      liveBody,
+		liveBodyOK:    liveBodyOK,
+		userBodyNoise: userBodyNoise,
+	}
+}
+
+// allows reports whether the candidate mock survives strict enforcement,
+// recording rejection diagnostics for the mismatch report when it doesn't.
+func (g *strictGate) allows(mock *models.Mock) bool {
+	if !g.engine.StrictEnabled() || !g.liveBodyOK {
+		return true
+	}
+	allowed, drift := g.engine.StrictReject(mock, g.liveBody, g.userBodyNoise)
+	if allowed {
+		return true
+	}
+	g.rejected++
+	if g.closestMock == "" {
+		g.closestMock = mock.Name
+		if recorded, ok := (mysqlNoiseAdapter{}).RecordedBody(mock); ok {
+			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
+			// skips those paths so the report shows only non-noise drift.
+			known := g.engine.KnownNoise(mock, g.userBodyNoise)
+			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(g.liveBody), known, "body.", 96)
+		}
+	}
+	paths := make([]string, 0, len(drift))
+	for p := range drift {
+		paths = append(paths, p)
+	}
+	g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
+		zap.String("mock", mock.Name),
+		zap.String("request_type", g.requestType),
+		zap.Strings("drifted_fields", paths))
+	return false
 }
 
 // mysqlRequestBodyJSON serializes the drift-carrying content of a command

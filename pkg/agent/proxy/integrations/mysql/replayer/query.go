@@ -274,16 +274,3 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		}
 	}
 }
-
-// formatExecParams renders bound parameter values for mismatch reports,
-// bounded per-value and overall so a blob param can't flood the report.
-func formatExecParams(params []mysql.Parameter) string {
-	if len(params) == 0 {
-		return ""
-	}
-	vals := make([]string, 0, len(params))
-	for _, p := range params {
-		vals = append(vals, truncate(fmt.Sprintf("%v", p.Value), 48))
-	}
-	return "params=[" + strings.Join(vals, ", ") + "]"
-}

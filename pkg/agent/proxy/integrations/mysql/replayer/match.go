@@ -14,7 +14,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -210,18 +209,6 @@ func isSessionReusableCommandMock(mock *models.Mock) bool {
 	return strings.HasPrefix(hdr.Type, "COM_")
 }
 
-// mockMiss carries the diagnostics of a "no matching mock" outcome so the
-// caller can build a meaningful mismatch report: the closest candidate (name +
-// its recorded query), field-level diffs against the first strict-rejected
-// candidate (noise-vocabulary "body."-paths with recorded/live values), and
-// how many candidates strict enforcement ruled out.
-type mockMiss struct {
-	closestQuery   string
-	closestMock    string
-	fieldDiffs     []models.MockFieldDiff
-	strictRejected int
-}
-
 // matchCommand matches one live command-phase request against the mock pool.
 // noiseEngine carries the resolved schema-noise flags (nil-safe: a nil engine
 // disables both detection and strict). userBodyNoise is the user's
@@ -394,54 +381,24 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// commands, CLOSE/RESET) — the engine no-ops for those.
 	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
 
-	// strictAllowed is the strict-enforcement gate consulted before a mock may
-	// become a match candidate. Under schemaNoiseStrict every candidate's
-	// recorded request body is value-compared against the live one: it is
-	// rejected when a field OUTSIDE the known-noise set (user's requestBody
-	// noise ∪ the mock's learned req_body_noise) drifted. Without strict it
-	// always allows, preserving the lenient score/FIFO behaviour so the
-	// auto-replay detection path can still learn.
-	//
-	// Rejections are captured for the mismatch report: the first rejected
-	// candidate gets field-level diffs (noise-vocabulary "body."-paths with
-	// recorded vs live values via matcher.JSONFieldDiffs) so the report can
-	// say exactly WHICH request fields drifted outside noise, not just that
-	// no mock matched.
-	var (
-		strictRejectCount int
-		strictClosestMock string
-		strictFieldDiffs  []models.MockFieldDiff
-	)
-	strictAllowed := func(mock *models.Mock) bool {
-		if !noiseEngine.StrictEnabled() || !liveBodyOK {
-			return true
-		}
-		allowed, drift := noiseEngine.StrictReject(mock, liveBody, userBodyNoise)
-		if allowed {
-			return true
-		}
-		strictRejectCount++
-		if strictClosestMock == "" {
-			strictClosestMock = mock.Name
-			if recorded, rok := (mysqlNoiseAdapter{}).RecordedBody(mock); rok {
-				// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
-				// skips those paths so the report shows only non-noise drift.
-				known := noiseEngine.KnownNoise(mock, userBodyNoise)
-				strictFieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(liveBody), known, "body.", 96)
-			}
-		}
-		paths := make([]string, 0, len(drift))
-		for p := range drift {
-			paths = append(paths, p)
-		}
-		logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
-			zap.String("mock", mock.Name),
-			zap.String("request_type", req.Header.Type),
-			zap.Strings("drifted_fields", paths))
-		return false
-	}
+	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
+	// before a mock may become a match candidate, and accumulates the
+	// rejection diagnostics (count / closest mock / field-level diffs) the
+	// mismatch report renders on a miss.
+	gate := newStrictGate(noiseEngine, logger, req.Header.Type, liveBody, liveBodyOK, userBodyNoise)
 
 	var (
+		// Score-based candidate tracking. Every non-definitive matcher returns
+		// a similarity score for its candidate; the trio below carries the best
+		// one seen so far across the whole pool scan:
+		//   maxMatchedCount — highest similarity score so far; a later
+		//                     candidate replaces the pick only with a
+		//                     STRICTLY higher score.
+		//   matchedResp     — the response of that best-scoring candidate;
+		//                     this is what gets served when no definitive
+		//                     (exact) match is found anywhere in the pool.
+		//   matchedMock     — the mock owning matchedResp; consumed/updated
+		//                     via updateMock once selected.
 		maxMatchedCount  int
 		matchedResp      *mysql.Response
 		matchedMock      *models.Mock
@@ -547,7 +504,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// Even an exact-text match is strict-gated: the query
 					// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
 					// text and may still drift.
-					if !strictAllowed(mock) {
+					if !gate.allows(mock) {
 						continue
 					}
 					if windowActive && !mockInCurrentWindow(mock) {
@@ -567,7 +524,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// Structure-matched-but-text-drifted candidate: under
 					// strict it may only be served when the drift (body.query
 					// / attribute values) is covered by learned/user noise.
-					if !strictAllowed(mock) {
+					if !gate.allows(mock) {
 						continue
 					}
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
@@ -575,7 +532,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 			case sCOM_STMT_PREP:
 				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
-					if !strictAllowed(mock) {
+					if !gate.allows(mock) {
 						continue
 					}
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
@@ -589,7 +546,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// Structure-matched-but-text-drifted PREPARE (dynamic SQL:
 					// trace comments, generated clauses): strict serves it only
 					// when body.query is covered by learned/user noise.
-					if !strictAllowed(mock) {
+					if !gate.allows(mock) {
 						continue
 					}
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
@@ -653,7 +610,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// lookup recorded before the first test window) is kept only
 					// as a last-resort fallback so a genuinely unique reusable
 					// read still resolves.
-					if !strictAllowed(mock) {
+					if !gate.allows(mock) {
 						continue
 					}
 					if windowActive && mockInCurrentWindow(mock) {
@@ -686,7 +643,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// the drifting params (body.parameters.N.value) are
 					// covered by learned/user noise. One gate call covers both
 					// the FIFO and score branches below.
-					if (queryExact || c > maxMatchedCount) && !strictAllowed(mock) {
+					if (queryExact || c > maxMatchedCount) && !gate.allows(mock) {
 						continue
 					}
 					if queryExact {
@@ -883,7 +840,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				if sldClosest == nil {
 					sldClosest = mock
 				}
-				if !strictAllowed(mock) {
+				if !gate.allows(mock) {
 					continue
 				}
 				if windowActive && mockInCurrentWindow(mock) {
@@ -905,8 +862,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					zap.String("closest_mock", sldClosest.Name))
 				return nil, false, &mockMiss{
 					closestMock:    sldClosest.Name,
-					fieldDiffs:     strictFieldDiffs,
-					strictRejected: strictRejectCount,
+					fieldDiffs:     gate.fieldDiffs,
+					strictRejected: gate.rejected,
 				}, nil
 			}
 			if chosen != nil {
@@ -1059,13 +1016,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			bestPartialMockName = bestPartialMock.Name
 		}
 		if bestPartialMockName == "" {
-			bestPartialMockName = strictClosestMock
+			bestPartialMockName = gate.closestMock
 		}
 		return nil, false, &mockMiss{
 			closestQuery:   bestPartialQuery,
 			closestMock:    bestPartialMockName,
-			fieldDiffs:     strictFieldDiffs,
-			strictRejected: strictRejectCount,
+			fieldDiffs:     gate.fieldDiffs,
+			strictRejected: gate.rejected,
 		}, nil
 	}
 
