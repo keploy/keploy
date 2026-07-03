@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,18 +81,41 @@ func sldReq(data []byte) mysql.Request {
 // collapse to a single "[]" bucket in the JSON differ), and ok=false for
 // packets with no drift-capable body.
 func TestMySQLRequestBodyJSON(t *testing.T) {
-	t.Run("COM_QUERY -> body.query", func(t *testing.T) {
-		bundle := comQueryReq("SELECT 1").PacketBundle
+	t.Run("COM_QUERY -> literal-split query shape", func(t *testing.T) {
+		bundle := comQueryReq("SELECT 'drift-sentinel'").PacketBundle
 		b, ok := mysqlRequestBodyJSON(&bundle)
 		if !ok {
 			t.Fatal("expected ok for COM_QUERY")
+		}
+		var doc struct {
+			Query struct {
+				Template string            `json:"template"`
+				Literals map[string]string `json:"literals"`
+			} `json:"query"`
+		}
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if doc.Query.Template == "" || strings.Contains(doc.Query.Template, "drift-sentinel") {
+			t.Errorf("template must replace literals with placeholders, got %q", doc.Query.Template)
+		}
+		if doc.Query.Literals["0"] != "drift-sentinel" {
+			t.Errorf("literals.0 = %v", doc.Query.Literals)
+		}
+	})
+
+	t.Run("COM_QUERY unparseable SQL falls back to whole text", func(t *testing.T) {
+		bundle := comQueryReq("%%% definitely not sql %%%").PacketBundle
+		b, ok := mysqlRequestBodyJSON(&bundle)
+		if !ok {
+			t.Fatal("expected ok even for unparseable SQL")
 		}
 		var doc map[string]any
 		if err := json.Unmarshal(b, &doc); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
 		}
-		if doc["query"] != "SELECT 1" {
-			t.Errorf("query field = %v", doc["query"])
+		if doc["query"] != "%%% definitely not sql %%%" {
+			t.Errorf("unparseable SQL must stay a plain string, got %v", doc["query"])
 		}
 	})
 
@@ -304,14 +328,14 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		if miss.strictRejected == 0 {
 			t.Error("miss must count strict-rejected candidates")
 		}
-		foundQueryDiff := false
+		foundLiteralDiff := false
 		for _, d := range miss.fieldDiffs {
-			if d.Path == "body.query" {
-				foundQueryDiff = true
+			if d.Path == "body.query.literals.0" && d.Expected == "recorded-uuid" && d.Actual == "replay-uuid" {
+				foundLiteralDiff = true
 			}
 		}
-		if !foundQueryDiff {
-			t.Errorf("miss must carry a body.query field diff for the report, got %+v", miss.fieldDiffs)
+		if !foundLiteralDiff {
+			t.Errorf("miss must carry the drifted literal diff with values, got %+v", miss.fieldDiffs)
 		}
 	})
 
@@ -326,17 +350,35 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		}
 	})
 
-	t.Run("detection learns body.query", func(t *testing.T) {
+	t.Run("detection learns only the drifting literal position", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, true, false)
 		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("detection replay must serve leniently (ok=%v err=%v)", ok, err)
 		}
-		if noise := db.capturedNoiseFor("q1"); noise == nil {
-			t.Fatal("expected body.query learned on the updated mock")
-		} else if _, has := noise["body.query"]; !has {
-			t.Fatalf("expected body.query in learned noise, got %v", noise)
+		noise := db.capturedNoiseFor("q1")
+		if _, has := noise["body.query.literals.0"]; !has {
+			t.Fatalf("expected body.query.literals.0 in learned noise, got %v", noise)
+		}
+		// The stable 'e' literal (position 1) and the template must NOT be
+		// flagged — per-position granularity is the point of the shape split.
+		if _, has := noise["body.query.literals.1"]; has {
+			t.Fatalf("stable literal must not be learned as noise, got %v", noise)
+		}
+		if _, has := noise["body.query.template"]; has {
+			t.Fatalf("template must not be learned for literal-only drift, got %v", noise)
+		}
+	})
+
+	t.Run("strict allows learned per-literal noise", func(t *testing.T) {
+		m := readbackMock("q1", recorded, "row-1", zeroTime())
+		m.Spec.ReqBodyNoise = map[string][]string{"body.query.literals.0": {}}
+		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
+		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		if err != nil || !ok {
+			t.Fatalf("strict must serve when only the noised literal drifts (ok=%v err=%v)", ok, err)
 		}
 	})
 
@@ -416,3 +458,98 @@ func TestMatchCommand_SendLongDataStrict(t *testing.T) {
 
 // zeroTime keeps the readbackMock helper usable with no active test window.
 func zeroTime() time.Time { return time.Time{} }
+
+// TestExtractQueryShape locks in the literal-split contract: static values
+// come out per-position, the template carries placeholders instead, and
+// statement comments (per-request trace ids) live on their own field so they
+// drift independently of the template.
+func TestExtractQueryShape(t *testing.T) {
+	t.Run("literals extracted per position", func(t *testing.T) {
+		shape := extractQueryShape("INSERT INTO events (id, name, created_at) VALUES ('u-42', 'text-event', '2026-07-02 08:09:49')")
+		if !shape.ok {
+			t.Fatal("expected parseable SQL")
+		}
+		want := []string{"u-42", "text-event", "2026-07-02 08:09:49"}
+		if len(shape.literals) != len(want) {
+			t.Fatalf("literals = %v, want %v", shape.literals, want)
+		}
+		for i, w := range want {
+			if shape.literals[i] != w {
+				t.Errorf("literals[%d] = %q, want %q", i, shape.literals[i], w)
+			}
+		}
+		for _, w := range want {
+			if strings.Contains(shape.template, w) {
+				t.Errorf("template still contains literal %q: %s", w, shape.template)
+			}
+		}
+	})
+
+	t.Run("comments split out of the template", func(t *testing.T) {
+		a := extractQueryShape("SELECT /* traceparent=aaa */ customer FROM orders WHERE amount > 50")
+		b := extractQueryShape("SELECT /* traceparent=bbb */ customer FROM orders WHERE amount > 50")
+		if !a.ok || !b.ok {
+			t.Fatal("expected parseable SQL")
+		}
+		if a.template != b.template {
+			t.Errorf("templates must be identical when only the comment drifts:\n  a=%s\n  b=%s", a.template, b.template)
+		}
+		if a.comments == b.comments || a.comments == "" {
+			t.Errorf("comments must carry the drifting trace id, got a=%q b=%q", a.comments, b.comments)
+		}
+	})
+
+	t.Run("placeholders are not literals", func(t *testing.T) {
+		shape := extractQueryShape("SELECT customer FROM orders WHERE id = ? AND amount > 100")
+		if !shape.ok {
+			t.Fatal("expected parseable SQL")
+		}
+		if len(shape.literals) != 1 || shape.literals[0] != "100" {
+			t.Errorf("only the inline 100 is a literal (? is a bind arg), got %v", shape.literals)
+		}
+	})
+
+	t.Run("unparseable SQL reports ok=false", func(t *testing.T) {
+		if shape := extractQueryShape("%%% not sql %%%"); shape.ok {
+			t.Errorf("expected ok=false, got %+v", shape)
+		}
+	})
+}
+
+// TestMatchCommand_TraceCommentDrift covers the per-request trace-comment
+// case end-to-end: identical query except the comment. Detection must learn
+// body.query.comments (not the template, not a literal), and strict must then
+// serve it.
+func TestMatchCommand_TraceCommentDrift(t *testing.T) {
+	logger := zap.NewNop()
+	const recorded = "SELECT /* traceparent=recorded */ customer FROM orders WHERE amount > 50"
+	const live = "SELECT /* traceparent=replay */ customer FROM orders WHERE amount > 50"
+	req := comQueryReq(live)
+
+	t.Run("detection learns body.query.comments only", func(t *testing.T) {
+		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
+		eng := schemanoise.New(mysqlNoiseAdapter{}, true, false)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		if err != nil || !ok {
+			t.Fatalf("detection replay must serve leniently (ok=%v err=%v)", ok, err)
+		}
+		noise := db.capturedNoiseFor("q1")
+		if _, has := noise["body.query.comments"]; !has {
+			t.Fatalf("expected body.query.comments learned, got %v", noise)
+		}
+		if _, has := noise["body.query.template"]; has {
+			t.Fatalf("template must not be noise for comment-only drift, got %v", noise)
+		}
+	})
+
+	t.Run("strict allows learned comment noise", func(t *testing.T) {
+		m := readbackMock("q1", recorded, "row-1", zeroTime())
+		m.Spec.ReqBodyNoise = map[string][]string{"body.query.comments": {}}
+		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
+		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		if err != nil || !ok {
+			t.Fatalf("strict must serve when only the noised comment drifts (ok=%v err=%v)", ok, err)
+		}
+	})
+}

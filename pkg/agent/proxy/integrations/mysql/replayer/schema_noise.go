@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strconv"
+	"strings"
+	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -11,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
+	"vitess.io/vitess/go/vt/sqlparser"
 )
 
 // mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
@@ -20,10 +23,15 @@ import (
 // canonical JSON document by mysqlRequestBodyJSON and diffed with the shared
 // JSON kernel. Field-path vocabulary per packet:
 //
-//	COM_QUERY               -> body.query [, body.parameters.N.* query attributes]
-//	COM_STMT_PREPARE        -> body.query
+//	COM_QUERY               -> body.query.{template,literals.N,comments} [, body.parameters.N.* query attributes]
+//	COM_STMT_PREPARE        -> body.query.{template,literals.N,comments}
 //	COM_STMT_EXECUTE        -> body.parameters.N.{type,value,unsigned}
 //	COM_STMT_SEND_LONG_DATA -> body.data (field-level body.data.* when the chunk is standalone JSON)
+//
+// SQL texts are literal-split (see queryBodyValue): inline static values
+// resolve to per-position paths (body.query.literals.2) and a plain
+// body.query entry still ignores the whole subtree. Unparseable SQL falls
+// back to whole-text body.query.
 //
 // Packets whose payload cannot drift (PING, CLOSE, utility commands) or whose
 // drift is neutralized elsewhere (handshake auth, statement ids) serialize to
@@ -153,6 +161,114 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	return false
 }
 
+// queryShape is the literal-split view of a SQL text: the query with every
+// inline literal replaced by a positional placeholder (template), the
+// extracted literal values in syntactic order, and any statement comments
+// pulled out of the template. ok=false means vitess could not parse the SQL
+// and callers must fall back to whole-text comparison.
+type queryShape struct {
+	template string
+	literals []string
+	comments string
+	ok       bool
+}
+
+// queryShapeCache memoizes extractQueryShape per SQL text — the same query is
+// re-canonicalized for every candidate mock during a pool scan, and mock-side
+// texts repeat across commands. Sibling of match.go's querySigCache.
+var queryShapeCache sync.Map // map[string]*queryShape
+
+// extractQueryShape parses sql with the vitess parser (the one the matcher
+// already uses for AST-structure signatures) and splits it into template +
+// literals + comments — the MySQL equivalent of the "give it a query, get its
+// fields" helper the Postgres integration uses. Results are memoized.
+func extractQueryShape(sql string) *queryShape {
+	if v, ok := queryShapeCache.Load(sql); ok {
+		return v.(*queryShape)
+	}
+	shape := computeQueryShape(sql)
+	queryShapeCache.Store(sql, shape)
+	return shape
+}
+
+func computeQueryShape(sql string) (shape *queryShape) {
+	// The rewriter panics on AST slots it cannot replace; treat any such SQL
+	// as unparseable so the caller falls back to whole-text comparison
+	// instead of taking the proxy down.
+	shape = &queryShape{}
+	defer func() {
+		if r := recover(); r != nil {
+			shape = &queryShape{}
+		}
+	}()
+
+	parser, err := sqlparser.New(sqlparser.Options{})
+	if err != nil {
+		return shape
+	}
+	stmt, err := parser.Parse(sql)
+	if err != nil {
+		return shape
+	}
+
+	// Pull statement comments out of the template so a per-request trace
+	// comment (/* traceparent=... */) drifts on its own field instead of
+	// polluting the whole template.
+	var comments []string
+	if c, isCommented := stmt.(sqlparser.Commented); isCommented {
+		if pc := c.GetParsedComments(); pc != nil {
+			comments = append(comments, pc.GetComments()...)
+		}
+		c.SetComments(nil)
+	}
+
+	// Replace every inline literal with a positional argument, collecting the
+	// values in walk order. Walk order is syntactic, so two queries that
+	// already passed the matcher's AST-structure gate enumerate their
+	// literals at identical positions.
+	var literals []string
+	out := sqlparser.Rewrite(stmt, func(cursor *sqlparser.Cursor) bool {
+		if lit, isLit := cursor.Node().(*sqlparser.Literal); isLit {
+			literals = append(literals, lit.Val)
+			cursor.Replace(sqlparser.NewArgument("v" + strconv.Itoa(len(literals))))
+		}
+		return true
+	}, nil)
+
+	return &queryShape{
+		template: sqlparser.String(out),
+		literals: literals,
+		comments: strings.TrimSpace(strings.Join(comments, " ")),
+		ok:       true,
+	}
+}
+
+// queryBodyValue returns the canonical JSON value for a SQL text. Parseable
+// SQL becomes a shape object — template, index-keyed literals, comments — so
+// drift resolves to per-literal noise paths (body.query.literals.2) instead
+// of the whole text; a learned/user "body.query" entry still covers the whole
+// subtree (the JSON differ's noise index ignores prefixed children), so
+// whole-query noise keeps working. Unparseable SQL stays a plain string,
+// where any drift is the single body.query field.
+func queryBodyValue(sql string) any {
+	shape := extractQueryShape(sql)
+	if !shape.ok {
+		return sql
+	}
+	q := map[string]any{"template": shape.template}
+	if len(shape.literals) > 0 {
+		lits := make(map[string]string, len(shape.literals))
+		for i, v := range shape.literals {
+			lits[strconv.Itoa(i)] = v
+		}
+		q["literals"] = lits
+	}
+	if shape.comments != "" {
+		q["comments"] = shape.comments
+	}
+	return q
+}
+
 // mysqlRequestBodyJSON serializes the drift-carrying content of a command
 // packet into a canonical JSON document for the schema-noise engine. ok=false
 // means the packet has no drift-capable body (utility commands, statement-id
@@ -179,7 +295,7 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 		if msg == nil {
 			return nil, false
 		}
-		doc = map[string]any{"query": msg.Query}
+		doc = map[string]any{"query": queryBodyValue(msg.Query)}
 		if len(msg.Parameters) > 0 {
 			doc["parameters"] = parametersByIndex(msg.Parameters)
 		}
@@ -187,7 +303,7 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 		if msg == nil {
 			return nil, false
 		}
-		doc = map[string]any{"query": msg.Query}
+		doc = map[string]any{"query": queryBodyValue(msg.Query)}
 	case *mysql.StmtExecutePacket:
 		if msg == nil {
 			return nil, false
