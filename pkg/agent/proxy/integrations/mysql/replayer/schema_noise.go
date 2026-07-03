@@ -163,14 +163,18 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 
 // queryShape is the literal-split view of a SQL text: the query with every
 // inline literal replaced by a positional placeholder (template), the
-// extracted literal values in syntactic order, and any statement comments
-// pulled out of the template. ok=false means vitess could not parse the SQL
-// and callers must fall back to whole-text comparison.
+// extracted literal values in syntactic order, any statement comments pulled
+// out of the template, and the count of REAL `?` bind placeholders the
+// statement carried (parsed as arguments — a '?' inside a string literal is
+// value content and is NOT counted, unlike a raw strings.Count). ok=false
+// means vitess could not parse the SQL and callers must fall back to
+// whole-text comparison.
 type queryShape struct {
-	template string
-	literals []string
-	comments string
-	ok       bool
+	template     string
+	literals     []string
+	comments     string
+	placeholders int
+	ok           bool
 }
 
 // queryShapeCache memoizes extractQueryShape per SQL text — the same query is
@@ -222,24 +226,41 @@ func computeQueryShape(sql string) (shape *queryShape) {
 		c.SetComments(nil)
 	}
 
+	// Count the statement's REAL `?` bind placeholders before any rewriting:
+	// vitess tokenizes each `?` into an *Argument node, so this count is
+	// immune to '?' bytes inside string literals (the flaw of a raw
+	// strings.Count on the SQL text).
+	placeholders := 0
+	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+		if _, isArg := node.(*sqlparser.Argument); isArg {
+			placeholders++
+		}
+		return true, nil
+	}, stmt)
+
 	// Replace every inline literal with a positional argument, collecting the
 	// values in walk order. Walk order is syntactic, so two queries that
 	// already passed the matcher's AST-structure gate enumerate their
-	// literals at identical positions.
+	// literals at identical positions. The replacement name is prefixed
+	// "kp_lit_" so it can NEVER collide with vitess's own `?`-placeholder
+	// arguments (named v1, v2, …) — without the distinct prefix,
+	// `WHERE a = ? AND b = 5` and `WHERE a = 5 AND b = ?` would both render
+	// as `a = :v1 and b = :v1` and false-match as the same template.
 	var literals []string
 	out := sqlparser.Rewrite(stmt, func(cursor *sqlparser.Cursor) bool {
 		if lit, isLit := cursor.Node().(*sqlparser.Literal); isLit {
 			literals = append(literals, lit.Val)
-			cursor.Replace(sqlparser.NewArgument("v" + strconv.Itoa(len(literals))))
+			cursor.Replace(sqlparser.NewArgument("kp_lit_" + strconv.Itoa(len(literals))))
 		}
 		return true
 	}, nil)
 
 	return &queryShape{
-		template: sqlparser.String(out),
-		literals: literals,
-		comments: strings.TrimSpace(strings.Join(comments, " ")),
-		ok:       true,
+		template:     sqlparser.String(out),
+		literals:     literals,
+		comments:     strings.TrimSpace(strings.Join(comments, " ")),
+		placeholders: placeholders,
+		ok:           true,
 	}
 }
 

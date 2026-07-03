@@ -387,6 +387,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// mismatch report renders on a miss.
 	gate := newStrictGate(noiseEngine, logger, req.Header.Type, liveBody, liveBodyOK, userBodyNoise)
 
+	// shapeAware activates the schema-noise matching refinements in
+	// matchQuery (parsed placeholder counts, non-DML template rescue).
+	// Off in normal replay so default matching stays byte-identical.
+	shapeAware := noiseEngine.DetectionEnabled() || noiseEngine.StrictEnabled()
+
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
 		// a similarity score for its candidate; the trio below carries the best
@@ -491,7 +496,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 
 			case sCOM_QUERY:
-				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle, shapeAware); ok {
 					// Exact query-text match. Prefer the candidate recorded
 					// inside the current test window so a repeated stateful
 					// read-back (same SQL, different row per call) resolves to
@@ -531,7 +536,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 
 			case sCOM_STMT_PREP:
-				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle, shapeAware); ok {
 					if !gate.allows(mock) {
 						continue
 					}
@@ -1148,7 +1153,12 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (bool, int) {
+// matchQuery compares a recorded and a live query-bearing packet and returns
+// (definitive, score). shapeAware activates the schema-noise refinements
+// (parsed placeholder counts + the non-DML template rescue) — it is true only
+// when schemaNoiseDetection or schemaNoiseStrict is enabled, so normal replay
+// behaviour is byte-identical to the pre-schema-noise matcher.
+func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string, shapeAware bool) (bool, int) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -1160,9 +1170,21 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	actualQuery := getQuery(actual)
 
 	// Count placeholders in both queries - this is crucial for PREPARE statements
-	// to ensure we match mocks with the same number of parameters
+	// to ensure we match mocks with the same number of parameters.
+	//
+	// Under schema-noise (shapeAware) the counts come from the PARSED bind
+	// arguments when both sides parse: a '?' byte inside a drifting string
+	// literal ('Are you there?' -> 'ok') is value content, not a placeholder,
+	// and must not veto the match. Real arity changes (IN (?,?) -> IN (?,?,?))
+	// still differ in parsed counts and still hard-reject.
 	expectedPlaceholders := strings.Count(expectedQuery, "?")
 	actualPlaceholders := strings.Count(actualQuery, "?")
+	if shapeAware {
+		expShape, actShape := extractQueryShape(expectedQuery), extractQueryShape(actualQuery)
+		if expShape.ok && actShape.ok {
+			expectedPlaceholders, actualPlaceholders = expShape.placeholders, actShape.placeholders
+		}
+	}
 	if expectedPlaceholders != actualPlaceholders {
 		// log.Debug("placeholder count mismatch",
 		// 	zap.String("expected_query", expectedQuery),
@@ -1199,6 +1221,23 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	}
 
 	if !(sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery)) {
+		// Non-DML (SELECT/SET/SHOW/...) drift historically scored at most the
+		// +1 payload-length point — a drifted literal that changed the query's
+		// byte length was unmatchable, so detection could never learn it.
+		// Under schema-noise, grant the same rescue DML gets, but on a
+		// STRONGER identity check: the literal-split template (which, unlike
+		// the DML node-type signature, includes table and column names, so a
+		// same-shape query on a different table can never false-match).
+		// Reads served this way carry recorded rows for drifted literals —
+		// that is precisely what detection then names/learns and strict gates.
+		if shapeAware {
+			expShape, actShape := extractQueryShape(expectedQuery), extractQueryShape(actualQuery)
+			if expShape.ok && actShape.ok && expShape.template == actShape.template {
+				log.Debug("non-DML template matched under schema-noise",
+					zap.String("template", expShape.template))
+				return false, matchCount + 6
+			}
+		}
 		log.Debug("No Query is dml",
 			zap.String("expected query", expectedQuery),
 			zap.String("actual query", actualQuery))
@@ -1236,20 +1275,20 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	return false, matchCount
 }
 
-func matchQueryPacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
+func matchQueryPacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, shapeAware bool) (bool, int) {
 	getQuery := func(packet mysql.PacketBundle) string {
 		msg, _ := packet.Message.(*mysql.QueryPacket)
 		return msg.Query
 	}
-	return matchQuery(ctx, log, expected, actual, getQuery)
+	return matchQuery(ctx, log, expected, actual, getQuery, shapeAware)
 }
 
-func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
+func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, shapeAware bool) (bool, int) {
 	getQuery := func(packet mysql.PacketBundle) string {
 		msg, _ := packet.Message.(*mysql.StmtPreparePacket)
 		return msg.Query
 	}
-	return matchQuery(ctx, log, expected, actual, getQuery)
+	return matchQuery(ctx, log, expected, actual, getQuery, shapeAware)
 }
 
 // query-aware EXEC scoring.
