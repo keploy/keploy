@@ -1525,6 +1525,44 @@ func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
 }
 
 // NEW: kind-scoped getters used by Redis matcher
+// HasMocksByKind reports whether any loaded mock of the given kind satisfies
+// match, across all tiers (unfiltered, filtered, startup). It reads the live
+// trees on every call — no caching — and returns on the first match, so it
+// stays correct as the mock set is replaced between test-sets and allocates
+// nothing on the hot path. A nil per-kind tree means no such mocks were set.
+func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) bool) bool {
+	m.treesMu.RLock()
+	flt := m.filteredByKind[kind]
+	unf := m.unfilteredByKind[kind]
+	startup := m.startup
+	m.treesMu.RUnlock()
+
+	anyMatch := func(tree *TreeDb, requireKind bool) bool {
+		if tree == nil {
+			return false
+		}
+		found := false
+		tree.rangeValues(func(v interface{}) bool {
+			mock, ok := v.(*models.Mock)
+			if !ok || mock == nil {
+				return true
+			}
+			if requireKind && mock.Kind != kind {
+				return true
+			}
+			if match(mock) {
+				found = true
+				return false // stop ranging
+			}
+			return true
+		})
+		return found
+	}
+
+	// Per-kind trees already hold only this kind; the startup tree is mixed.
+	return anyMatch(unf, false) || anyMatch(flt, false) || anyMatch(startup, true)
+}
+
 func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	// Fetch pointer safely; the tree itself is responsible for its own safety.
 	m.treesMu.RLock()

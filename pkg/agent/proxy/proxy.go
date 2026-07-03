@@ -884,6 +884,87 @@ func (p *Proxy) getMockManager() *MockManager {
 	return p.mockManager
 }
 
+// replayTargetHasHTTP2Mock reports whether a kind:Http2 mock was recorded for
+// THIS connection's destination (sniHost + port). ALPN is negotiated
+// per-connection before any request is seen, so the decision must be scoped to
+// the destination being dialed: a session-global check ("any Http2 mock at
+// all") would push an HTTP/1.1 target onto h2 as soon as the session contains
+// any HTTP/2 target, and its recorded http/1.1 mock would never match.
+//
+// The check reads the live mock set on every call (via HasMocksByKind, which
+// short-circuits on the first match and allocates nothing). It is intentionally
+// NOT cached: the mock set is replaced between test-sets on the SAME manager,
+// so a cache keyed on manager identity would both miss Http2 mocks that first
+// load after it was built and carry a destination's h2 preference into a later
+// test-set where that destination is HTTP/1.1-only.
+func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
+	m := p.getMockManager()
+	if m == nil {
+		return false
+	}
+	return m.HasMocksByKind(models.HTTP2, func(mk *models.Mock) bool {
+		if mk.Spec.HTTP2Req == nil {
+			return false
+		}
+		h, pt := hostPortFromAuthority(mk.Spec.HTTP2Req.Authority, mk.Spec.HTTP2Req.Scheme)
+		return http2DestMatches(strings.ToLower(h), pt, sniHost, port)
+	})
+}
+
+// http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
+// aHost lower-cased) matches the connection destination sniHost:port. A
+// discriminator unknown on either side (missing port, missing SNI/host) is not
+// used to reject, so the match is never stricter than the data allows; but a
+// KNOWN mismatch (different port, or different host) rejects. At least one
+// discriminator must actually match — otherwise we'd fall back to the old
+// session-global behaviour.
+func http2DestMatches(aHost string, aPort int, sniHost string, port uint32) bool {
+	portKnown := port != 0 && aPort != 0
+	if portKnown && uint32(aPort) != port {
+		return false
+	}
+	hostKnown := sniHost != "" && aHost != ""
+	if hostKnown && !strings.EqualFold(aHost, sniHost) {
+		return false
+	}
+	return portKnown || hostKnown
+}
+
+// http2AuthorityMatchesDest parses a raw :authority and delegates to
+// http2DestMatches. Retained as the unit-test entry point.
+func http2AuthorityMatchesDest(authority, scheme, sniHost string, port uint32) bool {
+	aHost, aPort := hostPortFromAuthority(authority, scheme)
+	return http2DestMatches(strings.ToLower(aHost), aPort, sniHost, port)
+}
+
+// hostPortFromAuthority splits an HTTP/2 :authority (or a stored dst URL) into
+// host and port. When no explicit port is present the port is inferred from
+// the scheme (https/empty -> 443, http -> 80). Returns port 0 when unknown.
+func hostPortFromAuthority(authority, scheme string) (string, int) {
+	authority = strings.TrimSpace(authority)
+	if i := strings.Index(authority, "://"); i >= 0 { // tolerate a scheme prefix
+		authority = authority[i+3:]
+	}
+	if i := strings.IndexByte(authority, '/'); i >= 0 { // drop any path
+		authority = authority[:i]
+	}
+	if authority == "" {
+		return "", 0
+	}
+	if h, pStr, err := net.SplitHostPort(authority); err == nil {
+		if pNum, err := strconv.Atoi(pStr); err == nil {
+			return h, pNum
+		}
+		return h, 0
+	}
+	switch strings.ToLower(scheme) {
+	case "http":
+		return authority, 80
+	default: // https or unspecified: h2 egress is effectively always TLS
+		return authority, 443
+	}
+}
+
 // setMockManager replaces the current mock manager in a thread-safe manner.
 //
 // Swaps the new manager in while holding sessionMu, then closes the
@@ -1876,7 +1957,43 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			zap.Bool("speculative", speculativeDial != nil),
 		)
 		tlsStart := time.Now()
-		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		// On replay, decide the MITM's ALPN offer PER-CONNECTION. If THIS
+		// destination has a recorded kind:Http2 mock, advertise h2 so a client
+		// offering it stays on HTTP/2 and its request matches the mock (instead
+		// of being downgraded to http/1.1 and finding no matching mock). The
+		// check is scoped to the destination on purpose: a mixed session (some
+		// HTTP/2 targets, some HTTP/1.1) must not push the HTTP/1.1 targets onto
+		// h2, or their recorded http/1.1 mocks would never match. Record and
+		// http/1.1-only recordings are unaffected (PreferH2 stays false).
+		//
+		// The destination is (sniHost, port). port (destInfo.Port) is always
+		// known. sniHost is only known pre-handshake when it was pre-stored in
+		// SrcPortToDstURL — the CONNECT-tunnel / sidecar path (connect.go); on
+		// the transparent proxyless path the SNI only becomes available inside
+		// the handshake, so sniHost is empty here and scoping falls back to
+		// port-only (best-effort — see http2DestMatches). Port already
+		// disambiguates the common mixed-session case (services on different
+		// ports); same-port-different-host disambiguation only engages where
+		// sniHost is present.
+		hsCtx := ctx
+		if rule.Mode == models.MODE_TEST {
+			sniHost := ""
+			if v, ok := pTls.SrcPortToDstURL.Load(sourcePort); ok {
+				if s, ok := v.(string); ok {
+					sniHost, _ = hostPortFromAuthority(s, "")
+				}
+			}
+			preferH2 := rule.OutgoingOptions.PreferH2
+			if !preferH2 {
+				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
+			}
+			if preferH2 {
+				hsCtx = pTls.WithPreferH2(ctx)
+				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
+					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
+			}
+		}
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
 			zap.Int64("dur_ns", time.Since(tlsStart).Nanoseconds()),
