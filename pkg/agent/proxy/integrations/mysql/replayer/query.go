@@ -196,11 +196,15 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 						zap.String("hint", "check mappings.yaml: this TC has 0 mock_entries — its mock was dropped at record time (teardown lag or memory pressure)"),
 					)
 				}
-				logger.Error("Connection closing due to no matching mock found. Re-record mocks if the SQL query has changed.",
+				// next_step reuses the strict-aware guidance computed for the
+				// mismatch report above — under schemaNoiseStrict the accurate
+				// advice is "mark/learn the drifted fields", not "re-record".
+				logger.Error("Connection closing due to no matching mock found.",
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", miss.closestMock),
-					zap.Int("strict_rejected_candidates", miss.strictRejected))
+					zap.Int("strict_rejected_candidates", miss.strictRejected),
+					zap.String("next_step", nextSteps))
 				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
 				return models.NewMockMismatchError(baseErr, report)
 			}

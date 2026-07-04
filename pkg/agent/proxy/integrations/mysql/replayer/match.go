@@ -505,6 +505,16 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
 					// text and may still drift.
 					if !gate.allows(mock) {
+						// A strict-rejected exact-text candidate is still the
+						// closest mock for the mismatch report (parity with
+						// the EXECUTE branch) — without this the miss diff
+						// renders an empty "closest" query.
+						if bestPartialMock == nil || bestPartialQuery == "" {
+							bestPartialMock = mock
+							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
+								bestPartialQuery = qp.Query
+							}
+						}
 						continue
 					}
 					if windowActive && !mockInCurrentWindow(mock) {
@@ -533,6 +543,15 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			case sCOM_STMT_PREP:
 				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
 					if !gate.allows(mock) {
+						// Same as COM_QUERY above: keep the strict-rejected
+						// exact-text PREPARE as the closest candidate so the
+						// miss diff names the query instead of rendering empty.
+						if bestPartialMock == nil || bestPartialQuery == "" {
+							bestPartialMock = mock
+							if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
+								bestPartialQuery = sp.Query
+							}
+						}
 						continue
 					}
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true

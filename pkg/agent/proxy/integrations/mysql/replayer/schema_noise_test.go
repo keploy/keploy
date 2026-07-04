@@ -339,6 +339,33 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		}
 	})
 
+	t.Run("strict-rejected exact-text candidate still names closest query", func(t *testing.T) {
+		// Identical SQL text (exact match) but a drifting query attribute
+		// (CLIENT_QUERY_ATTRIBUTES) — strict must reject, and the miss must
+		// carry the candidate's query so the report diff isn't blank.
+		m := readbackMock("q1", recorded, "row-1", zeroTime())
+		m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket).Parameters =
+			[]mysql.Parameter{{Type: 254 /* MYSQL_TYPE_STRING */, Value: "recorded-attr"}}
+		exactReq := comQueryReq(recorded)
+		exactReq.PacketBundle.Message.(*mysql.QueryPacket).Parameters =
+			[]mysql.Parameter{{Type: 254, Value: "replay-attr"}}
+		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
+		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
+		_, ok, miss, err := matchCommand(context.Background(), logger, exactReq, db, newDecodeCtx(), eng, nil)
+		if err == nil && ok {
+			t.Fatal("strict must reject unmarked query-attribute drift even on an exact-text match")
+		}
+		if miss == nil || miss.closestMock != "q1" {
+			t.Fatalf("mismatch report should name the strict-rejected exact candidate, got %+v", miss)
+		}
+		if miss.closestQuery != recorded {
+			t.Errorf("miss must carry the exact candidate's query as closest, got %q", miss.closestQuery)
+		}
+		if miss.strictRejected == 0 {
+			t.Error("miss must count strict-rejected candidates")
+		}
+	})
+
 	t.Run("strict allows learned body.query noise", func(t *testing.T) {
 		m := readbackMock("q1", recorded, "row-1", zeroTime())
 		m.Spec.ReqBodyNoise = map[string][]string{"body.query": {}}
