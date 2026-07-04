@@ -53,8 +53,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		default:
 			commandCount++
 
-			logger.Debug("Starting new command iteration",
-				zap.Int("command_count", commandCount))
+			// logger.Debug("Starting new command iteration",
+			// zap.Int("command_count", commandCount))
 
 			// Set a read deadline on the client connection.
 			// opts.SQLDelay is a time.Duration; multiplying by time.Second (the old
@@ -71,16 +71,16 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("About to read next command from client",
-				zap.Int("command_count", commandCount),
-				zap.Duration("read_timeout", readTimeout))
+			// logger.Debug("About to read next command from client",
+			// 	zap.Int("command_count", commandCount),
+			// 	zap.Duration("read_timeout", readTimeout))
 
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					// Idle wait: keep the connection open and continue polling
-					logger.Debug("read timeout waiting for next client command; keeping connection open")
+					// logger.Debug("read timeout waiting for next client command; keeping connection open")
 					// Optional: back off a bit to avoid hot loop
 					time.Sleep(50 * time.Millisecond)
 					// Clear deadline or set another future deadline, then keep looping
