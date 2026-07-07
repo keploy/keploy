@@ -319,3 +319,51 @@ func TestMatch_CompareAll_JSONStillCompared(t *testing.T) {
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
 }
+
+// TestAssertionMatch_StatusCodeClass_ActualNon2xxPasses_3843 ensures that a status_code_class
+// assertion of "5xx" passes when the actual response status code is 500. This guards against
+// a regression where actualClass was computed from a hardcoded 200 instead of the real
+// response status code, causing status_code_class to always evaluate against "2xx".
+func TestAssertionMatch_StatusCodeClass_ActualNon2xxPasses_3843(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-status-code-class-5xx-pass",
+		Assertions: map[models.AssertionType]interface{}{
+			models.StatusCodeClass: "5xx",
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 500,
+	}
+
+	// Act
+	pass, result := AssertionMatch(tc, actualResponse, logger)
+
+	// Assert
+	assert.True(t, pass, "Should pass because the actual status code 500 is in the 5xx class")
+	require.NotNil(t, result)
+}
+
+// TestAssertionMatch_StatusCodeClass_ActualNon2xxFailsAgainst2xx_3843 ensures that a
+// status_code_class assertion of "2xx" fails when the actual response status code is 500.
+// Prior to the fix, actualClass was always "2xx" regardless of the actual response, so this
+// assertion would have incorrectly passed.
+func TestAssertionMatch_StatusCodeClass_ActualNon2xxFailsAgainst2xx_3843(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-status-code-class-2xx-fail",
+		Assertions: map[models.AssertionType]interface{}{
+			models.StatusCodeClass: "2xx",
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 500,
+	}
+
+	// Act
+	pass, result := AssertionMatch(tc, actualResponse, logger)
+
+	// Assert
+	assert.False(t, pass, "Should fail because the actual status code 500 is not in the 2xx class")
+	require.NotNil(t, result)
+}
