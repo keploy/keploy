@@ -224,6 +224,38 @@ func TestStoreMocksStream_CorruptMidStream_NoPartialPublish(t *testing.T) {
 	}
 }
 
+// A header with an absurd count must not pre-allocate a huge slice (the cap
+// bounds it) and must fail fast rather than accept it — the CodeQL untrusted
+// -allocation guard.
+func TestStoreMocksStream_HugeCountHeaderIsBounded(t *testing.T) {
+	RegisterHooks(&captureHook{})
+	a := newTestAgent()
+	prior := &ClientMockStorage{filtered: []*models.Mock{mkMock("prior", models.HTTP, time.Time{})}}
+	a.clientMocks.Store(uint64(0), prior)
+
+	// Header claims ~1 billion mocks; the body carries none.
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(models.MockStreamHeader{FilteredCount: 1 << 30}); err != nil {
+		t.Fatalf("encode header: %v", err)
+	}
+	header, dec := readHeaderAndDecoder(t, buf.Bytes())
+
+	var err error
+	alloc := measureAlloc(func() {
+		err = a.StoreMocksStream(context.Background(), header, dec)
+	})
+	if err == nil {
+		t.Fatal("expected error for a header whose count exceeds the body")
+	}
+	// 1<<30 *Mock pointers would be ~8 GiB; the cap keeps the upfront alloc tiny.
+	if alloc > 64<<20 {
+		t.Fatalf("pre-allocation not bounded: allocated %d bytes for an absurd header count", alloc)
+	}
+	if got := loadStorage(t, a); got != prior {
+		t.Fatal("prior snapshot replaced by a failed ingest")
+	}
+}
+
 // TestStoreMocksStream_LowerTransientAlloc verifies streaming decode avoids the
 // whole-message gob buffer (≈ the payload) that a single whole-payload decode
 // allocates. Uses exact TotalAlloc deltas, so it is deterministic — not flaky.
