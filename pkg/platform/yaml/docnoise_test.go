@@ -86,23 +86,21 @@ func TestNewDocNoise_DropsRegexValuesAndSorts(t *testing.T) {
 	}
 }
 
-// TestResolveReqBodyNoise_PrefersNewFallsBackToLegacy checks decode resolution:
-// noise.req wins, else the legacy req_body_noise map's keys are used (regex
-// values dropped).
-func TestResolveReqBodyNoise_PrefersNewFallsBackToLegacy(t *testing.T) {
-	// New noise.req present -> used directly.
-	got := ResolveReqBodyNoise(&DocNoise{Req: []string{"body.a"}}, map[string][]string{"body.legacy": {}})
-	if _, ok := got["body.a"]; !ok || len(got) != 1 {
-		t.Fatalf("must prefer noise.req, got %v", got)
+// TestResolveReqBodyNoise checks decode resolution: request-body schema noise is
+// taken from the unified noise.req list, mapping each path to an empty regex list
+// (path-only representation). An absent noise block resolves to nil.
+func TestResolveReqBodyNoise(t *testing.T) {
+	// noise.req present -> its paths become the noise map.
+	got := ResolveReqBodyNoise(&DocNoise{Req: []string{"body.a"}})
+	if v, ok := got["body.a"]; !ok || len(got) != 1 || len(v) != 0 {
+		t.Fatalf("must resolve noise.req to a path-only map, got %v", got)
 	}
 
-	// No noise.req -> fall back to legacy keys, dropping regex values.
-	got = ResolveReqBodyNoise(nil, map[string][]string{"body.legacy": {"^x.*$"}})
-	if v, ok := got["body.legacy"]; !ok || len(v) != 0 {
-		t.Fatalf("legacy fallback must keep key and drop regex, got %v", got)
+	// No noise.req -> nil, so omitempty drops the key.
+	if ResolveReqBodyNoise(nil) != nil {
+		t.Fatal("absent noise block must resolve to nil")
 	}
-
-	if ResolveReqBodyNoise(nil, nil) != nil {
-		t.Fatal("no noise anywhere must resolve to nil")
+	if ResolveReqBodyNoise(&DocNoise{}) != nil {
+		t.Fatal("empty noise.req must resolve to nil")
 	}
 }

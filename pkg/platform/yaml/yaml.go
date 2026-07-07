@@ -46,31 +46,20 @@ type NetworkTrafficDoc struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
-	// ReqBodyNoise is the LEGACY top-level schema-noise key (req_body_noise). It is
-	// no longer written — new mocks carry request-body noise under noise.req (see
-	// DocNoise) — but it is still read so older on-disk mocks keep matching. On
-	// decode its keys are folded into the unified noise via ResolveReqBodyNoise
-	// (regex values dropped, since the strict path only ever honoured whole-field
-	// "ignore"). Kept for backward compatibility only.
-	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty" yaml:"req_body_noise,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under
-// the single `noise:` key. It supersedes the older layout that split a top-level
-// `noise:` string list (value-regexes) from a separate `req_body_noise:` mapping.
+// the single `noise:` key.
 //
 //   - Req   — request-body field paths to ignore during schema/strict matching
 //     (e.g. "body.tier_type"). A plain list of paths: the strict path only ever
-//     honoured "ignore this whole field", so the legacy per-path regex values are
-//     intentionally dropped.
+//     honoured "ignore this whole field", so per-path regex values are not kept.
 //   - Value — exact-match value regexes written by the enterprise obfuscator
 //     (the former top-level `noise:` list, models.Mock.Noise).
 //
 // For backward compatibility the custom unmarshalers also accept the OLD shape
-// where `noise:` was a bare string list — that decodes into Value. The legacy
-// top-level `req_body_noise:` key is still read separately
-// (NetworkTrafficDoc.ReqBodyNoise) and folded into Req on decode. New writes only
-// emit this unified mapping.
+// where `noise:` was a bare string list — that decodes into Value. New writes
+// only emit this unified mapping.
 type DocNoise struct {
 	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
 	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
@@ -119,20 +108,11 @@ func pathsToNoiseMap(paths []string) map[string][]string {
 	return out
 }
 
-// ResolveReqBodyNoise picks the request-body schema noise for a decoded doc,
-// preferring the new unified noise.req list and falling back to the legacy
-// top-level req_body_noise map (whose keys are kept and regex values dropped, to
-// match the path-only representation). Returns nil when neither is present.
-func ResolveReqBodyNoise(noise *DocNoise, legacy map[string][]string) map[string][]string {
+// ResolveReqBodyNoise returns the request-body schema noise for a decoded doc,
+// taken from the unified noise.req list. Returns nil when it is absent.
+func ResolveReqBodyNoise(noise *DocNoise) map[string][]string {
 	if noise != nil && len(noise.Req) > 0 {
 		return pathsToNoiseMap(noise.Req)
-	}
-	if len(legacy) > 0 {
-		paths := make([]string, 0, len(legacy))
-		for k := range legacy {
-			paths = append(paths, k)
-		}
-		return pathsToNoiseMap(paths)
 	}
 	return nil
 }
