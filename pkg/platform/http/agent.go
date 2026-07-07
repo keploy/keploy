@@ -52,13 +52,6 @@ type AgentClient struct {
 	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
 	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
-
-	// storeMocksStreamOnce guards a one-time GET /capabilities probe;
-	// storeMocksStreamOK caches whether the connected agent accepts the
-	// streaming /storemocks body (Content-Type application/x-gob-stream). An
-	// old agent has no /capabilities route (404) → false → legacy whole-dump.
-	storeMocksStreamOnce sync.Once
-	storeMocksStreamOK   bool
 }
 
 // var initStopScript []byte
@@ -645,68 +638,21 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 
 }
 
-// StoreMocks ships the test-set's mock corpus to the agent. When the agent
-// advertises the "storemocks-stream" capability it streams the mocks one-by-one
-// (so neither side materializes the whole gob payload at once — the fix for the
-// auto-replay agent OOM); otherwise it falls back to the legacy whole-gob-dump.
+// StoreMocks streams the test-set's mock corpus to the agent one mock at a
+// time: a gob MockStreamHeader (counts) followed by one gob-encoded Mock per
+// frame, written through an io.Pipe so the client never buffers a second full
+// copy. The agent decodes mock-by-mock, keeping peak memory at ≈1× the corpus
+// (the fix for the auto-replay agent OOM). Client and agent ship in lockstep,
+// so this streaming format is the only StoreMocks wire format — there is no
+// legacy whole-dump and no capability negotiation. Order is filtered-then-
+// unfiltered so the agent's positional bucketing (by the header counts) lines up.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	if a.supportsStoreMocksStream(ctx) {
-		return a.storeMocksStreaming(ctx, filtered, unFiltered)
-	}
-	return a.storeMocksLegacy(ctx, filtered, unFiltered)
-}
-
-// supportsStoreMocksStream probes GET {AgentURI}/capabilities exactly once and
-// caches the result. A 404 (old agent, no such route), any transport/decode
-// error, or a missing capability → false → legacy path. The agent process is
-// fixed for a client's lifetime, so a one-time probe is sufficient; a transient
-// failure conservatively disables streaming (legacy still works correctly).
-func (a *AgentClient) supportsStoreMocksStream(ctx context.Context) bool {
-	a.storeMocksStreamOnce.Do(func() {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/capabilities", a.conf.Agent.AgentURI), nil)
-		if err != nil {
-			return
-		}
-		res, err := a.client.Do(req)
-		if err != nil {
-			return
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			return
-		}
-		var caps models.AgentCapabilities
-		if err := json.NewDecoder(res.Body).Decode(&caps); err != nil {
-			return
-		}
-		for _, c := range caps.Capabilities {
-			if c == models.CapabilityStoreMocksStream {
-				a.storeMocksStreamOK = true
-				return
-			}
-		}
-	})
-	return a.storeMocksStreamOK
-}
-
-// storeMocksStreaming writes the request body incrementally through an io.Pipe:
-// the magic line, one gob MockStreamHeader (with exact counts), then each
-// filtered mock followed by each unfiltered mock. The client never holds a full
-// second gob copy, and the agent decodes mock-by-mock. Order is filtered-then-
-// unfiltered so the agent's positional bucketing (by header counts) matches.
-func (a *AgentClient) storeMocksStreaming(ctx context.Context, filtered, unFiltered []*models.Mock) error {
 	pr, pw := io.Pipe()
 	go func() {
-		if _, err := io.WriteString(pw, models.StoreMocksStreamMagic); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
 		enc := gob.NewEncoder(pw)
 		if err := enc.Encode(models.MockStreamHeader{
 			FilteredCount:   len(filtered),
 			UnfilteredCount: len(unFiltered),
-			ProtoVersion:    models.StoreMocksStreamProtoVersion,
 		}); err != nil {
 			_ = pw.CloseWithError(err)
 			return
@@ -740,46 +686,10 @@ func (a *AgentClient) storeMocksStreaming(ctx context.Context, filtered, unFilte
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for storemocks stream")
-		return fmt.Errorf("create request for storemocks stream: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
-	req.Header.Set("Accept", "application/x-gob")
-
-	res, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("send request for storemocks stream: %s", err.Error())
-	}
-	defer res.Body.Close()
-	return decodeStoreMocksResp(res)
-}
-
-// storeMocksLegacy is the original whole-payload gob dump, kept for agents that
-// don't advertise the streaming capability.
-func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered, unFiltered []*models.Mock) error {
-	requestBody := models.StoreMocksReq{
-		Filtered:   filtered,
-		UnFiltered: unFiltered,
-	}
-
-	// gob-encode the body
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(requestBody); err != nil {
-		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks")
-		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
-	}
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI),
-		&buf,
-	)
-	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for storemocks")
 		return fmt.Errorf("create request for storemocks: %s", err.Error())
 	}
-	req.Header.Set("Content-Type", "application/x-gob")
+	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
 	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)

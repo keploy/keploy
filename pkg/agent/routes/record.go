@@ -64,7 +64,6 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 
 	r.Route("/agent", func(r chi.Router) {
 		r.Get("/health", a.Health)
-		r.Get("/capabilities", a.Capabilities)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mappings", a.HandleMappings)
@@ -218,21 +217,6 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
-}
-
-// Capabilities advertises optional protocol features a client can negotiate
-// before use. A new k8s-proxy probes this before StoreMocks: if
-// "storemocks-stream" is present it streams the mock corpus (Content-Type
-// application/x-gob-stream); an OLD agent has no such route (404) and the
-// client falls back to the legacy whole-gob-dump. Kept separate from /health
-// so the docker-compose healthcheck's plain "OK" body is never disturbed.
-func (a *Agent) Capabilities(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	render.JSON(w, r, models.AgentCapabilities{
-		Capabilities: []string{models.CapabilityStoreMocksStream},
-		ProtoVersion: models.StoreMocksStreamProtoVersion,
-	})
 }
 
 // HandlePcapStream is a long-lived chunked response that emits a

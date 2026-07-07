@@ -1,15 +1,15 @@
 package http_test
 
-// End-to-end negotiation test: a real chi router + real agent route handlers
+// End-to-end streaming test: a real chi router + real agent route handlers
 // (DefaultRoutes) wired to a stub Service, behind an httptest server, driven by
-// the real AgentClient. Proves the client probes /capabilities and streams to a
-// capable agent (real Content-Type dispatch → StoreMocksStream), and falls back
-// to the legacy whole-dump against an agent with no /capabilities route.
+// the real AgentClient. Proves the client streams the corpus and the real
+// /storemocks handler decodes the header and drives StoreMocksStream. Streaming
+// is the only wire format (client and agent ship in lockstep) — no negotiation,
+// no legacy fallback.
 
 import (
 	"context"
 	"encoding/gob"
-	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -72,8 +72,10 @@ func fixtures() (filtered, unfiltered []*models.Mock) {
 		[]*models.Mock{{Name: "u1", Kind: models.DNS}}
 }
 
-// New (capable) agent: real routes advertise storemocks-stream → client streams.
-func TestStoreMocks_NegotiatesStreamingWithCapableAgent(t *testing.T) {
+// End-to-end: the client streams to the real agent routes, which decode the
+// header and drive StoreMocksStream. (Streaming is the only path now — client
+// and agent ship in lockstep, so there's no negotiation or legacy fallback.)
+func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	svc := &stubSvc{}
 	r := chi.NewRouter()
 	routes.DefaultRoutes{}.New(r, svc, zap.NewNop())
@@ -90,42 +92,6 @@ func TestStoreMocks_NegotiatesStreamingWithCapableAgent(t *testing.T) {
 	defer svc.mu.Unlock()
 	if svc.streamCalls != 1 || svc.legacyCalls != 0 {
 		t.Fatalf("expected 1 stream call, 0 legacy; got stream=%d legacy=%d", svc.streamCalls, svc.legacyCalls)
-	}
-	if svc.filtered != len(f) || svc.unfiltered != len(u) {
-		t.Fatalf("counts mismatch: got f=%d u=%d want f=%d u=%d", svc.filtered, svc.unfiltered, len(f), len(u))
-	}
-}
-
-// Old agent: no /capabilities route (404) → client falls back to the legacy
-// whole-gob-dump. We mount only a legacy /agent/storemocks handler.
-func TestStoreMocks_FallsBackForOldAgent(t *testing.T) {
-	svc := &stubSvc{}
-	r := chi.NewRouter()
-	// Deliberately NO /capabilities. Legacy whole-payload decode handler.
-	r.Post("/agent/storemocks", func(w http.ResponseWriter, req *http.Request) {
-		var body models.StoreMocksReq
-		if err := gob.NewDecoder(req.Body).Decode(&body); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: false})
-			return
-		}
-		_ = svc.StoreMocks(req.Context(), body.Filtered, body.UnFiltered)
-		w.WriteHeader(http.StatusOK)
-		_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
-	})
-	srv := httptest.NewServer(r)
-	defer srv.Close()
-
-	client := newClient(t, srv.URL+"/agent")
-	f, u := fixtures()
-	if err := client.StoreMocks(context.Background(), f, u); err != nil {
-		t.Fatalf("StoreMocks: %v", err)
-	}
-
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	if svc.legacyCalls != 1 || svc.streamCalls != 0 {
-		t.Fatalf("expected 1 legacy call, 0 stream; got legacy=%d stream=%d", svc.legacyCalls, svc.streamCalls)
 	}
 	if svc.filtered != len(f) || svc.unfiltered != len(u) {
 		t.Fatalf("counts mismatch: got f=%d u=%d want f=%d u=%d", svc.filtered, svc.unfiltered, len(f), len(u))

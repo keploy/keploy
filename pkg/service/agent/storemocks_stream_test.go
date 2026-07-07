@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"io"
 	"runtime"
 	"testing"
 	"time"
@@ -51,14 +50,10 @@ func mkBigMock(name string, ts time.Time, body string) *models.Mock {
 func encodeStreamBody(t *testing.T, filtered, unfiltered []*models.Mock) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if _, err := io.WriteString(&buf, models.StoreMocksStreamMagic); err != nil {
-		t.Fatalf("write magic: %v", err)
-	}
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(models.MockStreamHeader{
 		FilteredCount:   len(filtered),
 		UnfilteredCount: len(unfiltered),
-		ProtoVersion:    models.StoreMocksStreamProtoVersion,
 	}); err != nil {
 		t.Fatalf("encode header: %v", err)
 	}
@@ -75,19 +70,11 @@ func encodeStreamBody(t *testing.T, filtered, unfiltered []*models.Mock) []byte 
 	return buf.Bytes()
 }
 
-// readHeaderAndDecoder consumes the magic + header from body (as the HTTP
-// handler does) and returns the header + a decoder positioned at the first mock.
+// readHeaderAndDecoder consumes the header from body (as the HTTP handler
+// does) and returns the header + a decoder positioned at the first mock.
 func readHeaderAndDecoder(t *testing.T, body []byte) (models.MockStreamHeader, *gob.Decoder) {
 	t.Helper()
-	r := bytes.NewReader(body)
-	magic := make([]byte, len(models.StoreMocksStreamMagic))
-	if _, err := io.ReadFull(r, magic); err != nil {
-		t.Fatalf("read magic: %v", err)
-	}
-	if string(magic) != models.StoreMocksStreamMagic {
-		t.Fatalf("bad magic %q", magic)
-	}
-	dec := gob.NewDecoder(r)
+	dec := gob.NewDecoder(bytes.NewReader(body))
 	var header models.MockStreamHeader
 	if err := dec.Decode(&header); err != nil {
 		t.Fatalf("decode header: %v", err)
