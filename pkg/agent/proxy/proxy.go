@@ -1246,6 +1246,39 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	return nil
 }
 
+// runSkipListenerFlush drives the proxyless (skipListener) recording path's
+// owned-window flush loop. Proxyless capture has no TCP accept loop, so it has
+// no analog to the listener path's periodic FlushOwnedWindows — the drain that
+// retro-bins a mock which landed in the syncMock buffer AFTER its ingress
+// window resolved (the async egress-parse-vs-ingress-resolve race, or a
+// keep-alive outbound call made while a request is being served). This method
+// restores that drain: it flushes on the given interval while recording is
+// live, and on ctx cancellation performs one final best-effort drain before
+// returning. That final drain is the shutdown twin of the periodic tick — the
+// enterprise persistMocks consumer keeps reading MC for a grace period past
+// ctx.Done, so a mock flushed here is still persisted before the consumer
+// exits. Deleting either the periodic tick or the final drain silently
+// reintroduces the lost-mock bug. It blocks until ctx is cancelled; start()
+// passes the production 1 s cadence, tests pass a shorter one for fast,
+// deterministic ticks.
+func (p *Proxy) runSkipListenerFlush(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if mgr := syncMock.Get(); mgr != nil {
+				mgr.FlushOwnedWindows()
+			}
+			return
+		case <-ticker.C:
+			if mgr := syncMock.Get(); mgr != nil {
+				mgr.FlushOwnedWindows()
+			}
+		}
+	}
+}
+
 // start function starts the proxy server on the idle local port.
 // When skipListener is true, no TCP listener is created.
 // The function blocks on ctx.Done and handles cleanup on shutdown.
@@ -1258,8 +1291,38 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// internal entry point so logs aren't duplicated.
 		p.logger.Debug("Proxy TCP listener skipped; DNS and session services active")
 		readyChan <- nil
-		// Block until context is cancelled, then run cleanup.
-		<-ctx.Done()
+
+		// Proxyless capture has no TCP accept loop. Ingress windows still
+		// resolve — ResolveRange fires from the ingress CaptureHook
+		// (pkg/agent/hooks/conn), not from a per-conn listener handler — so
+		// recentWindows IS populated on this path. What has no analog here is
+		// the listener path's *periodic* FlushOwnedWindows, which drains mocks
+		// that landed in the syncMock buffer AFTER their window resolved. An
+		// outbound mock that lands post-resolution — the async
+		// egress-parse-vs-ingress-resolve race, or a keep-alive outbound call
+		// made while the app is serving a request (firstReqSeen already true) —
+		// would then sit in the buffer until shutdown, where the cancelled
+		// recorder ctx drops it. That silently loses every post-first-request
+		// outbound mock (e.g. HTTP enrich calls) while the pre-firstReqSeen
+		// bootstrap calls, which bypass the buffer, survive. Mirror the listener
+		// path's periodic FlushOwnedWindows so recentWindows retro-bins each late
+		// mock into its already-resolved window and the healthy write path
+		// persists it. NOT CloseOutChan: skipListener mode has no
+		// clientConnErrGrp guaranteeing producers exited, so closing MC could
+		// race an in-flight send (see the note below).
+		//
+		// Known residual: a mock AddMock'd AFTER the final FlushOwnedWindows
+		// (below) still loses the shutdown-tail race — proxyless mode has no
+		// producer-quiescence barrier to flush behind. It is mitigated, not
+		// eliminated, by the enterprise persistMocks consumer continuing to read
+		// MC for a grace period past ctx.Done; a full fix needs a capture-layer
+		// drain signal and is tracked separately.
+
+		// Drive the periodic + final owned-window flush for the proxyless
+		// path. Blocks until ctx is cancelled: it drains attributable
+		// buffered mocks on a 1 s cadence while recording is live, then runs
+		// one final best-effort drain on shutdown. See runSkipListenerFlush.
+		p.runSkipListenerFlush(ctx, 1*time.Second)
 		// Intentionally do NOT close p.session.MC in the skipListener
 		// path. The non-skip path above closes MC only after
 		// clientConnErrGrp.Wait() guarantees every per-conn producer
