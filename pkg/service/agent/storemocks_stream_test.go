@@ -1,10 +1,6 @@
 package agent
 
-// Tests for the streaming /storemocks ingest (StoreMocksStream) — proving it
-// produces a ClientMockStorage byte-for-byte equivalent to the legacy whole
-// -slice StoreMocks, preserves order/lifetime/freeze-anchor, handles empty and
-// corrupt streams safely, and materializes far less transient memory than the
-// legacy whole-payload gob decode (the auto-replay OOM fix).
+// Tests for the streaming /storemocks ingest (StoreMocksStream).
 
 import (
 	"bytes"
@@ -30,10 +26,7 @@ func mkMock(name string, kind models.Kind, ts time.Time) *models.Mock {
 	}
 }
 
-// mkBigMock builds a mock carrying a large HTTP response body so the encoded
-// payload is dominated by real data — this is what makes the legacy whole
-// -message gob buffer (allocated ≈ full payload) measurably larger than the
-// streaming per-mock buffer.
+// mkBigMock carries a large HTTP body so the encoded payload is data-dominated.
 func mkBigMock(name string, ts time.Time, body string) *models.Mock {
 	return &models.Mock{
 		Name: name,
@@ -45,8 +38,7 @@ func mkBigMock(name string, ts time.Time, body string) *models.Mock {
 	}
 }
 
-// encodeStreamBody writes the on-wire streaming body exactly as the client
-// does (magic + gob header + each filtered then unfiltered mock).
+// encodeStreamBody writes the wire body: gob header, then filtered then unfiltered mocks.
 func encodeStreamBody(t *testing.T, filtered, unfiltered []*models.Mock) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -218,8 +210,7 @@ func TestStoreMocksStream_CorruptMidStream_NoPartialPublish(t *testing.T) {
 		mkMock("m3", models.HTTP, base),
 	}
 	body := encodeStreamBody(t, filtered, nil)
-	// Truncate to cut off partway through the mock values (keep magic+header
-	// and some bytes, drop the tail) so a mid-stream Decode fails.
+	// Cut off partway through the mock values so a mid-stream Decode fails.
 	truncated := body[:len(body)-15]
 	header, dec := readHeaderAndDecoder(t, truncated)
 	err := a.StoreMocksStream(context.Background(), header, dec)
@@ -233,16 +224,13 @@ func TestStoreMocksStream_CorruptMidStream_NoPartialPublish(t *testing.T) {
 	}
 }
 
-// TestStoreMocksStream_PeakMemory proves the streaming decode holds far less
-// transient memory than the legacy whole-payload gob decode for a large corpus.
-func TestStoreMocksStream_PeakMemory(t *testing.T) {
-	// Large per-mock bodies so the encoded payload is dominated by data: the
-	// legacy whole-payload decode reads the single ~N*bodyLen message into one
-	// gob buffer (≈ full payload) before decoding, while the streaming decoder
-	// only ever buffers one mock message at a time. That transient buffer is
-	// the difference the fix removes.
+// TestStoreMocksStream_LowerTransientAlloc verifies streaming decode avoids the
+// whole-message gob buffer (≈ the payload) that a single whole-payload decode
+// allocates. Uses exact TotalAlloc deltas, so it is deterministic — not flaky.
+func TestStoreMocksStream_LowerTransientAlloc(t *testing.T) {
 	const n = 3000
 	const bodyLen = 8 * 1024
+	const payload = n * bodyLen
 	body := string(bytes.Repeat([]byte("x"), bodyLen))
 	filtered := make([]*models.Mock, n)
 	base := time.Now()
@@ -250,12 +238,11 @@ func TestStoreMocksStream_PeakMemory(t *testing.T) {
 		filtered[i] = mkBigMock("mock-"+itoa(i), base, body)
 	}
 
-	// Legacy: decode the whole StoreMocksReq at once (raw body + full slice live together).
 	var legacyBuf bytes.Buffer
 	if err := gob.NewEncoder(&legacyBuf).Encode(models.StoreMocksReq{Filtered: filtered}); err != nil {
 		t.Fatalf("encode legacy: %v", err)
 	}
-	legacyPeak := measurePeak(func() {
+	legacyAlloc := measureAlloc(func() {
 		var req models.StoreMocksReq
 		if err := gob.NewDecoder(bytes.NewReader(legacyBuf.Bytes())).Decode(&req); err != nil {
 			t.Fatalf("legacy decode: %v", err)
@@ -263,9 +250,8 @@ func TestStoreMocksStream_PeakMemory(t *testing.T) {
 		runtime.KeepAlive(req)
 	})
 
-	// Streaming: decode into ClientMockStorage one mock at a time.
 	streamBody := encodeStreamBody(t, filtered, nil)
-	streamPeak := measurePeak(func() {
+	streamAlloc := measureAlloc(func() {
 		a := newTestAgent()
 		RegisterHooks(&captureHook{})
 		header, dec := readHeaderAndDecoder(t, streamBody)
@@ -274,53 +260,23 @@ func TestStoreMocksStream_PeakMemory(t *testing.T) {
 		}
 	})
 
-	t.Logf("transient alloc — legacy: %d KiB, stream: %d KiB (ratio %.2f)",
-		legacyPeak/1024, streamPeak/1024, float64(streamPeak)/float64(legacyPeak))
-	// The legacy whole-message gob buffer roughly doubles transient allocation
-	// vs streaming. Require a clear margin (streaming < 75% of legacy) so the
-	// test is a meaningful regression guard, not a coin flip.
-	if streamPeak >= legacyPeak*3/4 {
-		t.Fatalf("streaming transient alloc (%d) not clearly below legacy (%d)", streamPeak, legacyPeak)
+	saved := int64(legacyAlloc) - int64(streamAlloc)
+	t.Logf("transient alloc — legacy: %d KiB, stream: %d KiB, saved: %d KiB (payload %d KiB)",
+		legacyAlloc/1024, streamAlloc/1024, saved/1024, payload/1024)
+	if saved < payload/2 {
+		t.Fatalf("streaming should save ~the whole-message buffer (~%d bytes); saved only %d", payload, saved)
 	}
 }
 
-// measurePeak returns the peak live-heap growth (max HeapInuse delta over a
-// pre-GC baseline) observed WHILE fn runs. This captures the transient the OOM
-// is about: legacy holds gob's whole-message buffer AND the decoded objects at
-// once (~2×), while streaming holds the decoded objects plus one small frame
-// (~1×). A sampler goroutine polls HeapInuse in a tight loop; ReadMemStats is
-// expensive but that only perturbs timing, not correctness of the max.
-func measurePeak(fn func()) uint64 {
+// measureAlloc returns the bytes allocated by fn (TotalAlloc delta) — exact and
+// deterministic, unlike sampled peak-heap.
+func measureAlloc(fn func()) uint64 {
 	runtime.GC()
-	var base runtime.MemStats
-	runtime.ReadMemStats(&base)
-
-	stop := make(chan struct{})
-	result := make(chan uint64, 1)
-	go func() {
-		var peak uint64
-		var ms runtime.MemStats
-		for {
-			select {
-			case <-stop:
-				result <- peak
-				return
-			default:
-				runtime.ReadMemStats(&ms)
-				if ms.HeapInuse > peak {
-					peak = ms.HeapInuse
-				}
-			}
-		}
-	}()
-
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	fn()
-	close(stop)
-	peak := <-result
-	if peak < base.HeapInuse {
-		return 0
-	}
-	return peak - base.HeapInuse
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
 }
 
 func clone(in []*models.Mock) []*models.Mock {

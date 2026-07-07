@@ -32,17 +32,11 @@ type StoreMocksReq struct {
 	UnFiltered []*Mock `json:"unFiltered"`
 }
 
-// StoreMocksStreamContentType labels the /storemocks request body: a gob
-// MockStreamHeader followed by one gob-encoded Mock per frame. The agent and
-// the client that talks to it ship in lockstep (OSS bump → agent release →
-// k8s-proxy release), so this is the ONLY StoreMocks wire format — there is no
-// legacy whole-dump fallback and no capability negotiation.
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
-// MockStreamHeader is the first gob value on a /storemocks body. The counts let
-// the agent pre-size its slices exactly (peak ≈ 1× corpus, no append-doubling)
-// and derive bucket membership positionally: the first FilteredCount mock
-// values are filtered, the next UnfilteredCount are unfiltered. EOF ends it.
+// MockStreamHeader is the first gob value on a /storemocks body; the counts
+// pre-size the agent's slices and split the following mocks into filtered then
+// unfiltered.
 type MockStreamHeader struct {
 	FilteredCount   int `json:"filteredCount"`
 	UnfilteredCount int `json:"unfilteredCount"`

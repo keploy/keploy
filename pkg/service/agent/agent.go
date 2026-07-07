@@ -678,26 +678,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	return nil
 }
 
-// finalizeClientMocks publishes a fully-built storage as the active client
-// mock pool and seeds the freeze anchor. Shared by StoreMocks (legacy whole
-// slice) and StoreMocksStream (incremental decode) so both paths are
-// byte-identical downstream.
-//
-// The publish is a single sync.Map store, so a concurrent UpdateMockParams
-// (which Loads client 0) sees either the previous storage or the fully-built
-// new one — never a half-populated slice. Callers MUST finish building
-// `storage` before calling this.
+// finalizeClientMocks publishes a fully-built storage as the active client mock
+// pool (one sync.Map store, so a concurrent UpdateMockParams never sees a
+// half-built pool) and seeds the freeze anchor. Shared by StoreMocks and
+// StoreMocksStream.
 func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStorage) {
 	a.clientMocks.Store(uint64(0), storage)
 
-	// Compute the freeze anchor as the earliest ReqTimestampMock across the
-	// stored mocks and forward it to AgentHooks. The hook implementation
-	// decides whether to apply it (a no-op when freezeTime is off). Doing
-	// this here, alongside the StoreMocks write, guarantees the anchor is
-	// known to the hook before BeforeTestRun fires — i.e. before the user
-	// app's first datetime.now() call — which is what closes the bootstrap
-	// gap that lets boto3 / JWT libs see "now > recorded Expiration" and
-	// kill the worker.
 	if anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered); !anchor.IsZero() {
 		if err := ActiveHooks.SetFreezeAnchor(ctx, anchor); err != nil {
 			a.logger.Warn("SetFreezeAnchor hook returned error",
@@ -706,28 +693,10 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	}
 }
 
-// StoreMocksStream ingests a STREAMING /storemocks body. The caller (HTTP
-// handler) has already consumed the magic line and decoded `header`; `dec` is
-// positioned at the first mock value. It decodes exactly
-// header.FilteredCount + header.UnfilteredCount bare models.Mock values,
-// appending each to the correct bucket (first FilteredCount → filtered, the
-// rest → unfiltered), running DeriveLifetime per mock.
-//
-// Memory: only one decoded mock frame is live beyond the retained slices
-// (which are pre-sized from the header), so peak ≈ 1× corpus — versus the
-// legacy whole-payload gob decode which materializes the raw body buffer + a
-// full decoded []*Mock simultaneously (~2-3× corpus, the source of the
-// auto-replay agent OOM).
-//
-// Failure semantics: a gob decode error means the stream framing is
-// unrecoverable (the byte offset of the next value is lost), so we FAIL THE
-// WHOLE INGEST and leave the previously-published pool intact — we never
-// publish a partial storage. This deliberately differs from the encode-side
-// "skip a bad mock and continue" resilience, where values are independent.
-//
-// Downstream parity: order (wire order == source order) and per-load pointer
-// identity are preserved, so SortOrder/ID assignment and matching behave
-// exactly as with the legacy path.
+// StoreMocksStream decodes the mock corpus one frame at a time from dec (header
+// counts split it into filtered then unfiltered), runs DeriveLifetime per mock,
+// and publishes the built storage once. A decode error fails the whole ingest
+// and leaves the previously-published pool intact — no partial publish.
 func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHeader, dec *gob.Decoder) error {
 	if header.FilteredCount < 0 || header.UnfilteredCount < 0 {
 		return fmt.Errorf("storemocks stream: negative counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
@@ -739,13 +708,12 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	}
 
 	for i := 0; i < total; i++ {
-		// Honor cancellation periodically without paying a syscall per mock.
 		if i%1024 == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
-		var m models.Mock // fresh var each iteration → &m is a distinct heap object
+		var m models.Mock
 		if err := dec.Decode(&m); err != nil {
 			return fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err)
 		}

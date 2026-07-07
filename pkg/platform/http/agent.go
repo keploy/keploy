@@ -638,14 +638,9 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 
 }
 
-// StoreMocks streams the test-set's mock corpus to the agent one mock at a
-// time: a gob MockStreamHeader (counts) followed by one gob-encoded Mock per
-// frame, written through an io.Pipe so the client never buffers a second full
-// copy. The agent decodes mock-by-mock, keeping peak memory at ≈1× the corpus
-// (the fix for the auto-replay agent OOM). Client and agent ship in lockstep,
-// so this streaming format is the only StoreMocks wire format — there is no
-// legacy whole-dump and no capability negotiation. Order is filtered-then-
-// unfiltered so the agent's positional bucketing (by the header counts) lines up.
+// StoreMocks streams the mock corpus to the agent over an io.Pipe: a gob
+// MockStreamHeader, then filtered mocks followed by unfiltered mocks, one gob
+// frame each.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	pr, pw := io.Pipe()
 	go func() {

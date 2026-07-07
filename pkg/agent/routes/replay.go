@@ -110,16 +110,8 @@ func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
-// StoreMocks receives the test-set's mock corpus as a STREAM: one gob
-// MockStreamHeader (counts), then header.FilteredCount+UnfilteredCount bare
-// gob Mock values. It decodes the header, then hands the live decoder to the
-// service's StoreMocksStream, which decodes mock-by-mock so the agent never
-// materializes the whole gob payload + a full decoded slice at once (the
-// ~2-3× transient that OOM-kills the auto-replay agent). Client and agent
-// ship in lockstep, so this is the only wire format — no legacy whole-dump
-// path and no capability negotiation. StoreMocksStream is reached via a
-// type-assertion so the agent.Service interface stays unchanged (same pattern
-// as BeginTestErrorCapture). Response is a single AgentResp gob.
+// StoreMocks receives the mock corpus as a stream: a gob MockStreamHeader
+// followed by one gob Mock per frame, decoded mock-by-mock by StoreMocksStream.
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
