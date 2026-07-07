@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -672,6 +673,21 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 		}
 	}
 
+	a.finalizeClientMocks(ctx, storage)
+	a.logger.Debug("Successfully stored mocks for client")
+	return nil
+}
+
+// finalizeClientMocks publishes a fully-built storage as the active client
+// mock pool and seeds the freeze anchor. Shared by StoreMocks (legacy whole
+// slice) and StoreMocksStream (incremental decode) so both paths are
+// byte-identical downstream.
+//
+// The publish is a single sync.Map store, so a concurrent UpdateMockParams
+// (which Loads client 0) sees either the previous storage or the fully-built
+// new one — never a half-populated slice. Callers MUST finish building
+// `storage` before calling this.
+func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStorage) {
 	a.clientMocks.Store(uint64(0), storage)
 
 	// Compute the freeze anchor as the earliest ReqTimestampMock across the
@@ -688,8 +704,64 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 				zap.Error(err), zap.Time("anchor", anchor))
 		}
 	}
+}
 
-	a.logger.Debug("Successfully stored mocks for client")
+// StoreMocksStream ingests a STREAMING /storemocks body. The caller (HTTP
+// handler) has already consumed the magic line and decoded `header`; `dec` is
+// positioned at the first mock value. It decodes exactly
+// header.FilteredCount + header.UnfilteredCount bare models.Mock values,
+// appending each to the correct bucket (first FilteredCount → filtered, the
+// rest → unfiltered), running DeriveLifetime per mock.
+//
+// Memory: only one decoded mock frame is live beyond the retained slices
+// (which are pre-sized from the header), so peak ≈ 1× corpus — versus the
+// legacy whole-payload gob decode which materializes the raw body buffer + a
+// full decoded []*Mock simultaneously (~2-3× corpus, the source of the
+// auto-replay agent OOM).
+//
+// Failure semantics: a gob decode error means the stream framing is
+// unrecoverable (the byte offset of the next value is lost), so we FAIL THE
+// WHOLE INGEST and leave the previously-published pool intact — we never
+// publish a partial storage. This deliberately differs from the encode-side
+// "skip a bad mock and continue" resilience, where values are independent.
+//
+// Downstream parity: order (wire order == source order) and per-load pointer
+// identity are preserved, so SortOrder/ID assignment and matching behave
+// exactly as with the legacy path.
+func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHeader, dec *gob.Decoder) error {
+	if header.FilteredCount < 0 || header.UnfilteredCount < 0 {
+		return fmt.Errorf("storemocks stream: negative counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
+	}
+	total := header.FilteredCount + header.UnfilteredCount
+	storage := &ClientMockStorage{
+		filtered:   make([]*models.Mock, 0, header.FilteredCount),
+		unfiltered: make([]*models.Mock, 0, header.UnfilteredCount),
+	}
+
+	for i := 0; i < total; i++ {
+		// Honor cancellation periodically without paying a syscall per mock.
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		var m models.Mock // fresh var each iteration → &m is a distinct heap object
+		if err := dec.Decode(&m); err != nil {
+			return fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err)
+		}
+		mock := &m
+		mock.DeriveLifetime()
+		if i < header.FilteredCount {
+			storage.filtered = append(storage.filtered, mock)
+		} else {
+			storage.unfiltered = append(storage.unfiltered, mock)
+		}
+	}
+
+	a.finalizeClientMocks(ctx, storage)
+	a.logger.Debug("Successfully stored streamed mocks for client",
+		zap.Int("filtered", len(storage.filtered)),
+		zap.Int("unfiltered", len(storage.unfiltered)))
 	return nil
 }
 

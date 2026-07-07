@@ -32,6 +32,44 @@ type StoreMocksReq struct {
 	UnFiltered []*Mock `json:"unFiltered"`
 }
 
+// StoreMocksStreamMagic is the version-tagged header written (raw, before the
+// gob stream) at the start of a streaming /storemocks request body. It lets
+// the agent positively identify a stream and reject a mis-routed legacy body.
+// Bump the version suffix if the on-wire frame layout ever changes.
+const StoreMocksStreamMagic = "keploy-storemocks-stream-v1\n"
+
+// StoreMocksStreamContentType is the Content-Type that selects the streaming
+// decode path on the agent's /storemocks handler. The legacy single-dump path
+// uses application/x-gob.
+const StoreMocksStreamContentType = "application/x-gob-stream"
+
+// MockStreamHeader is the first gob value on a streaming /storemocks body,
+// after the magic line. The counts let the agent pre-size its slices exactly
+// (peak ≈ 1× corpus, no append-doubling), and bucket membership is derived
+// positionally: the first FilteredCount mock values are filtered, the next
+// UnfilteredCount are unfiltered. EOF terminates the stream.
+type MockStreamHeader struct {
+	FilteredCount   int `json:"filteredCount"`
+	UnfilteredCount int `json:"unfilteredCount"`
+	ProtoVersion    int `json:"protoVersion"`
+}
+
+// StoreMocksStreamProtoVersion is the current streaming protocol version,
+// carried in MockStreamHeader.ProtoVersion.
+const StoreMocksStreamProtoVersion = 1
+
+// CapabilityStoreMocksStream is advertised by an agent that accepts a
+// streaming /storemocks body (Content-Type StoreMocksStreamContentType).
+const CapabilityStoreMocksStream = "storemocks-stream"
+
+// AgentCapabilities is the JSON body returned by GET /agent/capabilities. A
+// new client probes this before choosing the streaming vs legacy StoreMocks
+// path; an old agent has no such route (404) → client falls back to legacy.
+type AgentCapabilities struct {
+	Capabilities []string `json:"capabilities"`
+	ProtoVersion int      `json:"protoVersion"`
+}
+
 type MockFilterParams struct {
 	AfterTime          time.Time            `json:"afterTime,omitempty"`
 	BeforeTime         time.Time            `json:"beforeTime,omitempty"`

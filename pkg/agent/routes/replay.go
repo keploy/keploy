@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -112,6 +114,17 @@ func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
+	// Streaming path: a new k8s-proxy sends the mock corpus mock-by-mock
+	// (Content-Type application/x-gob-stream) so the agent never materializes
+	// the whole gob payload + a full decoded slice at once — the transient
+	// that OOM-kills the auto-replay agent. Selected by Content-Type; an old
+	// client (or any non-stream body) falls through to the legacy whole-decode
+	// below, so a new agent still serves old clients.
+	if r.Header.Get("Content-Type") == models.StoreMocksStreamContentType {
+		a.storeMocksStream(w, r)
+		return
+	}
+
 	var storeMocksReq models.StoreMocksReq
 	if err := gob.NewDecoder(r.Body).Decode(&storeMocksReq); err != nil {
 		storeMocksRes := models.AgentResp{
@@ -136,6 +149,53 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}
 	_ = gob.NewEncoder(w).Encode(storeMocksRes)
+}
+
+// storeMocksStream handles the streaming /storemocks body: raw magic line, one
+// gob MockStreamHeader, then header.FilteredCount+UnfilteredCount bare Mock
+// values. It verifies the magic, decodes the header, then hands the live
+// decoder to the service's StoreMocksStream (accessed via a capability
+// type-assertion so the agent.Service interface stays unchanged — same pattern
+// as BeginTestErrorCapture). Response framing (a single AgentResp gob) matches
+// the legacy path so the client decode is identical.
+func (a *Agent) storeMocksStream(w http.ResponseWriter, r *http.Request) {
+	writeErr := func(status int, err error) {
+		w.WriteHeader(status)
+		_ = gob.NewEncoder(w).Encode(models.AgentResp{Error: err, IsSuccess: false})
+	}
+
+	magic := make([]byte, len(models.StoreMocksStreamMagic))
+	if _, err := io.ReadFull(r.Body, magic); err != nil {
+		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks stream: read magic: %w", err))
+		return
+	}
+	if string(magic) != models.StoreMocksStreamMagic {
+		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks stream: unrecognized magic %q", magic))
+		return
+	}
+
+	dec := gob.NewDecoder(r.Body)
+	var header models.MockStreamHeader
+	if err := dec.Decode(&header); err != nil {
+		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks stream: decode header: %w", err))
+		return
+	}
+
+	streamer, ok := a.svc.(interface {
+		StoreMocksStream(context.Context, models.MockStreamHeader, *gob.Decoder) error
+	})
+	if !ok {
+		writeErr(http.StatusInternalServerError, fmt.Errorf("storemocks stream: service does not support streaming"))
+		return
+	}
+
+	err := streamer.StoreMocksStream(r.Context(), header, dec)
+	if err != nil {
+		writeErr(http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 }
 
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
