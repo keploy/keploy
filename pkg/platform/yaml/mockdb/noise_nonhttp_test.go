@@ -32,7 +32,7 @@ func genericNoiseMock(name string) *models.Mock {
 // TestNonHTTPNoise_YAMLRoundTrip is the core of the persistence blocker: a
 // non-HTTP mock's learned MockSpec.ReqBodyNoise must survive the YAML encode →
 // disk → decode cycle. The per-kind GenericSchema envelope has no field for it,
-// so it rides on the shared NetworkTrafficDoc.ReqBodyNoise and is restored to
+// so it rides on the shared unified noise.req block and is restored to
 // MockSpec on read.
 func TestNonHTTPNoise_YAMLRoundTrip(t *testing.T) {
 	mock := genericNoiseMock("mock-0")
@@ -191,10 +191,7 @@ func reqNoiseHas(n *yaml.DocNoise, path string) bool {
 
 // TestLegacyNoiseFormats_StillDecode is the backward-compatibility guard: a mock
 // written in the OLD on-disk shape — a top-level `noise:` string list (obfuscator
-// value-regexes) plus a separate `req_body_noise:` map (with per-path regex values)
-// — must still decode. The legacy noise list folds into value-noise (Mock.Noise),
-// the req_body_noise keys fold into MockSpec.ReqBodyNoise, and the now-unused regex
-// values are dropped.
+// value-regexes) — must still decode, folding into value-noise (Mock.Noise).
 func TestLegacyNoiseFormats_StillDecode(t *testing.T) {
 	raw := []byte(`version: api.keploy.io/v1beta1
 kind: Http
@@ -213,9 +210,6 @@ spec:
     body: '{"ok":true}'
 noise:
   - "^tok-.*$"
-req_body_noise:
-  body.a: ["^x.*$"]
-  body.b: []
 `)
 
 	doc, err := yaml.UnmarshalDoc(yaml.FormatYAML, raw)
@@ -238,16 +232,5 @@ req_body_noise:
 
 	if len(m.Noise) != 1 || m.Noise[0] != "^tok-.*$" {
 		t.Fatalf("Mock.Noise must come from the legacy noise list, got %v", m.Noise)
-	}
-	rb := m.Spec.ReqBodyNoise
-	if _, ok := rb["body.a"]; !ok {
-		t.Fatalf("legacy req_body_noise key body.a lost on decode: %v", rb)
-	}
-	if _, ok := rb["body.b"]; !ok {
-		t.Fatalf("legacy req_body_noise key body.b lost on decode: %v", rb)
-	}
-	// The legacy per-path regex value must be dropped (req noise is path-only now).
-	if len(rb["body.a"]) != 0 {
-		t.Fatalf("legacy regex value on body.a must be dropped, got %v", rb["body.a"])
 	}
 }

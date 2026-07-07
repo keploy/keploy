@@ -59,11 +59,6 @@ type NetworkTrafficDocJSON struct {
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId,omitempty"`
-	// ReqBodyNoise mirrors NetworkTrafficDoc.ReqBodyNoise: the LEGACY top-level
-	// req_body_noise key, no longer written but still read so older on-disk mocks
-	// keep matching. New mocks carry request-body noise under noise.req (DocNoise);
-	// on decode this legacy map's keys are folded in via ResolveReqBodyNoise.
-	ReqBodyNoise map[string][]string `json:"req_body_noise,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
@@ -88,7 +83,6 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
 		ConnectionID: doc.ConnectionID,
-		ReqBodyNoise: doc.ReqBodyNoise, // legacy read-through (see DocNoise)
 	}, nil
 }
 
@@ -153,7 +147,6 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,
 		ConnectionID: jsonDoc.ConnectionID,
-		ReqBodyNoise: jsonDoc.ReqBodyNoise, // legacy read-through (see DocNoise)
 	}
 
 	// Convert json.RawMessage to a generic interface, then encode into yaml.Node
