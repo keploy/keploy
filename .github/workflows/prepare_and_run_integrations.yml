@@ -67,9 +67,21 @@ jobs:
     steps:
       - name: Upload latest release
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_linux_amd64.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
+          # Fetch the latest released keploy binary. Use the
+          # /releases/latest/download/ redirect instead of an unauthenticated
+          # api.github.com call: that API is rate-limited to 60 req/hr/IP on
+          # shared runners, and when it throttles `jq .tag_name` returns null,
+          # the download URL 404s, and `curl -L` (no -f) silently saves the
+          # HTML error page so `tar` dies with "not in gzip format". -f fails
+          # on any HTTP error, --retry rides out transient blips, and the gzip
+          # check turns a bad asset into a clear message, not a cryptic tar error.
+          URL="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 "$URL" -o keploy.tar.gz
+          if ! gzip -t keploy.tar.gz 2>/dev/null; then
+            echo "::error::Downloaded keploy.tar.gz is not a valid gzip archive (latest release asset unavailable?)"
+            head -c 200 keploy.tar.gz || true
+            exit 1
+          fi
           tar -xzf keploy.tar.gz
           chmod +x keploy
       - uses: actions/upload-artifact@v4
