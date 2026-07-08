@@ -1116,6 +1116,37 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 // SrcPortToDstURL map is used to store the mapping between source port and DstURL for the TLS connection
 var SrcPortToDstURL = sync.Map{}
 
+// srcPortOwner tracks which live connection currently owns a source port,
+// keyed by source port → owner token (the connection's unique id). It exists
+// solely to make the delete-on-close of SrcPortToDstURL safe against source
+// port recycling: the OS reuses a client source port once the previous
+// connection's socket is closed, and that close happens (LIFO) before the
+// previous connection's deferred cleanup runs — so without an ownership check
+// the older connection's cleanup would clobber the NEW connection's freshly
+// stored mapping. CompareAndDelete on the owner token is the linearization
+// point: whichever connection currently owns the port is the only one allowed
+// to delete its mapping.
+var srcPortOwner = sync.Map{}
+
+// ClaimSrcPort records token as the current owner of port. The newest
+// connection on a (possibly recycled) source port wins, overwriting any stale
+// owner left by a previous connection whose cleanup has not yet run.
+func ClaimSrcPort(port int, token int64) {
+	srcPortOwner.Store(port, token)
+}
+
+// ReleaseSrcPortIfOwner deletes port's SrcPortToDstURL mapping, but ONLY if
+// token still owns the port — i.e. no newer connection has reclaimed the
+// recycled port in the meantime. Returns true when it actually deleted.
+// Safe to call for non-CONNECT/non-TLS connections (the keys are simply absent).
+func ReleaseSrcPortIfOwner(port int, token int64) bool {
+	if srcPortOwner.CompareAndDelete(port, token) {
+		SrcPortToDstURL.Delete(port)
+		return true
+	}
+	return false
+}
+
 var setLogLevelOnce sync.Once
 
 // certCache caches generated TLS certificates by hostname to avoid regenerating

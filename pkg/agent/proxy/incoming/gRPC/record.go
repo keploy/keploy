@@ -25,7 +25,7 @@ import (
 // This passthrough approach is compatible with cmux and any other listener wrapper
 // because it forwards the client's original HTTP/2 handshake directly to the app
 // without creating a separate gRPC session.
-func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string) error {
+func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool) error {
 	// Close connections on ctx cancellation to unblock all goroutines.
 	// This ensures no goroutine leaks during shutdown/StopIngress.
 	go func() {
@@ -68,15 +68,21 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true)
 	}()
 
+	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
+	// emitCompleteStreams does not need to carry those as parameters.
+	captureStream := func(stream *pkg.HTTP2Stream) {
+		Utils.CaptureGRPC(ctx, logger, t, stream, appPort, synchronous, mapping)
+	}
+
 	// Single emitter goroutine to avoid duplicate test case emission.
 	emitCh := make(chan struct{}, 1)
 	emitDone := make(chan struct{})
 	go func() {
 		defer close(emitDone)
 		for range emitCh {
-			emitCompleteStreams(logger, ctx, sm, t, appPort)
+			emitCompleteStreams(logger, sm, captureStream)
 		}
-		emitCompleteStreams(logger, ctx, sm, t, appPort)
+		emitCompleteStreams(logger, sm, captureStream)
 	}()
 
 	triggerEmit := func() {
@@ -243,10 +249,11 @@ func drainFrameChunks(ch <-chan frameChunk) {
 }
 
 // emitCompleteStreams checks the stream manager for complete request/response
-// pairs and sends them as test cases. Only called from the single emitter
-// goroutine to prevent duplicate emissions.
-func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.DefaultStreamManager, t chan *models.TestCase, appPort uint16) {
-	if t == nil || memoryguard.IsRecordingPaused() {
+// pairs and dispatches each via capture. Only called from the single emitter
+// goroutine to prevent duplicate emissions. ctx, t, appPort, synchronous, and
+// mapping are captured by the closure that RecordIncoming passes as capture.
+func emitCompleteStreams(logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream)) {
+	if capture == nil || memoryguard.IsRecordingPaused() {
 		return
 	}
 
@@ -261,7 +268,7 @@ func emitCompleteStreams(logger *zap.Logger, ctx context.Context, sm *pkg.Defaul
 			method = path
 		}
 		logger.Debug("captured gRPC test case (passthrough)", zap.String("method", method))
-		Utils.CaptureGRPC(ctx, logger, t, stream, appPort)
+		capture(stream)
 		sm.CleanupStream(stream.ID)
 	}
 }

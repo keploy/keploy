@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -204,10 +205,60 @@ func resetAllPressure() {
 	applyPausedState(false)
 }
 
+// pressureHooks are additional sinks for the memory-pressure signal,
+// registered via RegisterPressureHook. The decision to pause is global
+// (pod-level cgroup memory), but the buffered mocks that consume that memory
+// can live in many sync-mock managers — e.g. the multi-app agent runs one
+// manager per app and the package-global Get() manager is then unused. A
+// composer registers a hook that fans the pressure out to all its live
+// managers so the relief actually reaches the buffers.
+var (
+	pressureHookMu  sync.RWMutex
+	pressureHooks   = map[uint64]func(paused bool){}
+	pressureHookSeq uint64
+)
+
+// RegisterPressureHook adds fn to the set invoked by applyPausedState
+// alongside the package-global manager and returns an unregister func that
+// removes it again. A multi-app composer that registers one hook per app/
+// session MUST call the returned func when that session ends, otherwise the
+// hook — and everything its closure captures (the session's SyncMockManager
+// and its buffers) — is pinned for the life of the process and re-invoked on
+// every pressure transition. The returned func is idempotent and safe to call
+// from any goroutine; calling it more than once is a no-op. Safe for
+// concurrent use.
+func RegisterPressureHook(fn func(paused bool)) (unregister func()) {
+	if fn == nil {
+		return func() {}
+	}
+	pressureHookMu.Lock()
+	pressureHookSeq++
+	id := pressureHookSeq
+	pressureHooks[id] = fn
+	pressureHookMu.Unlock()
+	return func() {
+		pressureHookMu.Lock()
+		delete(pressureHooks, id)
+		pressureHookMu.Unlock()
+	}
+}
+
 func applyPausedState(paused bool) {
 	recordingPaused.Store(paused)
+	// Global manager: the buffering manager in single-app mode.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetMemoryPressure(paused)
+	}
+	// Fan out to registered managers (multi-app: one per app). The global
+	// trigger stays global; only the action reaches every live buffer.
+	pressureHookMu.RLock()
+	hooks := make([]func(paused bool), 0, len(pressureHooks))
+	for _, fn := range pressureHooks {
+		hooks = append(hooks, fn)
+	}
+	pressureHookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(paused)
 	}
 }
 

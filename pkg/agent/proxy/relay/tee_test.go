@@ -174,3 +174,53 @@ func TestTee_CloseIsIdempotent(t *testing.T) {
 	tt.close() // must not panic
 	tt.waitDone()
 }
+
+// TestTee_StagedChunkSurvivesClose is the regression guard for the
+// "server closed before response" startup-mock drop. When the upstream
+// sends a full Content-Length response then immediately closes the
+// connection (Connection: close), the forwarder pushes the response
+// chunk into staging and exits, and the relay then calls close() — which
+// fires the shutdown channel. The old drain loop selected between
+// delivering the chunk to out and dropping it on shutdown, so a fully
+// recorded response chunk was discarded on roughly half the teardowns,
+// intermittently dropping the boot-time startup mock from a test set.
+//
+// A chunk that was successfully admitted to staging before close() MUST
+// be delivered to out, never dropped: out shares staging's capacity and
+// close() halts further pushes, so the bounded tail always fits. The
+// loop runs many close races to make the old coin-flip behaviour fail
+// deterministically (it would drop on ~50% of iterations).
+func TestTee_StagedChunkSurvivesClose(t *testing.T) {
+	t.Parallel()
+	const iters = 200
+	for i := 0; i < iters; i++ {
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<30, 4, nil, rec.record, nil)
+
+		// Admit a chunk into staging, then immediately tear the tee
+		// down — mirroring the forwarder pushing the final response
+		// chunk and the relay closing the tee right behind it.
+		if !tt.push(mkChunk("startup-secret-response")) {
+			t.Fatalf("iter %d: push returned false unexpectedly", i)
+		}
+		tt.close()
+
+		// The consumer (parser) drains out after teardown. Every chunk
+		// admitted to staging must come out — none may be dropped.
+		var got int
+		for c := range tt.readCh() {
+			if string(c.Bytes) != "startup-secret-response" {
+				t.Fatalf("iter %d: unexpected chunk %q", i, c.Bytes)
+			}
+			got++
+		}
+		tt.waitDone()
+
+		if got != 1 {
+			t.Fatalf("iter %d: delivered %d chunks, want 1 (chunk dropped on teardown)", i, got)
+		}
+		if d := rec.count(DropChannelFull) + rec.count(DropMemoryPressure) + rec.count(DropPerConnCap); d != 0 {
+			t.Fatalf("iter %d: unexpected push-side drops: %v", i, rec.snapshot())
+		}
+	}
+}

@@ -247,7 +247,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 		}
 	}()
 
-	defer close(appErrChan)
+	// appErrChan is intentionally NOT closed by Start. The app-runner goroutine
+	// spawned in runAppErrGrp (the DockerCompose branch at ~308 and the
+	// non-compose branch at ~518) sends the app's exit error on it and can
+	// still be running when Start returns during shutdown: on SIGTERM the app
+	// exits with "signal: terminated" (not ErrCtxCanceled), so the goroutine
+	// reaches its `appErrChan <- runAppError` send. Closing the channel here
+	// raced that send and panicked with "send on closed channel" (seen in the
+	// pulsar-basetopic teardown). The sole consumer is a single receive in the
+	// select below that does not depend on a close, and the size-1 buffer
+	// absorbs the lone send (the two sender branches are mutually exclusive),
+	// so leaving the channel open to be GC'd is correct and race-free.
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
@@ -309,7 +319,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		// Aligned with the agent's own healthcheck budget; a fixed 120s wait gave
+		// up while the agent container was still starting under CI daemon
+		// contention. See pkg.AgentReadyTimeout (KEPLOY_AGENT_READY_TIMEOUT).
+		agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)

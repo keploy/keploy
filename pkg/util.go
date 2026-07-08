@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -605,6 +607,104 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
+// maxConnRefusedRetries bounds how many times a replay test request is re-sent
+// when the connection is REFUSED before the app accepts it. A refused connection
+// proves the app never received the request — zero bytes sent, zero single-use
+// mocks consumed — so re-sending is safe and does NOT fabricate a result: it
+// obtains the real response the suite must assert on instead of a false
+// status_code=0. We deliberately do NOT retry a mid-response reset (ECONNRESET),
+// EOF, or broken pipe: those can occur AFTER the app read the request and
+// consumed mocks, where a retry would re-run non-idempotent logic against
+// exhausted mocks and fabricate a verdict. Under CI contention an app container
+// can briefly refuse while still coming up; this turns that transient transport
+// failure into the real comparison rather than a flaky false regression.
+const (
+	maxConnRefusedRetries   = 3
+	connRefusedRetryBackoff = 150 * time.Millisecond
+)
+
+// isPreResponseConnRefused reports whether err is a pure "connection refused".
+// errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
+// syscall.Errno chain, so no manual unwrapping is needed.
+func isPreResponseConnRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// IsTransportConnReset reports whether err is a transport-level connection
+// reset / unexpected close while exchanging the request with the app — i.e.
+// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
+// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
+// connection.
+//
+// This class is dominated, under loaded CI replaying a DOCKER app, by docker's
+// userland proxy (docker-proxy) resetting a freshly-accepted host-side
+// connection during connection setup / before the backend app ever processes
+// the request. The CLI dials the published host port ([::1]:<port>) and sees
+//
+//	read tcp [::1]:<ephem>-><[::1]:<port>: read: connection reset by peer
+//
+// even for a request whose handler makes no downstream calls — proving the
+// reset is in the host<->proxy hop, not the app's response logic.
+//
+// IMPORTANT: a reset is, by the error alone, AMBIGUOUS about whether the app
+// already consumed single-use mocks (a mid-stream reset after the handler ran
+// looks identical). So this predicate only CLASSIFIES the error; the decision
+// to re-send is made by the caller (replay orchestration) and is gated on the
+// app having consumed ZERO new mocks for this request — the same "provably
+// nothing irreversible happened" invariant that makes the ECONNREFUSED re-send
+// safe. Without that gate this must NEVER drive a retry.
+func IsTransportConnReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	// net/http surfaces a peer-side drop during the response read as a bare
+	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
+	// reset frequently lands here too (see the "EOF" hits in the reproduction).
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
+// doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
+// pre-response connection-refused (bounded, ctx-aware backoff, request body
+// rewound via GetBody). Any other error, or a real response, returns
+// immediately — so a genuinely crashed/unreachable app still fails fast after
+// the bounded retries, and a mid-response reset is never retried.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+			return nil, err
+		}
+		// Only retry if we can faithfully re-send the body; otherwise stop so we
+		// never send a truncated/empty body (which would fabricate a result).
+		if req.Body != nil && req.GetBody == nil {
+			return nil, err
+		}
+		if req.GetBody != nil {
+			body, gbErr := req.GetBody()
+			if gbErr != nil {
+				return nil, err
+			}
+			req.Body = body
+		}
+		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(connRefusedRetryBackoff * time.Duration(attempt+1)):
+		}
+	}
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -619,8 +719,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -696,8 +796,8 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
-	// Execute the request
-	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	// Execute the request (re-sending only on a pre-response connection-refused)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -2676,6 +2776,30 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
+}
+
+// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
+// keploy-agent to report ready before giving up. It is sized to the agent
+// container's OWN healthcheck budget (start_period 10s + interval 5s × retries
+// 60 ≈ 310s, see pkg/platform/docker): under heavy CI docker-daemon contention
+// the agent container can take ~2 minutes just to start — observed in CI as a
+// `docker run` of an already-local image taking 126s before the agent process
+// ran. A shorter CLI wait gives up while the agent's own healthcheck still
+// considers it starting, tearing down a bring-up that would have succeeded.
+const DefaultAgentReadyTimeout = 330 * time.Second
+
+// AgentReadyTimeout returns how long to wait for the keploy-agent to become
+// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
+// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
+// slow or fast hosts. A non-positive / unparsable value falls back to the
+// default.
+func AgentReadyTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return DefaultAgentReadyTimeout
 }
 
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals

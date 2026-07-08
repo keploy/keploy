@@ -62,12 +62,35 @@ func useGobMockFormat() bool {
 	return configuredMockFormat == mockFormatGob
 }
 
+// useGobFormat is the per-instance gob-vs-structured decision: the
+// KEPLOY_MOCK_FORMAT env override wins, then this db's per-session
+// MockFormat (set by multi-app callers), then the package-global default.
+// Single-session callers leave MockFormat empty and get exactly the old
+// useGobMockFormat() behaviour.
+func (ys *MockYaml) useGobFormat() bool {
+	if v := os.Getenv("KEPLOY_MOCK_FORMAT"); v != "" {
+		return v == mockFormatGob
+	}
+	if ys.MockFormat != "" {
+		return ys.MockFormat == mockFormatGob
+	}
+	return useGobMockFormat()
+}
+
 type MockYaml struct {
 	MockPath  string
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
 	Format    yaml.Format
+
+	// MockFormat is the per-instance record-time format (yaml vs gob),
+	// orthogonal to Format (the yaml/json storage encoding). Empty means
+	// "use the package-global default" (configuredMockFormat), preserving
+	// single-session behaviour. Multi-app/per-session callers set this so
+	// each session honours its own spec.MockFormat instead of the process
+	// global — see useGobFormat.
+	MockFormat string
 
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
@@ -451,9 +474,10 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -570,9 +594,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		if st, ok := mockNames[mock.Name]; ok {
 			// Persist any request-body noise detected during schema-based
 			// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
-			// disk-read mock before it is re-written.
-			if len(st.ReqBodyNoise) > 0 && mock.Kind == models.Kind(models.HTTP) && mock.Spec.HTTPReq != nil {
-				mock.Spec.HTTPReq.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, st.ReqBodyNoise)
+			// disk-read mock before it is re-written. Stored uniformly on the
+			// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
+			if len(st.ReqBodyNoise) > 0 {
+				mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 			}
 			newMocks = append(newMocks, mock)
 			continue
@@ -718,20 +743,23 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	lock.Lock()
 	defer lock.Unlock()
 
-	// merge applies the learned noise; returns true when any mock changed
-	// so unchanged files are never rewritten.
+	// merge applies the learned noise; returns true when any mock changed so
+	// unchanged files are never rewritten. Every parser (HTTP included) stores
+	// noise uniformly on the kind-agnostic MockSpec.ReqBodyNoise. Previously this
+	// path skipped every non-HTTP mock, so learning under --schema-noise-detection
+	// WITHOUT --remove-unused-mocks silently discarded the learned noise at exit.
 	merge := func(mocks []*models.Mock) bool {
 		changed := false
 		for _, mock := range mocks {
 			noise, ok := withNoise[mock.Name]
-			if !ok || mock.Kind != models.Kind(models.HTTP) || mock.Spec.HTTPReq == nil {
+			if !ok {
 				continue
 			}
-			merged := mergeReqBodyNoise(mock.Spec.HTTPReq.ReqBodyNoise, noise)
-			if len(merged) != len(mock.Spec.HTTPReq.ReqBodyNoise) {
+			merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+			if len(merged) != len(mock.Spec.ReqBodyNoise) {
 				changed = true
 			}
-			mock.Spec.HTTPReq.ReqBodyNoise = merged
+			mock.Spec.ReqBodyNoise = merged
 		}
 		return changed
 	}
@@ -834,7 +862,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// gob is the binary record-time format (async writer, ~28% CPU win
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
-	if useGobMockFormat() {
+	if ys.useGobFormat() {
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 

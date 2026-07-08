@@ -34,8 +34,14 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
-		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
+		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
+		// values are dropped). Request-body noise is only non-empty for a kind whose
+		// parser implements the schema-noise adapter and learned drift (HTTP, plus
+		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
+		// write, so omitempty keeps the noise key out of the doc entirely.
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 	}
 
 	var spec any
@@ -233,8 +239,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
-		Noise:        mock.Noise,
 		ConnectionID: mock.ConnectionID,
+		// Unified noise block (see DocNoise): obfuscator value-regexes (mock.Noise)
+		// plus request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys;
+		// regex values dropped). Set before the mapper/per-kind projection runs so it
+		// survives regardless of the spec envelope. NewDocNoise returns nil when
+		// empty, so omitempty drops the key.
+		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
@@ -610,7 +621,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Version:      m.Version,
 			Name:         m.Name,
 			Kind:         m.Kind,
-			Noise:        m.Noise,
+			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
@@ -620,6 +631,12 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			return nil, wrapped
 		}
 		if mapped {
+			// Restore kind-agnostic schema-noise carried on the doc envelope
+			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			// Sourced from the unified noise.req block.
+			if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+				mock.Spec.ReqBodyNoise = rb
+			}
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -786,6 +803,13 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
 			continue
+		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope onto the
+		// freshly-built spec (the per-kind switch above replaced mock.Spec
+		// wholesale). Uniform across parsers — HTTP included. Sourced from the
+		// unified noise.req block.
+		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+			mock.Spec.ReqBodyNoise = rb
 		}
 		mocks = append(mocks, &mock)
 	}
@@ -1255,7 +1279,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 			Version:      m.Version,
 			Name:         m.Name,
 			Kind:         m.Kind,
-			Noise:        m.Noise,
+			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 		}
 
@@ -1484,6 +1508,12 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 		default:
 			logger.Debug("skipping unsupported mock kind on JSON read", zap.String("kind", string(m.Kind)))
 			continue
+		}
+		// Restore kind-agnostic schema-noise carried on the doc envelope (the
+		// per-kind switch above replaced mock.Spec wholesale). Uniform across
+		// parsers — HTTP included. Sourced from the unified noise.req block.
+		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
+			mock.Spec.ReqBodyNoise = rb
 		}
 		mocks = append(mocks, &mock)
 	}

@@ -4,6 +4,7 @@ package grpc
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/k0kubun/pp/v3"
@@ -57,8 +58,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				Message:  "missing status header in response",
 			}
 			headerResult.Normal = false
-			currentRisk = models.High
-			currentCategories = append(currentCategories, models.StatusCodeChanged)
+			// :status is the HTTP/2 transport-layer header (always 200 for gRPC);
+			// do not classify its absence as StatusCodeChanged — the real gRPC
+			// status is compared below via the grpc-status trailer.
 		} else {
 			headerResult.Actual.Value = []string{actualStatus}
 			headerResult.Normal = expectedStatus == actualStatus
@@ -73,8 +75,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualStatus,
 					Message:  "status header value mismatch",
 				}
-				currentRisk = models.High
-				currentCategories = append(currentCategories, models.StatusCodeChanged)
 			}
 		}
 
@@ -405,6 +405,30 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
+	// Compare grpc-status trailer — this is the canonical gRPC status code.
+	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
+	// be used as the gRPC status; grpc-status: 0 = OK, non-zero = error.
+	expectedGrpcStatus := parseGrpcStatus(expectedResp.Trailers.OrdinaryHeaders["grpc-status"])
+	actualGrpcStatus := parseGrpcStatus(actualResp.Trailers.OrdinaryHeaders["grpc-status"])
+	result.StatusCode = models.IntResult{
+		Normal:   expectedGrpcStatus == actualGrpcStatus,
+		Expected: expectedGrpcStatus,
+		Actual:   actualGrpcStatus,
+	}
+	if !result.StatusCode.Normal {
+		differences["trailers.grpc-status"] = struct {
+			Expected string
+			Actual   string
+			Message  string
+		}{
+			Expected: strconv.Itoa(expectedGrpcStatus),
+			Actual:   strconv.Itoa(actualGrpcStatus),
+			Message:  "grpc-status mismatch",
+		}
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.StatusCodeChanged)
+	}
+
 	// remove duplicates
 	catMap := make(map[models.FailureCategory]bool)
 	uniqueCategories := []models.FailureCategory{}
@@ -422,4 +446,19 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 
 	return matched, result
+}
+
+// parseGrpcStatus parses a grpc-status trailer value to int.
+// An empty string (trailer absent) is treated as 0 (OK) — the gRPC default.
+func parseGrpcStatus(s string) int {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		// Non-numeric grpc-status trailer — treat as unknown error so it
+		// causes a mismatch rather than silently passing as OK (0).
+		return -1
+	}
+	return n
 }
