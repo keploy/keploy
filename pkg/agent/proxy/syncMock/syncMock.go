@@ -135,6 +135,15 @@ type SyncMockManager struct {
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
 
+	// pressureSeen latches true on the FIRST memory-pressure activation and is
+	// never cleared for the session. It is a lock-free fast path for the
+	// per-exchange capture gate (incoming/http.go pressureOverlappedExchange):
+	// when no pressure has ever occurred — the overwhelmingly common case on a
+	// healthy run — the gate can skip the WasPressureActiveInWindow scan (which
+	// takes m.mu) entirely, keeping the parser hot loop lock-free. Once pressure
+	// has occurred at least once, the gate pays for the windowed check.
+	pressureSeen atomic.Bool
+
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped
 	// because the outChan was already closed by CloseOutChan — i.e.
@@ -689,10 +698,11 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 // was active at any moment during [start, end].
 //
 // Called by the TC-send path in routes/record.go right before forwarding a
-// TC to the CLI: if it returns true, the TC is suppressed and never reaches
-// disk, so replay cannot encounter a missing-mock EOF for it.
+// TC to the CLI, and by the earlier Capture-level check (conn/util.go): if it
+// returns true, the TC is suppressed and never reaches disk, so replay cannot
+// encounter a missing-mock EOF for it.
 //
-// Why this is race-free unlike a per-mock-drop ledger:
+// Range-based, not a per-mock-drop ledger — the "open" is well-ordered:
 //   - memoryguard calls SetMemoryPressure(true) and the range is appended
 //     under mu in the SAME critical section that flips m.memoryPause = true.
 //   - Any mock-parser goroutine that subsequently sees memoryPause==true
@@ -702,6 +712,15 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 //     bounded by wall-clock time; if any pressure range overlaps that
 //     window, the TC was at risk of losing a mock to pressure regardless
 //     of when AddMock actually fires for that mock.
+//
+// CAVEAT — this is NOT unconditionally race-free. The overlap is only visible
+// while the range is still in m.pressureRanges. SetMemoryPressure prunes a
+// closed range 7s after it ends (pressureRangeStaleness). If the CALLER runs
+// more than ~7s after the range closed, the range is gone and this returns a
+// false negative — the orphaned TC slips through. That lag is exactly why the
+// check is duplicated: the Capture-level call (conn/util.go) runs earlier in the
+// pipeline than this record.go call, shrinking the lag and the odds of hitting
+// the pruned window. Neither call eliminates it.
 //
 // Two intervals [a, b] and [c, d] overlap iff a <= d AND c <= b. An open
 // (still-active) range's end is treated as time.Now().
@@ -761,6 +780,17 @@ func (m *SyncMockManager) PressureRangeCount() int {
 	return len(m.pressureRanges)
 }
 
+// PressureEverActive reports, lock-free, whether memory pressure has been
+// activated at least once this session. Used by the per-exchange capture gate
+// to skip the (lock-taking) windowed overlap scan on runs that never hit
+// pressure. A nil manager reports false.
+func (m *SyncMockManager) PressureEverActive() bool {
+	if m == nil {
+		return false
+	}
+	return m.pressureSeen.Load()
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
@@ -794,6 +824,9 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 
 	var clearedFromBuffer int
 	if enabled {
+		// Latch the lock-free "pressure has occurred" flag so the per-exchange
+		// capture gate can stay lock-free until the first activation.
+		m.pressureSeen.Store(true)
 		if !wasEnabled {
 			// false→true transition: open a new pressure interval.
 			// memoryguard fires SetMemoryPressure(true) once per 500ms tick,

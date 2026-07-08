@@ -189,6 +189,49 @@ const captureHookConcurrency = 16
 
 var captureHookSem = make(chan struct{}, captureHookConcurrency)
 
+// pressureOverlappedExchange reports whether a memory-pressure interval
+// overlapped the just-closed exchange window [reqTs, respTs]. syncMock.AddMock
+// drops any outgoing (e.g. Mongo) mock whose request timestamp fell inside a
+// pressure interval, so a test case whose window overlapped pressure may already
+// have lost one or more of its mocks; persisting it would orphan it
+// ("no mocks" / EOF at replay). This is the go-memory-load-mongo flake.
+//
+// CRITICAL — this MUST be called SYNCHRONOUSLY on the parser goroutine, at
+// window-close (right after respTimestamp is stamped), BEFORE the captureHookSem
+// acquire and the capture goroutine. That ordering is the whole point:
+//
+//   - syncMock prunes a CLOSED pressure range 7s after it ends
+//     (SetMemoryPressure's staleness reaper).
+//   - Under load the tcChan (100-deep) backs up because the CLI drains it
+//     slowly; a full tcChan blocks the capture goroutines on their `t <- tc`
+//     send, so they never release captureHookSem, so the NEXT exchange's parser
+//     goroutine blocks on the semaphore acquire. Any pressure check placed
+//     AFTER that acquire (as the earlier conn.Capture-level check was) therefore
+//     inherits the full backpressure lag and can run long after the range was
+//     pruned — returning a false negative and letting the orphan through. That
+//     is exactly why the first attempt (a check inside Capture) did NOT move the
+//     CI failure rate.
+//   - Called here, at window-close, the overlapping range has just ended (or is
+//     still open), so it cannot yet have been pruned: the decision is reliable
+//     regardless of how backed-up the capture pipeline is.
+//
+// Resolves the same manager the mock-drop path uses (FromContextOrGlobal), so
+// this check and AddMock read the same pressureRanges under the same lock.
+func pressureOverlappedExchange(ctx context.Context, reqTs, respTs time.Time) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr == nil {
+		return false
+	}
+	// Lock-free fast path: if pressure has never activated this session (the
+	// common case on a healthy run) no range can overlap, so skip the
+	// lock-taking windowed scan and keep the parser hot loop contention-free.
+	if !mgr.PressureEverActive() {
+		return false
+	}
+	overlapped, _ := mgr.WasPressureActiveInWindow(reqTs, respTs)
+	return overlapped
+}
+
 // asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
 // io.Copy on the forwarding path writes into it via Write (non-blocking,
 // drops on backpressure); the parseStreamingHTTP goroutine reads from
@@ -799,6 +842,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		// Skip capture if memory pressure kicked in during the exchange
 		if shouldCapture && isIngressRecordingPaused() {
+			shouldCapture = false
+		}
+		// Skip capture if memory pressure OVERLAPPED this exchange's window even
+		// if it has cleared now: the paired outgoing mock may already have been
+		// dropped by syncMock.AddMock. Decided HERE — synchronously, at
+		// window-close, before the capture goroutine — so the pressure range is
+		// still fresh (not yet pruned). See pressureOverlappedExchange.
+		if shouldCapture && pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
 			shouldCapture = false
 		}
 
@@ -1531,7 +1582,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// pre-buffered).
 		reqTeeTruncated := reqCapture != nil && reqCapture.Truncated()
 		respTeeTruncated := respCapture != nil && respCapture.Truncated()
-		if captureEnabled && !reqTeeTruncated && !respTeeTruncated {
+		// Skip capture when memory pressure overlapped this exchange's window:
+		// the paired outgoing mock may already have been dropped, so persisting
+		// the TC would orphan it. Decided synchronously here — BEFORE the
+		// captureHookSem acquire below (which under tcChan backpressure can block
+		// long enough for the pressure range to be pruned) — so the range is
+		// still fresh and the decision is reliable. See pressureOverlappedExchange.
+		if captureEnabled && !reqTeeTruncated && !respTeeTruncated &&
+			!pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
 			select {
 			case captureHookSem <- struct{}{}:
 			case <-ctx.Done():
@@ -1715,6 +1773,18 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		}
 		if respTimestamp.Before(reqTimestamp) {
 			respTimestamp = reqTimestamp
+		}
+
+		// Skip capture when memory pressure overlapped this exchange's window:
+		// the paired outgoing mock may already have been dropped, so the TC would
+		// orphan at replay. Decided synchronously HERE, at window-close, BEFORE
+		// the captureHookSem acquire below — because under tcChan backpressure
+		// that acquire can block long past syncMock's 7s range-prune horizon,
+		// which is exactly what let the orphan slip through the later in-goroutine
+		// check. At window-close the overlapping range cannot yet be pruned, so
+		// the decision is reliable. See pressureOverlappedExchange.
+		if pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
+			continue
 		}
 
 		// Emit in a goroutine so the parser loop is never blocked by a

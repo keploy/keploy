@@ -68,8 +68,65 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// pressureOverlappedWindow reports whether a memory-pressure interval overlapped
+// the exchange window [reqTime, resTime]. syncMock.AddMock drops any outgoing
+// mock whose request timestamp falls inside a pressure interval, so a test case
+// whose window overlapped pressure may already have lost one or more of its
+// mocks. It resolves the same manager the mock-drop path uses
+// (FromContextOrGlobal, matching the NextTestID call site below), so the drop
+// decision and the mock-drop decision read the same pressure ranges.
+func pressureOverlappedWindow(ctx context.Context, reqTime, resTime time.Time) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr == nil {
+		return false
+	}
+	// Lock-free fast path: if pressure has never activated this session (the
+	// common case on a healthy run) no range can overlap, so skip the
+	// lock-taking windowed scan. Mirrors incoming/http.go's authoritative gate
+	// so this backstop costs nothing per test case until pressure actually hits.
+	if !mgr.PressureEverActive() {
+		return false
+	}
+	overlapped, _ := mgr.WasPressureActiveInWindow(reqTime, resTime)
+	return overlapped
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if memoryguard.IsRecordingPaused() {
+	// Drop this capture when memory pressure means its paired outgoing mock(s)
+	// may not have been recorded. Two cases must both be caught here:
+	//
+	//  1. Pressure is active RIGHT NOW (IsRecordingPaused) — the classic
+	//     "recording paused" skip.
+	//  2. Pressure is NOT active now but overlapped this exchange's window
+	//     [reqTimeTest, resTimeTest]. syncMock.AddMock drops any outgoing mock
+	//     whose request fell inside a pressure interval, so persisting this
+	//     test case would orphan it ("no mocks" / EOF at replay).
+	//
+	// Case 2 is a BACKSTOP here. The AUTHORITATIVE, reliable pressure-overlap
+	// gate for the go-memory-load-mongo flake lives one layer up, in the parser
+	// hot loop (incoming/http.go pressureOverlappedExchange), where it runs
+	// SYNCHRONOUSLY at window-close — before the captureHookSem acquire — so the
+	// pressure range that put the paired mock at risk cannot yet have been pruned
+	// by syncMock's 7s staleness reaper.
+	//
+	//   Why this in-Capture check cannot be the primary gate: Capture runs inside
+	//   the captureHookSem-gated capture goroutine, and respTimestamp is stamped
+	//   BEFORE that semaphore is acquired. Under load the tcChan (100-deep) backs
+	//   up (the CLI drains it slowly), which blocks in-flight capture goroutines
+	//   on their `t <- testCase` send so they never release captureHookSem, which
+	//   in turn blocks the NEXT exchange's semaphore acquire. A check that runs
+	//   only after that acquire inherits the full backpressure lag and can fire
+	//   long after the range was pruned — a false negative that lets the orphan
+	//   through. (An earlier fix that placed the ONLY check here did not move the
+	//   CI failure rate for exactly this reason.)
+	//
+	//   Retained anyway because: (a) it is a cheap, correct second line of
+	//   defense whenever the range is still live at this point; (b) it covers the
+	//   IsRecordingPaused case and any CaptureHook caller that did not run the
+	//   window-close gate (e.g. the enterprise async path). It resolves the same
+	//   manager the mock-drop path uses (FromContextOrGlobal). record.go's check
+	//   at TC-stream time is the third, last-ditch layer.
+	if memoryguard.IsRecordingPaused() || pressureOverlappedWindow(ctx, reqTimeTest, resTimeTest) {
 		// Close bodies even when skipping capture to avoid resource leaks.
 		if req.Body != nil {
 			req.Body.Close()
@@ -450,6 +507,18 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
 		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	// Same early pressure check as the HTTP path: drop the stream when memory
+	// pressure overlapped its window, since AddMock may already have dropped a
+	// paired outgoing mock. Checked here — earlier in the pipeline than the
+	// routes/record.go recompute — so the lag to the check is shorter and the
+	// pressure range is more likely to still be present before the 7s staleness
+	// reaper prunes it. This is a race-window reduction, not a hard guarantee
+	// (see the Capture comment above). Runs before ResolveRange so the stream's
+	// mocks are not attributed to a TC that won't be sent.
+	if pressureOverlappedWindow(ctx, http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp) {
 		return
 	}
 
