@@ -2,9 +2,35 @@ name: Golang On Docker (Windows)
 on:
   workflow_call:
 
-concurrency:
-  group: windows-docker-runner
-  cancel-in-progress: false
+# NO workflow-level concurrency group here on purpose.
+#
+# This reusable workflow runs on a pool of 4 self-hosted Windows
+# runners that share ONE physical VM. It used to carry
+#   concurrency: { group: windows-docker-runner, cancel-in-progress: false }
+# whose group was a CONSTANT string, so GitHub allowed only ONE run of
+# this workflow across the entire repo at a time — every other run
+# queued and 3 of the 4 runners sat idle. That constant group was a
+# band-aid for the fact that concurrent jobs collided on shared-VM
+# resources: the host-published keploy proxy port (-p 16789:16789), a
+# machine-wide keploy.exe kill that would abort a sibling's CLI, and the
+# shared docker-compose project name (network/volumes). (This lane
+# intercepts via a per-job eBPF keploy-agent container in the compose
+# network, not the host WinDivert driver, so driver coexistence is not
+# the concern here.)
+#
+# Those collisions are now removed at the source: every shared-VM
+# resource is made per-job unique and every kill is job-scoped (see
+# golang-docker-windows.ps1 and the "Recover stale runner state" step
+# below). With the collisions gone, serialization is pure waste, so it
+# is deleted — all 4 runners can now pick up jobs in parallel.
+#
+# Superseded-push cancellation is still handled one level up: the only
+# caller, prepare_and_run.yml, sets
+#   concurrency: { group: <workflow>-<pr#/ref>, cancel-in-progress: true }
+# which cancels the whole run (this job included) when a new commit
+# lands on the same PR/branch. The 4-runner pool is the natural
+# concurrency cap. This mirrors the sibling golang_native_windows.yml,
+# which also runs with no concurrency group.
 
 jobs:
   golang_docker_windows:
@@ -59,18 +85,58 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           try {
-            Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "Stopping leftover keploy.exe pid=$($_.Id)"
-              try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
-            }
-            foreach ($name in @('WinDivert', 'WinDivert64')) {
-              $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-              if ($svc -and $svc.Status -ne 'Stopped') {
-                Write-Host "Stopping kernel driver service $name (status=$($svc.Status))"
-                try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
-              }
-            }
             $ws = $env:GITHUB_WORKSPACE
+            # Prefix with a trailing separator so `...\keploy` can't be
+            # mistaken for a sibling `...\keploy2`. Each self-hosted
+            # runner has a distinct $GITHUB_WORKSPACE, so the exe path is
+            # the reliable ownership key (see TEST PLAN assumption).
+            $wsPrefix = if ($ws) { $ws.TrimEnd('\','/') + '\' } else { $null }
+
+            # Job-scoped cleanup ONLY. Four self-hosted runners share this
+            # VM, so a bare `Get-Process -Name keploy | Stop-Process` (the
+            # old behaviour) would kill a sibling job's HOST keploy CLI
+            # (the process orchestrating that job's `docker compose up`),
+            # aborting its whole run. Our keploy binaries live under
+            # $ws\bin. Kill only THIS workspace's leftover keploy (e.g.
+            # from a prior interrupted run in this same workspace).
+            $ownKeploy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+              $_.ProcessName -like 'keploy*' -and $_.Path -and $wsPrefix -and
+              $_.Path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+            foreach ($p in $ownKeploy) {
+              Write-Host "Stopping this workspace's leftover keploy pid=$($p.Id) path=$($p.Path)"
+              try { $p | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # WinDivert reset is DEFENSIVE here: this docker-compose lane
+            # intercepts inside the compose network via a per-job eBPF
+            # keploy-agent container, so it does not load the host Windows
+            # WinDivert driver (that is the native-Windows lane's path).
+            # But WinDivert is still a SINGLE machine-wide kernel service,
+            # so if some other keploy on this VM ever did load it, the old
+            # UNCONDITIONAL `Stop-Service` would break that sibling. Only
+            # reset it when NO OTHER keploy is running. Our own leftovers
+            # were already killed above, so restrict the gate to keploy
+            # NOT under this workspace (or with an unreadable path —
+            # counted as "other" to stay conservative).
+            $otherKeploy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+              $_.ProcessName -like 'keploy*' -and -not (
+                $_.Path -and $wsPrefix -and
+                $_.Path.StartsWith($wsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+              )
+            })
+            if ($otherKeploy.Count -eq 0) {
+              foreach ($name in @('WinDivert', 'WinDivert64')) {
+                $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -ne 'Stopped') {
+                  Write-Host "No other keploy running on this VM; resetting stale kernel driver service $name (status=$($svc.Status))"
+                  try { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue } catch {}
+                }
+              }
+            } else {
+              Write-Host "Skipping WinDivert driver reset: $($otherKeploy.Count) other keploy process(es) running on this VM (sibling jobs may be capturing)."
+            }
+
             if ($ws -and (Test-Path $ws)) {
               $gitDir = Join-Path $ws '.git'
               $items = @(Get-ChildItem -Path $ws -Force -ErrorAction SilentlyContinue)
