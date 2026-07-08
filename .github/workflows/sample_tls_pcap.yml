@@ -80,6 +80,20 @@ jobs:
 
       - name: Install tshark + openssl for pcap decryption check
         run: |
+          # GitHub's ubuntu-24.04 runner image ships third-party apt
+          # repositories (packages.microsoft.com — azure-cli + prod) that this
+          # job does not use: tshark and openssl come from the Ubuntu
+          # main/universe archives. That host intermittently serves a corrupt
+          # InRelease ("Clearsigned file isn't valid, got 'NOSPLIT'"), which
+          # makes `apt-get update` exit 100 and — under this step's default
+          # `bash -eo pipefail` shell — takes the whole job down before keploy
+          # ever runs. Drop every apt source pointing at that host so
+          # `apt-get update` only consults the repos we actually depend on.
+          # The `|| true` keeps a benign no-match (grep exit 1, which pipefail
+          # would otherwise propagate) from aborting the step, while a real
+          # `rm` failure still surfaces. Deterministic — no retry, no sleep.
+          { sudo grep -rlZ 'packages.microsoft.com' /etc/apt/sources.list.d/ 2>/dev/null || true; } \
+            | sudo xargs -0r rm -f
           sudo apt-get update -qq
           # Pre-accept the wireshark-common dump-cap suid prompt so the
           # apt install runs non-interactively.
