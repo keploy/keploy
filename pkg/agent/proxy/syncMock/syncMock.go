@@ -31,6 +31,17 @@ const maxRecentWindows = 256
 // scan (both loop over every range).
 const pressureRangeStaleness = 7 * time.Second
 
+// droppedMockReqCap bounds the dropped-mock request-timestamp ledger
+// (SyncMockManager.droppedMockReqs). The ledger is deliberately NOT time-pruned
+// — see its field comment — so this hard cap is the only bound. Drops are rare
+// (zero on a healthy run; ~64 on a memory-pressure run of the go-memory-load
+// lane), so this covers orders of magnitude more than any real recording
+// produces; the cap only trips on a pathological continuous-pressure run whose
+// recording is already unusable, at which point oldest entries are evicted with
+// a one-time warning. Each entry is a time.Time (~24 B) so the ceiling is a few
+// hundred KB.
+const droppedMockReqCap = 8192
+
 // resolvedWindow is one already-resolved per-test window retained so a
 // late-arriving mock (decoded after the window closed) can still be
 // attributed to the test that actually owns its ReqTimestampMock.
@@ -173,6 +184,39 @@ type SyncMockManager struct {
 	// continuous recording from accumulating millions of intervals and
 	// slowing every overlap scan.
 	pressureRanges []pressureRange
+
+	// droppedMockReqs is the CAUSAL, race-free join key for the atomic
+	// mock-drop / test-case-drop fix (#4336). It records the ReqTimestampMock
+	// of every outgoing mock dropped BEFORE persistence:
+	//
+	//   - supervisor/session.go emitMockCore's mockIncomplete branch — the
+	//     memory-pressure chunk gate (relay tee DropMemoryPressure ->
+	//     MarkMockIncomplete) that is the dominant loss on the go-memory-load
+	//     lane, plus write_error / short_write / decode-error incompleteness;
+	//   - AddMock's own pressure drop below (mock whose request fell inside a
+	//     pressure interval).
+	//
+	// A test case whose HTTP window [HTTPReq.Timestamp, HTTPResp.Timestamp]
+	// contains any of these timestamps has already lost one of its mocks and
+	// MUST NOT be persisted, or replay orphans it (mock mismatch no_mocks /
+	// EOF). The suppression gates (incoming/http.go, conn.Capture,
+	// routes/record.go) consult TCHasDroppedMock.
+	//
+	// Why this replaces the pressure-range OVERLAP heuristic as the load-bearing
+	// signal: pressureRanges only records that pressure was active at some
+	// instant; a TC-suppression gate inferring "a mock might have dropped" from
+	// range overlap is (a) imprecise — it suppresses calm TCs whose window
+	// merely brushed a pressure blip — and (b) defeated by pruning, because
+	// pressureRanges is reaped 7s after a range closes and the TC-persist path
+	// lags the drop by far more than 7s under load (100-deep tcChan + slow CLI
+	// drain). droppedMockReqs instead records the ACTUAL drop at the instant it
+	// happens and is NOT time-pruned, so the fact survives however long the
+	// persist lags — closing the race the pressure-range check only narrowed.
+	// Bounded by droppedMockReqCap (drops are rare; see that const). Guarded by
+	// mu; droppedSeen is the lock-free fast path.
+	droppedMockReqs []time.Time
+	droppedSeen     atomic.Bool
+	droppedWarnOnce sync.Once
 
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
@@ -403,8 +447,32 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// request time, not now: drop only if the request ITSELF happened
 		// during pressure (the ingress never captured it, so there is no TC).
 		if m.pressureActiveAtLocked(mock.Spec.ReqTimestampMock) {
+			// Atomic drop: record this mock's request timestamp in the
+			// dropped-mock ledger (while still holding mu) so the TC whose HTTP
+			// window owns it is suppressed together with the mock, instead of
+			// being persisted and orphaned at replay. Lifetime was resolved by
+			// DeriveLifetime() at the top of AddMock, so exclude reusable
+			// session/connection mocks (not window-owned) to avoid spuriously
+			// suppressing a TC they don't belong to. See droppedMockReqs /
+			// ledgerRecordableLifetime.
+			recordable := ledgerRecordableLifetime(mock.TestModeInfo.Lifetime)
+			var evicted bool
+			if recordable {
+				evicted = m.recordDroppedMockLocked(mock.Spec.ReqTimestampMock)
+			}
 			m.mu.Unlock()
+			if recordable {
+				m.droppedSeen.Store(true)
+			}
 			m.pressureDropped.Add(1)
+			if evicted {
+				m.droppedWarnOnce.Do(func() {
+					if logger := m.dropLogger(); logger != nil {
+						logger.Warn("syncMock: dropped-mock ledger exceeded cap — oldest entries evicted",
+							zap.Int("cap", droppedMockReqCap))
+					}
+				})
+			}
 			return
 		}
 		// Request was during calm → its TC was captured → keep this mock;
@@ -791,6 +859,123 @@ func (m *SyncMockManager) PressureEverActive() bool {
 	return m.pressureSeen.Load()
 }
 
+// ledgerRecordableLifetime reports whether a DROPPED mock of the given lifetime
+// should be recorded in the dropped-mock ledger (#4336). Only per-test mocks
+// (LifetimePerTest, which is also the zero value / default for untagged mocks)
+// are owned by a specific test-case window — dropping one orphans exactly that
+// test case, which the ledger must suppress.
+//
+// Session- and connection-lifetime mocks (mongo handshake/heartbeat, SCRAM,
+// prepared-statement setup, etc.) are REUSABLE across every test and are NOT
+// window-owned; ResolveRange's lifetime carve-out drains them without the
+// per-test window match. Recording a dropped one whose ReqTimestampMock happens
+// to fall inside some real test-case window would spuriously suppress that test
+// case (which never depended on this reusable mock), so we exclude them —
+// avoiding real over-suppression while still catching every per-test orphan.
+func ledgerRecordableLifetime(lt models.Lifetime) bool {
+	return lt != models.LifetimeSession && lt != models.LifetimeConnection
+}
+
+// recordDroppedMockLocked appends reqTs to the dropped-mock ledger and enforces
+// the hard cap. Caller MUST hold m.mu. Returns whether the cap tripped (an
+// eviction happened) so the exported wrapper can warn once outside the lock.
+// Zero timestamps are ignored: a mock with no request timestamp cannot be
+// attributed to any TC window, so recording it could only cause spurious
+// suppression.
+func (m *SyncMockManager) recordDroppedMockLocked(reqTs time.Time) (evicted bool) {
+	if reqTs.IsZero() {
+		return false
+	}
+	m.droppedMockReqs = append(m.droppedMockReqs, reqTs)
+	if len(m.droppedMockReqs) > droppedMockReqCap {
+		// Evict oldest, keep the newest cap entries. copy down so the big
+		// backing array isn't retained by the reslice.
+		n := copy(m.droppedMockReqs, m.droppedMockReqs[len(m.droppedMockReqs)-droppedMockReqCap:])
+		m.droppedMockReqs = m.droppedMockReqs[:n]
+		evicted = true
+	}
+	return evicted
+}
+
+// RecordDroppedMock records that an outgoing mock with request timestamp reqTs
+// was dropped before it could be persisted. It is the write half of the atomic
+// mock-drop / TC-drop fix: every pressure/incompleteness drop site calls this so
+// the owning test case (the one whose HTTP window contains reqTs) is suppressed
+// by TCHasDroppedMock before it reaches disk. Safe on a nil manager and a nil/
+// zero timestamp (both no-ops). Cheap: one append under mu plus a lock-free
+// latch store.
+func (m *SyncMockManager) RecordDroppedMock(reqTs time.Time) {
+	if m == nil || reqTs.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	evicted := m.recordDroppedMockLocked(reqTs)
+	m.mu.Unlock()
+	// Set the lock-free fast-path latch AFTER the entry is committed under mu,
+	// so any TCHasDroppedMock that observes droppedSeen==true is guaranteed to
+	// also see the entry once it takes mu (store happens-after the append).
+	m.droppedSeen.Store(true)
+	if evicted {
+		m.droppedWarnOnce.Do(func() {
+			if logger := m.dropLogger(); logger != nil {
+				logger.Warn("syncMock: dropped-mock ledger exceeded cap — oldest entries evicted; "+
+					"a test case whose mock was dropped this far in the past may no longer be suppressed. "+
+					"This indicates a pathological volume of memory-pressure mock drops; reduce concurrent "+
+					"load or raise --memory-limit for a clean recording.",
+					zap.Int("cap", droppedMockReqCap),
+				)
+			}
+		})
+	}
+}
+
+// TCHasDroppedMock reports whether any mock dropped before persistence had a
+// request timestamp inside the test-case window [start, end]. It is the read
+// half of the atomic mock-drop / TC-drop fix: a true result means this test
+// case lost at least one of its outgoing mocks and must be suppressed rather
+// than persisted (else replay orphans it — no_mocks / EOF).
+//
+// Inclusivity matches ResolveRange's own window-attribution test
+// (start <= reqTs <= end), so a mock is judged "owned" by exactly the windows
+// ResolveRange would have attributed it to had it survived.
+//
+// Lock-free fast path via droppedSeen: on a healthy run no mock is ever
+// dropped, so this returns immediately without taking mu — the per-test-case
+// gate costs nothing until the first drop.
+func (m *SyncMockManager) TCHasDroppedMock(start, end time.Time) bool {
+	if m == nil {
+		return false
+	}
+	if !m.droppedSeen.Load() {
+		return false
+	}
+	// Degenerate windows can't be reasoned about; refuse to claim ownership
+	// (mirrors WasPressureActiveInWindow's zero-input guard).
+	if start.IsZero() || end.IsZero() {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.droppedMockReqs {
+		if !t.Before(start) && !t.After(end) {
+			return true
+		}
+	}
+	return false
+}
+
+// DroppedMockCount returns the number of pre-persistence mock drops recorded so
+// far (bounded by droppedMockReqCap). Exposed for the recording-complete
+// summary in routes/record.go and for tests. A nil manager reports 0.
+func (m *SyncMockManager) DroppedMockCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.droppedMockReqs)
+}
+
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if m == nil {
 		return
@@ -859,6 +1044,24 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			}
 			if !m.pressureActiveAtLocked(mk.Spec.ReqTimestampMock) {
 				keep = append(keep, mk)
+				continue
+			}
+			// ATOMIC DROP (#4336): this buffered mock is being wiped because its
+			// request fell inside a pressure interval. This is the THIRD
+			// pressure-drop path (alongside AddMock's pressure drop and
+			// emitMockCore's mockIncomplete drop), and it orphans its owning test
+			// case just the same: the mock's request timestamp lies inside that
+			// TC's HTTP window (the mongo call happened while the app was serving
+			// the request), so a TC whose window straddles the calm->pressure
+			// boundary loses this mock. Record it in the ledger so the TC is
+			// suppressed race-free — the pressure-range overlap check that would
+			// otherwise catch it is defeated once the 7s staleness reaper prunes
+			// the range, but the ledger is never pruned. Buffered mocks carry a
+			// resolved Lifetime (DeriveLifetime ran in AddMock); exclude reusable
+			// session/connection mocks so a wiped heartbeat/handshake doesn't
+			// spuriously suppress an unrelated TC. See ledgerRecordableLifetime.
+			if ledgerRecordableLifetime(mk.TestModeInfo.Lifetime) {
+				m.recordDroppedMockLocked(mk.Spec.ReqTimestampMock)
 			}
 		}
 		for i := len(keep); i < before; i++ {
@@ -866,6 +1069,13 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		}
 		m.buffer = keep
 		clearedFromBuffer = before - len(keep)
+		if clearedFromBuffer > 0 {
+			// A wipe happened -> at least one drop may have been recorded above;
+			// latch the lock-free fast path so the TC-suppression gates start
+			// consulting the ledger. (recordDroppedMockLocked only skips zero
+			// timestamps, which cannot be owned by any window anyway.)
+			m.droppedSeen.Store(true)
+		}
 	} else if wasEnabled {
 		// true→false transition: close the most recent open interval.
 		// The defensive len check covers the degenerate case where
@@ -887,11 +1097,21 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			logger.Debug("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
 				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
 				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
+				zap.Int("mocks_dropped_pre_persist_so_far", m.DroppedMockCount()),
 				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
 			)
 		} else if !enabled && wasEnabled {
+			// Include the pre-persist drop-ledger size (#4336): the cumulative
+			// number of mocks dropped before persistence across ALL pressure
+			// paths (emitMockCore incomplete, AddMock pressure drop, buffer
+			// wipe). Logged on every pressure-clear transition — which the
+			// memoryguard emits reliably during recording — so the "how many
+			// mocks were dropped, and therefore how many test cases were
+			// suppressed to stay consistent" signal survives even when the
+			// end-of-session recording-complete summary is cut short by SIGINT.
 			logger.Debug("agent: memory pressure cleared",
 				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
+				zap.Int("mocks_dropped_pre_persist_total", m.DroppedMockCount()),
 				zap.Int64("mocks_added_total", m.totalAdded.Load()),
 			)
 		}

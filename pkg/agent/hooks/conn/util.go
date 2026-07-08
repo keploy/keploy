@@ -91,6 +91,21 @@ func pressureOverlappedWindow(ctx context.Context, reqTime, resTime time.Time) b
 	return overlapped
 }
 
+// droppedMockInWindow reports whether an outgoing mock owned by this exchange's
+// window [reqTime, resTime] was actually dropped before persistence (#4336). It
+// is the precise, never-pruned companion to pressureOverlappedWindow: the drop
+// itself recorded the fact (TCHasDroppedMock reads the droppedMockReqs ledger),
+// so — unlike the pressure-range overlap heuristic, which is reaped 7s after a
+// range closes — the answer stays correct however long this backstop lags the
+// drop. Resolves the same manager the mock-drop path records into.
+func droppedMockInWindow(ctx context.Context, reqTime, resTime time.Time) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr == nil {
+		return false
+	}
+	return mgr.TCHasDroppedMock(reqTime, resTime)
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	// Drop this capture when memory pressure means its paired outgoing mock(s)
 	// may not have been recorded. Two cases must both be caught here:
@@ -126,7 +141,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	//   window-close gate (e.g. the enterprise async path). It resolves the same
 	//   manager the mock-drop path uses (FromContextOrGlobal). record.go's check
 	//   at TC-stream time is the third, last-ditch layer.
-	if memoryguard.IsRecordingPaused() || pressureOverlappedWindow(ctx, reqTimeTest, resTimeTest) {
+	if memoryguard.IsRecordingPaused() || pressureOverlappedWindow(ctx, reqTimeTest, resTimeTest) ||
+		droppedMockInWindow(ctx, reqTimeTest, resTimeTest) {
 		// Close bodies even when skipping capture to avoid resource leaks.
 		if req.Body != nil {
 			req.Body.Close()
@@ -519,6 +535,12 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// (see the Capture comment above). Runs before ResolveRange so the stream's
 	// mocks are not attributed to a TC that won't be sent.
 	if pressureOverlappedWindow(ctx, http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp) {
+		return
+	}
+	// Atomic-drop gate (#4336): suppress the stream if one of the mocks its
+	// window owns was actually dropped before persistence. Race-free even after
+	// the pressure-range check above has been pruned. See droppedMockInWindow.
+	if droppedMockInWindow(ctx, http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp) {
 		return
 	}
 

@@ -309,6 +309,43 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// connection goes idle, producing spurious aborts after a
 		// benign drop (memory pressure, chunk gate, short write).
 		s.mockIncomplete.Store(false)
+		// ATOMIC DROP (#4336): this outgoing mock is being abandoned — most
+		// often because the relay tee gated a chunk under memory pressure
+		// (DropMemoryPressure -> MarkMockIncomplete), the dominant loss on the
+		// go-memory-load-mongo lane, but also on write_error / short_write /
+		// decode incompleteness. Whatever the cause, the INCOMING test case
+		// whose HTTP window contains this mock's request timestamp has now lost
+		// one of its mocks: if that test case is still persisted, replay issues
+		// the same outgoing call, finds no matching mock, and fails with a
+		// no_mocks / EOF mismatch (candidates:0). Record the drop in the
+		// sync-mock ledger so the TC-persist gates (incoming/http.go,
+		// conn.Capture, routes/record.go) suppress the owning test case together
+		// with this mock — making mock-drop and TC-drop a single atomic outcome
+		// rather than two independent observations of pressure coupled only by
+		// timing. A zero ReqTimestampMock is ignored by RecordDroppedMock (it
+		// can't be attributed to any window). Resolves the SAME manager the emit
+		// path uses below (s.Mgr, else the package global), so the drop and the
+		// gate read one ledger.
+		// Exclude reusable session/connection-lifetime mocks (mongo
+		// handshake/heartbeat, SCRAM, prepared-statement setup): they are not
+		// owned by any single test-case window, so recording a dropped one whose
+		// request timestamp happens to fall inside a real TC window would
+		// spuriously suppress that (actually-fine) test case. Only per-test
+		// (and default/untagged) drops orphan a specific TC. DeriveLifetime is
+		// idempotent and cheap (single metadata probe); it resolves the tier
+		// here because this drop path runs BEFORE AddMock, where the emit path
+		// would otherwise derive it.
+		if !m.Spec.ReqTimestampMock.IsZero() {
+			m.DeriveLifetime()
+			lt := m.TestModeInfo.Lifetime
+			if lt != models.LifetimeSession && lt != models.LifetimeConnection {
+				mgr := s.Mgr
+				if mgr == nil {
+					mgr = syncMock.Get()
+				}
+				mgr.RecordDroppedMock(m.Spec.ReqTimestampMock)
+			}
+		}
 		if s.Logger != nil {
 			// Debug-level: this fires on every mock that loses an
 			// upstream chunk (per-request frequency on a misconfigured

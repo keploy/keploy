@@ -1,0 +1,70 @@
+name: Gomem Atomic-Drop Regression (Linux)
+# Deterministic regression guard for issue #4336 — the go-memory-load-mongo
+# flake where the agent drops a captured test case's outgoing mock under memory
+# pressure while STILL persisting the test case, so replay reports
+# `mock mismatch ... no_mocks candidates:0` for it and the lane fails the 4%
+# tolerance.
+#
+# The fix makes a pressure mock-drop ATOMIC with its owning test case: every
+# pre-persistence drop (relay tee -> MarkMockIncomplete -> emitMockCore; AddMock's
+# pressure drop; SetMemoryPressure's buffer wipe) records the mock's request
+# timestamp in a never-pruned sync-mock ledger, and the TC-persist gates
+# (incoming/http.go, conn.Capture, routes/record.go) suppress any test case whose
+# HTTP window owns a dropped mock — so no persisted test case ever references a
+# mock that was dropped.
+#
+# WHY A UNIT-TEST LANE (not only the e2e go-memory-load-mongo lane): the drop is
+# only exercised when a memory-pressure PAUSE overlaps an in-flight large mock,
+# which on a fast multi-core box is rare (pauses recover before a chunk is gated)
+# — the 2-vCPU CI runner is the reliable rate validator (see golang_docker.yml's
+# go-memory-load-mongo job). These tests instead drive the atomic-drop mechanism
+# DETERMINISTICALLY and with -race, so a regression is caught on every PR
+# regardless of the host's pressure timing. The load-bearing case
+# (TestDroppedMockLedger_SurvivesPruneWherePressureRangeDoesNot) reproduces the
+# exact prune race the older pressure-range check (#4338) could not close.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  atomic-drop-regression:
+    name: atomic-drop-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "1" # pg_query_go links libpg_query via cgo; the agent tree needs it to build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install build essentials (cgo)
+        run: |
+          sudo apt -y update
+          sudo apt -y install build-essential gcc libc-dev pkg-config
+
+      - name: Install dependencies
+        run: go get .
+
+      # -race so a concurrency regression in the ledger / gate paths is caught.
+      # -count=1 defeats the test cache so the guard always executes.
+      # The explicit -run list is the regression surface for #4336; keep it in
+      # sync when adding atomic-drop tests. It spans all four packages the fix
+      # touches: the ledger (syncMock), the write-half drop site (supervisor),
+      # and the read-half TC-suppression gates (conn, incoming).
+      - name: Run atomic-drop regression tests (-race)
+        run: |
+          go test -race -count=1 -v \
+            -run 'TestTCHasDroppedMock_Ownership|TestRecordDroppedMock_ZeroIgnored|TestAddMock_PressureDropRecordsLedger|TestBufferWipeDropRecordsLedger|TestRecordDroppedMock_CapEviction|TestDroppedMockLedger_SurvivesPruneWherePressureRangeDoesNot|TestAddMock_ReusableLifetimeDropNotRecorded|TestBufferWipe_ReusableLifetimeDropNotRecorded|TestCapture_TCDroppedByLedger|TestCapture_TCKeptWhenNoDrop|TestCapture_MockAndTCDroppedAtomicallyUnderPressure|TestCapture_PruneRace_CaptureCheckLoadBearing|TestCapture_TCKeptWhenNoPressureOverlap|TestEmitMock_IncompleteDropRecordsLedger|TestEmitMock_IncompleteDropZeroTsIgnored|TestEmitMock_SessionLifetimeDropNotRecorded' \
+            ./pkg/agent/proxy/syncMock/... \
+            ./pkg/agent/hooks/conn/... \
+            ./pkg/agent/proxy/supervisor/... \
+            ./pkg/agent/proxy/incoming/...

@@ -357,6 +357,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Int("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar),
 					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
+					zap.Int("mocks_dropped_pre_persist_total", syncmgr.Get().DroppedMockCount()),
 					zap.Int64("mocks_added_successfully", finalAdded),
 				)
 				return
@@ -371,13 +372,26 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			tcRespTime := t.HTTPResp.Timestamp
 			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
 
-			if hasOverlap {
+			// Atomic-drop last-ditch (#4336): suppress the TC if one of its
+			// mocks was actually dropped before persistence. This is the
+			// race-free join — unlike the pressure-range overlap above it reads
+			// the never-pruned dropped-mock ledger, so an orphan whose pressure
+			// range was already reaped by the 7s staleness reaper (the exact
+			// window this stream loop lags into under a 100-deep tcChan) is
+			// still caught here. The synchronous window-close gate in
+			// incoming/http.go is the primary suppression point; this is the
+			// last line of defence for a mock dropped after its TC was already
+			// dispatched to the tcChan.
+			hasDroppedMock := syncmgr.Get().TCHasDroppedMock(t.HTTPReq.Timestamp, tcRespTime)
+
+			if hasOverlap || hasDroppedMock {
 				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
+				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window or a mock it owns was dropped, not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 					zap.Int("pressure_overlaps", overlapCount),
+					zap.Bool("owned_mock_dropped", hasDroppedMock),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)
 				continue

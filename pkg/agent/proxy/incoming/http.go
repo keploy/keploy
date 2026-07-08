@@ -232,6 +232,35 @@ func pressureOverlappedExchange(ctx context.Context, reqTs, respTs time.Time) bo
 	return overlapped
 }
 
+// droppedMockInExchange reports whether an outgoing mock whose request timestamp
+// falls inside this exchange's window [reqTs, respTs] was actually DROPPED
+// before persistence (memory-pressure chunk gate at emitMockCore, or AddMock's
+// pressure drop). It is the authoritative, race-free companion to
+// pressureOverlappedExchange:
+//
+//   - pressureOverlappedExchange suppresses a TC whose window merely OVERLAPPED
+//     a pressure range. That is conservative (it can over-suppress calm TCs)
+//     and, worse, DEFEATED BY PRUNING — syncMock reaps a closed pressure range
+//     7s after it ends, and under load this gate can run long after that, so the
+//     overlap is invisible and the orphan slips through. That prune race is the
+//     residual go-memory-load-mongo flake this fix closes.
+//
+//   - droppedMockInExchange instead asks whether a mock owned by this window was
+//     genuinely lost. The drop itself recorded the fact (TCHasDroppedMock reads
+//     the never-pruned droppedMockReqs ledger), so the answer is correct however
+//     long this gate lags the drop — and precise (no calm-TC over-suppression).
+//
+// Both are kept: the pressure-range check stays as a conservative backstop, and
+// this is the load-bearing, atomic one. Resolves the same manager the mock-drop
+// path records into (FromContextOrGlobal), so gate and drop read one ledger.
+func droppedMockInExchange(ctx context.Context, reqTs, respTs time.Time) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	if mgr == nil {
+		return false
+	}
+	return mgr.TCHasDroppedMock(reqTs, respTs)
+}
+
 // asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
 // io.Copy on the forwarding path writes into it via Write (non-blocking,
 // drops on backpressure); the parseStreamingHTTP goroutine reads from
@@ -850,6 +879,13 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// window-close, before the capture goroutine — so the pressure range is
 		// still fresh (not yet pruned). See pressureOverlappedExchange.
 		if shouldCapture && pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
+			shouldCapture = false
+		}
+		// Atomic-drop gate (#4336): suppress the TC if one of the mocks its
+		// window owns was actually dropped before persistence. Race-free even
+		// when the pressure-range check above has already been pruned. See
+		// droppedMockInExchange.
+		if shouldCapture && droppedMockInExchange(ctx, reqTimestamp, respTimestamp) {
 			shouldCapture = false
 		}
 
@@ -1589,7 +1625,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// long enough for the pressure range to be pruned) — so the range is
 		// still fresh and the decision is reliable. See pressureOverlappedExchange.
 		if captureEnabled && !reqTeeTruncated && !respTeeTruncated &&
-			!pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
+			!pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) &&
+			!droppedMockInExchange(ctx, reqTimestamp, respTimestamp) {
 			select {
 			case captureHookSem <- struct{}{}:
 			case <-ctx.Done():
@@ -1784,6 +1821,12 @@ func (pm *IngressProxyManager) parseStreamingHTTP(ctx context.Context, logger *z
 		// check. At window-close the overlapping range cannot yet be pruned, so
 		// the decision is reliable. See pressureOverlappedExchange.
 		if pressureOverlappedExchange(ctx, reqTimestamp, respTimestamp) {
+			continue
+		}
+		// Atomic-drop gate (#4336): a mock owned by this window was dropped
+		// before persistence — suppress the TC so replay can't orphan it. See
+		// droppedMockInExchange.
+		if droppedMockInExchange(ctx, reqTimestamp, respTimestamp) {
 			continue
 		}
 
