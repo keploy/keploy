@@ -289,6 +289,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
+	// summaryEmitted flips true once the normal TestRun summary fires. If the
+	// run stops gracefully before that (setup/instrument failure), the defer
+	// emits a TestRunAborted with the categorized reason instead.
+	var summaryEmitted bool
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -297,6 +301,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
+			// Keploy-initiated (not user Ctrl+C, which lands in the ctx.Done
+			// case above) graceful stop before any run summary was emitted —
+			// record why so the replay funnel can see where test runs die on
+			// setup. Graceful only; hard crashes are covered by Sentry.
+			if !summaryEmitted {
+				r.telemetry.TestRunAborted(stopReason)
+				if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+					s.Shutdown()
+				}
+			}
 		}
 
 		// Notify the agent that we are shutting down gracefully. It covers early exits before RunTestSet runs
@@ -341,6 +355,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
 		utils.LogError(r.logger, err, errMsg)
+		// Ran `keploy test` before any tests were recorded — a distinct
+		// funnel signal, so surface it via the categorized stop reason
+		// rather than letting the default "completed" mask it.
+		stopReason = "no test sets found"
 		return fmt.Errorf("%s", errMsg)
 	}
 
@@ -807,6 +825,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(passed, failed, len(testSets), mocksConsumed, testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
+	// The run reached its summary; the teardown defer must not also emit a
+	// TestRunAborted for this invocation.
+	summaryEmitted = true
 	// Shutdown is optional: the static Telemetry interface does not require it,
 	// but the concrete implementation exposes it for graceful drain of in-flight events.
 	if s, ok := r.telemetry.(interface{ Shutdown() }); ok {

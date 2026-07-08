@@ -10,6 +10,7 @@ package models
 const (
 	TeleEventTestRun                = "TestRun"
 	TeleEventRecordSessionCompleted = "RecordSessionCompleted"
+	TeleEventTestRunAborted         = "TestRunAborted"
 )
 
 type TeleEvent struct {

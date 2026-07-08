@@ -219,6 +219,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+		totalMocks := 0
 		if recordingStarted {
 			mockCountMapMu.Lock()
 			mockCountSnapshot := make(map[string]int, len(mockCountMap))
@@ -229,18 +230,22 @@ func (r *Recorder) Start(ctx context.Context) error {
 			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountSnapshot, map[string]interface{}{
 				"host-domains": domainSet.ToSlice(),
 			})
-			totalMocks := 0
 			for _, c := range mockCountSnapshot {
 				totalMocks += c
 			}
-			// "completed" for a clean exit / user Ctrl+C, "aborted"
-			// when an error path set stopReason. Lets dashboards split
-			// successful sessions from failures without losing either.
+		}
+		// Emit the session summary on every graceful stop: either recording
+		// actually started, OR an error path set a stopReason before frames
+		// were established (setup/agent-not-ready/testset-lookup failures that
+		// previously emitted nothing — the highest-signal "stuck" cases).
+		// "completed" for a clean exit / user Ctrl+C, "aborted" when a
+		// stopReason was set; stop_reason carries the categorized cause.
+		if recordingStarted || stopReason != "" {
 			status := "completed"
 			if stopReason != "" {
 				status = "aborted"
 			}
-			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status)
+			r.telemetry.RecordSessionCompleted(int64(testCount), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, stopReason)
 		}
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
