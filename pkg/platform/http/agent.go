@@ -636,30 +636,54 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 	return nil
 
 }
+
+// StoreMocks streams the mock corpus to the agent over an io.Pipe: a gob
+// MockStreamHeader, then filtered mocks followed by unfiltered mocks, one gob
+// frame each.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	requestBody := models.StoreMocksReq{
-		Filtered:   filtered,
-		UnFiltered: unFiltered,
-	}
+	pr, pw := io.Pipe()
+	go func() {
+		enc := gob.NewEncoder(pw)
+		if err := enc.Encode(models.MockStreamHeader{
+			FilteredCount:   len(filtered),
+			UnfilteredCount: len(unFiltered),
+		}); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		i := 0
+		encodeAll := func(mocks []*models.Mock) error {
+			for _, m := range mocks {
+				if i%1024 == 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+				}
+				i++
+				if err := enc.Encode(m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := encodeAll(filtered); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if err := encodeAll(unFiltered); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
 
-	// gob-encode the body
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(requestBody); err != nil {
-		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks")
-		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
-	}
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI),
-		&buf,
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for storemocks")
 		return fmt.Errorf("create request for storemocks: %s", err.Error())
 	}
-	req.Header.Set("Content-Type", "application/x-gob")
+	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
 	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)
@@ -667,10 +691,14 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		return fmt.Errorf("send request for storemocks: %s", err.Error())
 	}
 	defer res.Body.Close()
+	return decodeStoreMocksResp(res)
+}
 
-	// Non-200? Try to decode anyway; if that fails, return status text
+// decodeStoreMocksResp reads the agent's single AgentResp gob reply, shared by
+// the streaming and legacy paths so their response handling is identical.
+func decodeStoreMocksResp(res *http.Response) error {
+	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		// Best-effort decode; fall back to status if it fails
 		var fail models.AgentResp
 		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
@@ -685,7 +713,6 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	if err := gob.NewDecoder(res.Body).Decode(&mockResp); err != nil {
 		return fmt.Errorf("decode gob response for storemocks: %s", err.Error())
 	}
-
 	if mockResp.Error != nil {
 		return mockResp.Error
 	}

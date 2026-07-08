@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -672,25 +673,84 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 		}
 	}
 
+	a.finalizeClientMocks(ctx, storage)
+	a.logger.Debug("Successfully stored mocks for client")
+	return nil
+}
+
+// finalizeClientMocks publishes a fully-built storage as the active client mock
+// pool (one sync.Map store, so a concurrent UpdateMockParams never sees a
+// half-built pool) and seeds the freeze anchor. Shared by StoreMocks and
+// StoreMocksStream.
+func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStorage) {
 	a.clientMocks.Store(uint64(0), storage)
 
-	// Compute the freeze anchor as the earliest ReqTimestampMock across the
-	// stored mocks and forward it to AgentHooks. The hook implementation
-	// decides whether to apply it (a no-op when freezeTime is off). Doing
-	// this here, alongside the StoreMocks write, guarantees the anchor is
-	// known to the hook before BeforeTestRun fires — i.e. before the user
-	// app's first datetime.now() call — which is what closes the bootstrap
-	// gap that lets boto3 / JWT libs see "now > recorded Expiration" and
-	// kill the worker.
 	if anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered); !anchor.IsZero() {
 		if err := ActiveHooks.SetFreezeAnchor(ctx, anchor); err != nil {
 			a.logger.Warn("SetFreezeAnchor hook returned error",
 				zap.Error(err), zap.Time("anchor", anchor))
 		}
 	}
+}
 
-	a.logger.Debug("Successfully stored mocks for client")
+// StoreMocksStream decodes the mock corpus one frame at a time from dec (header
+// counts split it into filtered then unfiltered), runs DeriveLifetime per mock,
+// and publishes the built storage once. A decode error fails the whole ingest
+// and leaves the previously-published pool intact — no partial publish.
+func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHeader, dec *gob.Decoder) error {
+	total := header.FilteredCount + header.UnfilteredCount
+	if header.FilteredCount < 0 || header.UnfilteredCount < 0 || total < 0 {
+		return fmt.Errorf("storemocks stream: invalid counts (filtered=%d unfiltered=%d)", header.FilteredCount, header.UnfilteredCount)
+	}
+	// Pre-size from the header counts, but cap the capacity: the counts are
+	// client-provided, so an inflated header must not force a huge upfront
+	// allocation. A larger real count just grows via append; a lying count
+	// still fails fast at the first Decode past the actual data.
+	storage := &ClientMockStorage{
+		filtered:   make([]*models.Mock, 0, presizeCap(header.FilteredCount)),
+		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
+	}
+
+	for i := 0; i < total; i++ {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		var m models.Mock
+		if err := dec.Decode(&m); err != nil {
+			return fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err)
+		}
+		mock := &m
+		mock.DeriveLifetime()
+		if i < header.FilteredCount {
+			storage.filtered = append(storage.filtered, mock)
+		} else {
+			storage.unfiltered = append(storage.unfiltered, mock)
+		}
+	}
+
+	a.finalizeClientMocks(ctx, storage)
+	a.logger.Debug("Successfully stored streamed mocks for client",
+		zap.Int("filtered", len(storage.filtered)),
+		zap.Int("unfiltered", len(storage.unfiltered)))
 	return nil
+}
+
+// maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
+// header's client-provided counts, so a malformed header can't trigger a huge
+// upfront allocation (CodeQL: untrusted allocation size). Real pools are far
+// smaller; a larger real count grows via append.
+const maxStreamPresize = 1 << 20
+
+func presizeCap(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > maxStreamPresize {
+		return maxStreamPresize
+	}
+	return n
 }
 
 // earliestReqTimestamp returns the earliest non-zero ReqTimestampMock seen
