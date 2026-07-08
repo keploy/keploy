@@ -224,9 +224,38 @@ function Invoke-RecordIteration {
       Where-Object { $_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'ginApp.exe' } |
       Select-Object -First 1
 
+    # Wait for keploy to FINISH persisting this iteration's testcases + mongo
+    # mocks to disk while it is STILL RUNNING, then stop it. keploy streams mocks
+    # to disk as it records and runs a final flush on shutdown; force-killing
+    # (taskkill /F) before that settles truncates or drops the mongo mocks, so
+    # replay fails with "[MongoDB] ... no_mocks". Poll the recorded mocks files
+    # until their total size stops growing (flush settled), bounded at 60s, then
+    # stop. (The old code slept 10s AFTER Kill-Tree — i.e. after keploy was
+    # already dead — so it never actually waited for the flush; that is the bug.)
+    # Watch BOTH mocks.yaml and mocks.json: the yaml iterations write mocks.yaml
+    # and the --storage-format json iterations write mocks.json, so filtering on
+    # mocks.yaml alone would see only the stale yaml files during a json
+    # iteration and break early. Do NOT glob mocks.* — that would also match
+    # keploy's transient mocks.<rand>.tmp atomic-write files and corrupt the
+    # size-stability signal.
+    $ksDir = Join-Path $currentDir 'keploy'
+    $deadline = (Get-Date).AddSeconds(60)
+    $lastSize = -1
+    $stable = 0
+    while ((Get-Date) -lt $deadline) {
+        $mockSum = (Get-ChildItem -Path $ksDir -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq 'mocks.yaml' -or $_.Name -eq 'mocks.json' } |
+                    Measure-Object -Property Length -Sum).Sum
+        if ($mockSum -and $mockSum -gt 0) {
+            if ($mockSum -eq $lastSize) { $stable++ } else { $stable = 0 }
+            if ($stable -ge 2) { break }   # size unchanged across ~6s => flush settled
+        }
+        $lastSize = $mockSum
+        Start-Sleep -Seconds 3
+    }
+    Write-Host "Recording flush settled (mocks size: $lastSize bytes); stopping keploy."
+
     if ($REC_PROC) { Kill-Tree -ProcessId $REC_PROC.ProcessId }
-    # Wait for keploy to flush mocks to disk
-    Start-Sleep -Seconds 10
 
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Drain-JobOutput -Job $recJob -LogFile $logFile
