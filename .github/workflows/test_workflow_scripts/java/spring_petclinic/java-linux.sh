@@ -61,6 +61,35 @@ wait_for_http_port() {
   endsec; return 1
 }
 
+wait_for_port_free() {
+  # This job launches the app on the fixed port 9966 four times in sequence
+  # (yaml record, json record, yaml replay, json replay). Stopping keploy with
+  # `sudo kill` only signals keploy; the spring-boot JVM grandchild can still be
+  # closing its :9966 listening socket when the NEXT launch tries to bind it,
+  # and spring does not set SO_REUSEADDR — so the next app dies with
+  # "Port 9966 was already in use" (flaky, worse under loaded runners). Poll the
+  # actual kernel socket state until the port is free before each (re)launch,
+  # reaping a lingering JVM after a short grace so a wedged shutdown can't stall.
+  local port="${1:-9966}"
+  section "Ensure port ${port} is free before (re)launch"
+  local reaped=0
+  for i in $(seq 1 60); do
+    if ! ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
+      echo "Port ${port} is free."
+      endsec; return 0
+    fi
+    if [[ "$i" -ge 5 && "$reaped" -eq 0 ]]; then
+      echo "Port ${port} still bound after ${i}s; reaping lingering spring-petclinic JVM"
+      sudo pkill -f 'spring-petclinic-rest.*jar' 2>/dev/null || true
+      reaped=1
+    fi
+    sleep 1
+  done
+  echo "::error::Port ${port} still bound after 60s"
+  ss -ltnp "sport = :${port}" 2>/dev/null || true
+  endsec; return 1
+}
+
 detect_api_prefix() {
   # returns either /petclinic/api or /api (echo to stdout), otherwise empty
   local base="http://localhost:9966"
@@ -621,11 +650,17 @@ send_request() {
   # Run the user's transaction logic
   run_transactions
 
-  # Let keploy persist, then stop it
+  # Let keploy persist, then stop it and its JVM child deterministically.
   sleep 10
   echo "$kp_pid Keploy PID"
   echo "Killing keploy"
   sudo kill "$kp_pid" 2>/dev/null || true
+  # Wait for keploy to exit gracefully, then reap the spring-boot JVM grandchild
+  # and hard-kill keploy as a fallback, so port 9966 is actually released before
+  # the next launch rather than depending on incidental latency.
+  for _ in $(seq 1 15); do kill -0 "$kp_pid" 2>/dev/null || break; sleep 1; done
+  sudo pkill -f 'spring-petclinic-rest.*jar' 2>/dev/null || true
+  sudo kill -9 "$kp_pid" 2>/dev/null || true
 }
 
 # ----- main -----
@@ -661,6 +696,8 @@ do_record_iteration() {
   section "Record iteration $i${label:+ (json)}"
 
   run_maven_build
+
+  wait_for_port_free 9966
 
   # shellcheck disable=SC2086
   "$RECORD_BIN" record $extra_flags \
@@ -730,6 +767,8 @@ docker rm mypostgres || true
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 endsec
 
+wait_for_port_free 9966
+
 section "Replay"
 set +e
 "$REPLAY_BIN" test \
@@ -789,6 +828,8 @@ if [[ $REPLAY_RC -ne 0 ]]; then
 fi
 
 if json_pass_supported; then
+  wait_for_port_free 9966
+
   section "Replay (json)"
   set +e
   "$REPLAY_BIN" test --storage-format json \
