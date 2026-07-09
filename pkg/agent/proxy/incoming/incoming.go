@@ -150,6 +150,15 @@ func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 // StartIngressProxy starts a new ingress proxy on the given original app port if it's not already running.
 // It delegates to the registered IngressHook (default: Go TCP forwarder).
 func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPort, newAppPort uint16) {
+	// If the agent is already shutting down, do not arm a new forwarder.
+	// WatchBindEvents delivers bind events over a buffered channel, so
+	// ListenForIngressEvents can still drain late/stale events after the context
+	// is canceled. Binding then would leave a listener holding the app's port
+	// (commonly 8000) for the next record run ("address already in use") and would
+	// also surface as a spurious ERROR log. Silently skip during teardown.
+	if ctx.Err() != nil {
+		return
+	}
 	pm.mu.Lock()
 	if _, ok := pm.active[origAppPort]; ok {
 		pm.mu.Unlock()
@@ -170,8 +179,16 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 
 	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
 		close(startDone)
-		pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
-			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		if ctx.Err() != nil {
+			// The agent is shutting down (context canceled or deadline exceeded); a
+			// start failure here is expected teardown, not a real error. Keep it out
+			// of ERROR so it doesn't trip error-grep gates in CI record output.
+			pm.logger.Debug("Ingress forwarder start aborted; agent shutting down",
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		} else {
+			pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		}
 		pm.mu.Lock()
 		delete(pm.active, origAppPort)
 		pm.mu.Unlock()
@@ -270,9 +287,30 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 			zap.Uint16("orig_port", origPort))
 	}
 
+	// If the agent is already shutting down, do NOT bind the ingress listener.
+	// A forwarder bound during teardown (e.g. from a late/stale bind event whose
+	// target wait above returned context.Canceled) can outlive StopAll's snapshot
+	// and linger holding the app's port (commonly 8000), so the next record run's
+	// application fails to bind it with "address already in use" — the flaky
+	// port-8000 reuse failure. Aborting here is safe: a canceled context means no
+	// ingress traffic will be served anyway.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
+			zap.String("target", newAppAddr), zap.Error(ctxErr))
+		return ctxErr
+	}
+
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
 		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
+	}
+	// Close the residual race: if the context was canceled while net.Listen was
+	// binding, release the port immediately and do NOT register the forwarder —
+	// otherwise it would linger holding the port and leave a stale forwarder entry
+	// that blocks re-arming it later.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = listener.Close()
+		return ctxErr
 	}
 	tcpListener, ok := listener.(*net.TCPListener)
 	if !ok {
@@ -286,6 +324,12 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 
 	go func() {
 		defer close(done)
+		// Release the listener (and its bound port) whenever the accept loop exits,
+		// even if StopIngress is never called for this forwarder (e.g. it raced with
+		// shutdown and missed StopAll's snapshot). Close is idempotent — StopIngress
+		// may also close it — and this runs before close(done) so a StopIngress
+		// waiter observes the port freed. Prevents the port from lingering post-exit.
+		defer func() { _ = listener.Close() }()
 		sem := make(chan struct{}, 1)
 		for {
 			select {
