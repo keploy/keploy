@@ -1717,43 +1717,53 @@ func TestSetMemoryPressurePreservesStartupMocks(t *testing.T) {
 	}
 }
 
-// TestSetMemoryPressurePrunesStaleRanges asserts the pressureRanges history is
-// bounded: SetMemoryPressure drops CLOSED ranges that ended longer ago than the
-// staleness horizon, but always keeps a still-open range. Without this the slice
-// would grow unbounded under continuous recording (mentor review #4220:119).
-func TestSetMemoryPressurePrunesStaleRanges(t *testing.T) {
+// TestSetMemoryPressureRetainsClosedRanges asserts pressureRanges is retained by
+// COUNT, not pruned by wall-clock age (the #4336 fix). A range that closed long
+// ago must survive so a lagging routes/record.go still finds it when it
+// belatedly checks the TC that range orphaned — age-pruning it (as the old code
+// did after 7s) let the orphan through and replay reported match_phase=no_mocks.
+// A still-open range is likewise always kept.
+func TestSetMemoryPressureRetainsClosedRanges(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
 
-	// Two stale closed ranges (ended well before the horizon) + one recent one.
+	// Two ranges that closed long ago + one recent. None may be dropped by age.
 	mgr := &SyncMockManager{
 		pressureRanges: []pressureRange{
-			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale → prune
-			{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)}, // stale → prune
-			{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},   // recent → keep
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)},
+			{start: now.Add(-30 * time.Second), end: now.Add(-20 * time.Second)},
+			{start: now.Add(-4 * time.Second), end: now.Add(-2 * time.Second)},
 		},
 	}
-	// memoryPause is already false, so calling with false is a no-op transition
-	// that still runs the prune.
+	// memoryPause is already false, so this is a no-op transition — it must NOT
+	// drop any range by age.
 	mgr.SetMemoryPressure(false)
-	if got := len(mgr.pressureRanges); got != 1 {
-		t.Fatalf("expected stale closed ranges pruned to 1 recent range; got %d", got)
+	if got := len(mgr.pressureRanges); got != 3 {
+		t.Fatalf("closed ranges must be retained (not age-pruned); want 3, got %d", got)
 	}
 
-	// A still-open range (end == zero) must never be pruned, even if it started
-	// long ago (a single long pressure spell).
+	// A still-open range (end == zero) is kept alongside a long-closed one.
 	mgr2 := &SyncMockManager{
 		memoryPause: true,
 		pressureRanges: []pressureRange{
-			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // stale closed → prune
-			{start: now.Add(-40 * time.Second)},                                  // open → keep
+			{start: now.Add(-60 * time.Second), end: now.Add(-50 * time.Second)}, // closed, old → retained
+			{start: now.Add(-40 * time.Second)},                                  // open → kept
 		},
 	}
-	// true→true: no new range opened, just the prune.
+	// true→true: no new range opened, and no age-prune.
 	mgr2.SetMemoryPressure(true)
-	if got := len(mgr2.pressureRanges); got != 1 || !mgr2.pressureRanges[0].end.IsZero() {
-		t.Fatalf("expected only the open range kept; got %d ranges", got)
+	if got := len(mgr2.pressureRanges); got != 2 {
+		t.Fatalf("expected both the old closed range and the open range retained; got %d", got)
+	}
+	openFound := false
+	for _, r := range mgr2.pressureRanges {
+		if r.end.IsZero() {
+			openFound = true
+		}
+	}
+	if !openFound {
+		t.Fatal("the still-open range must be preserved")
 	}
 }
 
