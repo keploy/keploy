@@ -52,9 +52,10 @@ FROM debian:trixie-slim
 
 ENV KEPLOY_INDOCKER=true
 
-# Update the package lists and install required packages
-RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
+# libcap2-bin → setcap. Mirror of Dockerfile.runtime — see that file for
+# the full rationale on file caps + dual-mode (root/non-root) execution.
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl sudo libcap2-bin && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -62,11 +63,16 @@ RUN apt-get install -y ca-certificates curl sudo && \
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 
-# windows comapatibility
-RUN sed -i 's/\r$//' /app/entrypoint.sh
-
-# Make the entrypoint.sh file executable
-RUN chmod +x /app/entrypoint.sh
+# windows compatibility + executable bit + file capabilities + non-root
+# user. The image default stays root (no USER directive); k8s deployments
+# override via securityContext.runAsUser=65532, file caps make the bounding
+# set effective on exec for that non-root case. See Dockerfile.runtime
+# for the full design note.
+RUN sed -i 's/\r$//' /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh /app/keploy && \
+    setcap cap_bpf,cap_perfmon,cap_net_admin,cap_sys_ptrace,cap_sys_resource+eip /app/keploy && \
+    groupadd --system --gid 65532 keploy && \
+    useradd  --system --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin keploy
 
 # Set the entrypoint
 ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker"]
