@@ -942,6 +942,20 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
+		// If it ignored the graceful signal (or was too contention-slow to exit
+		// within the wait), escalate to SIGKILL so it cannot keep holding resources
+		// (e.g. a listening port) and race the next app start with
+		// "address already in use" (the go-docker-timefreeze flake).
+		if running, rerr := isProcessRunning(pid); rerr != nil {
+			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
+		} else if running {
+			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
+			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
+				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
+			} else {
+				_ = waitForProcessExit(pid, 3*time.Second, logger)
+			}
+		}
 	}
 	return nil
 }

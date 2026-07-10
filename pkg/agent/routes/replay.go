@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -109,33 +110,37 @@ func (a *Agent) BeginTestErrorCapture(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, map[string]string{"status": "ok"})
 }
 
+// StoreMocks receives the mock corpus as a stream: a gob MockStreamHeader
+// followed by one gob Mock per frame, decoded mock-by-mock by StoreMocksStream.
 func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-gob")
 
-	var storeMocksReq models.StoreMocksReq
-	if err := gob.NewDecoder(r.Body).Decode(&storeMocksReq); err != nil {
-		storeMocksRes := models.AgentResp{
-			Error:     err,
-			IsSuccess: false,
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		_ = gob.NewEncoder(w).Encode(storeMocksRes)
+	writeErr := func(status int, err error) {
+		w.WriteHeader(status)
+		_ = gob.NewEncoder(w).Encode(models.AgentResp{Error: err, IsSuccess: false})
+	}
+
+	dec := gob.NewDecoder(r.Body)
+	var header models.MockStreamHeader
+	if err := dec.Decode(&header); err != nil {
+		writeErr(http.StatusBadRequest, fmt.Errorf("storemocks: decode stream header: %w", err))
 		return
 	}
 
-	err := a.svc.StoreMocks(r.Context(), storeMocksReq.Filtered, storeMocksReq.UnFiltered)
-
-	storeMocksRes := models.AgentResp{
-		Error:     err,
-		IsSuccess: err == nil,
+	streamer, ok := a.svc.(interface {
+		StoreMocksStream(context.Context, models.MockStreamHeader, *gob.Decoder) error
+	})
+	if !ok {
+		writeErr(http.StatusInternalServerError, fmt.Errorf("storemocks: service does not support streaming"))
+		return
 	}
 
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	} else {
-		w.WriteHeader(http.StatusOK)
+	if err := streamer.StoreMocksStream(r.Context(), header, dec); err != nil {
+		writeErr(http.StatusInternalServerError, err)
+		return
 	}
-	_ = gob.NewEncoder(w).Encode(storeMocksRes)
+	w.WriteHeader(http.StatusOK)
+	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 }
 
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {

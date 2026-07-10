@@ -20,16 +20,21 @@ const defaultMockBufferCapacity = 100
 // staleness cutoff keeps reachable, while staying O(1) memory.
 const maxRecentWindows = 256
 
-// pressureRangeStaleness bounds how long a CLOSED memory-pressure interval is
-// retained in SyncMockManager.pressureRanges. It is the same 7 s staleness
-// horizon the mock buffer and recentWindows already use: a pressure range that
-// ended longer ago than this can no longer overlap any still-live mock or test
-// window (both are stale-dropped at the same cutoff), so it is safe to prune.
-// Without this, the slice would grow by one entry per pressure transition for
-// the entire recording — under continuous recording that is an unbounded memory
-// leak and an ever-slower WasPressureActiveInWindow / pressureActiveAtLocked
-// scan (both loop over every range).
-const pressureRangeStaleness = 7 * time.Second
+// maxPressureRanges bounds SyncMockManager.pressureRanges by COUNT, not by
+// wall-clock age. An earlier version time-pruned closed ranges 7 s after they
+// ended, on the assumption that nothing older could still be queried. That is
+// wrong for the orphan-TC suppression in routes/record.go: the test-case stream
+// lags the recorder — a backed-up channel plus a slow CLI drain routinely puts
+// it MORE than 7 s behind — so a range that caused a mock drop is reaped before
+// the TC whose window overlaps it is ever checked, and the orphan is persisted
+// (replay then fails match_phase=no_mocks). Retention therefore must be
+// independent of how far record.go lags. Keep the newest maxPressureRanges
+// intervals and evict the oldest: memoryguard opens at most one range per
+// pause/resume cycle (a few per second of sustained pressure at most), so this
+// holds hundreds of recording sessions' worth of history — far more than
+// record.go could ever lag behind — while staying O(1) memory and keeping the
+// O(n) WasPressureActiveInWindow / pressureActiveAtLocked scans bounded.
+const maxPressureRanges = 8192
 
 // resolvedWindow is one already-resolved per-test window retained so a
 // late-arriving mock (decoded after the window closed) can still be
@@ -152,17 +157,26 @@ type SyncMockManager struct {
 	//
 	// This is the join key for the Bug 0 TC-suppression fix:
 	// WasPressureActiveInWindow checks whether any range overlaps a TC's
-	// [HTTPReq.Timestamp, HTTPResp.Timestamp] window. Using pressure ranges
-	// instead of per-mock drop timestamps is RACE-FREE — memoryguard records
-	// the start the instant it flips memoryPause, BEFORE any mock-parser
-	// goroutine sees the result; so even if the paired AddMock fires AFTER
-	// the TC has reached routes/record.go, the overlap is already visible.
+	// [HTTPReq.Timestamp, HTTPResp.Timestamp] window. Using pressure INTERVALS
+	// instead of per-mock drop timestamps is what makes suppression parser-
+	// agnostic: any parser (mongo in keploy/integrations, postgres, http…) that
+	// drops captured bytes on memoryguard.IsRecordingPaused() drops within an
+	// interval this slice records, so record.go catches the overlap without the
+	// parser reporting anything. Note the ordering is NOT a strict happens-before
+	// on m.memoryPause: memoryguard flips the GLOBAL recordingPaused flag (which
+	// the parser reads) just BEFORE it calls SetMemoryPressure to open the range,
+	// so there is a sub-microsecond gap where a parser could drop with no range
+	// yet recorded. Correctness does not rely on that gap being closed — it rests
+	// on record.go querying the range much later (by which time it exists), and
+	// on the drop preceding the mock's HTTPResp.Timestamp by far more than the
+	// open latency, so the TC window still overlaps the recorded interval.
 	//
-	// Bounded, not unbounded: SetMemoryPressure prunes closed ranges older
-	// than pressureRangeStaleness on every call, so the slice stays small
-	// (~the last few seconds) no matter how long recording runs. This keeps
-	// continuous recording from accumulating millions of intervals and
-	// slowing every overlap scan.
+	// Bounded, not unbounded: SetMemoryPressure caps the slice at
+	// maxPressureRanges by COUNT (evicting the oldest), NOT by wall-clock age.
+	// Age-based pruning would reap a range before a lagging routes/record.go
+	// could check the TC it orphaned; a count cap is independent of that lag
+	// while still keeping continuous recording from accumulating unbounded
+	// intervals and slowing every overlap scan.
 	pressureRanges []pressureRange
 
 	// loggerMu guards logger so SetLogger and the drop path can run
@@ -775,23 +789,6 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
 
-	// Prune the pressure-range history to the staleness horizon so it stays
-	// bounded under continuous recording (mentor review #4220, syncMock.go:119).
-	// Keep the currently-open range (end == zero) and any range that ended
-	// within the last pressureRangeStaleness; drop the rest. memoryguard calls
-	// this every 500 ms, so the slice never holds more than ~the last few
-	// seconds of history regardless of recording length. In-place filter,
-	// preserving order (the open range, if any, is newest so stays last).
-	if cutoff := now.Add(-pressureRangeStaleness); len(m.pressureRanges) > 0 {
-		kept := m.pressureRanges[:0]
-		for _, r := range m.pressureRanges {
-			if r.end.IsZero() || r.end.After(cutoff) {
-				kept = append(kept, r)
-			}
-		}
-		m.pressureRanges = kept
-	}
-
 	var clearedFromBuffer int
 	if enabled {
 		if !wasEnabled {
@@ -841,6 +838,18 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		if n := len(m.pressureRanges); n > 0 && m.pressureRanges[n-1].end.IsZero() {
 			m.pressureRanges[n-1].end = now
 		}
+	}
+
+	// Bound the range history by count (see maxPressureRanges). Evict the
+	// oldest intervals: routes/record.go consumes TCs oldest-first, so anything
+	// beyond the newest maxPressureRanges was streamed and checked long ago.
+	// Copy into a right-sized slice so the backing array does not pin the
+	// evicted entries. Eviction is rare (only past thousands of pressure
+	// cycles) so the allocation is not a hot path.
+	if n := len(m.pressureRanges); n > maxPressureRanges {
+		trimmed := make([]pressureRange, maxPressureRanges)
+		copy(trimmed, m.pressureRanges[n-maxPressureRanges:])
+		m.pressureRanges = trimmed
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
 

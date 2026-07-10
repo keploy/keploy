@@ -1579,6 +1579,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
 	}
+
+	// Snapshot the post-setup consumed-mock baseline. These are the
+	// reusable/session mocks (driver handshake, auth, connection pool
+	// warm-up) consumed during application bootstrap, before any test
+	// fires. Each mock-consistency retry cycle re-runs the passing tests
+	// as a fresh forward pass, so its serving pool must START from this
+	// baseline — see the rewind at the top of the replay loop below.
+	baselineConsumedMocks := make(map[string]models.MockState, len(totalConsumedMocks))
+	for k, v := range totalConsumedMocks {
+		baselineConsumedMocks[k] = v
+	}
+	// Persistent union of every MockState consumed across ALL retry cycles.
+	// totalConsumedMocks is rewound to baselineConsumedMocks at the start of
+	// each retry cycle, so after the loop it no longer holds the full set of
+	// consumed mocks. Two post-loop readers need that full union: the
+	// run-level Mocks-Consumed telemetry (r.consumedMockNames) and the
+	// schema-noise-detection persistence (PersistMockNoise, which reads the
+	// learned ReqBodyNoise off each MockState value — including mocks a later
+	// test failed on). Fold consumed mocks in here as cycles complete; last
+	// write wins, matching the pre-rewind behavior where a re-consumed mock's
+	// final-cycle MockState overwrote earlier ones.
+	allConsumedAcrossCycles := make(map[string]models.MockState, len(totalConsumedMocks))
+	for k, v := range totalConsumedMocks {
+		allConsumedAcrossCycles[k] = v
+	}
 	// Build a lookup of mock name -> summary and protocol from the mock registry (once per test set).
 	type mockInfo struct {
 		summary  string
@@ -1655,6 +1680,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		itr = 5
 	}
 	for replay := 0; replay < itr; replay++ {
+		// Mock-consistency retry cycles (replay > 0) re-run the tests that
+		// passed the previous cycle as a fresh forward pass. Rewind the
+		// consumed-mock filter to the post-setup baseline so each re-run
+		// test's PER-TEST single-use mocks — consumed via DeleteFilteredMock
+		// and flagged Usage=Deleted during the previous cycle — are served
+		// again. Without this rewind those mocks stay in totalConsumedMocks
+		// as Deleted; the agent's filterOutDeleted then strips them from the
+		// retry pool and every test that drives a per-test mock (MongoDB
+		// find/update, SQL query, non-idempotent HTTP) fails the retry with
+		// match_phase=no_mocks even though it passed the first pass. The
+		// window filter alone can't save them: the mock IS in the window,
+		// it's the Deleted flag that removes it. Mocks consumed in the prior
+		// cycle are folded into allConsumedAcrossCycles first so the post-loop
+		// readers (Mocks-Consumed telemetry and PersistMockNoise) stay complete.
+		if replay > 0 {
+			for k, v := range totalConsumedMocks {
+				allConsumedAcrossCycles[k] = v
+			}
+			totalConsumedMocks = make(map[string]models.MockState, len(baselineConsumedMocks))
+			for k, v := range baselineConsumedMocks {
+				totalConsumedMocks[k] = v
+			}
+		}
 		var nextTestsToRun []*models.TestCase
 		var currentFailures int
 		var currentObsolete int
@@ -2679,6 +2727,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	// Fold every mock consumed since the last rewind into the cross-cycle
+	// union — the final main-loop cycle's mocks and the streaming Phase 2
+	// mocks (Phase 2 appends to totalConsumedMocks and never rewinds).
+	// Earlier retry cycles were already folded at each rewind above. This
+	// must run after Phase 2's last write so the post-loop readers
+	// (PersistMockNoise and the Mocks-Consumed telemetry) see the complete
+	// union of everything consumed across all cycles and phases.
+	for k, v := range totalConsumedMocks {
+		allConsumedAcrossCycles[k] = v
+	}
+
 	timeTaken := time.Since(startTime)
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
@@ -2840,7 +2899,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error
 		}
 		if p, ok := r.mockDB.(mockNoisePersister); ok {
-			if err := p.PersistMockNoise(runTestSetCtx, testSetID, totalConsumedMocks); err != nil {
+			if err := p.PersistMockNoise(runTestSetCtx, testSetID, allConsumedAcrossCycles); err != nil {
 				utils.LogError(r.logger, err, "failed to persist learned request-body noise onto mocks")
 			}
 		} else {
@@ -3019,10 +3078,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Merge mock NAMES (not the count) into the run-level distinct
-	// set so duplicates across test sets aren't double-counted.
+	// Merge mock NAMES (not the count) into the run-level distinct set so
+	// duplicates across test sets aren't double-counted. allConsumedAcrossCycles
+	// is the cross-cycle union (folded at each rewind and once after the loop),
+	// so names consumed only in an earlier retry cycle aren't lost from the
+	// Mocks-Consumed telemetry.
 	r.completeTestReportMu.Lock()
-	for name := range totalConsumedMocks {
+	for name := range allConsumedAcrossCycles {
 		r.consumedMockNames[name] = struct{}{}
 	}
 	r.completeTestReportMu.Unlock()
