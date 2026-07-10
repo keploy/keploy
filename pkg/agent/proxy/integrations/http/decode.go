@@ -259,6 +259,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			// Hydrate a spilled response before serving. The agent's on-disk
+			// residency layer elides large per-test response bodies from the
+			// resident window (matching + schema-noise read only the request), so
+			// the body is loaded on demand here — the single reader of the elided
+			// HTTP response. No-op for mocks that already carry their response.
+			if err := stub.HydrateResponse(); err != nil {
+				utils.LogError(h.Logger, err, "failed to hydrate spilled http response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
+				return
+			}
+
 			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
 			body := stub.Spec.HTTPResp.Body

@@ -91,6 +91,53 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
+
+	// responseHydrator lazily loads this mock's response payload
+	// (HTTPResp / MongoResponses) the first time HydrateResponse is called.
+	// It is set ONLY for spilled per-test HTTP/Mongo mocks whose response
+	// body was elided from the resident window by the agent's on-disk
+	// residency store (pkg/agent/proxy/diskmocks.go) — matching never reads
+	// responses, so the body is loaded on demand at serve time instead of
+	// being held resident for the whole test window. nil for every other
+	// mock, which makes HydrateResponse a no-op. Unexported so gob ignores
+	// it: it never crosses the StoreMocks wire or a recording.
+	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+}
+
+// SetResponseHydrator installs a lazy response loader on this mock. Used by
+// the agent disk-residency layer for spilled per-test mocks; see
+// responseHydrator.
+func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
+	m.responseHydrator = fn
+}
+
+// HasSpilledResponse reports whether this mock's response payload is elided
+// and must be hydrated (via HydrateResponse) before it can be served.
+func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
+
+// HydrateResponse loads a previously-elided response payload into Spec. It is
+// a no-op for mocks that already carry their response (config, non-eligible
+// kinds, the legacy blob path), so every serve path can call it
+// unconditionally before reading Spec.HTTPResp / Spec.MongoResponses. The
+// loader only reads immutable on-disk bytes; per-test mocks are single-use
+// (consumed on match), so no cross-goroutine synchronisation is required.
+func (m *Mock) HydrateResponse() error {
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil
+	}
+	httpResp, mongoResp, err := fn()
+	if err != nil {
+		return err
+	}
+	if httpResp != nil {
+		m.Spec.HTTPResp = httpResp
+	}
+	if mongoResp != nil {
+		m.Spec.MongoResponses = mongoResp
+	}
+	m.responseHydrator = nil
+	return nil
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
@@ -826,6 +873,12 @@ func (m *Mock) DeepCopy() *Mock {
 		},
 		ConnectionID: m.ConnectionID,
 	}
+
+	// Carry the lazy response loader so window mocks copied into the match
+	// trees can still hydrate their elided body at serve time. The loader is
+	// a pure reader of immutable on-disk bytes, so sharing it across copies
+	// is safe; each copy hydrates its own Spec independently.
+	c.responseHydrator = m.responseHydrator
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {
