@@ -1334,17 +1334,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			)
 		}
 
-		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
-		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
-		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
-		// Write the value straight to the procfs knob instead of shelling out to the
-		// `sysctl` binary, which isn't guaranteed to be present in minimal images.
+		// Relax perf_event_paranoid so eBPF programs can attach to syscall
+		// tracepoints (e.g. sys_socket) via perf_event_open. Best-effort — see
+		// relaxPerfEventParanoid for why a failure here must not abort setup.
 		if runtime.GOOS == "linux" {
-			const perfEventParanoidPath = "/proc/sys/kernel/perf_event_paranoid"
-			if err := os.WriteFile(perfEventParanoidPath, []byte("2\n"), 0644); err != nil {
-				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
-				return err
-			}
+			relaxPerfEventParanoid(a.logger, perfEventParanoidPath)
 		}
 	}
 
@@ -1405,6 +1399,46 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
+}
+
+// perfEventParanoidPath is the procfs knob controlling how restricted
+// perf_event_open is for unprivileged users. The dotted sysctl name
+// kernel.perf_event_paranoid maps to this path.
+const perfEventParanoidPath = "/proc/sys/kernel/perf_event_paranoid"
+
+// relaxPerfEventParanoid lowers kernel.perf_event_paranoid to 2 so eBPF programs
+// can attach to syscall tracepoints via perf_event_open. Debian/Ubuntu ship a
+// patched kernel that gates all unprivileged perf_event_open on paranoid <= 2
+// (keyed on CAP_SYS_ADMIN rather than CAP_PERFMON), so a CAP_PERFMON-only agent
+// is blocked there until the knob is relaxed.
+//
+// It is deliberately best-effort:
+//   - It skips the write when the knob is already permissive (<= 2), which avoids
+//     needing write permission when there is nothing to do.
+//   - It only logs — never returns an error — when the value can't be read or
+//     written. The knob is a global host setting we frequently can't touch
+//     (read-only /proc/sys inside containers, non-root CLI, hardened kernels),
+//     and on mainline kernels the agent's CAP_PERFMON already bypasses the
+//     paranoid check, so a failure here must not abort setup.
+//
+// Writing procfs directly avoids a runtime dependency on the `sysctl` binary,
+// which isn't guaranteed to be present in minimal images. The path is a
+// parameter so tests can exercise the read/skip/write logic against a temp file.
+func relaxPerfEventParanoid(logger *zap.Logger, path string) {
+	const target = 2
+
+	if cur, err := os.ReadFile(path); err == nil {
+		if v, perr := strconv.Atoi(strings.TrimSpace(string(cur))); perr == nil && v <= target {
+			logger.Debug("perf_event_paranoid already permissive; skipping relax",
+				zap.Int("current", v), zap.Int("target", target))
+			return
+		}
+	}
+
+	if err := os.WriteFile(path, []byte(strconv.Itoa(target)+"\n"), 0644); err != nil {
+		logger.Warn("could not relax perf_event_paranoid; tracepoint attach falls back to the agent's CAP_PERFMON, which suffices on mainline kernels but not on Debian/Ubuntu patched kernels",
+			zap.String("path", path), zap.Error(err))
+	}
 }
 
 func (a *AgentClient) getApp() (*app.App, error) {
