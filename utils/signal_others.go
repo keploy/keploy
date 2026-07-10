@@ -37,7 +37,12 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
 	// Run the app as the user who invoked sudo
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
+	// Run through `sh -c` when a shell is available; fall back to a direct exec
+	// (no /bin/sh) on distroless images. See utils.CommandContext.
+	cmd, err := CommandContext(ctx, userCmd)
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
 
 	// Set the cancel function for the command
 	cmd.Cancel = cancel(cmd)
@@ -85,7 +90,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
