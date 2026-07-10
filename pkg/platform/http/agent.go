@@ -637,10 +637,51 @@ func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSe
 
 }
 
-// StoreMocks streams the mock corpus to the agent over an io.Pipe: a gob
-// MockStreamHeader, then filtered mocks followed by unfiltered mocks, one gob
-// frame each.
+// StoreMocks sends the mock corpus to the agent. It streams by default (a gob
+// MockStreamHeader over an io.Pipe, then filtered then unfiltered mocks, one gob
+// frame each) — streaming was added (#4327) so the agent doesn't buffer the
+// whole corpus and OOM on large recordings.
+//
+// Backward compatibility: a pre-streaming agent (keploy <= v3.5.84) gob-decodes
+// the request body as a single StoreMocksReq and fails the instant it meets the
+// MockStreamHeader ("type mismatch: no fields matched"), returning HTTP 400.
+// Rather than lockstep-break every rolling upgrade where the deployed agent
+// image lags the controller (a fresh streaming controller talking to an
+// already-running old agent), StoreMocks transparently retries such a 400 with
+// the legacy single-shot framing the old agent understands. An agent old enough
+// to reject the stream is old enough to have handled single-shot before — and
+// predates the large-corpus recordings streaming exists for — so the fallback
+// is safe; a genuine bad-request 400 simply fails again on the retry.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	// A dedicated cancelable context for the stream request: cancelling it tears
+	// down the transport's read of the io.Pipe body, which unblocks the encoder
+	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
+	// whole stream — so the fallback path can't leak that goroutine.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+
+	res, err := a.storeMocksStream(streamCtx, filtered, unFiltered)
+	if err != nil {
+		cancelStream()
+		return err
+	}
+
+	if res.StatusCode == http.StatusBadRequest {
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+		cancelStream()
+		a.logger.Warn("agent rejected streaming /storemocks with HTTP 400; retrying with legacy single-shot framing. The usual cause is a deployed agent that predates streaming (keploy <= v3.5.84) during a rolling upgrade — align the agent image with the controller's keploy version to use streaming and avoid buffering the whole mock corpus. (A new agent that returns 400 for another reason will simply fail the legacy retry too, surfacing the real error.)")
+		return a.storeMocksLegacy(ctx, filtered, unFiltered)
+	}
+
+	defer cancelStream()
+	defer res.Body.Close()
+	return decodeStoreMocksResp(res)
+}
+
+// storeMocksStream POSTs the corpus as a gob stream (MockStreamHeader + one
+// frame per mock) and returns the raw response so the caller can decide whether
+// to fall back on a 400.
+func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (*http.Response, error) {
 	pr, pw := io.Pipe()
 	go func() {
 		enc := gob.NewEncoder(pw)
@@ -680,15 +721,53 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), pr)
 	if err != nil {
+		// The transport never took ownership of pr, so nothing else will ever
+		// close it — close the pipe so the encoder goroutine's blocked pw.Write
+		// returns instead of leaking. (Do() closes req.Body itself on its own
+		// error path per the RoundTripper contract, but here Do was never
+		// reached.)
+		_ = pw.CloseWithError(err)
 		utils.LogError(a.logger, err, "failed to create request for storemocks")
-		return fmt.Errorf("create request for storemocks: %s", err.Error())
+		return nil, fmt.Errorf("create request for storemocks: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", models.StoreMocksStreamContentType)
 	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send request for storemocks: %s", err.Error())
+		return nil, fmt.Errorf("send request for storemocks: %s", err.Error())
+	}
+	return res, nil
+}
+
+// storeMocksLegacy POSTs the corpus in the pre-streaming single-shot framing:
+// one gob-encoded StoreMocksReq with Content-Type application/x-gob. Used only
+// as the compatibility fallback when a deployed agent rejects the stream (see
+// StoreMocks). It buffers the whole corpus in memory the way the pre-#4327 path
+// did — acceptable here because it only runs against an old agent that never
+// supported streaming anyway.
+func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(models.StoreMocksReq{
+		Filtered:   filtered,
+		UnFiltered: unFiltered,
+	}); err != nil {
+		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks (legacy)")
+		return fmt.Errorf("gob encode request for storemocks (legacy): %s", err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), &buf)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create legacy request for storemocks")
+		return fmt.Errorf("create legacy request for storemocks: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/x-gob")
+	req.Header.Set("Accept", "application/x-gob")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send legacy request for storemocks: %s", err.Error())
 	}
 	defer res.Body.Close()
 	return decodeStoreMocksResp(res)
