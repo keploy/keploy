@@ -278,6 +278,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
 
+	// parentCtx is the context as passed into Start — canceled only by a
+	// real user interrupt (SIGINT via utils.NewCtx). The errgroup-derived
+	// ctx below additionally cancels on ANY goroutine error, so it must NOT
+	// be used to detect user-abort: doing so would suppress TestRunAborted
+	// for exactly the internal graceful-abort paths this telemetry targets.
+	parentCtx := ctx
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
@@ -297,14 +304,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
-		case <-ctx.Done():
+		case <-parentCtx.Done():
 			break
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
-			// Keploy-initiated (not user Ctrl+C, which lands in the ctx.Done
-			// case above) graceful stop before any run summary was emitted —
-			// record why so the replay funnel can see where test runs die on
-			// setup. Graceful only; hard crashes are covered by Sentry.
+			// Keploy-initiated (not user Ctrl+C, which lands in the
+			// parentCtx.Done case above) graceful stop before any run summary
+			// was emitted — record why so the replay funnel can see where test
+			// runs die on setup. Graceful only; hard crashes are covered by
+			// Sentry. parentCtx (not the errgroup ctx) is checked so internal
+			// goroutine errors don't masquerade as user interrupts.
 			if !summaryEmitted {
 				r.telemetry.TestRunAborted(stopReason)
 				if s, ok := r.telemetry.(interface{ Shutdown() }); ok {

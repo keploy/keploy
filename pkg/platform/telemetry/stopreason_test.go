@@ -14,16 +14,16 @@ func TestCategorizeStopReason(t *testing.T) {
 		"replay completed successfully": StopReasonCompleted,
 
 		// record.go
-		"failed to get new test-set id":                                                     StopReasonTestsetLookup,
-		"failed setting up the environment":                                                 StopReasonSetupFailed,
-		"failed to get data frames":                                                         StopReasonNoTrafficFrames,
-		"error in running the user application, hence stopping keploy":                      StopReasonAppError,
-		"user application terminated unexpectedly hence stopping keploy":                    StopReasonAppExited,
-		"internal error occurred while hooking into the application, hence stopping keploy": StopReasonHookError,
-		"keploy test mode binary stopped, hence stopping keploy":                            StopReasonAppExited,
-		"unknown error received from application, hence stopping keploy":                    StopReasonAppError,
-		"error while inserting test case into db, hence stopping keploy":                    StopReasonDBWriteError,
-		"error while inserting mock into db, hence stopping keploy":                         StopReasonDBWriteError,
+		"failed to get new test-set id":                                StopReasonTestsetLookup,
+		"failed setting up the environment":                            StopReasonSetupFailed,
+		"failed to get data frames":                                    StopReasonNoTrafficFrames,
+		"error in running the user application, hence stopping keploy": StopReasonAppError,
+		"user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected": StopReasonAppExited,
+		"internal error occurred while hooking into the application, hence stopping keploy":                                               StopReasonHookError,
+		"keploy test mode binary stopped, hence stopping keploy":                                                                          StopReasonAppExited,
+		"unknown error received from application, hence stopping keploy":                                                                  StopReasonAppError,
+		"error while inserting test case into db, hence stopping keploy":                                                                  StopReasonDBWriteError,
+		"error while inserting mock into db, hence stopping keploy":                                                                       StopReasonDBWriteError,
 
 		// replay.go (these interpolate %v in production; prefix must still match)
 		"no test sets found":                   StopReasonNoTestsets,
