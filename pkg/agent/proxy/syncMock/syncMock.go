@@ -2,6 +2,7 @@ package manager
 
 import (
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -148,6 +149,24 @@ type SyncMockManager struct {
 	droppedMu      sync.Mutex
 	droppedTCNames map[string]struct{}
 	droppedTCOrder []string
+
+	// revokeCapable gates the deferred-orphan revoke protocol: it is set true
+	// (via SetRevokeCapable) only when the CLI negotiated
+	// OutgoingOptions.SupportsDroppedRevoke on the /outgoing request. When
+	// false (an older CLI, or the default), recordDroppedTC queues NOTHING and
+	// drainPendingRevokes sends NOTHING — so a CLI that can't divert the
+	// reserved Kind=RevokedTests control frame never receives one. atomic so
+	// the send path can read it without taking a lock.
+	revokeCapable atomic.Bool
+
+	// pendingRevokes is the FIFO of dropped-TC names still to be emitted to the
+	// CLI as RevokedTests control frames. Appended by recordDroppedTC when a
+	// NEW capacity-drop owner is recorded AND revokeCapable is set; drained by
+	// drainPendingRevokes on every FlushOwnedWindows tick and at CloseOutChan.
+	// Guarded by the SAME droppedMu leaf lock as droppedTCNames (it fits the
+	// leaf discipline — droppedMu takes no other lock while held), so a drop
+	// records the owner and queues the revoke under one lock acquisition.
+	pendingRevokes []string
 
 	// testCounter generates this session's sequential test IDs
 	// ("test-1", "test-2", …). Per-instance so concurrent capture
@@ -306,6 +325,15 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	if out != m.outChan {
 		m.outChan = out
 		m.outChanClosed = false
+		// New session (distinct channel = re-record): drop any revokes still
+		// queued from a prior session so a name orphaned there can't be
+		// delivered onto THIS session's /outgoing stream. droppedMu is a leaf;
+		// taking it here under outChanMu.Lock keeps the same outChanMu→droppedMu
+		// order the send path already uses (outChanMu.RLock→recordDroppedTC), so
+		// there is no new lock-ordering hazard.
+		m.droppedMu.Lock()
+		m.pendingRevokes = nil
+		m.droppedMu.Unlock()
 	}
 }
 
@@ -435,6 +463,57 @@ func (m *SyncMockManager) sendToOutChanOwned(mock *models.Mock, owner string) {
 	}
 }
 
+// trySendControlFrame attempts a NON-blocking send of a reserved-Kind control
+// frame (a revoke) on outChan. Returns true iff delivered. Unlike
+// sendToOutChanOwned it does NOT bump dropCount and does NOT record a drop or
+// fire the "recording is lossy" log — a control frame is not a mock. If the
+// channel is closed/nil or full, it returns false and the caller re-queues.
+func (m *SyncMockManager) trySendControlFrame(mock *models.Mock) bool {
+	m.outChanMu.RLock()
+	defer m.outChanMu.RUnlock()
+	if m.outChanClosed || m.outChan == nil {
+		return false
+	}
+	select {
+	case m.outChan <- mock:
+		return true
+	default:
+		return false
+	}
+}
+
+// drainPendingRevokes emits a revoke control frame for every test case queued
+// by recordDroppedTC. It SNAPSHOTS the queue under droppedMu, releases the
+// lock, then sends — holding droppedMu across trySendControlFrame (which takes
+// outChanMu.RLock) would invert the leaf-lock order and can 3-way deadlock
+// against CloseOutChan's outChanMu.Lock under load. Undelivered names are
+// re-queued for the next tick (eventual delivery while the stream is open).
+func (m *SyncMockManager) drainPendingRevokes() {
+	if m == nil || !m.revokeCapable.Load() {
+		return
+	}
+	m.droppedMu.Lock()
+	if len(m.pendingRevokes) == 0 {
+		m.droppedMu.Unlock()
+		return
+	}
+	batch := m.pendingRevokes
+	m.pendingRevokes = nil
+	m.droppedMu.Unlock()
+
+	frame := &models.Mock{
+		Kind: models.RevokedTests,
+		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": strings.Join(batch, ",")}},
+	}
+	if !m.trySendControlFrame(frame) {
+		// Re-queue the whole batch under a fresh lock (new drops may have
+		// appended meanwhile — keep the retries ahead of them).
+		m.droppedMu.Lock()
+		m.pendingRevokes = append(batch, m.pendingRevokes...)
+		m.droppedMu.Unlock()
+	}
+}
+
 // DropCount exposes the cumulative drop counter for tests and
 // external observability. The value is monotonically increasing;
 // readers that need a delta should snapshot and diff.
@@ -468,6 +547,27 @@ func (m *SyncMockManager) recordDroppedTC(name string) {
 		k := copy(m.droppedTCOrder, m.droppedTCOrder[1:])
 		m.droppedTCOrder = m.droppedTCOrder[:k]
 	}
+	// Deferred-orphan revoke: if the TC already streamed to the CLI, a drop now
+	// is undetectable by stream-time suppression, so queue the name for LIVE
+	// delivery as a RevokedTests control frame. Only when the CLI negotiated the
+	// capability (revokeCapable) — an older CLI would mis-persist the frame.
+	// Queued under the already-held droppedMu; the name is NEW here (the dedup
+	// return above guarantees it), so pendingRevokes never accumulates dupes.
+	if m.revokeCapable.Load() {
+		m.pendingRevokes = append(m.pendingRevokes, name)
+	}
+}
+
+// SetRevokeCapable enables (or disables) emission of RevokedTests control
+// frames for the deferred-orphan revoke protocol. The agent service calls it
+// from GetOutgoing with OutgoingOptions.SupportsDroppedRevoke, so emission is
+// gated strictly on what the connecting CLI negotiated — default false means an
+// older CLI never triggers a revoke frame.
+func (m *SyncMockManager) SetRevokeCapable(v bool) {
+	if m == nil {
+		return
+	}
+	m.revokeCapable.Store(v)
 }
 
 // WasMockDroppedForTC reports whether a mock owned by test `name` was dropped on
@@ -704,6 +804,11 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	outChanBound, _ := m.outChanStatus()
 	if !outChanBound {
 		m.mu.Unlock()
+		// Still drain pending revokes: an unbound outChan means
+		// trySendControlFrame can't deliver, so the batch is re-queued for a
+		// later tick — but the drain must be REACHED on every tick regardless
+		// of buffer/channel state so the tail can't be starved.
+		m.drainPendingRevokes()
 		return
 	}
 	mappingChan := m.mappingChan
@@ -781,6 +886,13 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			}
 		}
 	}
+	// Deliver any queued deferred-orphan revokes on the same open stream. Runs
+	// on EVERY tick (the proxy invokes FlushOwnedWindows periodically and
+	// CloseOutChan calls it once at shutdown) so a capacity-dropped TC that
+	// already streamed is signalled to the CLI while the /outgoing stream is
+	// still open. Snapshot-then-send inside drainPendingRevokes keeps droppedMu
+	// off the send path — do NOT hoist it under m.mu.
+	m.drainPendingRevokes()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {

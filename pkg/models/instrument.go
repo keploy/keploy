@@ -101,6 +101,14 @@ type OutgoingOptions struct {
 	// before dialing and deadlocks otherwise. When nil/empty, the
 	// proxy falls back to the built-in defaults [3306, 4000].
 	MysqlPorts []uint32
+	// SupportsDroppedRevoke is a capability flag set by the CLI on the
+	// /outgoing request: when true, the CLI understands the reserved
+	// Kind=RevokedTests control frame (it diverts it into a revoke set and
+	// deletes those test cases at finalize) rather than trying to persist it
+	// as a mock. The agent emits revoke frames ONLY when this is true, so an
+	// older CLI that never sets it never receives one — the version-skew
+	// guard for the deferred-orphan revoke protocol. Record path only.
+	SupportsDroppedRevoke bool
 }
 
 type ConditionalDstCfg struct {
