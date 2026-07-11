@@ -360,6 +360,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
 					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+					zap.Int("orphan_ranges_total", syncmgr.Get().OrphanRangeCount()),
 				)
 				return
 			}
@@ -380,14 +381,24 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// concurrent TC that kept all its mocks.
 			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
 
-			if hasOverlap || mockDropped {
+			// A non-pressure mock void (parser marked its mock incomplete —
+			// reassembly overflow, a decode error on the realignment tail after
+			// a pressure gap, per-conn cap, short write) records an orphan
+			// window but feeds NEITHER the pressure ranges NOR the capacity
+			// ledger above. Without this check such a void reaches replay
+			// mock-less (match_phase=no_mocks) exactly like the two cases above.
+			// Overlap by the TC's own HTTP window, same as the pressure check.
+			orphanOverlap, orphanCount := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+
+			if hasOverlap || mockDropped || orphanOverlap {
 				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window or a mock was capacity-dropped, not sent to CLI",
+				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, a mock was capacity-dropped, or a mock was voided (incomplete) in the TC window; not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 					zap.Int("pressure_overlaps", overlapCount),
 					zap.Bool("capacity_drop", mockDropped),
+					zap.Int("orphan_overlaps", orphanCount),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)
 				continue

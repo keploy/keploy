@@ -224,6 +224,25 @@ type SyncMockManager struct {
 	// intervals and slowing every overlap scan.
 	pressureRanges []pressureRange
 
+	// orphanRanges records every [start, end] wire window over which a mock was
+	// VOIDED for a reason OTHER than memory pressure — a parser marked its mock
+	// incomplete (client/server reassembly overflow, a decode error on the
+	// realignment tail after a memory-pressure gap, per-conn cap, short write)
+	// so supervisor.emitMockCore dropped it, or the parser reported the failing
+	// operation's window directly. It is the exact complement of pressureRanges:
+	// memory-pressure drops happen while memoryguard.IsRecordingPaused() is true
+	// and therefore fall inside a pressureRanges interval, but these voids happen
+	// while recording is NOT paused, so WasPressureActiveInWindow structurally
+	// cannot see them and the orphaned TC would reach replay mock-less
+	// (match_phase=no_mocks). WasMockOrphanedInWindow checks overlap against a
+	// TC's [HTTPReq.Timestamp, HTTPResp.Timestamp] window with the same interval
+	// semantics as pressureRanges, and record.go ORs the two. Count-bounded at
+	// maxPressureRanges (oldest evicted), guarded by mu — a continuous stream of
+	// voids can't grow it unbounded or slow the overlap scan. Entries always
+	// carry a concrete end (RecordOrphanWindow clamps a zero/degenerate end to
+	// start), so no open-interval "extend to now" handling is needed here.
+	orphanRanges []pressureRange
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
@@ -992,6 +1011,73 @@ func (m *SyncMockManager) PressureRangeCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.pressureRanges)
+}
+
+// RecordOrphanWindow records that a mock owned by some test case was voided
+// over the wire window [start, end] for a NON-pressure reason (a parser marked
+// it incomplete, or emitMockCore dropped it under the mockIncomplete flag).
+// record.go suppresses any TC whose HTTP [req, resp] window overlaps, so the
+// orphaned TC is not streamed mock-less. A degenerate window (start == end, a
+// single operation instant) is valid — the overlap test treats it as a
+// zero-width interval. Bounded by count like pressureRanges (oldest evicted).
+//
+// A zero start is IGNORED: a caller with no reliable wire timestamp must not
+// poison the suppressor into over-claiming (which would silently drop healthy
+// TCs). A zero or inverted end is clamped to start so the entry is a valid
+// point interval rather than an empty or reversed one.
+func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
+	if m == nil || start.IsZero() {
+		return
+	}
+	if end.IsZero() || end.Before(start) {
+		end = start
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.orphanRanges = append(m.orphanRanges, pressureRange{start: start, end: end})
+	// Orphan windows are recorded per voided mock — far more frequently than
+	// pressure ranges (a few per second) — so avoid the reallocate-and-copy on
+	// EVERY call past the cap that SetMemoryPressure can afford. Let the slice
+	// grow to 2×cap, then compact IN PLACE (reuse the backing array, non-
+	// overlapping src/dst) back to the newest cap. Amortized O(1) per call, zero
+	// allocation once warmed, scan bounded at 2×cap, still evicting oldest-first.
+	if n := len(m.orphanRanges); n > 2*maxPressureRanges {
+		m.orphanRanges = append(m.orphanRanges[:0], m.orphanRanges[n-maxPressureRanges:]...)
+	}
+}
+
+// WasMockOrphanedInWindow returns (true, count) if a non-pressure mock void was
+// recorded overlapping [start, end] — the orphan-window twin of
+// WasPressureActiveInWindow. record.go ORs the two so a TC is suppressed
+// whether its mock was lost to memory pressure OR to a parser-side void. Every
+// orphanRanges entry has a concrete end (RecordOrphanWindow guarantees it), so
+// no open-interval handling is needed. Degenerate TC inputs are refused (return
+// false) rather than over-suppressing, matching WasPressureActiveInWindow.
+func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, int) {
+	if m == nil || start.IsZero() || end.IsZero() {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, r := range m.orphanRanges {
+		// Standard interval-overlap test: [r.start, r.end] vs [start, end].
+		if !r.start.After(end) && !r.end.Before(start) {
+			count++
+		}
+	}
+	return count > 0, count
+}
+
+// OrphanRangeCount returns the number of non-pressure mock-void windows
+// recorded so far. Exposed for the session-summary log in routes/record.go.
+func (m *SyncMockManager) OrphanRangeCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.orphanRanges)
 }
 
 func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
