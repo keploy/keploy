@@ -358,6 +358,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
+					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
+					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
 				)
 				return
 			}
@@ -370,14 +372,22 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// mock's goroutine runs relative to this handler.
 			tcRespTime := t.HTTPResp.Timestamp
 			hasOverlap, overlapCount := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+			// A capacity drop (outChan overflow / already-closed channel)
+			// feeds nothing into pressureRanges, so the pressure-overlap check
+			// above cannot catch it. Suppress by EXACT owning test name so a
+			// TC whose mock was capacity-dropped is not streamed mock-less
+			// (replay: match_phase=no_mocks), without over-suppressing any
+			// concurrent TC that kept all its mocks.
+			mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
 
-			if hasOverlap {
+			if hasOverlap || mockDropped {
 				tcsSuppressedSoFar++
-				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, not sent to CLI",
+				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window or a mock was capacity-dropped, not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
 					zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 					zap.Int("pressure_overlaps", overlapCount),
+					zap.Bool("capacity_drop", mockDropped),
 					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 				)
 				continue
