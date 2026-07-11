@@ -2001,3 +2001,83 @@ func TestAgentReadyTimeout(t *testing.T) {
 		t.Fatalf("DefaultAgentReadyTimeout %v is shorter than the agent healthcheck budget (~310s)", DefaultAgentReadyTimeout)
 	}
 }
+
+// TestFilterConfigMocksMapping_PreservesRecordedRevisionOrder is the unit-level
+// reproduction of the couchbase-java mapping-based-replay flake.
+//
+// filterByMapping partitions the config pool into [in-mapping] and
+// [not-in-mapping] by per-test mapping membership. The pre-fix
+// FilterConfigMocksMapping returned append(inMapping, notInMapping...), which
+// splits an order-sensitive recorded revision SEQUENCE (e.g. the Couchbase
+// GET_CLUSTER_CONFIG cluster-config poll) across the mapping boundary: a later
+// revision that some test mapped sorts BEFORE an earlier bootstrap revision
+// that no test mapped. The config pool is served to the matcher in this
+// slice's order (MockManager.SetUnFilteredMocks restamps SortOrder from it), so
+// a stateful cursor-based matcher then walks revisions out of recorded order
+// and gocb's WaitUntilReady never converges (the 108x WAIT_FOR_CONFIG /
+// ~6m45s degraded bootstrap seen only under mapping-based replay#2).
+//
+// This test pins the fixed invariant: FilterConfigMocksMapping returns the
+// config pool in strict ReqTimestampMock (recorded) order — identical to what
+// the timestamp branch (FilterConfigMocksTierAware) produces — regardless of
+// which revisions a given test mapped. Fails on the pre-fix concatenation
+// (returns [cfg-rev-2 cfg-rev-1 cfg-rev-3]); passes on the sorted fix.
+func TestFilterConfigMocksMapping_PreservesRecordedRevisionOrder(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mk := func(name string, offsetMs int) *models.Mock {
+		ts := base.Add(time.Duration(offsetMs) * time.Millisecond)
+		return &models.Mock{
+			Name:    name,
+			Version: "api.keploy.io/v1beta1",
+			Spec: models.MockSpec{
+				// Couchbase cluster-config-poll mocks carry the config tier.
+				Metadata:         map[string]string{"type": "config"},
+				ReqTimestampMock: ts,
+				ResTimestampMock: ts.Add(time.Millisecond),
+			},
+		}
+	}
+
+	// Three cluster-config-poll revisions recorded in strict chronological
+	// order: rev1 (t+0) < rev2 (t+100ms) < rev3 (t+200ms).
+	rev1 := mk("cfg-rev-1", 0)
+	rev2 := mk("cfg-rev-2", 100)
+	rev3 := mk("cfg-rev-3", 200)
+	input := []*models.Mock{rev1, rev2, rev3}
+
+	// Only the MIDDLE revision is present in this test's mapping. filterByMapping
+	// therefore returns filtered=[rev2], unfiltered=[rev1, rev3]; the pre-fix
+	// append(filtered, unfiltered...) hoisted rev2 ahead of the earlier rev1.
+	mocksPresentInMapping := []string{"cfg-rev-2"}
+
+	got := FilterConfigMocksMapping(ctx, logger, input, mocksPresentInMapping)
+	require.Len(t, got, 3, "all three config-tier revisions must be returned")
+
+	gotOrder := make([]string, len(got))
+	for i, m := range got {
+		gotOrder[i] = m.Name
+	}
+	// This exact-order equality is the load-bearing invariant: strict recorded
+	// (ReqTimestampMock) order — the property the stateful cursor-based matcher
+	// (couchbase GET_CLUSTER_CONFIG pick) relies on — NOT mapping-partition
+	// order. Pre-fix this was [cfg-rev-2 cfg-rev-1 cfg-rev-3], the couchbase bug.
+	assert.Equal(t, []string{"cfg-rev-1", "cfg-rev-2", "cfg-rev-3"}, gotOrder,
+		"config pool must be served in recorded (ReqTimestampMock) order; a mapped "+
+			"revision hoisted ahead of an earlier one is the couchbase-java flake")
+
+	// The IsFiltered tagging that filterByMapping applies for consumption
+	// tracking must survive the reorder — only ORDER changes, not membership.
+	byName := make(map[string]*models.Mock, len(got))
+	for _, m := range got {
+		byName[m.Name] = m
+	}
+	assert.True(t, byName["cfg-rev-2"].TestModeInfo.IsFiltered,
+		"mapped revision must remain IsFiltered=true after reorder")
+	assert.False(t, byName["cfg-rev-1"].TestModeInfo.IsFiltered,
+		"unmapped revision must remain IsFiltered=false after reorder")
+	assert.False(t, byName["cfg-rev-3"].TestModeInfo.IsFiltered,
+		"unmapped revision must remain IsFiltered=false after reorder")
+}
