@@ -188,9 +188,18 @@ func (s *Session) AddPostRecordHook(h PostRecordHook) {
 // "why was a mock withheld?" (memory pressure, channel full, dropped
 // chunk, parser-internal inconsistency) can enable --debug to see it;
 // subsequent calls within the same session are no-ops and emit nothing.
-// Production runs stay quiet because the forward path is unaffected —
-// only mock recording is impacted, which is an internal concern not a
-// user-facing problem.
+// Production runs stay quiet because the forward path is unaffected.
+//
+// A voided mock is NOT harmless: the test case that owns the operation
+// still streams to the CLI, so dropping its mock silently orphans that TC
+// at replay (match_phase=no_mocks). When a mock DOES reach emitMockCore
+// and is dropped by this flag, emitMockCore records the mock's wire window
+// as an orphan window so record.go suppresses the owning TC. When the
+// parser voids an operation BEFORE any mock is built (a reassembly
+// overflow, or a decode error on the realignment tail after a
+// memory-pressure gap), no mock reaches emitMockCore — the parser should
+// additionally call Session.RecordOrphanWindow with that operation's wire
+// window so its TC is suppressed too.
 //
 // The relay calls this when it gates a chunk at the tee; parsers call
 // it when they cannot continue decoding a mock cleanly. Safe to call
@@ -222,6 +231,37 @@ func (s *Session) IsMockIncomplete() bool {
 		return false
 	}
 	return s.mockIncomplete.Load()
+}
+
+// orphanManager resolves the SyncMockManager this session records into,
+// preferring the per-app s.Mgr and falling back to the package-global. Mirrors
+// the manager resolution in emitMockCore's RouteMocksViaSyncMock branch so an
+// orphan window lands on the SAME manager that owns the dropped mock.
+func (s *Session) orphanManager() *syncMock.SyncMockManager {
+	if s == nil {
+		return nil
+	}
+	if s.Mgr != nil {
+		return s.Mgr
+	}
+	return syncMock.Get()
+}
+
+// RecordOrphanWindow lets a parser report that the operation whose wire window
+// is [start, end] lost its mock because the parser could not build one at all —
+// e.g. a client/server reassembly overflow, or a decode error on the
+// realignment tail after a memory-pressure gap. In those cases NO mock reaches
+// emitMockCore (the mockIncomplete flag instead voids the NEXT mock, which may
+// belong to a different TC), so the failing operation's own TC would leak
+// unless the parser reports its window here. record.go then suppresses any TC
+// whose HTTP window overlaps. Complements MarkMockIncomplete: MarkMockIncomplete
+// voids the mock; RecordOrphanWindow makes that void visible to TC suppression
+// by the operation's own captured timestamps. Safe with a nil session or a zero
+// start (both no-ops — see (*SyncMockManager).RecordOrphanWindow).
+func (s *Session) RecordOrphanWindow(start, end time.Time) {
+	if mgr := s.orphanManager(); mgr != nil {
+		mgr.RecordOrphanWindow(start, end)
+	}
 }
 
 // EmitMock sends m to the mocks channel. If the session's active mock
@@ -309,6 +349,29 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// connection goes idle, producing spurious aborts after a
 		// benign drop (memory pressure, chunk gate, short write).
 		s.mockIncomplete.Store(false)
+		// The mock is abandoned, but the test case that owns this
+		// operation still streams to the CLI — dropping the mock without
+		// telling anyone orphans that TC (replay match_phase=no_mocks).
+		// Record the mock's own wire window as an orphan window so
+		// record.go suppresses the owning TC, exactly as it does for a
+		// memory-pressure drop via WasPressureActiveInWindow. The
+		// timestamps are the parser's captured values — the same clock the
+		// TC's HTTP window is compared against — so a zero timestamp
+		// (parser left it unset) is simply ignored by RecordOrphanWindow
+		// rather than over-claiming.
+		//
+		// Only PER-TEST mocks orphan a specific TC. A voided SESSION or
+		// CONNECTION mock (a mongo handshake/heartbeat and the like) is
+		// reusable and served from the session tier at replay regardless of
+		// this drop, so recording its window would gain nothing and only
+		// risk over-suppressing a healthy per-test TC that happens to
+		// overlap it. Skip those — the stale mockIncomplete flag can void a
+		// reusable mock that belongs to no test at all.
+		if mgr := s.orphanManager(); mgr != nil &&
+			m.TestModeInfo.Lifetime != models.LifetimeSession &&
+			m.TestModeInfo.Lifetime != models.LifetimeConnection {
+			mgr.RecordOrphanWindow(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		}
 		if s.Logger != nil {
 			// Debug-level: this fires on every mock that loses an
 			// upstream chunk (per-request frequency on a misconfigured
