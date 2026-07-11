@@ -159,6 +159,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.TeeChanBuf,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
+		cfg.OnTeeDropWindow,
 		cfg.Logger,
 	)
 	r.teeD2C = newTee(
@@ -167,6 +168,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.TeeChanBuf,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
+		cfg.OnTeeDropWindow,
 		cfg.Logger,
 	)
 
