@@ -16,6 +16,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
@@ -465,6 +466,14 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	if err != nil {
 		return nil, err
 	}
+
+	// Gate the deferred-orphan revoke protocol on what THIS CLI negotiated.
+	// The proxy wires its outChan into the package-global syncMock manager
+	// (syncMock.Get()) inside Record above; flip revoke emission on/off to
+	// match the decoded capability before returning the stream so an older CLI
+	// (SupportsDroppedRevoke=false, the default) never receives a RevokedTests
+	// control frame it can't divert.
+	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
 
 	return m, nil
 }
