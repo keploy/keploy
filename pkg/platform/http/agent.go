@@ -1480,7 +1480,11 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return err
 	}
 
-	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
+	cmd, err := kdocker.PrepareDockerCommand(ctx, keployAlias)
+	if err != nil {
+		utils.LogError(logger, err, "failed to prepare docker command")
+		return err
+	}
 
 	cmd.Cancel = func() error {
 		logger.Debug("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
