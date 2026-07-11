@@ -36,6 +36,12 @@ const maxRecentWindows = 256
 // O(n) WasPressureActiveInWindow / pressureActiveAtLocked scans bounded.
 const maxPressureRanges = 8192
 
+// maxDroppedTCNames bounds SyncMockManager.droppedTCNames /
+// droppedTCOrder. COUNT-bounded (like maxPressureRanges), not age-bounded:
+// record.go can lag the recorder, so a dropped owner name must stay
+// queryable until the lagging TC is checked.
+const maxDroppedTCNames = 8192
+
 // resolvedWindow is one already-resolved per-test window retained so a
 // late-arriving mock (decoded after the window closed) can still be
 // attributed to the test that actually owns its ReqTimestampMock.
@@ -123,6 +129,26 @@ type SyncMockManager struct {
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
 
+	// droppedMu guards droppedTCNames / droppedTCOrder. It is a DEDICATED
+	// LEAF lock: it is only ever taken while (optionally) holding
+	// outChanMu.RLock, and it takes no other lock while held — so it can
+	// never participate in a lock-ordering cycle with m.mu or outChanMu.
+	// Do NOT reuse m.mu or outChanMu here.
+	//
+	// droppedTCNames is the set of test-case names that OWNED a mock which
+	// was dropped on the outChan capacity path (send-budget exhaustion or an
+	// already-closed channel). Unlike the memory-pressure path — which
+	// records pressureRanges so record.go suppresses the overlapping TC — a
+	// capacity drop feeds nothing into pressureRanges, so the owning TC would
+	// otherwise reach replay mock-less (match_phase=no_mocks). record.go
+	// queries this set by EXACT test name (WasMockDroppedForTC) and suppresses
+	// any TC in it, so suppression cannot over-suppress a concurrent TC.
+	// droppedTCOrder is the FIFO insertion order used to evict the oldest name
+	// once the set exceeds maxDroppedTCNames (count-bounded, see the const).
+	droppedMu      sync.Mutex
+	droppedTCNames map[string]struct{}
+	droppedTCOrder []string
+
 	// testCounter generates this session's sequential test IDs
 	// ("test-1", "test-2", …). Per-instance so concurrent capture
 	// sessions in one process number their testcases independently.
@@ -190,6 +216,15 @@ type SyncMockManager struct {
 // active. end is zero while the interval is still open (pressure not cleared yet).
 type pressureRange struct {
 	start, end time.Time
+}
+
+// ownedMock pairs a buffered mock with the name of the test case that owns it,
+// so the send path can record the OWNING TC when a capacity drop occurs. owner
+// is "" for mocks not owned by a specific test (session/connection/startup/
+// anonymous carve-outs) — those record nothing on a drop.
+type ownedMock struct {
+	mock  *models.Mock
+	owner string
 }
 
 // Global instance is initialized at package load time
@@ -340,9 +375,26 @@ const sendDropSampleRate uint64 = 1024
 // customer-facing recording-loss flake and is strictly worse than a
 // 200 ms worst-case shutdown delay.
 func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
+	m.sendToOutChanOwned(mock, "")
+}
+
+// sendToOutChanOwned is sendToOutChan with the owning test name threaded
+// through so a capacity drop can be attributed to the TC that owns the mock.
+// When owner != "" and the mock is genuinely undeliverable — the outChan is
+// closed/nil, or the bounded send budget is exhausted — the owner is recorded
+// via recordDroppedTC so record.go suppresses (rather than streams) that TC at
+// replay. owner == "" (session/connection/startup/anonymous) records nothing.
+// See sendToOutChan's doc comment for the locking rationale.
+func (m *SyncMockManager) sendToOutChanOwned(mock *models.Mock, owner string) {
 	m.outChanMu.RLock()
 	defer m.outChanMu.RUnlock()
 	if m.outChanClosed || m.outChan == nil {
+		// Genuinely undeliverable → a real drop. Record the owner (under the
+		// outChanMu.RLock already held; droppedMu is a leaf lock) so the
+		// orphaned TC is suppressed instead of reaching replay mock-less.
+		if owner != "" {
+			m.recordDroppedTC(owner)
+		}
 		return
 	}
 	select {
@@ -358,6 +410,9 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 		timer.Stop()
 	case <-timer.C:
 		n := m.dropCount.Add(1)
+		if owner != "" {
+			m.recordDroppedTC(owner)
+		}
 		// The existing per-1024 sampled Error fires at n==1 AND every
 		// subsequent 1024th drop. Per-Copilot review on #4176, the
 		// "your recording is now lossy" wording lives on the same n==1
@@ -388,6 +443,55 @@ func (m *SyncMockManager) DropCount() uint64 {
 		return 0
 	}
 	return m.dropCount.Load()
+}
+
+// recordDroppedTC remembers that a mock owned by test `name` was dropped on the
+// outChan capacity path. Idempotent per name (the set dedups) and count-bounded
+// FIFO at maxDroppedTCNames: past the cap the oldest name is evicted so a long
+// recording can't leak unbounded. Takes only droppedMu (a leaf lock).
+func (m *SyncMockManager) recordDroppedTC(name string) {
+	if m == nil || name == "" {
+		return
+	}
+	m.droppedMu.Lock()
+	defer m.droppedMu.Unlock()
+	if m.droppedTCNames == nil {
+		m.droppedTCNames = make(map[string]struct{})
+	}
+	if _, ok := m.droppedTCNames[name]; ok {
+		return
+	}
+	m.droppedTCNames[name] = struct{}{}
+	m.droppedTCOrder = append(m.droppedTCOrder, name)
+	if len(m.droppedTCOrder) > maxDroppedTCNames {
+		delete(m.droppedTCNames, m.droppedTCOrder[0])
+		k := copy(m.droppedTCOrder, m.droppedTCOrder[1:])
+		m.droppedTCOrder = m.droppedTCOrder[:k]
+	}
+}
+
+// WasMockDroppedForTC reports whether a mock owned by test `name` was dropped on
+// the outChan capacity path. record.go calls this by EXACT test name so a
+// suppression can never spill onto a concurrent TC that kept all its mocks.
+func (m *SyncMockManager) WasMockDroppedForTC(name string) bool {
+	if m == nil || name == "" {
+		return false
+	}
+	m.droppedMu.Lock()
+	defer m.droppedMu.Unlock()
+	_, ok := m.droppedTCNames[name]
+	return ok
+}
+
+// DroppedTCCount returns the number of distinct test cases that lost a mock to
+// a capacity drop. Exposed for the session-summary log in routes/record.go.
+func (m *SyncMockManager) DroppedTCCount() int {
+	if m == nil {
+		return 0
+	}
+	m.droppedMu.Lock()
+	defer m.droppedMu.Unlock()
+	return len(m.droppedTCNames)
 }
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
@@ -593,7 +697,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		return
 	}
 
-	var mocksToSend []*models.Mock
+	var mocksToSend []ownedMock
 	var lateMappings map[string][]string
 
 	m.mu.Lock()
@@ -621,8 +725,9 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		}
 		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
 			// Reusable across tests; flush verbatim (never renamed),
-			// matching ResolveRange's lifetime carve-out.
-			mocksToSend = append(mocksToSend, mock)
+			// matching ResolveRange's lifetime carve-out. Owned by no
+			// specific test → owner "" (a capacity drop records nothing).
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
 		if w, ok := ownerWindow(mock.Spec.ReqTimestampMock); ok {
@@ -633,7 +738,9 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 				}
 				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
 			}
-			mocksToSend = append(mocksToSend, mock)
+			// Owned by the matched window's test → tag it so a capacity
+			// drop suppresses that TC.
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
 			continue
 		}
 		// STARTUP RESCUE: a startup-window mock the ownerWindow check above
@@ -641,10 +748,10 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		// window hasn't resolved yet on this ticker tick). Flush it to disk
 		// proactively rather than leaving it parked in the buffer where a dedup
 		// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
-		// is ever persisted.
+		// is ever persisted. Owns no specific test → owner "".
 		if isStartupMock(mock) {
 			mock.Name = "mock-" + generateRandomString(8)
-			mocksToSend = append(mocksToSend, mock)
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
 		// Not attributable yet — a future (possibly out-of-order) request
@@ -660,8 +767,8 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 
 	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
 	// block up to sendBudget; holding m.mu across it would wedge AddMock.
-	for _, mock := range mocksToSend {
-		m.sendToOutChan(mock)
+	for _, om := range mocksToSend {
+		m.sendToOutChanOwned(om.mock, om.owner)
 	}
 	if mappingChan != nil {
 		for tn, ids := range lateMappings {
@@ -897,7 +1004,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// would keep mu held, blocking every AddMock waiting to enqueue.
 	// We have outChanMu (inside sendToOutChan) to guard the actual
 	// send against close, so m.mu release here is safe.
-	var mocksToSend []*models.Mock
+	var mocksToSend []ownedMock
 	var associatedMockIDs []string
 	var mappingEntry *models.TestMockMapping
 	// lateMappings accumulates mock IDs for mocks retroactively binned
@@ -1015,8 +1122,8 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			// recorder writes whatever Name the mock already
 			// carries. They also don't belong in the per-test
 			// associatedMockIDs mapping (which is purely about
-			// per-test matches).
-			mocksToSend = append(mocksToSend, mock)
+			// per-test matches). Owned by no specific test → owner "".
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
 
@@ -1041,7 +1148,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 				}
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
-				mocksToSend = append(mocksToSend, mock)
+				// Owned by THIS window's test → tag it so a capacity
+				// drop suppresses testName rather than orphaning it.
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: testName})
 			} else if isStartupMock(mock) {
 				// STARTUP RESCUE (static-dedup duplicate window): keep==false
 				// means the enterprise static-dedup deemed THIS test case a
@@ -1060,7 +1169,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 					continue
 				}
 				mock.Name = "mock-" + generateRandomString(8)
-				mocksToSend = append(mocksToSend, mock)
+				// Duplicate's synthetic testName owns no real mapping →
+				// owner "" (records nothing on a capacity drop).
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -1095,7 +1206,9 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 					}
 					lateMappings[ownerW.testName] = append(lateMappings[ownerW.testName], mock.Name)
 				}
-				mocksToSend = append(mocksToSend, mock)
+				// Owned by the retro-matched window's test → tag it so a
+				// capacity drop suppresses that TC.
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: ownerW.testName})
 				lateBinned++
 			}
 			// Handled (flushed or retained); drop from the current buffer.
@@ -1119,7 +1232,8 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 				continue
 			}
 			mock.Name = "mock-" + generateRandomString(8)
-			mocksToSend = append(mocksToSend, mock)
+			// Boot/startup traffic owns no specific test → owner "".
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
 
@@ -1226,12 +1340,13 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		)
 	}
 
-	// Route mock sends through sendToOutChan so the close-vs-send
-	// race is serialized the same way AddMock does it. Mapping
-	// channel is never closed by the shutdown path today — if that
-	// ever changes, lift the mapping send under an equivalent guard.
-	for _, mock := range mocksToSend {
-		m.sendToOutChan(mock)
+	// Route mock sends through sendToOutChanOwned so the close-vs-send
+	// race is serialized the same way AddMock does it, and a capacity
+	// drop is attributed to the owning TC. Mapping channel is never
+	// closed by the shutdown path today — if that ever changes, lift the
+	// mapping send under an equivalent guard.
+	for _, om := range mocksToSend {
+		m.sendToOutChanOwned(om.mock, om.owner)
 	}
 	if mappingEntry != nil && mappingChan != nil {
 		select {
@@ -1283,7 +1398,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		return
 	}
 
-	var mocksToSend []*models.Mock
+	var mocksToSend []ownedMock
 	var lateMappings map[string][]string
 
 	m.mu.Lock()
@@ -1316,10 +1431,11 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 
 		// Session/connection mocks outlive any single test window and must
 		// survive a per-test cleanup. Flush when we can persist them now,
-		// otherwise retain for a later drain.
+		// otherwise retain for a later drain. Owned by no specific test →
+		// owner "".
 		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
 			if outChanBound {
-				mocksToSend = append(mocksToSend, mock)
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 				continue
 			}
 			m.buffer[keepIdx] = mock
@@ -1344,7 +1460,9 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 				}
 				lateMappings[w.testName] = append(lateMappings[w.testName], mock.Name)
 			}
-			mocksToSend = append(mocksToSend, mock)
+			// Owned by the rescued window's test → tag it so a capacity
+			// drop suppresses that TC.
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
 			continue
 		}
 
@@ -1364,7 +1482,8 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 				continue
 			}
 			mock.Name = "mock-" + generateRandomString(8)
-			mocksToSend = append(mocksToSend, mock)
+			// Startup/boot traffic owns no specific test → owner "".
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
 		}
 
@@ -1382,8 +1501,8 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 
 	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
 	// block up to sendBudget; holding m.mu across it would wedge AddMock.
-	for _, mock := range mocksToSend {
-		m.sendToOutChan(mock)
+	for _, om := range mocksToSend {
+		m.sendToOutChanOwned(om.mock, om.owner)
 	}
 	if mappingChan != nil {
 		for tn, ids := range lateMappings {
