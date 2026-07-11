@@ -26,17 +26,13 @@ import (
 )
 
 type ClientMockStorage struct {
-	// filtered holds RESIDENT per-test mocks — only the ineligible ones
-	// (missing/invalid timestamps) when diskMocks is set; the full slice on the
-	// legacy blob StoreMocks path. unfiltered holds the resident config/session
-	// pool (always resident — matched across the whole session).
+	// filtered = resident per-test mocks (only the disk-ineligible ones when
+	// diskMocks is set; the full slice on the legacy blob path). unfiltered =
+	// resident config/session pool.
 	filtered   []*models.Mock
 	unfiltered []*models.Mock
-	// diskMocks, when non-nil, holds the window-eligible per-test mocks on
-	// agent-local disk (StoreMocksStream path). UpdateMockParams loads only the
-	// current test's window from it instead of keeping the whole pool resident,
-	// bounding replay-agent RAM to O(config + one window). Nil on the legacy
-	// blob path, where filtered stays fully resident.
+	// diskMocks (non-nil on the streaming path) holds window-eligible per-test
+	// mocks on disk; UpdateMockParams loads only the current window from it.
 	diskMocks *proxyPkg.DiskMocks
 	mu        sync.RWMutex
 }
@@ -710,10 +706,8 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	}
 	a.clientMocks.Store(uint64(0), storage)
 
-	// Seed the freeze anchor from the earliest request timestamp across the
-	// WHOLE pool — including on-disk per-test mocks, which often carry the
-	// earliest (app-boot) timestamps. Excluding them would push the anchor
-	// later and make cached recorded credentials look expired.
+	// Seed the freeze anchor from the earliest request timestamp across the WHOLE
+	// pool, including on-disk mocks (they often carry the earliest, boot, times).
 	anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered)
 	if storage.diskMocks != nil {
 		if se := storage.diskMocks.EarliestReqTs(); !se.IsZero() && (anchor.IsZero() || se.Before(anchor)) {
@@ -746,15 +740,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
 	}
 
-	// Move window-eligible per-test mocks to agent-local disk instead of holding
-	// the whole pool resident for the entire replay — but ONLY when strict
-	// mock-window is in effect (KEPLOY_STRICT_MOCK_WINDOW). Under lax mode the
-	// filter promotes out-of-window per-test mocks to the session tier, so the
-	// agent needs the whole per-test set for every test anyway; keeping them
-	// resident (prior behavior) is strictly better than reloading the full pool
-	// from disk each test. So the on-disk store engages exactly when the window
-	// bound is usable and is a no-op (identical to prior behavior) otherwise.
-	// Best-effort: if the temp store can't be created, fall back to full-resident.
+	// Engage the on-disk store only under strict mock-window: lax promotes
+	// out-of-window mocks to the session tier, so it needs the whole per-test set
+	// anyway. Best-effort — fall back to full-resident if it can't be created.
 	var disk *proxyPkg.DiskMocks
 	if pkg.IsStrictMockWindow(false) {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
@@ -785,13 +773,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mock := &m
 		mock.DeriveLifetime()
 		if i < header.FilteredCount {
-			// Per-test region. Window-eligible per-test mocks go to disk; the
-			// resident reference is then dropped. Ineligible ones (missing/invalid
-			// timestamps) stay resident so the existing filter routing is exact.
+			// Per-test region: window-eligible mocks go to disk, ineligible ones
+			// (missing/invalid timestamps) stay resident so filter routing is exact.
 			if disk != nil && proxyPkg.EligibleForDisk(mock) {
 				if err := disk.Add(mock); err != nil {
-					// This mock's disk write failed — keep it resident so it is
-					// never lost; only the memory benefit is skipped for it.
+					// Disk write failed — keep it resident so it's never lost.
 					a.logger.Warn("on-disk mock write failed; keeping mock resident",
 						zap.String("mock", mock.Name), zap.Error(err))
 					storage.filtered = append(storage.filtered, mock)
@@ -805,8 +791,6 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	}
 	if disk != nil {
 		disk.Finalize()
-		// Visibility: shows the residency bound in action — per-test mocks are on
-		// disk, only config + the rare ineligible per-test mocks stay resident.
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
@@ -864,22 +848,11 @@ func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
 	return anchor
 }
 
-// loadPerTestMocks materializes the per-test mock slice that the UpdateMockParams
-// filter will run over. With an on-disk store it loads ONLY the mocks the filter can
-// keep for this call — mirroring the filter's effective mode so the downstream
-// result is byte-for-byte identical to the old full-resident path, while resident
-// RAM stays O(config + one window):
-//   - mapping-based  -> the named mocks (mapping selects by name, ignores window)
-//   - effective strict -> the window [after,before] plus the startup band
-//     (req < firstWindowStart); the stale band and req>end are simply not loaded,
-//     which is exactly what strict drops
-//   - lax (default)  -> all per-test mocks, because lax promotes out-of-window
-//     per-test mocks to the session tier; loading only the window would lose
-//     shared-fixture reuse. Lax is not the OOM path, so correctness wins here.
-//
-// The rare resident per-test mocks (missing/invalid timestamps, never on disk)
-// are always merged in. Without an on-disk store (legacy blob path) the resident slice is
-// returned unchanged.
+// loadPerTestMocks builds the per-test slice the filter runs over, loading from
+// disk only what the filter's effective mode would keep (so the result matches
+// the old full-resident path): mapping -> named mocks; strict -> window +
+// startup band; lax -> all. Resident ineligible mocks are merged in; with no
+// disk store (legacy path) the resident slice is returned unchanged.
 func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, agentStrict bool, firstWindowStart time.Time) ([]*models.Mock, error) {
 	if disk == nil {
 		return resident, nil
@@ -909,7 +882,6 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	if err != nil {
 		return nil, err
 	}
-	// Visibility: per-test set is materialized from disk for THIS test only.
 	a.logger.Debug("agent mock residency: loaded per-test set from disk",
 		zap.String("mode", mode),
 		zap.Int("loadedFromDisk", len(loaded)),
@@ -917,10 +889,8 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	return dedupByName(resident, loaded), nil
 }
 
-// dedupByName concatenates two mock slices, keeping the first
-// occurrence of each mock name. Mock names are unique per session, so this only
-// collapses a rare overlap (e.g. window and startup-band loads that touch the
-// same on-disk mock).
+// dedupByName concatenates two slices, keeping the first occurrence per name
+// (collapses a window/startup-band overlap on the same mock).
 func dedupByName(a, b []*models.Mock) []*models.Mock {
 	out := make([]*models.Mock, 0, len(a)+len(b))
 	seen := make(map[string]struct{}, len(a)+len(b))
@@ -996,27 +966,19 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	disk := storage.diskMocks
 	storage.mu.RUnlock()
 
-	// WindowedProxy defers authoritative strict window enforcement to
-	// MockManager.SetMocksWithWindow, so the agent-level filter runs with
-	// agentStrict=false there (the process-wide env override still applies
-	// inside the filter). Computed up front because the per-test on-disk load
-	// mirrors the filter's effective mode.
+	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
+	// the authoritative strict enforcement); env override still applies inside.
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
 	agentStrict := params.StrictMockWindow && !isWindowedProxy
 
-	// firstWindowStart: the earliest test-window start MockManager has observed,
-	// so the tier-aware filter (and the on-disk load) keep startup-init mocks
-	// (req < firstWindowStart) rather than dropping them as stale.
+	// firstWindowStart: earliest observed window start, so startup-init mocks
+	// (req < it) are kept, not dropped as stale.
 	var firstWindowStart time.Time
 	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
 		firstWindowStart = reader.FirstTestWindowStart()
 	}
 
-	// Materialize the per-test input for THIS call. With an on-disk store, load only the
-	// mocks the filter will keep (window+startup under strict, by-name under
-	// mapping, all under lax) — mirroring the filter's own mode so downstream
-	// results are identical while resident RAM stays O(config + one window).
-	// Without an on-disk store (legacy blob path) this returns the full resident slice.
+	// Load only what the filter will keep for this call (see loadPerTestMocks).
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, agentStrict, firstWindowStart)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
@@ -1040,8 +1002,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// legacy SetMocks fallback path. For WindowedProxy callers we
 	// pass strict=false to FilterPerTestAndLaxPromoted and let
 	// MockManager.SetMocksWithWindow enforce strict semantics.
-	// (isWindowedProxy, agentStrict, and firstWindowStart are computed earlier
-	// in this function so the per-test on-disk load mirrors the filter's mode.)
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {

@@ -13,73 +13,43 @@ import (
 	"go.uber.org/zap"
 )
 
-// DiskMocks keeps heavy per-test mocks on the agent's LOCAL DISK instead of in
-// RAM, and loads only the mocks a given test needs (its time window) on demand.
-//
-// Why: the replay agent used to hold the ENTIRE delivered pool resident
-// (ClientMockStorage) for the whole replay, using the per-test time window only
-// as a MATCHING filter (MockManager.SetMocksWithWindow) — never as a RESIDENCY
-// filter. On a large pool (notably the new-release historical smart-set) that
-// resident set OOM-kills the rpl-pod agent.
-//
-// DiskMocks makes the window a residency filter: at ingest, window-eligible
-// per-test mocks are gob-encoded to a per-session temp file and indexed by
-// request timestamp; the resident pointer is dropped. At UpdateMockParams the
-// agent loads only what the filter would keep — the current window plus the
-// startup band — via a binary search. Resident RAM becomes O(config/startup +
-// one window) regardless of pool size, for every mock kind.
-//
-// Reusable mocks (session/connection/config) and the rare ineligible per-test
-// mocks (missing/invalid timestamps) are NOT put on disk — the caller keeps them
-// resident so the existing filter routing (lifetime-first, missing-timestamp,
-// lax promotion) is reproduced exactly on the loaded superset.
+// DiskMocks parks per-test mocks on the agent's local disk and loads only the
+// mocks a given test needs (its request-time window) on demand, so resident RAM
+// is O(config/startup + one window) instead of the whole delivered pool.
 type DiskMocks struct {
 	mu       sync.Mutex
 	f        *os.File
 	path     string
 	offset   int64
 	entries  []diskEntry          // sorted by reqTsNano after Finalize
-	byName   map[string]diskEntry // mock name -> entry (by value, sort-immune; for mapping-based replay)
+	byName   map[string]diskEntry // name -> entry, by value so it survives sorting entries
 	finalize bool
 	logger   *zap.Logger
 	closed   bool
 }
 
-// diskEntry locates one on-disk mock. ~56 B resident per mock — the only
-// per-mock cost that stays in RAM; the payload lives in the temp file.
-//
-// For big-body HTTP/Mongo per-test mocks the response payload is written as a
-// SEPARATE on-disk blob (respOff/respLen) and elided from the request-side
-// record, so LoadWindow reconstructs only matchers — never the bodies. The
-// body is hydrated on demand at serve time (Mock.HydrateResponse). respOff is
-// -1 when the response is inline (small responses, non-eligible kinds).
+// diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
+// mocks the response is a separate blob at respOff/respLen; respOff -1 = inline.
 type diskEntry struct {
 	reqTsNano int64
 	off       int64
 	length    int
-	respOff   int64 // -1 => response is inline in the mock record
+	respOff   int64
 	respLen   int
 }
 
-// responseSpillMinBytes: only elide HTTP response bodies at least this large.
-// Small responses stay inline (holding them resident in the window is cheap and
-// avoids a serve-time disk read); eliding them would add hydrate latency with
-// no memory benefit. Mongo responses always spill — they are the big-doc case
-// that drives the serve-time transient. Targets the payload bloat, not counts.
+// responseSpillMinBytes: only elide HTTP bodies at least this big; smaller ones
+// stay inline (a serve-time disk read isn't worth it). Mongo always spills.
 const responseSpillMinBytes = 8 * 1024
 
-// spilledResponse is the response payload written to disk apart from the
-// (small) request-side mock, so the resident window holds only matchers.
-// Kind-agnostic: exactly one field is populated. The interface-typed Mongo
-// messages round-trip through gob the same way the whole-mock record does.
+// spilledResponse is the elided response payload, stored apart from the mock so
+// the resident window holds only matchers. Exactly one field is populated.
 type spilledResponse struct {
 	HTTP  *models.HTTPResp
 	Mongo []models.MongoResponse
 }
 
-// NewDiskMocks creates an on-disk mock store backed by a fresh temp file. The
-// caller owns its lifecycle and must Close it when the pool generation is
-// retired (next StoreMocksStream / agent shutdown).
+// NewDiskMocks creates the store over a fresh temp file; caller must Close it.
 func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 	f, err := os.CreateTemp("", "keploy-diskmocks-*.gob")
 	if err != nil {
@@ -93,12 +63,9 @@ func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 	}, nil
 }
 
-// EligibleForDisk reports whether a mock should be kept on disk instead of RAM.
-// Only window-eligible per-test mocks qualify: reusable mocks
-// (session/connection/config) must stay resident (matched across the whole
-// session, never window-filtered), and per-test mocks with missing/inconsistent
-// timestamps are routed by the filter without a window check, so they stay
-// resident too. Call DeriveLifetime on the mock before this.
+// EligibleForDisk reports whether a mock goes to disk: only per-test mocks with
+// valid timestamps. Reusable/config and missing-timestamp mocks stay resident
+// (the filter routes them without a window check). Call DeriveLifetime first.
 func EligibleForDisk(m *models.Mock) bool {
 	if m == nil || m.TestModeInfo.Lifetime != models.LifetimePerTest {
 		return false
@@ -111,12 +78,8 @@ func EligibleForDisk(m *models.Mock) bool {
 	return true
 }
 
-// EligibleForResponseSpill reports whether a disk-eligible per-test mock carries
-// a large HTTP/Mongo response worth eliding from the resident window and
-// hydrating at serve time. Matching never reads responses, so keeping a big body
-// resident for the whole test window is pure waste — this is what drives the
-// serve-time transient spike on fan-out tests (one window spanning many big
-// docs). Other kinds (and small HTTP bodies) keep their response inline.
+// EligibleForResponseSpill reports whether a disk-eligible mock has a big
+// HTTP/Mongo response worth eliding from the window (matching never reads it).
 func EligibleForResponseSpill(m *models.Mock) bool {
 	if !EligibleForDisk(m) {
 		return false
@@ -130,14 +93,9 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 	return false
 }
 
-// Add writes an eligible mock to disk and records its location. The caller must
-// drop its resident reference to the mock afterwards. Called from the single-
-// threaded StoreMocksStream decode loop.
-//
-// For response-spill-eligible mocks the response payload is encoded and written
-// as a separate blob, and the mock record is encoded with its response elided —
-// so LoadWindow reconstructs matchers only. The response hydrates on demand at
-// serve (see readAt / Mock.HydrateResponse).
+// Add writes a mock to disk and indexes it; caller drops its resident ref after.
+// Spill-eligible mocks write their response as a separate blob and encode the
+// record with the response elided. Called from the single-threaded ingest loop.
 func (d *DiskMocks) Add(m *models.Mock) error {
 	spill := EligibleForResponseSpill(m)
 
@@ -151,13 +109,10 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		respBlob = rb.Bytes()
 	}
 
+	// Fresh encoder per record → each is self-contained and decodable via ReadAt.
 	var buf bytes.Buffer
-	// Fresh encoder per record → each record is self-contained (full type
-	// definitions) so it can be decoded in isolation via ReadAt; a shared
-	// encoder emits type defs only once and later records fail to decode alone.
 	if spill {
-		// Encode with the response elided; restore afterwards so the caller's
-		// mock is untouched (it is dropped by the caller regardless).
+		// Elide the response for encoding, then restore (caller drops m anyway).
 		httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
 		m.Spec.HTTPResp, m.Spec.MongoResponses = nil, nil
 		err := gob.NewEncoder(&buf).Encode(m)
@@ -194,8 +149,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	return nil
 }
 
-// writeLocked appends b to the temp file at the running offset and advances it.
-// Caller holds d.mu.
+// writeLocked appends b at the running offset and advances it. Caller holds mu.
 func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	off := d.offset
 	n, err := d.f.WriteAt(b, off)
@@ -206,8 +160,7 @@ func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	return off, n, nil
 }
 
-// Finalize sorts the index by request timestamp so LoadWindow/LoadBefore can
-// binary-search. Idempotent; call once after the ingest loop.
+// Finalize sorts the index by request timestamp for binary search. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -215,12 +168,11 @@ func (d *DiskMocks) Finalize() {
 		return
 	}
 	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].reqTsNano < d.entries[j].reqTsNano })
-	// byName holds entries by value, so it is unaffected by sorting d.entries.
 	d.finalize = true
 }
 
-// readAt decodes the mock at a given entry. The file is append-only and
-// immutable after Finalize, so ReadAt is safe for concurrent readers.
+// readAt decodes the mock at an entry. The file is immutable after Finalize, so
+// ReadAt is concurrency-safe. Elided responses get a lazy serve-time loader.
 func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	buf := make([]byte, e.length)
 	if _, err := d.f.ReadAt(buf, e.off); err != nil {
@@ -230,9 +182,6 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&m); err != nil {
 		return nil, fmt.Errorf("disk mocks: decode at %d: %w", e.off, err)
 	}
-	// The response body was elided from this record — install a lazy loader so
-	// it hydrates from disk only when the mock is actually served. The window
-	// therefore holds matchers only, not the (potentially large) bodies.
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
@@ -242,9 +191,7 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	return &m, nil
 }
 
-// loadResponse reads and decodes an elided response payload. The temp file is
-// append-only and immutable after Finalize, so ReadAt is safe for concurrent
-// readers; a closed store returns a clean error rather than mis-serving.
+// loadResponse reads and decodes an elided response blob on demand at serve.
 func (d *DiskMocks) loadResponse(off int64, length int) (*models.HTTPResp, []models.MongoResponse, error) {
 	d.mu.Lock()
 	closed := d.closed
@@ -264,8 +211,8 @@ func (d *DiskMocks) loadResponse(off int64, length int) (*models.HTTPResp, []mod
 	return sr.HTTP, sr.Mongo, nil
 }
 
-// LoadWindow returns on-disk mocks whose request timestamp is in [start,end],
-// matching SetMocksWithWindow's inclusive bounds (!Before(start) && !After(end)).
+// LoadWindow returns mocks with request timestamp in [start,end] (inclusive,
+// matching SetMocksWithWindow).
 func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -288,9 +235,8 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadBefore returns on-disk mocks with request timestamp strictly before t —
-// the startup band (req < firstWindowStart) that SetMocksWithWindow routes to
-// the startup tree. Loaded once and kept resident by the caller.
+// LoadBefore returns mocks with request timestamp strictly before t — the
+// startup band routed to the startup tree; loaded once, kept resident by caller.
 func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -309,8 +255,7 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadByNames returns the on-disk mocks named in names (mapping-based replay,
-// which selects by name and ignores the window). Missing names are skipped.
+// LoadByNames returns mocks by name (mapping-based replay ignores the window).
 func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -327,9 +272,7 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadAll returns every on-disk mock (lax timestamp mode, which promotes
-// out-of-window per-test mocks to the session pool and therefore needs the full
-// per-test set). Lax mode is not the OOM path; correctness over the RAM bound.
+// LoadAll returns every on-disk mock (lax mode needs the full per-test set).
 func (d *DiskMocks) LoadAll() ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -353,10 +296,8 @@ func (d *DiskMocks) decodeAll(sel []diskEntry) ([]*models.Mock, error) {
 	return out, nil
 }
 
-// EarliestReqTs returns the earliest request timestamp across on-disk mocks, or
-// the zero time if none. Used so finalizeClientMocks seeds the freeze anchor
-// from the full pool (on-disk per-test mocks often carry the earliest, app-boot,
-// timestamps) rather than only the resident slices.
+// EarliestReqTs returns the earliest on-disk request timestamp (zero if empty);
+// folded into the replay freeze anchor since boot mocks often live on disk.
 func (d *DiskMocks) EarliestReqTs() time.Time {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -375,22 +316,21 @@ func (d *DiskMocks) EarliestReqTs() time.Time {
 	return time.Unix(0, d.entries[0].reqTsNano)
 }
 
-// Len returns the number of on-disk mocks (diagnostics/tests).
+// Len returns the on-disk mock count (diagnostics/tests).
 func (d *DiskMocks) Len() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.entries)
 }
 
-// DiskBytes returns the total bytes written to the store's file (diagnostics/tests).
+// DiskBytes returns total bytes written to the file (diagnostics/tests).
 func (d *DiskMocks) DiskBytes() int64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.offset
 }
 
-// Close releases the store: closes and removes the temp file. Idempotent. After
-// Close, all operations fail rather than silently mis-serve.
+// Close closes and removes the temp file. Idempotent; later ops then fail.
 func (d *DiskMocks) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
