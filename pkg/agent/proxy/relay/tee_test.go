@@ -14,7 +14,7 @@ import (
 func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*tee, func(reason string), *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, memCheck, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, memCheck, rec.record, rec.recordAt, nil)
 	t.Cleanup(func() {
 		t2.close()
 		t2.waitDone()
@@ -22,16 +22,38 @@ func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*t
 	return t2, rec.record, rec
 }
 
-// dropRecorder collects drop reasons for assertion.
+// dropRecorder collects drop reasons for assertion. It also records the
+// (reason, ts) pairs delivered via the onDropAt callback so tests can
+// assert the accurately-attributed orphan-window path.
 type dropRecorder struct {
 	mu      sync.Mutex
 	reasons []string
+	atTs    []time.Time
+	atReas  []string
 }
 
 func (d *dropRecorder) record(reason string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.reasons = append(d.reasons, reason)
+}
+
+func (d *dropRecorder) recordAt(reason string, ts time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.atReas = append(d.atReas, reason)
+	d.atTs = append(d.atTs, ts)
+}
+
+// atSnapshot returns the (reason, ts) pairs seen via onDropAt.
+func (d *dropRecorder) atSnapshot() ([]string, []time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rs := make([]string, len(d.atReas))
+	copy(rs, d.atReas)
+	ts := make([]time.Time, len(d.atTs))
+	copy(ts, d.atTs)
+	return rs, ts
 }
 
 func (d *dropRecorder) snapshot() []string {
@@ -146,9 +168,135 @@ func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 	}
 }
 
+// TestTee_DropRecordsWindowAt is the guard for the orphan-window fix:
+// every drop path must report the dropped chunk's OWN wire timestamp via
+// onDropAt (so the supervisor can suppress the TC whose HTTP window
+// contains it), and a successful push must report nothing. A regression
+// that stops threading the timestamp — or reverts drop() to not calling
+// onDropAt — makes this fail.
+func TestTee_DropRecordsWindowAt(t *testing.T) {
+	t.Parallel()
+	stamp := time.Unix(1700000000, 12345)
+	chunkAt := func(payload string) fakeconn.Chunk {
+		return fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(payload), ReadAt: stamp}
+	}
+
+	// memory_pressure
+	var paused atomic.Bool
+	paused.Store(true)
+	tt, _, rec := newTestTee(t, 1<<20, 4, paused.Load)
+	if tt.push(chunkAt("x")) {
+		t.Fatalf("push should have dropped under memory pressure")
+	}
+	reasons, tss := rec.atSnapshot()
+	if len(reasons) != 1 || reasons[0] != DropMemoryPressure {
+		t.Fatalf("want one memory_pressure window, got reasons %v", reasons)
+	}
+	if !tss[0].Equal(stamp) {
+		t.Fatalf("window ts = %v, want the dropped chunk's ReadAt %v", tss[0], stamp)
+	}
+
+	// paused
+	tt2, _, rec2 := newTestTee(t, 1<<20, 4, nil)
+	tt2.setPaused(true)
+	if tt2.push(chunkAt("y")) {
+		t.Fatalf("push while paused should drop")
+	}
+	// per_conn_cap on the same tee after resume (cap 1<<20 won't trip; use a tiny-cap tee)
+	tt3, _, rec3 := newTestTee(t, 4, 16, nil)
+	if !tt3.push(chunkAt("abc")) {
+		t.Fatalf("first push should fit under cap")
+	}
+	if tt3.push(chunkAt("def")) {
+		t.Fatalf("second push should exceed per_conn_cap")
+	}
+	rs2, ts2 := rec2.atSnapshot()
+	if len(rs2) != 1 || rs2[0] != DropPaused || !ts2[0].Equal(stamp) {
+		t.Fatalf("paused: want one paused window at %v, got %v / %v", stamp, rs2, ts2)
+	}
+	rs3, ts3 := rec3.atSnapshot()
+	if len(rs3) != 1 || rs3[0] != DropPerConnCap || !ts3[0].Equal(stamp) {
+		t.Fatalf("per_conn_cap: want one per_conn_cap window at %v, got %v / %v", stamp, rs3, ts3)
+	}
+
+	// A successful push records NO window.
+	tt4, _, rec4 := newTestTee(t, 1<<20, 4, nil)
+	if !tt4.push(chunkAt("ok")) {
+		t.Fatalf("healthy push should succeed")
+	}
+	if rs, _ := rec4.atSnapshot(); len(rs) != 0 {
+		t.Fatalf("healthy push must record no orphan window, got %v", rs)
+	}
+}
+
+// TestTee_DropWindowChannelFullCoalesceFallback covers the paths
+// TestTee_DropRecordsWindowAt does not: the channel_full drop (the
+// primary target of the fix, and the only path where drop() runs after
+// closeMu.RUnlock), per-operation coalescing of a chunk burst, the
+// WrittenAt fallback when ReadAt is unset, and the zero-timestamp guard.
+func TestTee_DropWindowChannelFullCoalesceFallback(t *testing.T) {
+	t.Parallel()
+
+	// --- channel_full + coalescing: many same-instant chunk drops -> ONE window ---
+	stamp := time.Unix(1700000000, 500000)
+	tt, _, rec := newTestTee(t, 1<<30, 1, nil) // buf=1, never drained -> staging fills
+	for i := 0; i < 20; i++ {
+		tt.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("x"), ReadAt: stamp})
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rec.count(DropChannelFull) == 0 {
+		t.Fatalf("expected channel_full drops, got %v", rec.snapshot())
+	}
+	rs, tss := rec.atSnapshot()
+	if len(rs) != 1 {
+		t.Fatalf("coalescing failed: want exactly 1 window for the same-instant burst, got %d (%v)", len(rs), rs)
+	}
+	if rs[0] != DropChannelFull || !tss[0].Equal(stamp) {
+		t.Fatalf("want one channel_full window at %v, got %v / %v", stamp, rs, tss)
+	}
+
+	// --- distinct operations (>1ms apart) each keep their own window ---
+	// Use the paused path so every push drops deterministically (the
+	// channel_full path races the drain goroutine on which pushes drop).
+	var alwaysPaused atomic.Bool
+	alwaysPaused.Store(true)
+	tt2, _, rec2 := newTestTee(t, 1<<30, 4, alwaysPaused.Load)
+	base := time.Unix(1700000000, 0)
+	for i := 0; i < 6; i++ {
+		ts := base.Add(time.Duration(i) * 2 * time.Millisecond) // 2ms apart
+		if tt2.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("y"), ReadAt: ts}) {
+			t.Fatalf("push should drop under pressure")
+		}
+	}
+	if rs2, _ := rec2.atSnapshot(); len(rs2) != 6 {
+		t.Fatalf("distinct 2ms-apart drops must each record (no coalescing): want 6 windows, got %d", len(rs2))
+	}
+
+	// --- WrittenAt fallback when ReadAt is zero (dest-side pre-forward stamp) ---
+	var paused atomic.Bool
+	paused.Store(true)
+	tt3, _, rec3 := newTestTee(t, 1<<20, 4, paused.Load)
+	wStamp := time.Unix(1700000001, 777)
+	if tt3.push(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("z"), WrittenAt: wStamp}) {
+		t.Fatalf("push should drop under pressure")
+	}
+	if rs3, ts3 := rec3.atSnapshot(); len(rs3) != 1 || !ts3[0].Equal(wStamp) {
+		t.Fatalf("WrittenAt fallback: want one window at %v, got %v / %v", wStamp, rs3, ts3)
+	}
+
+	// --- zero-timestamp chunk records NO window ---
+	tt4, _, rec4 := newTestTee(t, 1<<20, 4, paused.Load)
+	if tt4.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("q")}) {
+		t.Fatalf("push should drop under pressure")
+	}
+	if rs4, _ := rec4.atSnapshot(); len(rs4) != 0 {
+		t.Fatalf("zero-ts chunk must record no window, got %v", rs4)
+	}
+}
+
 func TestTee_ClosePreventsSendPanic(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil, nil)
 
 	// Spawn pushers racing with close; no panic expected.
 	var wg sync.WaitGroup
@@ -169,7 +317,7 @@ func TestTee_ClosePreventsSendPanic(t *testing.T) {
 
 func TestTee_CloseIsIdempotent(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil, nil)
 	tt.close()
 	tt.close() // must not panic
 	tt.waitDone()
@@ -195,7 +343,7 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 	const iters = 200
 	for i := 0; i < iters; i++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 4, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<30, 4, nil, rec.record, rec.recordAt, nil)
 
 		// Admit a chunk into staging, then immediately tear the tee
 		// down — mirroring the forwarder pushing the final response
