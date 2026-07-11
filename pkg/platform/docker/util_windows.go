@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func PrepareDockerCommand(ctx context.Context, keployAlias string) *exec.Cmd {
+func PrepareDockerCommand(ctx context.Context, keployAlias string) (*exec.Cmd, error) {
 	var args []string
 	args = append(args, "/C")
 	args = append(args, strings.Split(keployAlias, " ")...)
@@ -21,5 +21,5 @@ func PrepareDockerCommand(ctx context.Context, keployAlias string) *exec.Cmd {
 		args...,
 	)
 
-	return cmd
+	return cmd, nil
 }

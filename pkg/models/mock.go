@@ -48,6 +48,17 @@ const (
 	// GenericResponses payload slices and owns the typed frame model +
 	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
+
+	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
+	// traffic parser ever produces it. The recorder emits a Mock with this Kind
+	// on the /outgoing stream to tell the CLI to revoke (delete) test cases
+	// whose owned mock was capacity-dropped AFTER the TC had already streamed
+	// (the deferred-orphan case that stream-time suppression cannot catch). The
+	// revoked TC names ride in Spec.Metadata. The CLI diverts this frame into a
+	// revoke set instead of persisting it; the agent emits it ONLY to a CLI that
+	// negotiated OutgoingOptions.SupportsDroppedRevoke, so an older CLI (which
+	// never sets that flag) never receives it and cannot mis-persist it.
+	RevokedTests Kind = "keploy-revoked-tests"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
