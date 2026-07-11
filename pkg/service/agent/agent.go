@@ -740,11 +740,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
 	}
 
-	// Engage the on-disk store only under strict mock-window: lax promotes
-	// out-of-window mocks to the session tier, so it needs the whole per-test set
-	// anyway. Best-effort — fall back to full-resident if it can't be created.
+	// Engage the on-disk store when strict mock-window is in effect — the OSS
+	// config flag config.Test.StrictMockWindow, on by default (seeded by
+	// config.New(); KEPLOY_STRICT_MOCK_WINDOW=0 opts out). Under lax the filter
+	// promotes out-of-window mocks, needing the whole per-test set every test, so
+	// windowing to disk would only add reload cost. Best-effort — fall back to
+	// full-resident if the store can't be created.
 	var disk *proxyPkg.DiskMocks
-	if pkg.IsStrictMockWindow(false) {
+	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
 		if diskErr != nil {
 			a.logger.Warn("on-disk mock store unavailable; keeping per-test mocks resident", zap.Error(diskErr))
@@ -853,7 +856,7 @@ func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
 // the old full-resident path): mapping -> named mocks; strict -> window +
 // startup band; lax -> all. Resident ineligible mocks are merged in; with no
 // disk store (legacy path) the resident slice is returned unchanged.
-func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, agentStrict bool, firstWindowStart time.Time) ([]*models.Mock, error) {
+func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time) ([]*models.Mock, error) {
 	if disk == nil {
 		return resident, nil
 	}
@@ -865,7 +868,7 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case params.UseMappingBased && len(params.MockMapping) > 0:
 		mode = "mapping"
 		loaded, err = disk.LoadByNames(params.MockMapping)
-	case pkg.IsStrictMockWindow(agentStrict) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	case pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		mode = "strict-window"
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
@@ -979,7 +982,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	}
 
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
-	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, agentStrict, firstWindowStart)
+	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return err
