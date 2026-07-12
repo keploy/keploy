@@ -247,18 +247,27 @@ func (t *tee) drop(reason string, ts time.Time) {
 		t.onDrop(reason)
 	}
 	// Report the dropped chunk's own wire instant so the supervisor can
-	// record an orphan window and suppress a TC whose HTTP window
-	// contains it. Recorded on the forward path (decode-lag immune),
-	// unlike the onDrop next-mock-void which attributes the loss to a
-	// later mock. Attribution is by time only (the tee has no TC or mock
-	// identity): it correctly catches the dropped operation's own TC, but
-	// a concurrent healthy TC on another connection whose HTTP window
-	// straddles this instant — or a per-test TC overlapping a dropped
-	// REUSABLE (session/heartbeat) chunk — may also be suppressed. That
-	// over-suppression trades a little coverage for no orphaned replay,
-	// the same tradeoff the pressure-range path already makes. Coalesced
-	// per operation to keep the bounded orphanRanges ring from flooding.
-	if t.onDropAt != nil && !ts.IsZero() {
+	// record an orphan window and suppress a TC whose HTTP window contains
+	// it — for the non-pressure drop reasons only. Recorded on the forward
+	// path (decode-lag immune), unlike the onDrop next-mock-void which
+	// attributes the loss to a later mock. Attribution is by time only (the
+	// tee has no TC or mock identity): it correctly catches the dropped
+	// operation's own TC, but a concurrent healthy TC whose HTTP window
+	// straddles this instant may also be suppressed — the same coverage-for-
+	// stability tradeoff the pressure-range path makes.
+	//
+	// memory_pressure is deliberately EXCLUDED: the memoryguard already
+	// records the whole pause as a pressureRange, and during a pause EVERY
+	// chunk drops with this reason for the pause's full (multi-second)
+	// duration — so recording a per-chunk window here is both redundant
+	// (pressureRange covers any TC straddling the pause; no TC is captured
+	// wholly within one) AND actively harmful: it floods the count-bounded
+	// orphanRanges ring with thousands of pause-interval windows that
+	// overlap no TC, EVICTING the genuinely-uncovered channel_full/
+	// per_conn_cap/parser windows from calm periods that are the whole point
+	// of this path. Coalescing alone can't fix that (1ms coalescing over a
+	// multi-second pause still yields thousands). Skip it here.
+	if reason != DropMemoryPressure && t.onDropAt != nil && !ts.IsZero() {
 		n := ts.UnixNano()
 		last := t.lastDropRecNanos.Load()
 		if last == 0 || n-last >= dropWindowCoalesceNanos || last-n >= dropWindowCoalesceNanos {

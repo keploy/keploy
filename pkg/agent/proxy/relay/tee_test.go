@@ -181,19 +181,20 @@ func TestTee_DropRecordsWindowAt(t *testing.T) {
 		return fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(payload), ReadAt: stamp}
 	}
 
-	// memory_pressure
+	// memory_pressure: drops, but records NO orphan window (the memoryguard
+	// already records the pause as a pressureRange; a per-chunk window here
+	// would flood the bounded ring for the pause's whole duration).
 	var paused atomic.Bool
 	paused.Store(true)
 	tt, _, rec := newTestTee(t, 1<<20, 4, paused.Load)
 	if tt.push(chunkAt("x")) {
 		t.Fatalf("push should have dropped under memory pressure")
 	}
-	reasons, tss := rec.atSnapshot()
-	if len(reasons) != 1 || reasons[0] != DropMemoryPressure {
-		t.Fatalf("want one memory_pressure window, got reasons %v", reasons)
+	if rec.count(DropMemoryPressure) != 1 {
+		t.Fatalf("want 1 memory_pressure drop recorded via onDrop, got %v", rec.snapshot())
 	}
-	if !tss[0].Equal(stamp) {
-		t.Fatalf("window ts = %v, want the dropped chunk's ReadAt %v", tss[0], stamp)
+	if reasons, _ := rec.atSnapshot(); len(reasons) != 0 {
+		t.Fatalf("memory_pressure must record NO orphan window (pressureRange covers it), got %v", reasons)
 	}
 
 	// paused
@@ -256,16 +257,16 @@ func TestTee_DropWindowChannelFullCoalesceFallback(t *testing.T) {
 	}
 
 	// --- distinct operations (>1ms apart) each keep their own window ---
-	// Use the paused path so every push drops deterministically (the
-	// channel_full path races the drain goroutine on which pushes drop).
-	var alwaysPaused atomic.Bool
-	alwaysPaused.Store(true)
-	tt2, _, rec2 := newTestTee(t, 1<<30, 4, alwaysPaused.Load)
+	// Use the DropPaused path (setPaused) for deterministic drops that DO
+	// record windows — memory_pressure no longer records one, and the
+	// channel_full path races the drain goroutine on which pushes drop.
+	tt2, _, rec2 := newTestTee(t, 1<<30, 4, nil)
+	tt2.setPaused(true)
 	base := time.Unix(1700000000, 0)
 	for i := 0; i < 6; i++ {
 		ts := base.Add(time.Duration(i) * 2 * time.Millisecond) // 2ms apart
 		if tt2.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("y"), ReadAt: ts}) {
-			t.Fatalf("push should drop under pressure")
+			t.Fatalf("push while paused should drop")
 		}
 	}
 	if rs2, _ := rec2.atSnapshot(); len(rs2) != 6 {
@@ -273,21 +274,21 @@ func TestTee_DropWindowChannelFullCoalesceFallback(t *testing.T) {
 	}
 
 	// --- WrittenAt fallback when ReadAt is zero (dest-side pre-forward stamp) ---
-	var paused atomic.Bool
-	paused.Store(true)
-	tt3, _, rec3 := newTestTee(t, 1<<20, 4, paused.Load)
+	tt3, _, rec3 := newTestTee(t, 1<<20, 4, nil)
+	tt3.setPaused(true)
 	wStamp := time.Unix(1700000001, 777)
 	if tt3.push(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("z"), WrittenAt: wStamp}) {
-		t.Fatalf("push should drop under pressure")
+		t.Fatalf("push while paused should drop")
 	}
 	if rs3, ts3 := rec3.atSnapshot(); len(rs3) != 1 || !ts3[0].Equal(wStamp) {
 		t.Fatalf("WrittenAt fallback: want one window at %v, got %v / %v", wStamp, rs3, ts3)
 	}
 
 	// --- zero-timestamp chunk records NO window ---
-	tt4, _, rec4 := newTestTee(t, 1<<20, 4, paused.Load)
+	tt4, _, rec4 := newTestTee(t, 1<<20, 4, nil)
+	tt4.setPaused(true)
 	if tt4.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("q")}) {
-		t.Fatalf("push should drop under pressure")
+		t.Fatalf("push while paused should drop")
 	}
 	if rs4, _ := rec4.atSnapshot(); len(rs4) != 0 {
 		t.Fatalf("zero-ts chunk must record no window, got %v", rs4)
