@@ -247,18 +247,30 @@ func (t *tee) drop(reason string, ts time.Time) {
 		t.onDrop(reason)
 	}
 	// Report the dropped chunk's own wire instant so the supervisor can
-	// record an orphan window and suppress a TC whose HTTP window
-	// contains it. Recorded on the forward path (decode-lag immune),
-	// unlike the onDrop next-mock-void which attributes the loss to a
-	// later mock. Attribution is by time only (the tee has no TC or mock
-	// identity): it correctly catches the dropped operation's own TC, but
-	// a concurrent healthy TC on another connection whose HTTP window
-	// straddles this instant — or a per-test TC overlapping a dropped
-	// REUSABLE (session/heartbeat) chunk — may also be suppressed. That
-	// over-suppression trades a little coverage for no orphaned replay,
-	// the same tradeoff the pressure-range path already makes. Coalesced
-	// per operation to keep the bounded orphanRanges ring from flooding.
-	if t.onDropAt != nil && !ts.IsZero() {
+	// record an orphan window and suppress a TC whose HTTP window contains
+	// it — but ONLY for genuine per-operation byte loss: channel_full and
+	// per_conn_cap. Recorded on the forward path (decode-lag immune), unlike
+	// the onDrop next-mock-void which attributes the loss to a later mock.
+	// Attribution is by time only (the tee has no TC/mock identity), so a
+	// concurrent healthy TC whose HTTP window straddles this instant may
+	// also be suppressed — the same coverage-for-stability tradeoff the
+	// pressure-range path makes; exact-owner attribution is a fast-follow.
+	//
+	// memory_pressure and paused are DELIBERATELY EXCLUDED — both drop every
+	// chunk for a sustained interval, so each would write thousands of
+	// zero-width instants into the count-bounded, global orphanRanges ring.
+	// That (a) floods the ring, evicting the real channel_full/per_conn_cap
+	// windows before the >7s-lagging record.go reads them, and (b)
+	// mass-suppresses healthy TCs on every connection whose window contains
+	// one of those instants — turning one visible replay orphan into many
+	// silent coverage losses.
+	//   - memory_pressure: a pause lasts seconds and is ALREADY covered by
+	//     pressureRanges (which record.go consults, and which cover any TC
+	//     straddling the pause) — recording it here is pure redundant flood.
+	//   - paused: setPaused(true) comes from PauseTees (abort — session is
+	//     dead) or KindPauseDir (the mock was finalized, further traffic is
+	//     noise); both raw-forward until close with no live mock to suppress.
+	if (reason == DropChannelFull || reason == DropPerConnCap) && t.onDropAt != nil && !ts.IsZero() {
 		n := ts.UnixNano()
 		last := t.lastDropRecNanos.Load()
 		if last == 0 || n-last >= dropWindowCoalesceNanos || last-n >= dropWindowCoalesceNanos {

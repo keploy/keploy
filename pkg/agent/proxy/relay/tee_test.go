@@ -117,17 +117,18 @@ func TestTee_DropOnMemoryPressure(t *testing.T) {
 
 func TestTee_DropOnPerConnCap(t *testing.T) {
 	t.Parallel()
-	// Cap at 4 bytes; first 3-byte push fits, second also fits (6 > 4) → drop.
+	// A single chunk LARGER than the cap always trips per_conn_cap on the
+	// calling goroutine (bytes.Load()+n > cap with n > cap), independent of
+	// the drain goroutine. The old two-small-push form ("abc" then "def",
+	// cap 4) relied on the drain NOT yet having decremented the byte counter
+	// when the second push ran — a ~1/12000 race. Oversized is deterministic.
 	tt, _, rec := newTestTee(t, 4, 16, nil)
 
-	if !tt.push(mkChunk("abc")) {
-		t.Fatalf("first push should succeed")
+	if tt.push(mkChunk("abcde")) { // 5 bytes > cap 4
+		t.Fatalf("oversized push must trip per_conn_cap")
 	}
-	if tt.push(mkChunk("def")) {
-		t.Fatalf("second push should be dropped (per_conn_cap)")
-	}
-	if rec.count(DropPerConnCap) < 1 {
-		t.Fatalf("want at least 1 per_conn_cap drop, got %v", rec.snapshot())
+	if rec.count(DropPerConnCap) != 1 {
+		t.Fatalf("want 1 per_conn_cap drop, got %v", rec.snapshot())
 	}
 }
 
@@ -168,12 +169,12 @@ func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 	}
 }
 
-// TestTee_DropRecordsWindowAt is the guard for the orphan-window fix:
-// every drop path must report the dropped chunk's OWN wire timestamp via
-// onDropAt (so the supervisor can suppress the TC whose HTTP window
-// contains it), and a successful push must report nothing. A regression
-// that stops threading the timestamp — or reverts drop() to not calling
-// onDropAt — makes this fail.
+// TestTee_DropRecordsWindowAt is the guard for the orphan-window fix and
+// its whitelist: a genuine per-op byte-loss drop (per_conn_cap, channel_full)
+// reports the dropped chunk's OWN wire timestamp via onDropAt, while the
+// sustained-interval reasons (memory_pressure, paused) report NOTHING — they
+// would flood the bounded ring and mass-suppress healthy TCs. A successful
+// push reports nothing. channel_full is covered by the coalesce test below.
 func TestTee_DropRecordsWindowAt(t *testing.T) {
 	t.Parallel()
 	stamp := time.Unix(1700000000, 12345)
@@ -181,38 +182,43 @@ func TestTee_DropRecordsWindowAt(t *testing.T) {
 		return fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(payload), ReadAt: stamp}
 	}
 
-	// memory_pressure
+	// memory_pressure: drops, but records NO orphan window (pressureRanges
+	// already cover it; per-chunk recording over a pause floods the ring).
 	var paused atomic.Bool
 	paused.Store(true)
 	tt, _, rec := newTestTee(t, 1<<20, 4, paused.Load)
 	if tt.push(chunkAt("x")) {
 		t.Fatalf("push should have dropped under memory pressure")
 	}
-	reasons, tss := rec.atSnapshot()
-	if len(reasons) != 1 || reasons[0] != DropMemoryPressure {
-		t.Fatalf("want one memory_pressure window, got reasons %v", reasons)
+	if rec.count(DropMemoryPressure) != 1 {
+		t.Fatalf("want 1 memory_pressure drop via onDrop, got %v", rec.snapshot())
 	}
-	if !tss[0].Equal(stamp) {
-		t.Fatalf("window ts = %v, want the dropped chunk's ReadAt %v", tss[0], stamp)
+	if reasons, _ := rec.atSnapshot(); len(reasons) != 0 {
+		t.Fatalf("memory_pressure must record NO orphan window, got %v", reasons)
 	}
 
-	// paused
+	// paused: drops, but records NO orphan window (an aborted connection
+	// stays paused raw-forwarding until close — recording every chunk would
+	// mass-suppress healthy TCs for the connection's whole remaining life).
 	tt2, _, rec2 := newTestTee(t, 1<<20, 4, nil)
 	tt2.setPaused(true)
 	if tt2.push(chunkAt("y")) {
 		t.Fatalf("push while paused should drop")
 	}
-	// per_conn_cap on the same tee after resume (cap 1<<20 won't trip; use a tiny-cap tee)
+	if rec2.count(DropPaused) != 1 {
+		t.Fatalf("want 1 paused drop via onDrop, got %v", rec2.snapshot())
+	}
+	if rs2, _ := rec2.atSnapshot(); len(rs2) != 0 {
+		t.Fatalf("paused must record NO orphan window, got %v", rs2)
+	}
+
+	// per_conn_cap: genuine per-op loss → records a window at the chunk's ts.
+	// Oversized chunk (len > cap) for determinism: it never enters staging,
+	// so t.bytes stays 0 and the cap check trips independent of the drain
+	// goroutine — unlike a two-small-push form which races the drain.
 	tt3, _, rec3 := newTestTee(t, 4, 16, nil)
-	if !tt3.push(chunkAt("abc")) {
-		t.Fatalf("first push should fit under cap")
-	}
-	if tt3.push(chunkAt("def")) {
-		t.Fatalf("second push should exceed per_conn_cap")
-	}
-	rs2, ts2 := rec2.atSnapshot()
-	if len(rs2) != 1 || rs2[0] != DropPaused || !ts2[0].Equal(stamp) {
-		t.Fatalf("paused: want one paused window at %v, got %v / %v", stamp, rs2, ts2)
+	if tt3.push(chunkAt("abcde")) { // 5 bytes > cap 4
+		t.Fatalf("oversized push must trip per_conn_cap")
 	}
 	rs3, ts3 := rec3.atSnapshot()
 	if len(rs3) != 1 || rs3[0] != DropPerConnCap || !ts3[0].Equal(stamp) {
@@ -256,38 +262,43 @@ func TestTee_DropWindowChannelFullCoalesceFallback(t *testing.T) {
 	}
 
 	// --- distinct operations (>1ms apart) each keep their own window ---
-	// Use the paused path so every push drops deterministically (the
-	// channel_full path races the drain goroutine on which pushes drop).
-	var alwaysPaused atomic.Bool
-	alwaysPaused.Store(true)
-	tt2, _, rec2 := newTestTee(t, 1<<30, 4, alwaysPaused.Load)
+	// Use per_conn_cap with OVERSIZED chunks (len > cap) for deterministic
+	// drops that DO record windows: a chunk bigger than the cap always trips
+	// per_conn_cap on the calling goroutine (bytes.Load()+n > cap, n > cap),
+	// independent of the drain goroutine. memory_pressure/paused no longer
+	// record windows, and channel_full races the drain.
+	tt2, _, rec2 := newTestTee(t, 4, 16, nil) // cap=4; 5-byte chunks always trip
 	base := time.Unix(1700000000, 0)
 	for i := 0; i < 6; i++ {
 		ts := base.Add(time.Duration(i) * 2 * time.Millisecond) // 2ms apart
-		if tt2.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("y"), ReadAt: ts}) {
-			t.Fatalf("push should drop under pressure")
+		if tt2.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("yyyyy"), ReadAt: ts}) {
+			t.Fatalf("oversized push must trip per_conn_cap")
 		}
 	}
-	if rs2, _ := rec2.atSnapshot(); len(rs2) != 6 {
+	rs2, _ := rec2.atSnapshot()
+	if len(rs2) != 6 {
 		t.Fatalf("distinct 2ms-apart drops must each record (no coalescing): want 6 windows, got %d", len(rs2))
+	}
+	for _, r := range rs2 {
+		if r != DropPerConnCap {
+			t.Fatalf("want per_conn_cap windows, got %v", rs2)
+		}
 	}
 
 	// --- WrittenAt fallback when ReadAt is zero (dest-side pre-forward stamp) ---
-	var paused atomic.Bool
-	paused.Store(true)
-	tt3, _, rec3 := newTestTee(t, 1<<20, 4, paused.Load)
+	tt3, _, rec3 := newTestTee(t, 4, 16, nil)
 	wStamp := time.Unix(1700000001, 777)
-	if tt3.push(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("z"), WrittenAt: wStamp}) {
-		t.Fatalf("push should drop under pressure")
+	if tt3.push(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("zzzzz"), WrittenAt: wStamp}) {
+		t.Fatalf("oversized push must trip per_conn_cap")
 	}
-	if rs3, ts3 := rec3.atSnapshot(); len(rs3) != 1 || !ts3[0].Equal(wStamp) {
-		t.Fatalf("WrittenAt fallback: want one window at %v, got %v / %v", wStamp, rs3, ts3)
+	if rs3, ts3 := rec3.atSnapshot(); len(rs3) != 1 || rs3[0] != DropPerConnCap || !ts3[0].Equal(wStamp) {
+		t.Fatalf("WrittenAt fallback: want one per_conn_cap window at %v, got %v / %v", wStamp, rs3, ts3)
 	}
 
-	// --- zero-timestamp chunk records NO window ---
-	tt4, _, rec4 := newTestTee(t, 1<<20, 4, paused.Load)
-	if tt4.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("q")}) {
-		t.Fatalf("push should drop under pressure")
+	// --- zero-timestamp chunk records NO window (even for a recorded reason) ---
+	tt4, _, rec4 := newTestTee(t, 4, 16, nil)
+	if tt4.push(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("qqqqq")}) {
+		t.Fatalf("oversized push must trip per_conn_cap")
 	}
 	if rs4, _ := rec4.atSnapshot(); len(rs4) != 0 {
 		t.Fatalf("zero-ts chunk must record no window, got %v", rs4)

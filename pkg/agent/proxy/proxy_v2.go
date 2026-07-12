@@ -163,18 +163,17 @@ func (p *Proxy) recordViaSupervisor(
 		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
 		BumpActivity:         sv.BumpActivity,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
-		// Time-attributed complement to OnMarkMockIncomplete: the dropped
-		// chunk's own wire instant is recorded as a zero-width orphan
-		// window so record.go suppresses TCs whose HTTP window contains
-		// it. Unlike the session flag (which voids a later, unrelated
-		// mock — why relay-layer drops under load orphaned TCs the
-		// pressure/next-mock windows never covered), this lands inside the
-		// dropped op's OWN TC window. Attribution is by time only — a
-		// concurrent healthy TC straddling this instant, or a per-test TC
-		// overlapping a dropped reusable/heartbeat chunk, may also be
-		// suppressed; that over-suppression is the accepted "drop the TC
-		// rather than orphan it" tradeoff (see tee.drop). Fast-follow:
-		// thread per-op identity to suppress by exact TC.
+		// Time-attributed complement to OnMarkMockIncomplete: for a genuine
+		// per-op byte-loss drop (channel_full/per_conn_cap only — the tee
+		// excludes memory_pressure/paused, which would flood the ring and
+		// mass-suppress healthy TCs), the dropped chunk's own wire instant
+		// is recorded as a zero-width orphan window so record.go suppresses
+		// TCs whose HTTP window contains it. Unlike the session flag (which
+		// voids a later, unrelated mock), this lands inside the dropped op's
+		// OWN TC window. Attribution is by time only — a concurrent healthy
+		// TC straddling this instant may also be suppressed; that bounded
+		// over-suppression is the accepted "drop the TC rather than orphan
+		// it" tradeoff. Fast-follow: thread per-op identity for exact-TC.
 		OnTeeDropWindow: func(_ string, ts time.Time) {
 			svSess.RecordOrphanWindow(ts, ts)
 		},
