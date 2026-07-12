@@ -26,9 +26,15 @@ import (
 )
 
 type ClientMockStorage struct {
+	// filtered = resident per-test mocks (only the disk-ineligible ones when
+	// diskMocks is set; the full slice on the legacy blob path). unfiltered =
+	// resident config/session pool.
 	filtered   []*models.Mock
 	unfiltered []*models.Mock
-	mu         sync.RWMutex
+	// diskMocks (non-nil on the streaming path) holds window-eligible per-test
+	// mocks on disk; UpdateMockParams loads only the current window from it.
+	diskMocks *proxyPkg.DiskMocks
+	mu        sync.RWMutex
 }
 
 type Agent struct {
@@ -692,9 +698,23 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 // half-built pool) and seeds the freeze anchor. Shared by StoreMocks and
 // StoreMocksStream.
 func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStorage) {
+	// Close the superseded generation's on-disk store file (temp-file leak otherwise).
+	if prev, ok := a.clientMocks.Load(uint64(0)); ok {
+		if ps, _ := prev.(*ClientMockStorage); ps != nil && ps.diskMocks != nil && ps.diskMocks != storage.diskMocks {
+			_ = ps.diskMocks.Close()
+		}
+	}
 	a.clientMocks.Store(uint64(0), storage)
 
-	if anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered); !anchor.IsZero() {
+	// Seed the freeze anchor from the earliest request timestamp across the WHOLE
+	// pool, including on-disk mocks (they often carry the earliest, boot, times).
+	anchor := earliestReqTimestamp(storage.filtered, storage.unfiltered)
+	if storage.diskMocks != nil {
+		if se := storage.diskMocks.EarliestReqTs(); !se.IsZero() && (anchor.IsZero() || se.Before(anchor)) {
+			anchor = se
+		}
+	}
+	if !anchor.IsZero() {
 		if err := ActiveHooks.SetFreezeAnchor(ctx, anchor); err != nil {
 			a.logger.Warn("SetFreezeAnchor hook returned error",
 				zap.Error(err), zap.Time("anchor", anchor))
@@ -720,23 +740,62 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
 	}
 
+	// Engage the on-disk store only under strict mock-window: lax promotes
+	// out-of-window mocks to the session tier, so it needs the whole per-test set
+	// anyway. Best-effort — fall back to full-resident if it can't be created.
+	var disk *proxyPkg.DiskMocks
+	if pkg.IsStrictMockWindow(false) {
+		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
+		if diskErr != nil {
+			a.logger.Warn("on-disk mock store unavailable; keeping per-test mocks resident", zap.Error(diskErr))
+		} else {
+			disk = d
+		}
+	}
+	storage.diskMocks = disk
+	failStream := func(err error) error {
+		if disk != nil {
+			_ = disk.Close()
+		}
+		return err
+	}
+
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
 			if err := ctx.Err(); err != nil {
-				return err
+				return failStream(err)
 			}
 		}
 		var m models.Mock
 		if err := dec.Decode(&m); err != nil {
-			return fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err)
+			return failStream(fmt.Errorf("storemocks stream: decode mock %d/%d: %w", i+1, total, err))
 		}
 		mock := &m
 		mock.DeriveLifetime()
 		if i < header.FilteredCount {
-			storage.filtered = append(storage.filtered, mock)
+			// Per-test region: window-eligible mocks go to disk, ineligible ones
+			// (missing/invalid timestamps) stay resident so filter routing is exact.
+			if disk != nil && proxyPkg.EligibleForDisk(mock) {
+				if err := disk.Add(mock); err != nil {
+					// Disk write failed — keep it resident so it's never lost.
+					a.logger.Warn("on-disk mock write failed; keeping mock resident",
+						zap.String("mock", mock.Name), zap.Error(err))
+					storage.filtered = append(storage.filtered, mock)
+				}
+			} else {
+				storage.filtered = append(storage.filtered, mock)
+			}
 		} else {
 			storage.unfiltered = append(storage.unfiltered, mock)
 		}
+	}
+	if disk != nil {
+		disk.Finalize()
+		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
+			zap.Int("onDisk", disk.Len()),
+			zap.Int64("diskBytes", disk.DiskBytes()),
+			zap.Int("residentPerTest", len(storage.filtered)),
+			zap.Int("residentConfig", len(storage.unfiltered)))
 	}
 
 	a.finalizeClientMocks(ctx, storage)
@@ -789,6 +848,69 @@ func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
 	return anchor
 }
 
+// loadPerTestMocks builds the per-test slice the filter runs over, loading from
+// disk only what the filter's effective mode would keep (so the result matches
+// the old full-resident path): mapping -> named mocks; strict -> window +
+// startup band; lax -> all. Resident ineligible mocks are merged in; with no
+// disk store (legacy path) the resident slice is returned unchanged.
+func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, agentStrict bool, firstWindowStart time.Time) ([]*models.Mock, error) {
+	if disk == nil {
+		return resident, nil
+	}
+
+	var loaded []*models.Mock
+	var err error
+	var mode string
+	switch {
+	case params.UseMappingBased && len(params.MockMapping) > 0:
+		mode = "mapping"
+		loaded, err = disk.LoadByNames(params.MockMapping)
+	case pkg.IsStrictMockWindow(agentStrict) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+		mode = "strict-window"
+		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
+		if err == nil && !firstWindowStart.IsZero() {
+			var startup []*models.Mock
+			startup, err = disk.LoadBefore(firstWindowStart)
+			if err == nil {
+				loaded = append(loaded, startup...)
+			}
+		}
+	default:
+		mode = "lax-all"
+		loaded, err = disk.LoadAll()
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.logger.Debug("agent mock residency: loaded per-test set from disk",
+		zap.String("mode", mode),
+		zap.Int("loadedFromDisk", len(loaded)),
+		zap.Int("residentIneligible", len(resident)))
+	return dedupByName(resident, loaded), nil
+}
+
+// dedupByName concatenates two slices, keeping the first occurrence per name
+// (collapses a window/startup-band overlap on the same mock).
+func dedupByName(a, b []*models.Mock) []*models.Mock {
+	out := make([]*models.Mock, 0, len(a)+len(b))
+	seen := make(map[string]struct{}, len(a)+len(b))
+	add := func(src []*models.Mock) {
+		for _, m := range src {
+			if m == nil {
+				continue
+			}
+			if _, dup := seen[m.Name]; dup {
+				continue
+			}
+			seen[m.Name] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	add(a)
+	add(b)
+	return out
+}
+
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 
@@ -837,11 +959,31 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	storage := storageInterface.(*ClientMockStorage)
 
 	storage.mu.RLock()
-	originalFiltered := make([]*models.Mock, len(storage.filtered))
+	residentFiltered := make([]*models.Mock, len(storage.filtered))
 	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
-	copy(originalFiltered, storage.filtered)
+	copy(residentFiltered, storage.filtered)
 	copy(originalUnfiltered, storage.unfiltered)
+	disk := storage.diskMocks
 	storage.mu.RUnlock()
+
+	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
+	// the authoritative strict enforcement); env override still applies inside.
+	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
+	agentStrict := params.StrictMockWindow && !isWindowedProxy
+
+	// firstWindowStart: earliest observed window start, so startup-init mocks
+	// (req < it) are kept, not dropped as stale.
+	var firstWindowStart time.Time
+	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
+		firstWindowStart = reader.FirstTestWindowStart()
+	}
+
+	// Load only what the filter will keep for this call (see loadPerTestMocks).
+	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, agentStrict, firstWindowStart)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
+		return err
+	}
 
 	a.logger.Debug("Original mocks before filtering",
 		zap.Int("originalFiltered", len(originalFiltered)),
@@ -860,23 +1002,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// legacy SetMocks fallback path. For WindowedProxy callers we
 	// pass strict=false to FilterPerTestAndLaxPromoted and let
 	// MockManager.SetMocksWithWindow enforce strict semantics.
-	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
-	agentStrict := params.StrictMockWindow && !isWindowedProxy
-
-	// Tier-aware strictMockWindow: when the proxy exposes the optional
-	// FirstWindowStartReader extension, read the earliest test-window
-	// start the MockManager has observed so filterByTimeStamp can keep
-	// per-test mocks with req < firstWindowStart in the filtered slice
-	// (they are startup-tier, not cross-test bleed). Stale previous-test
-	// mocks (firstWindowStart <= req < currentStart, or req > currentEnd)
-	// are still dropped — that's the containment guarantee strict mode
-	// exists to provide. A zero return from the reader (no test has
-	// fired yet) reverts to the legacy blanket-drop contract so callers
-	// observe behaviour strictly no worse than before.
-	var firstWindowStart time.Time
-	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
-		firstWindowStart = reader.FirstTestWindowStart()
-	}
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
