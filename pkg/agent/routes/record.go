@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -341,8 +342,61 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Use select (not for-range) so context cancellation is checked
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
-	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed because pressure overlapped the TC's HTTP window
+	var tcsSentSoFar atomic.Int64       // TCs sent to CLI this session
+	var tcsSuppressedSoFar atomic.Int64 // TCs suppressed because pressure overlapped the TC's HTTP window
+
+	// MEASUREMENT (temporary, throwaway branch): remember every SENT TC window;
+	// a periodic tick re-checks them against the CURRENT range sets. If the
+	// tee-drop orphan windows are being recorded (orphan_ranges_total climbs)
+	// but retro_suppressible >> tcs_suppressed, the windows are recorded too
+	// late to catch the TC (race); if retro ≈ tcs_suppressed AND
+	// orphan_ranges is high, the windows don't overlap the orphaned TCs
+	// (value/coverage gap); if orphan_ranges stays low, the tee-drop windows
+	// aren't being recorded at all. Emitted periodically so it survives the
+	// teardown SIGKILL.
+	type sentWin struct{ req, resp time.Time }
+	var sentMu sync.Mutex
+	var sentWins []sentWin
+	measureDone := make(chan struct{})
+	defer close(measureDone)
+	go func() {
+		tk := time.NewTicker(5 * time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-measureDone:
+				return
+			case <-tk.C:
+				mgr := syncmgr.Get()
+				sentMu.Lock()
+				snap := make([]sentWin, len(sentWins))
+				copy(snap, sentWins)
+				sentMu.Unlock()
+				retro := 0
+				for _, sw := range snap {
+					if o, _ := mgr.WasMockOrphanedInWindow(sw.req, sw.resp); o {
+						retro++
+						continue
+					}
+					if p, _ := mgr.WasPressureActiveInWindow(sw.req, sw.resp); p {
+						retro++
+					}
+				}
+				_, dropped, added, _ := mgr.GetDropStats()
+				a.logger.Info("agent: recording progress [MEASUREMENT]",
+					zap.Int64("tcs_sent_to_cli", tcsSentSoFar.Load()),
+					zap.Int64("tcs_suppressed", tcsSuppressedSoFar.Load()),
+					zap.Int("retro_suppressible_sent", retro),
+					zap.Int("orphan_ranges_total", mgr.OrphanRangeCount()),
+					zap.Int("pressure_ranges_total", mgr.PressureRangeCount()),
+					zap.Int64("mocks_dropped_by_pressure", dropped),
+					zap.Int64("mocks_added", added),
+					zap.Uint64("mocks_dropped_capacity", mgr.DropCount()),
+				)
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-r.Context().Done():
@@ -353,8 +407,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				// Channel closed = recording session over.
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 				a.logger.Info("agent: recording complete",
-					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
-					zap.Int("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar),
+					zap.Int64("tcs_sent_to_cli", tcsSentSoFar.Load()),
+					zap.Int64("tcs_suppressed_pressure_overlap", tcsSuppressedSoFar.Load()),
 					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
@@ -391,7 +445,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			orphanOverlap, orphanCount := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
 
 			if hasOverlap || mockDropped || orphanOverlap {
-				tcsSuppressedSoFar++
+				tcsSuppressedSoFar.Add(1)
 				a.logger.Debug("agent: TC suppressed — memory pressure overlapped TC window, a mock was capacity-dropped, or a mock was voided (incomplete) in the TC window; not sent to CLI",
 					zap.String("tc_name", t.Name),
 					zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
@@ -399,12 +453,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					zap.Int("pressure_overlaps", overlapCount),
 					zap.Bool("capacity_drop", mockDropped),
 					zap.Int("orphan_overlaps", orphanCount),
-					zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+					zap.Int64("tcs_suppressed_so_far", tcsSuppressedSoFar.Load()),
 				)
 				continue
 			}
 
-			tcsSentSoFar++
+			tcsSentSoFar.Add(1)
+			sentMu.Lock()
+			sentWins = append(sentWins, sentWin{req: t.HTTPReq.Timestamp, resp: tcRespTime})
+			sentMu.Unlock()
 			// Stream each test case as JSON
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
