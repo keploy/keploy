@@ -965,6 +965,30 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				}
 
+				// The COM_STMT_PREPARE response's parameter-definition block is
+				// ALWAYS terminated by an EOF packet unless CLIENT_DEPRECATE_EOF
+				// was negotiated. Clients that do NOT negotiate DEPRECATE_EOF
+				// (e.g. go-sql-driver) call readUntilEOF() after the param defs
+				// (see database/sql mysql connection.go: prepare) and block
+				// forever if that terminator is missing — the synthesized
+				// PREPARE_OK then hangs the connection until the client's
+				// context deadline fires, which surfaces as "driver: bad
+				// connection" and cascades across the whole pool. Emit a
+				// legacy EOF terminator here, mirroring the recorder
+				// (record_v2.go only captures EOFAfterParamDefs when
+				// !DeprecateEOF), so a synthesized response is wire-complete.
+				var eofAfterParamDefs []byte
+				if numParams > 0 && !decodeCtx.DeprecateEOF() {
+					// Legacy EOF: header(len=5, seq) + payload
+					// (0xFE | warnings=0 | status_flags=AUTOCOMMIT). Param
+					// defs occupy sequence ids 2..(1+numParams), so the
+					// terminator is at 2+numParams.
+					eofAfterParamDefs = []byte{
+						0x05, 0x00, 0x00, byte(2 + numParams),
+						0xFE, 0x00, 0x00, 0x02, 0x00,
+					}
+				}
+
 				prepareOk := &mysql.StmtPrepareOkPacket{
 					Status:             0,
 					StatementID:        newStmtID,
@@ -974,7 +998,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					WarningAvailable:   true,
 					WarningCount:       0,
 					ParamDefs:          paramDefs,
-					EOFAfterParamDefs:  []byte{},
+					EOFAfterParamDefs:  eofAfterParamDefs,
 					ColumnDefs:         nil,
 					EOFAfterColumnDefs: []byte{},
 				}
