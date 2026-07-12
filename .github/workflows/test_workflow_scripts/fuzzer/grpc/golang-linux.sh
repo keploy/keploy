@@ -134,6 +134,31 @@ ensure_success_phrase() {
  exit 1
 }
 
+# wait_port_free NAME PORT [TIMEOUT_SEC]
+# Block until nothing is listening on localhost:PORT (or TIMEOUT_SEC elapses).
+# Deterministic replacement for a fixed `sleep` after killing a process that
+# owns a port: the next bind must not race a socket that is still being
+# released, which is what surfaces as "listen tcp :PORT: bind: address already
+# in use" and fails the run intermittently. Returns as soon as the port is
+# actually free, so it is normally sub-second. `nc -z` is already used elsewhere
+# in this script to poll for a port coming UP; here we poll for it going DOWN.
+wait_port_free() {
+  local name=$1 port=$2 timeout=${3:-30}
+  local deadline=$(( $(date +%s) + timeout ))
+  # Bare `nc -z` (no -w): on some netcat builds -w makes -z report an occupied
+  # port as free, which would defeat the whole check. Wall-clock deadline (not
+  # an iteration count) so a slow per-probe nc can't stretch the bound.
+  while nc -z localhost "$port" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "⚠️ $name still holding port $port after ${timeout}s"
+      return 1
+    fi
+    sleep 1
+  done
+  echo "✅ $name port $port is free"
+  return 0
+}
+
 
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
@@ -188,7 +213,15 @@ if [ "$MODE" = "incoming" ]; then
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
- sleep 2 # Give a moment for the port to be released
+ # The HTTP client started above (:18080) is otherwise never stopped in the
+ # incoming path, so it leaks into the json cycle where a fresh client cannot
+ # bind :18080 (and the stale one silently serves /run against a dead server).
+ # Stop it here, at the source of the leak.
+ sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+ # Wait for the ports to be released instead of a fixed sleep that races the
+ # yaml replay's server re-bind on :50051.
+ wait_port_free "gRPC server" 50051 || true
+ wait_port_free "HTTP client" 18080 || true
 
  echo "Waiting for processes to settle"
 
@@ -240,14 +273,23 @@ if [ "$MODE" = "incoming" ]; then
 
  if json_pass_supported; then
    echo "🧪 Re-running incoming with --storage-format json"
-   # The yaml replay above started the fuzzer server with `keploy -c`.
-   # Keploy stops itself, but the server child it spawned can keep
-   # owning :50051, so the json record's app-launch fails with
-   # "listen tcp :50051: bind: address already in use" and keploy
-   # bails before capturing any test case. Force-kill anything still
-   # holding :50051 before the json record's app starts.
+   # Before the json cycle rebinds :50051 (server) and :18080 (client), make
+   # sure the yaml cycle's processes are gone AND their ports are released.
+   # Two leftovers otherwise race the json binds:
+   #   * :50051 — the yaml replay's `keploy test -c` server can still be
+   #     unwinding when `keploy test` returns; the json record's app then hits
+   #     "listen tcp :50051: bind: address already in use" and keploy bails
+   #     before capturing any test case.
+   #   * :18080 — the yaml cycle's HTTP client is never stopped, so a fresh
+   #     json client cannot bind it and the stale one silently serves /run
+   #     against a server that never came up (1000 nil mismatches).
+   # Kill both and WAIT for the sockets to close (bounded) rather than trusting
+   # a fixed sleep. (The yaml teardown already stops the client; this is the
+   # defensive backstop at the actual bind boundary.)
    sudo pkill -f "$FUZZER_SERVER_BIN" || true
-   sleep 2
+   sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+   wait_port_free "gRPC server" 50051 || true
+   wait_port_free "HTTP client" 18080 || true
    if [[ "$RECORD_SRC" == "latest" ]]; then
      "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming_json.txt &
    else
