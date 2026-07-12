@@ -15,6 +15,8 @@ import (
 	"math"
 	"net"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -2761,6 +2763,20 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {
 		mm.ResetForReplaySession()
+		// Return the previous test-set's transient memory to the OS at the
+		// set boundary. The runtime keeps freed pages mapped (up to
+		// GOMEMLIMIT) for reuse, so without this the next set inherits the
+		// prior set's high-water RSS and a large-body serve transient can
+		// tip it past the cgroup limit. Mock() is per test-set, so this is
+		// a boundary op, not a hot path.
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		debug.FreeOSMemory()
+		runtime.ReadMemStats(&after)
+		p.logger.Info("replay: returned memory to OS at test-set boundary",
+			zap.Uint64("heapInuse_before_mb", before.HeapInuse/(1024*1024)),
+			zap.Uint64("heapInuse_after_mb", after.HeapInuse/(1024*1024)),
+			zap.Uint64("heapReleased_delta_mb", (after.HeapReleased-before.HeapReleased)/(1024*1024)))
 	}
 
 	if !opts.Mocking {
