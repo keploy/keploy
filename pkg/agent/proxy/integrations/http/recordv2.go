@@ -129,7 +129,6 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		resTs := firstRespChunk.WrittenAt
 		logger.Debug("V2 HTTP record: initial response chunk", zap.Int("bytes", len(finalResp)))
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, methodFromRequestLine(finalReq))
-		logger.Debug("V2 HTTP record: completed response read", zap.Int("bytes", len(finalResp)))
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -302,11 +301,11 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 	}
 
-	// RFC 7230 §3.3.3 rule 1: a HEAD response and 204 / 304 / 101 responses have
-	// no message body and end at the header terminator, regardless of
-	// Content-Length / Transfer-Encoding. Without this a 204 (which carries
-	// neither framing header) falls into the read-until-EOF branch below and, on
-	// a keepalive connection, swallows every subsequent response into this one.
+	// Bodiless terminal responses — HEAD, 204, 205, 304, 101 (see
+	// responseHasNoBody for the per-status basis) — end at the header terminator
+	// regardless of Content-Length / Transfer-Encoding. Without this a 204 (which
+	// carries neither framing header) falls into the read-until-EOF branch below
+	// and, on a keepalive connection, swallows every subsequent response.
 	if responseHasNoBody(requestMethod, parseStatusCode(*finalResp)) {
 		return lastWr, nil
 	}
