@@ -22,10 +22,6 @@ func TestBuildReplayResponse_Chunked(t *testing.T) {
 
 	raw := buildReplayResponse(statusLine, header, body)
 
-	if strings.Contains(strings.ToLower(raw), "content-length") {
-		t.Errorf("chunked replay must not carry Content-Length:\n%s", raw)
-	}
-
 	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
 	if err != nil {
 		t.Fatalf("ReadResponse failed on replayed bytes: %v\nraw:\n%s", err, raw)
@@ -34,6 +30,14 @@ func TestBuildReplayResponse_Chunked(t *testing.T) {
 
 	if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
 		t.Errorf("TransferEncoding = %v, want [chunked]", resp.TransferEncoding)
+	}
+	// Assert on the parsed response (not a raw substring — a body could itself
+	// contain "content-length"): chunked responses must not carry Content-Length.
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		t.Errorf("chunked replay must not carry Content-Length, got %q", cl)
+	}
+	if resp.ContentLength != -1 {
+		t.Errorf("chunked ContentLength = %d, want -1 (unknown)", resp.ContentLength)
 	}
 	got, _ := io.ReadAll(resp.Body)
 	if string(got) != body {

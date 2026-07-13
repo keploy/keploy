@@ -283,7 +283,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			responseString := buildReplayResponse(statusLine, header, respBody)
 
-			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			h.Logger.Debug("sending mock response to client", zap.Int("bytes", len(responseString)))
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
@@ -330,7 +330,7 @@ func buildReplayResponse(statusLine string, header http.Header, respBody string)
 	var b strings.Builder
 	b.WriteString(statusLine)
 	for key, values := range header {
-		if key == "Content-Length" {
+		if strings.EqualFold(key, "Content-Length") {
 			if isChunked {
 				continue
 			}
