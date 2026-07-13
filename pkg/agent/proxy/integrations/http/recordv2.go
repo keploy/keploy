@@ -195,8 +195,6 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 	}
 
 	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalReq)
-	logger := h.Logger
-	logger.Debug("V2 HTTP record: parsed headers", zap.String("content-length", contentLengthHeader), zap.String("transfer-encoding", transferEncodingHeader))
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
@@ -377,10 +375,6 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 
 }
 
-// parseHeaders extracts Content-Length and Transfer-Encoding header
-// values (if any) from an HTTP message whose headers end with CRLFCRLF.
-// The parse is the same loose style the chunk.go helpers use: split on
-// '\n', trim '\r', skip malformed lines.
 // methodFromRequestLine returns the HTTP method (first token of the request
 // line) from raw request bytes, or "" if it can't be determined.
 func methodFromRequestLine(req []byte) string {
@@ -421,6 +415,10 @@ func responseHasNoBody(requestMethod string, statusCode int) bool {
 	return statusCode == 204 || statusCode == 304 || (statusCode >= 100 && statusCode < 200)
 }
 
+// parseHeaders extracts Content-Length and Transfer-Encoding header
+// values (if any) from an HTTP message whose headers end with CRLFCRLF.
+// The parse is the same loose style the chunk.go helpers use: split on
+// '\n', trim '\r', skip malformed lines.
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 	// Only the header section carries framing info; slice to the CRLFCRLF
 	// terminator so we never convert/split a large (possibly streaming) body.
