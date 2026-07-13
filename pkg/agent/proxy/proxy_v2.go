@@ -193,6 +193,16 @@ func (p *Proxy) recordViaSupervisor(
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
 
+	// Teach the hang watchdog to tell an idle parser from a stuck one:
+	// only declare a hang when the relay still holds unconsumed input.
+	// A pooled DB connection sitting between requests (parser blocked on
+	// an empty read) must not be aborted — aborting PauseTees's it and
+	// permanently stops recording on a live connection that gets reused,
+	// which is the go-memory-load-mongo recording dead zone. Set before
+	// Run; the watchdog only consults it once `pending` is armed, which
+	// happens after Run tees the first client chunk.
+	sv.SetActivityProbe(r.HasBufferedInput)
+
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
 	// FakeConns so the parser's reads unblock on abort.

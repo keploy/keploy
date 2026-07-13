@@ -230,6 +230,26 @@ func (r *Relay) PauseTees() {
 	r.teeD2C.setPaused(true)
 }
 
+// HasBufferedInput reports whether either direction currently holds
+// input the parser has not yet consumed — bytes staged in a tee, or a
+// chunk queued/stashed in a FakeConn. The supervisor's hang watchdog
+// consults this (via SetActivityProbe) so a parser that is merely idle —
+// blocked reading an empty stream, e.g. a pooled DB connection sitting
+// between requests — is not mistaken for one that is hung. A hang is
+// declared only when there is genuinely unconsumed input the parser is
+// failing to make progress on. Without this discriminator, an idle
+// connection whose last exchange was abandoned (its response dropped
+// under memory pressure, so no mock was emitted to clear the
+// supervisor's `pending` flag) is false-hanged after the budget and
+// permanently silenced via PauseTees — recording never resumes on the
+// live pooled connection, producing the go-memory-load-mongo recording
+// dead zone. Safe for concurrent use: atomic byte counters plus the
+// FakeConn's own synchronised buffer check.
+func (r *Relay) HasBufferedInput() bool {
+	return r.teeC2D.hasStagedBytes() || r.teeD2C.hasStagedBytes() ||
+		r.clientStream.HasBuffered() || r.destStream.HasBuffered()
+}
+
 // Run starts the forwarder, drain, and directive-processor goroutines
 // and blocks until both forwarders exit. Exits happen on:
 //

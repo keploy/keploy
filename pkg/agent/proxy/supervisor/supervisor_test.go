@@ -197,6 +197,82 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 	}
 }
 
+// TestHangNotFiredWhenIdleNoUnconsumedInput is the regression for the
+// go-memory-load-mongo recording dead zone. A pooled connection whose
+// last exchange was abandoned (its response dropped under memory
+// pressure, so no mock cleared `pending`) sits idle between requests
+// with the parser blocked on an empty read. The activity probe reports
+// no unconsumed input; the watchdog MUST NOT declare a hang, because
+// aborting would PauseTees the live connection and permanently stop
+// recording. Without the probe gate this false-hangs after the budget.
+func TestHangNotFiredWhenIdleNoUnconsumedInput(t *testing.T) {
+	t.Parallel()
+	aborted := make(chan struct{})
+	s := New(shortCfg(t)) // 50ms budget
+	s.SessionOnAbort = func() { close(aborted) }
+	// Parser is idle: caught up, nothing left to read.
+	s.SetActivityProbe(func() bool { return false })
+	// A request was teed but never produced a mock (abandoned exchange),
+	// so `pending` is stuck armed.
+	s.MarkPendingWork()
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	// Five budgets of wallclock: an idle parser must survive.
+	select {
+	case r := <-done:
+		t.Fatalf("watchdog aborted an idle parser (false-hang): %+v", r)
+	case <-aborted:
+		t.Fatalf("SessionOnAbort fired for an idle parser (false-hang)")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Cleanup.
+	s.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("parser did not exit after Close")
+	}
+}
+
+// TestHangFiredWhenUnconsumedInputPresent proves the probe gate does not
+// weaken genuine hang detection: a parser that still has unconsumed
+// input but makes no progress within the budget is still aborted.
+func TestHangFiredWhenUnconsumedInputPresent(t *testing.T) {
+	t.Parallel()
+	aborted := make(chan struct{})
+	s := New(shortCfg(t))
+	s.SessionOnAbort = func() { close(aborted) }
+	// Parser has input it is failing to make progress on.
+	s.SetActivityProbe(func() bool { return true })
+	s.MarkPendingWork()
+
+	res := s.Run(context.Background(),
+		func(ctx context.Context, sess *Session) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		&Session{})
+
+	if res.Status != StatusHung {
+		t.Fatalf("status: got %s, want hung", res.Status)
+	}
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		t.Fatalf("SessionOnAbort not invoked for a genuinely stuck parser")
+	}
+}
+
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

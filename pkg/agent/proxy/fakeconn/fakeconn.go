@@ -117,6 +117,26 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 	}
 }
 
+// HasBuffered reports whether this FakeConn currently holds input the
+// parser has not yet consumed: a Chunk queued on the relay-owned
+// channel, or residual bytes stashed by a partial Read. It is used by
+// the supervisor's hang watchdog to distinguish a parser that is idle —
+// blocked on an empty read, e.g. a pooled DB connection sitting between
+// requests — from one genuinely stuck with input to process. Cheap: a
+// channel-length read plus a short mutex-guarded buffer check. The
+// result is a point-in-time hint (a chunk may arrive the instant after
+// it returns false); callers must tolerate that, which the watchdog
+// does by re-checking every tick.
+func (f *FakeConn) HasBuffered() bool {
+	if len(f.ch) > 0 {
+		return true
+	}
+	f.mu.Lock()
+	n := f.buf.Len()
+	f.mu.Unlock()
+	return n > 0
+}
+
 // Read implements io.Reader / net.Conn. It first drains any bytes
 // left over from a previous Chunk, then blocks for the next Chunk
 // (subject to read deadline and Close).

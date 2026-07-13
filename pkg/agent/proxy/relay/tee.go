@@ -149,6 +149,12 @@ func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, memCheck func()
 // relay can wrap it in a [fakeconn.FakeConn].
 func (t *tee) readCh() <-chan fakeconn.Chunk { return t.out }
 
+// hasStagedBytes reports whether the tee is holding chunks that have
+// been read from the socket but not yet drained to the FakeConn. Part
+// of the relay's "unconsumed input" signal (see Relay.HasBufferedInput)
+// the hang watchdog uses to avoid false-hanging an idle parser.
+func (t *tee) hasStagedBytes() bool { return t.bytes.Load() > 0 }
+
 // dropCount returns the number of chunks dropped since construction.
 // Safe to call concurrently.
 func (t *tee) dropCount() uint64 { return t.drops.Load() }

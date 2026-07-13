@@ -73,6 +73,15 @@ type Supervisor struct {
 	lastProgressNano atomic.Int64
 	pending          atomic.Bool
 
+	// activityProbe, when set, reports whether the parser currently
+	// has unconsumed input (bytes staged/queued but not yet read).
+	// The watchdog declares a hang only when the probe is absent or
+	// returns true, so a parser idle-blocked on an empty read — a
+	// pooled connection between requests — is never false-hanged.
+	// Wired by the dispatcher to the relay's buffered-input check via
+	// SetActivityProbe, after the relay is built but before Run.
+	activityProbe atomic.Pointer[func() bool]
+
 	// Abort path: hung is closed by the watchdog when the activity
 	// budget is exceeded while pending work is outstanding.
 	// memCapExceeded is set by callers that detect a memory-cap
@@ -143,6 +152,21 @@ func New(cfg Config) *Supervisor {
 // timer. Cheap; a single atomic store.
 func (s *Supervisor) BumpActivity() {
 	s.lastProgressNano.Store(time.Now().UnixNano())
+}
+
+// SetActivityProbe installs a probe the hang watchdog consults before
+// declaring a parser hung: the hang fires only when the probe is absent
+// or reports unconsumed input. This lets the dispatcher distinguish a
+// parser genuinely stuck with work to do (abort it) from one merely
+// idle-blocked waiting for the next request on a quiet pooled connection
+// (leave it alone — aborting would PauseTees the connection and
+// permanently stop recording even though it is alive and will be
+// reused). Call once between New and Run; a nil fn is ignored, leaving
+// the legacy always-eligible behaviour.
+func (s *Supervisor) SetActivityProbe(fn func() bool) {
+	if fn != nil {
+		s.activityProbe.Store(&fn)
+	}
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
@@ -415,6 +439,21 @@ func (s *Supervisor) watchdogLoop() {
 				continue
 			}
 			if time.Since(time.Unix(0, last)) > s.cfg.HangBudget {
+				// Only a parser that still has unconsumed input can be
+				// "hung": one blocked on an empty read is idle-waiting
+				// for the next request (normal for a pooled connection),
+				// not stuck. Aborting it fires SessionOnAbort →
+				// PauseTees and permanently stops recording on a live
+				// connection that will be reused — the recording dead
+				// zone. Re-check next tick; a genuine stall keeps the
+				// probe true and fires then. (A parser that consumed all
+				// input and then spins with no new bytes arriving is the
+				// one residual case this does not catch; in the V2
+				// architecture the relay forwards independently so that
+				// leaks at most a goroutine and never stalls traffic.)
+				if p := s.activityProbe.Load(); p != nil && !(*p)() {
+					continue
+				}
 				s.hungOnce.Do(func() { close(s.hungCh) })
 				return
 			}

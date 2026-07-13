@@ -337,6 +337,46 @@ func TestDirectiveAbortMock(t *testing.T) {
 	}
 }
 
+// TestHasBufferedInput is the discriminator behind the hang-watchdog
+// idle-vs-stuck gate: HasBufferedInput must report true exactly while a
+// teed chunk sits unconsumed by the parser, and false once the parser
+// has drained it (or before any traffic). This is what stops an idle
+// pooled connection from being false-hanged and permanently silenced.
+func TestHasBufferedInput(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+
+	pollUntil := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if h.r.HasBufferedInput() == want {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Fatalf("HasBufferedInput never became %v", want)
+	}
+
+	// Idle relay, no traffic: nothing buffered.
+	if h.r.HasBufferedInput() {
+		t.Fatalf("fresh relay: HasBufferedInput = true, want false")
+	}
+
+	// Drain the dest side so the client→dest forward completes (net.Pipe
+	// is synchronous), then send a client request. With no parser reading
+	// the client FakeConn, the teed chunk is unconsumed input.
+	go func() { _, _ = io.Copy(io.Discard, h.destSvc) }()
+	h.writeClient([]byte("find-request-bytes"))
+	pollUntil(true)
+
+	// The parser consumes the teed chunk → idle again.
+	if _, err := h.r.ClientStream().ReadChunk(); err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	pollUntil(false)
+}
+
 func TestDirectivePauseResume(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, Config{})
