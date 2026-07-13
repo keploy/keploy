@@ -431,6 +431,55 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP
 	}
 }
 
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs is the
+// regression test for the NODATA relay fix. An AAAA query for an IPv4-only
+// cluster service returns NOERROR with zero Answer RRs (NODATA) — a *valid*
+// negative answer, not a resolution failure. Before the fix this fell through
+// to ErrMockNotFound / the proxy-IP fallback, breaking replay for every app
+// whose libc issues A+AAAA in parallel (glibc getaddrinfo). After the fix the
+// empty NOERROR is relayed as-is, with mocking enabled, and the SOA in the
+// authority section preserved.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs(t *testing.T) {
+	// Fake upstream: NOERROR + zero answers + an SOA in the authority section,
+	// exactly what a resolver returns for an AAAA query on an IPv4-only name.
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NOERROR
+		// No Answer RRs — NODATA.
+		soa, _ := dns.NewRR("cluster.local.\t30\tIN\tSOA\tns.cluster.local. hostmaster.cluster.local. 1 3600 600 86400 30")
+		if soa != nil {
+			m.Ns = []dns.RR{soa}
+		}
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected the relayed NODATA response, got nil Msg (ErrMockNotFound path?)")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want %d (NOERROR relayed as-is, NOT steered to proxy IP)", entry.Msg.Rcode, dns.RcodeSuccess)
+	}
+	if len(entry.Msg.Answer) != 0 {
+		t.Errorf("expected 0 answers (NODATA), got %d", len(entry.Msg.Answer))
+	}
+	if len(entry.Msg.Ns) == 0 {
+		t.Error("SOA authority record was dropped; NODATA relay should preserve it")
+	}
+	if !entry.FromUpstream {
+		t.Error("entry.FromUpstream = false; a relayed upstream NODATA must be cached as FromUpstream")
+	}
+}
+
 // TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
 // confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
 // real cluster-internal name still passes through unchanged after Fix B.

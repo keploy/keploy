@@ -276,8 +276,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.String("qtype", dns.TypeToString[question.Qtype]))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			// Upstream returned a genuinely negative answer (NXDOMAIN or
-			// SERVFAIL).
+			// Upstream returned a genuinely negative answer: NXDOMAIN,
+			// SERVFAIL, or any other non-success rcode (REFUSED, NOTIMP,
+			// FORMERR, …) — everything except the RcodeSuccess cases handled
+			// above.
 			// When mocking is disabled the operator wants real DNS
 			// behaviour, so honour the upstream negative answer as-is.
 			// When mocking is enabled, a negative answer must NOT reach
