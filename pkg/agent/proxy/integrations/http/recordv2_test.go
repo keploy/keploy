@@ -602,3 +602,50 @@ func TestRecordV2_KeepAlive204ThenChunked(t *testing.T) {
 		t.Errorf("mock[1] Transfer-Encoding = %q, want chunked", te)
 	}
 }
+
+// TestRecordV2_Interim100ContinueThenFinal verifies provisional 1xx responses
+// are skipped during recording: a 100 Continue followed by the real 200 on the
+// same connection must record ONE mock for the 200, not the interim 100.
+func TestRecordV2_Interim100ContinueThenFinal(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+
+	req := []byte("POST /submit HTTP/1.1\r\nHost: ex.com\r\nContent-Length: 0\r\n\r\n")
+	// Interim 100 Continue, then the final 200 with a Content-Length body.
+	body := `{"ok":"done"}` // 13 bytes
+	resp := []byte("HTTP/1.1 100 Continue\r\n\r\n" +
+		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n" + body)
+
+	base := time.Unix(1_700_004_000, 0)
+	sendReq(req, base, base)
+	sendResp(resp, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2 returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s")
+	}
+
+	select {
+	case m := <-mocks:
+		if m.Spec.HTTPResp.StatusCode != 200 {
+			t.Errorf("status = %d, want 200 (interim 100 Continue must be skipped)", m.Spec.HTTPResp.StatusCode)
+		}
+		if m.Spec.HTTPResp.Body != body {
+			t.Errorf("body = %q, want %q", m.Spec.HTTPResp.Body, body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no mock emitted")
+	}
+}

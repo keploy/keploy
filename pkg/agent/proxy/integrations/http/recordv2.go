@@ -266,30 +266,47 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, requestMethod string) (time.Time, error) {
 	var lastWr time.Time
 
-	// 1. Complete headers.
-	for !hasCompleteHeaders(*finalResp) {
-		if err := ctx.Err(); err != nil {
-			return lastWr, err
+	// 1. Read the status line + headers, skipping any provisional 1xx interim
+	// responses. A provisional 1xx (100 Continue, 102, 103, ...) has no body and
+	// is followed by the real response on the same connection, so the mock must
+	// capture the final response — not the interim. 101 Switching Protocols is
+	// terminal (the connection then speaks another protocol) and is handled by
+	// the bodiless check below.
+	for {
+		for !hasCompleteHeaders(*finalResp) {
+			if err := ctx.Err(); err != nil {
+				return lastWr, err
+			}
+			chunk, err := stream.ReadChunk()
+			if err != nil {
+				return lastWr, err
+			}
+			if !chunk.WrittenAt.IsZero() {
+				lastWr = chunk.WrittenAt
+			}
+			if len(chunk.Bytes) == 0 {
+				return lastWr, io.EOF
+			}
+			*finalResp = append(*finalResp, chunk.Bytes...)
 		}
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return lastWr, err
+		status := parseStatusCode(*finalResp)
+		if status < 100 || status >= 200 || status == 101 {
+			break
 		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
+		// Discard the interim 1xx header block, keeping any bytes of the
+		// following response that already arrived, then loop to read it.
+		if idx := bytes.Index(*finalResp, []byte("\r\n\r\n")); idx >= 0 {
+			*finalResp = append([]byte(nil), (*finalResp)[idx+4:]...)
+		} else {
+			*finalResp = (*finalResp)[:0]
 		}
-		if len(chunk.Bytes) == 0 {
-			return lastWr, io.EOF
-		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
 
-	// RFC 7230 §3.3.3 rule 1: a response to a HEAD request and any 1xx / 204 /
-	// 304 response have no message body and end at the header terminator,
-	// regardless of Content-Length / Transfer-Encoding. Without this a 204
-	// (which carries neither framing header) falls into the read-until-EOF
-	// branch below and, on a keepalive connection, swallows every subsequent
-	// response into this one — so only the first mock is ever recorded.
+	// RFC 7230 §3.3.3 rule 1: a HEAD response and 204 / 304 / 101 responses have
+	// no message body and end at the header terminator, regardless of
+	// Content-Length / Transfer-Encoding. Without this a 204 (which carries
+	// neither framing header) falls into the read-until-EOF branch below and, on
+	// a keepalive connection, swallows every subsequent response into this one.
 	if responseHasNoBody(requestMethod, parseStatusCode(*finalResp)) {
 		return lastWr, nil
 	}
@@ -404,15 +421,17 @@ func parseStatusCode(resp []byte) int {
 }
 
 // responseHasNoBody reports whether an HTTP response is defined to carry no
-// message body per RFC 7230 §3.3.3 rule 1: a response to a HEAD request, or a
-// 1xx / 204 / 304 status. Such a response ends at the header terminator
-// regardless of Content-Length / Transfer-Encoding, so the recorder must not
-// wait for a body.
+// message body and is terminal for the request (RFC 7230 §3.3.3 rule 1): a
+// response to a HEAD request, or a 204 / 304 / 101 status. Such a response ends
+// at the header terminator regardless of Content-Length / Transfer-Encoding, so
+// the recorder must not wait for a body. Provisional 1xx (100 Continue, 102,
+// 103, ...) are interim, NOT terminal — they are skipped by readResponseV2's
+// interim loop and never reach here.
 func responseHasNoBody(requestMethod string, statusCode int) bool {
 	if strings.EqualFold(requestMethod, "HEAD") {
 		return true
 	}
-	return statusCode == 204 || statusCode == 304 || (statusCode >= 100 && statusCode < 200)
+	return statusCode == 204 || statusCode == 304 || statusCode == 101
 }
 
 // parseHeaders extracts Content-Length and Transfer-Encoding header
