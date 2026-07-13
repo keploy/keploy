@@ -274,9 +274,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Fetching the response headers
 			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
 
-			//Check if the content encoding is present in the header
-			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+			// Re-compress the body if the recorded response declared a
+			// Content-Encoding (the record path stored it decompressed). Match the
+			// key case-insensitively: pkg.ToHTTPHeader preserves the recorded
+			// casing, so a direct header["Content-Encoding"] lookup could miss a
+			// non-canonical key and send an unencoded body under a Content-Encoding
+			// header, corrupting the response.
+			if encoding := headerGetFold(header, "Content-Encoding"); encoding != "" {
+				compressedBody, err := pkg.Compress(h.Logger, encoding, []byte(body))
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err
@@ -340,6 +345,18 @@ func headerHasChunked(header http.Header) bool {
 		}
 	}
 	return false
+}
+
+// headerGetFold returns the first value of the header whose key matches name
+// case-insensitively, or "". Unlike http.Header.Get it does not assume the key
+// is in canonical form — pkg.ToHTTPHeader preserves the recorded key casing.
+func headerGetFold(header http.Header, name string) string {
+	for key, values := range header {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
 }
 
 // buildReplayResponse serializes a recorded response onto the wire: status
