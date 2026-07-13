@@ -328,6 +328,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}
 }
 
+// transferEncodingIsChunked reports whether a Transfer-Encoding header value
+// declares chunked. Transfer-Encoding is a comma-separated token list, so
+// "chunked" is matched as a whole token (case-insensitive, whitespace-trimmed)
+// rather than a substring — otherwise tokens like "xchunked" would false-match.
+func transferEncodingIsChunked(value string) bool {
+	for _, tok := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "chunked") {
+			return true
+		}
+	}
+	return false
+}
+
 // headerHasChunked reports whether the header map declares chunked
 // transfer-encoding. It scans keys case-insensitively rather than using
 // http.Header.Get: pkg.ToHTTPHeader preserves the recorded key casing, so a
@@ -339,7 +352,7 @@ func headerHasChunked(header http.Header) bool {
 			continue
 		}
 		for _, v := range values {
-			if strings.Contains(strings.ToLower(v), "chunked") {
+			if transferEncodingIsChunked(v) {
 				return true
 			}
 		}

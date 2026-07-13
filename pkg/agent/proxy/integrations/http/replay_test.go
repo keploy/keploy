@@ -144,3 +144,27 @@ func TestBuildReplayResponse_MissingContentLength(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, body)
 	}
 }
+
+// TestTransferEncodingIsChunked verifies chunked is matched as a whole
+// comma-separated token (case-insensitive), not a substring.
+func TestTransferEncodingIsChunked(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"chunked", true},
+		{"CHUNKED", true},
+		{" chunked ", true},
+		{"gzip, chunked", true},
+		{"chunked, gzip", true},
+		{"xchunked", false},
+		{"chunkedx", false},
+		{"gzip", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := transferEncodingIsChunked(c.in); got != c.want {
+			t.Errorf("transferEncodingIsChunked(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

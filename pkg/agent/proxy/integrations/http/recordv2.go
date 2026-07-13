@@ -344,8 +344,7 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		return lastWr, nil
 	}
 
-	if transferEncodingHeader != "" &&
-		strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+	if transferEncodingIsChunked(transferEncodingHeader) {
 		// Chunked: read until we see the last-chunk terminator as a
 		// suffix of finalResp. pUtil terminator detection (see chunk.go
 		// chunkedTerminator) uses HasSuffix so a body chunk that shares
@@ -478,7 +477,7 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 // Content-Length, as before.
 func applyRecordedResponseFraming(header http.Header, rawResp []byte, bodyLen int, requestMethod string) {
 	_, transferEncoding := parseHeaders(rawResp)
-	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+	if transferEncodingIsChunked(transferEncoding) {
 		header.Set("Transfer-Encoding", "chunked")
 		header.Del("Content-Length")
 		return
