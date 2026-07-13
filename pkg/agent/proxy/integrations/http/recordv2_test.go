@@ -649,3 +649,30 @@ func TestRecordV2_Interim100ContinueThenFinal(t *testing.T) {
 		t.Fatal("no mock emitted")
 	}
 }
+
+// TestResponseHasNoBody locks in the bodiless-terminal status set. HEAD, 204,
+// 205, 304 and 101 are terminal with no body; a normal 200, a provisional 1xx
+// (handled by the interim loop, not here), and a redirect are not.
+func TestResponseHasNoBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		method string
+		status int
+		want   bool
+	}{
+		{"GET", 204, true},
+		{"GET", 205, true},
+		{"GET", 304, true},
+		{"GET", 101, true},
+		{"HEAD", 200, true},
+		{"head", 200, true}, // case-insensitive method
+		{"GET", 200, false},
+		{"GET", 100, false}, // provisional; skipped upstream, not terminal
+		{"GET", 302, false},
+	}
+	for _, c := range cases {
+		if got := responseHasNoBody(c.method, c.status); got != c.want {
+			t.Errorf("responseHasNoBody(%q, %d) = %v, want %v", c.method, c.status, got, c.want)
+		}
+	}
+}

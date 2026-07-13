@@ -421,17 +421,20 @@ func parseStatusCode(resp []byte) int {
 }
 
 // responseHasNoBody reports whether an HTTP response is defined to carry no
-// message body and is terminal for the request (RFC 7230 §3.3.3 rule 1): a
-// response to a HEAD request, or a 204 / 304 / 101 status. Such a response ends
-// at the header terminator regardless of Content-Length / Transfer-Encoding, so
-// the recorder must not wait for a body. Provisional 1xx (100 Continue, 102,
-// 103, ...) are interim, NOT terminal — they are skipped by readResponseV2's
-// interim loop and never reach here.
+// message body and is terminal for the request: a response to a HEAD request,
+// or a 204 / 205 / 304 / 101 status. Such a response ends at the header
+// terminator regardless of Content-Length / Transfer-Encoding, so the recorder
+// must not wait for a body (otherwise it swallows the next response on a
+// keepalive connection). HEAD / 204 / 304 are RFC 7230 §3.3.3 rule 1; 205 (Reset
+// Content) is treated the same because RFC 7231 §6.3.6 forbids a 205 sender from
+// generating a payload. Provisional 1xx (100 Continue, 102, 103, ...) are
+// interim, NOT terminal — they are skipped by readResponseV2's interim loop and
+// never reach here.
 func responseHasNoBody(requestMethod string, statusCode int) bool {
 	if strings.EqualFold(requestMethod, "HEAD") {
 		return true
 	}
-	return statusCode == 204 || statusCode == 304 || statusCode == 101
+	return statusCode == 204 || statusCode == 205 || statusCode == 304 || statusCode == 101
 }
 
 // parseHeaders extracts Content-Length and Transfer-Encoding header
