@@ -259,6 +259,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			// Load the response body if it was spilled to disk (no-op otherwise).
+			if err := stub.HydrateResponse(); err != nil {
+				utils.LogError(h.Logger, err, "failed to hydrate spilled http response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
+				return
+			}
+
 			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
 			body := stub.Spec.HTTPResp.Body

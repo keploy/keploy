@@ -10,9 +10,20 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// strictAgent returns a test agent whose OSS config sets the strict mock-window
+// flag — the same flag config.New() seeds true by default, which gates residency.
+func strictAgent(strict bool) *Agent {
+	a := newTestAgent()
+	a.config = &config.Config{}
+	a.config.Test.StrictMockWindow = strict
+	return a
+}
 
 // --- helpers ---
 
@@ -121,6 +132,103 @@ func (c *captureHook) SetFreezeAnchor(_ context.Context, anchor time.Time) error
 	c.anchor = anchor
 	c.called = true
 	return nil
+}
+
+// diskEligibleMock builds a per-test mock (Mongo => LifetimePerTest) with valid
+// request+response timestamps, so it is window-eligible and is kept on disk.
+func diskEligibleMock(name string, req time.Time) *models.Mock {
+	return &models.Mock{
+		Name: name,
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: req, ResTimestampMock: req.Add(time.Millisecond)},
+	}
+}
+
+// TestStoreMocksStream_PerTestMocksGoToDisk verifies the residency split:
+// window-eligible per-test mocks go to disk (not resident), while
+// ineligible per-test mocks (missing timestamps) and config mocks stay resident.
+// The on-disk store must still reconstruct the eligible mocks by window, and the freeze
+// anchor must reflect the earliest on-disk timestamp.
+func TestStoreMocksStream_PerTestMocksGoToDisk(t *testing.T) {
+	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+
+	// Residency follows the OSS config flag config.Test.StrictMockWindow — run
+	// both modes and assert against the code's own gate, pkg.IsStrictMockWindow(strict),
+	// which stays correct even if the ambient KEPLOY_STRICT_MOCK_WINDOW env overrides.
+	for _, strict := range []bool{true, false} {
+		strict := strict
+		t.Run(map[bool]string{true: "strict", false: "lax"}[strict], func(t *testing.T) {
+			prevHooks := ActiveHooks
+			ch := &captureHook{}
+			ActiveHooks = ch
+			defer func() { ActiveHooks = prevHooks }()
+
+			a := strictAgent(strict)
+			wantDisk := pkg.IsStrictMockWindow(strict)
+
+			ineligible := &models.Mock{Name: "pt-missing", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: base.Add(5 * time.Second)}} // no res ts
+			cfg := &models.Mock{Name: "cfg-1", Kind: models.Mongo, Spec: models.MockSpec{
+				ReqTimestampMock: base.Add(3 * time.Second), ResTimestampMock: base.Add(3 * time.Second).Add(time.Millisecond),
+				Metadata: map[string]string{"type": "config"},
+			}}
+			// filtered (per-test): 2 eligible + 1 ineligible; unfiltered: 1 config.
+			filtered := []*models.Mock{
+				diskEligibleMock("pt-2", base.Add(2*time.Second)),
+				diskEligibleMock("pt-1", base.Add(1*time.Second)), // earliest → freeze anchor
+				ineligible,
+			}
+			unfiltered := []*models.Mock{cfg}
+
+			header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, unfiltered))
+			if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+				t.Fatalf("StoreMocksStream: %v", err)
+			}
+			st := loadStorage(t, a)
+
+			if wantDisk {
+				// Strict: eligible per-test mocks live on disk; only the
+				// ineligible one stays resident in filtered.
+				if st.diskMocks == nil {
+					t.Fatal("strict mode: expected an on-disk store")
+				}
+				if got := st.diskMocks.Len(); got != 2 {
+					t.Fatalf("expected 2 on-disk eligible per-test mocks, got %d", got)
+				}
+				if len(st.filtered) != 1 || st.filtered[0].Name != "pt-missing" {
+					t.Fatalf("resident filtered should be just the ineligible mock, got %v", sigs(st.filtered))
+				}
+				got, err := st.diskMocks.LoadWindow(base, base.Add(3*time.Second))
+				if err != nil {
+					t.Fatalf("LoadWindow: %v", err)
+				}
+				if len(got) != 2 {
+					t.Fatalf("LoadWindow should reconstruct 2 eligible mocks, got %d", len(got))
+				}
+			} else {
+				// Lax: no on-disk store — all 3 per-test mocks stay resident.
+				if st.diskMocks != nil {
+					t.Fatal("lax mode: on-disk store must NOT engage (no RAM bound to gain)")
+				}
+				if len(st.filtered) != 3 {
+					t.Fatalf("lax mode: all 3 per-test mocks should be resident, got %d", len(st.filtered))
+				}
+			}
+
+			// config stays resident in unfiltered in BOTH modes.
+			if len(st.unfiltered) != 1 || st.unfiltered[0].Name != "cfg-1" {
+				t.Fatalf("config should be resident in unfiltered, got %v", sigs(st.unfiltered))
+			}
+			// freeze anchor = earliest request timestamp (pt-1 @ base+1s) in both
+			// modes: folded from the on-disk store under strict, from the resident
+			// slice under lax.
+			if !ch.called {
+				t.Fatal("SetFreezeAnchor was not called")
+			}
+			if !ch.anchor.Equal(base.Add(1 * time.Second)) {
+				t.Fatalf("freeze anchor should be earliest ts %v, got %v", base.Add(1*time.Second), ch.anchor)
+			}
+		})
+	}
 }
 
 // --- tests ---

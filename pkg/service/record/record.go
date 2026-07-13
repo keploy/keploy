@@ -170,6 +170,19 @@ func (r *Recorder) Start(ctx context.Context) error {
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
 
+	// Deferred-orphan revoke bookkeeping. revokedNames collects TC names the
+	// agent signalled via Kind=RevokedTests control frames (their owned mock
+	// was capacity-dropped AFTER the TC streamed); insertedNames records which
+	// TCs actually persisted. At finalize we delete the intersection so a
+	// revoke that raced ahead of its TC's persistence is still caught. Both are
+	// written only by the mock/TC consumer goroutines and read at teardown
+	// AFTER those goroutines drain, but the mutexes are cheap insurance against
+	// a force-shutdown teardown racing an in-flight consumer.
+	revokedNames := map[string]struct{}{}
+	var revokedMu sync.Mutex
+	insertedNames := map[string]struct{}{}
+	var insertedMu sync.Mutex
+
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
@@ -219,6 +232,66 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err := utils.DrainErrGroup(r.logger, "record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+
+		// Deferred-orphan revoke: delete TCs whose owned mock was capacity-dropped
+		// AFTER the TC streamed (the agent signalled them live via RevokedTests
+		// control frames). Applied here — after all inserts drained — so a revoke
+		// that raced ahead of its TC's persistence is still caught by the intersect.
+		// Snapshot both sets under their OWN locks before intersecting. On the
+		// DrainErrGroup TIMEOUT path a wedged consumer goroutine can still be
+		// writing these maps (DrainErrGroup returns after its timeout WITHOUT
+		// joining a goroutine that ignores cancellation — see utils/drain.go),
+		// so an unguarded read here could hit a fatal "concurrent map read and
+		// map write". The two maps are never locked together elsewhere, so
+		// snapshot each independently (lock, copy, unlock) — no nesting, no
+		// ordering hazard.
+		revokedMu.Lock()
+		revokedSnap := make([]string, 0, len(revokedNames))
+		for n := range revokedNames {
+			revokedSnap = append(revokedSnap, n)
+		}
+		revokedMu.Unlock()
+
+		var toDelete []string
+		insertedMu.Lock()
+		for _, n := range revokedSnap {
+			if _, ok := insertedNames[n]; ok {
+				toDelete = append(toDelete, n)
+			}
+		}
+		insertedMu.Unlock()
+		if len(toDelete) > 0 {
+			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
+			// TestDB interface (enterprise implements that interface; don't break it).
+			// Reach it by runtime assertion; degrade to a warning if unavailable.
+			if td, ok := r.testDB.(interface {
+				DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+			}); ok {
+				deleted := 0
+				for _, n := range toDelete {
+					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
+						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
+							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
+						continue
+					}
+					deleted++
+				}
+				if deleted > 0 {
+					// Guard under insertedMu so this decrement can't race the
+					// (possibly still-live, on the drain-timeout path) testCount++
+					// in the TC-insert loop, which now runs under the same lock.
+					insertedMu.Lock()
+					testCount -= deleted
+					insertedMu.Unlock()
+					r.logger.Info("deferred-orphan revoke: removed capacity-orphaned test cases whose mock was dropped after streaming",
+						zap.Int("revoked", deleted), zap.String("testSetID", newTestSetID))
+				}
+			} else {
+				r.logger.Warn("deferred-orphan revoke: testDB does not support DeleteTests; leaving orphaned test cases in the set",
+					zap.Int("count", len(toDelete)))
+			}
+		}
+
 		totalMocks := 0
 		if recordingStarted {
 			mockCountMapMu.Lock()
@@ -421,7 +494,15 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				insertTestErrChan <- err
 			} else {
+				// testCount and insertedNames are both TC-insert state; write
+				// them under one insertedMu section so the finalize revoke block
+				// (which reads insertedNames and adjusts testCount, possibly
+				// while this goroutine is still live on the drain-timeout path)
+				// can't race them.
+				insertedMu.Lock()
 				testCount++
+				insertedNames[testCase.Name] = struct{}{}
+				insertedMu.Unlock()
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
@@ -438,6 +519,22 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
+			// Divert it into the revoke set (applied at finalize) BEFORE any
+			// domain-extraction / hook / InsertMock / correlation work — it
+			// carries no traffic and must never be persisted.
+			if mock.GetKind() == string(models.RevokedTests) {
+				if mock.Spec.Metadata != nil {
+					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
+						if n = strings.TrimSpace(n); n != "" {
+							revokedMu.Lock()
+							revokedNames[n] = struct{}{}
+							revokedMu.Unlock()
+						}
+					}
+				}
+				continue
+			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
@@ -659,6 +756,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		CapturePackets:            r.config.Record.CapturePackets,
 		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
 		MysqlPorts:                r.config.MysqlPorts,
+		// Advertise that this CLI understands the reserved Kind=RevokedTests
+		// control frame: it diverts such a frame into a revoke set and deletes
+		// those deferred-orphan test cases at finalize instead of persisting it
+		// as a mock. The agent emits revoke frames ONLY when this is true.
+		SupportsDroppedRevoke: true,
 	})
 	if err != nil {
 
