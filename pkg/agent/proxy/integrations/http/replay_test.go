@@ -71,3 +71,32 @@ func TestBuildReplayResponse_ContentLength(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, body)
 	}
 }
+
+// TestBuildReplayResponse_ChunkedLowercaseKey ensures chunked detection is
+// case-insensitive. pkg.ToHTTPHeader preserves the recorded key casing, so a
+// mock header map may carry a lowercase "transfer-encoding" key; replay must
+// still chunk the body rather than emit a chunked header over an unframed body.
+func TestBuildReplayResponse_ChunkedLowercaseKey(t *testing.T) {
+	statusLine := "HTTP/1.1 200 OK\r\n"
+	header := http.Header{
+		"content-type":      []string{"application/json"}, // non-canonical
+		"transfer-encoding": []string{"chunked"},          // non-canonical
+	}
+	body := "hello world"
+
+	raw := buildReplayResponse(statusLine, header, body)
+
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse failed on replayed bytes (body likely sent unchunked under a chunked header): %v\nraw:\n%s", err, raw)
+	}
+	defer resp.Body.Close()
+
+	if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
+		t.Errorf("TransferEncoding = %v, want [chunked]", resp.TransferEncoding)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != body {
+		t.Errorf("de-chunked body = %q, want %q", got, body)
+	}
+}

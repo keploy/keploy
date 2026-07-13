@@ -323,6 +323,25 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}
 }
 
+// headerHasChunked reports whether the header map declares chunked
+// transfer-encoding. It scans keys case-insensitively rather than using
+// http.Header.Get: pkg.ToHTTPHeader preserves the recorded key casing, so a
+// non-canonical key (e.g. "transfer-encoding") would be invisible to Get and
+// wrongly send an unchunked body under a Transfer-Encoding: chunked header.
+func headerHasChunked(header http.Header) bool {
+	for key, values := range header {
+		if !strings.EqualFold(key, "Transfer-Encoding") {
+			continue
+		}
+		for _, v := range values {
+			if strings.Contains(strings.ToLower(v), "chunked") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // buildReplayResponse serializes a recorded response onto the wire: status
 // line, headers, blank line, body. When the header carries Transfer-Encoding:
 // chunked the body — already Content-Encoding-applied by the caller — is
@@ -330,7 +349,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 // message must not carry both framings. Otherwise Content-Length is recomputed
 // from the (possibly compressed) body length.
 func buildReplayResponse(statusLine string, header http.Header, respBody string) string {
-	isChunked := strings.Contains(strings.ToLower(header.Get("Transfer-Encoding")), "chunked")
+	isChunked := headerHasChunked(header)
 	if isChunked {
 		respBody = toChunkedBody(respBody)
 	}
