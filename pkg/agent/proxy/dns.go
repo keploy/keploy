@@ -260,8 +260,24 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.Int("answers", len(fwdResp.Answer)))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			// Upstream returned a negative or empty answer (NXDOMAIN,
-			// SERVFAIL, or success with no RRs).
+			// NODATA — upstream returned NOERROR with zero answer RRs. This is
+			// a *valid* negative answer ("the name exists but has no record of
+			// this type"), not a resolution failure, so relay it as-is even
+			// when mocking is enabled. The canonical case is an AAAA query for
+			// an IPv4-only cluster service (e.g. postgres.<ns>.svc.cluster.local):
+			// glibc's getaddrinfo always issues A+AAAA in parallel, the AAAA leg
+			// legitimately has no record, and the app connects over the A record.
+			// Unlike NXDOMAIN there is no unknown name to steer to the proxy IP,
+			// and raising ErrMockNotFound here would fail replay for essentially
+			// every app that resolves an in-cluster dependency by name.
+			if fwdResp.Rcode == dns.RcodeSuccess {
+				p.logger.Debug("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]))
+				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+			}
+			// Upstream returned a genuinely negative answer (NXDOMAIN or
+			// SERVFAIL).
 			// When mocking is disabled the operator wants real DNS
 			// behaviour, so honour the upstream negative answer as-is.
 			// When mocking is enabled, a negative answer must NOT reach
