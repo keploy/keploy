@@ -676,3 +676,49 @@ func TestResponseHasNoBody(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordV2_HeadResponsePreservesContentLength verifies a HEAD response keeps
+// the upstream Content-Length (the size the body would be for GET) in the mock
+// instead of having it overwritten to 0 by the empty HEAD body. It also guards
+// against readResponseV2 waiting for a HEAD body that never arrives.
+func TestRecordV2_HeadResponsePreservesContentLength(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+
+	req := []byte("HEAD /file HTTP/1.1\r\nHost: ex.com\r\n\r\n")
+	// HEAD response: Content-Length describes the would-be GET body; no body follows.
+	resp := []byte("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 1234\r\n\r\n")
+
+	base := time.Unix(1_700_005_000, 0)
+	sendReq(req, base, base)
+	sendResp(resp, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2 returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s (HEAD Content-Length body wrongly awaited?)")
+	}
+
+	select {
+	case m := <-mocks:
+		if got := m.Spec.HTTPResp.Header["Content-Length"]; got != "1234" {
+			t.Errorf("Content-Length = %q, want \"1234\" (must not be overwritten to 0)", got)
+		}
+		if m.Spec.HTTPResp.Body != "" {
+			t.Errorf("body = %q, want empty (HEAD)", m.Spec.HTTPResp.Body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no mock emitted")
+	}
+}

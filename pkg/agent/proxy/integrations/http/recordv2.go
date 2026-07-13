@@ -476,11 +476,17 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 // Transfer-Encoding: chunked and omit Content-Length (a message must not carry
 // both — RFC 7230 §3.3.3); otherwise record the decoded body length as
 // Content-Length, as before.
-func applyRecordedResponseFraming(header http.Header, rawResp []byte, bodyLen int) {
+func applyRecordedResponseFraming(header http.Header, rawResp []byte, bodyLen int, requestMethod string) {
 	_, transferEncoding := parseHeaders(rawResp)
 	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
 		header.Set("Transfer-Encoding", "chunked")
 		header.Del("Content-Length")
+		return
+	}
+	// A HEAD response carries no body, but its Content-Length (when present)
+	// describes the body a GET would return. Preserve the recorded header value
+	// instead of overwriting it with the empty HEAD body length (0).
+	if strings.EqualFold(requestMethod, "HEAD") {
 		return
 	}
 	header.Set("Content-Length", strconv.Itoa(bodyLen))
@@ -555,7 +561,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
 		}
-		applyRecordedResponseFraming(respParsed.Header, m.Resp, len(respBody))
+		applyRecordedResponseFraming(respParsed.Header, m.Resp, len(respBody), req.Method)
 	}
 
 	meta := map[string]string{

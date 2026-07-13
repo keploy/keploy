@@ -241,7 +241,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// Preserve chunked framing when the raw response was chunked; otherwise
 		// record the decoded body length as Content-Length. Shared with the V2
 		// path (buildHTTPMock) so both record paths stay byte-for-byte identical.
-		applyRecordedResponseFraming(respParsed.Header, mock.Resp, len(respBody))
+		applyRecordedResponseFraming(respParsed.Header, mock.Resp, len(respBody), req.Method)
 	}
 
 	// store the request and responses as mocks

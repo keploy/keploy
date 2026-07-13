@@ -39,7 +39,10 @@ func TestBuildReplayResponse_Chunked(t *testing.T) {
 	if resp.ContentLength != -1 {
 		t.Errorf("chunked ContentLength = %d, want -1 (unknown)", resp.ContentLength)
 	}
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if string(got) != body {
 		t.Errorf("de-chunked body = %q, want %q", got, body)
 	}
@@ -66,7 +69,10 @@ func TestBuildReplayResponse_ContentLength(t *testing.T) {
 	if resp.ContentLength != int64(len(body)) {
 		t.Errorf("ContentLength = %d, want %d", resp.ContentLength, len(body))
 	}
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if string(got) != body {
 		t.Errorf("body = %q, want %q", got, body)
 	}
@@ -95,7 +101,10 @@ func TestBuildReplayResponse_ChunkedLowercaseKey(t *testing.T) {
 	if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
 		t.Errorf("TransferEncoding = %v, want [chunked]", resp.TransferEncoding)
 	}
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if string(got) != body {
 		t.Errorf("de-chunked body = %q, want %q", got, body)
 	}
@@ -127,7 +136,10 @@ func TestBuildReplayResponse_MissingContentLength(t *testing.T) {
 	if resp.ContentLength != int64(len(body)) {
 		t.Errorf("ContentLength = %d, want %d", resp.ContentLength, len(body))
 	}
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if string(got) != body {
 		t.Errorf("body = %q, want %q", got, body)
 	}
