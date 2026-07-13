@@ -373,15 +373,21 @@ func buildReplayResponse(statusLine string, header http.Header, respBody string)
 	var b strings.Builder
 	b.WriteString(statusLine)
 	for key, values := range header {
+		// Content-Length is authoritative here, so drop whatever the recorded
+		// map carried (any casing) and re-emit a single correct one below.
 		if strings.EqualFold(key, "Content-Length") {
-			if isChunked {
-				continue
-			}
-			values = []string{strconv.Itoa(len(respBody))}
+			continue
 		}
 		for _, value := range values {
 			fmt.Fprintf(&b, "%s: %s\r\n", key, value)
 		}
+	}
+	// A non-chunked response always gets exactly one Content-Length derived from
+	// the body — even if the recorded map omitted it — so the client can delimit
+	// the body instead of waiting for EOF (which hangs on keepalive connections).
+	// Chunked responses carry none; the last-chunk marker delimits the body.
+	if !isChunked {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(respBody))
 	}
 	b.WriteString("\r\n")
 	b.WriteString(respBody)

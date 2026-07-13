@@ -100,3 +100,35 @@ func TestBuildReplayResponse_ChunkedLowercaseKey(t *testing.T) {
 		t.Errorf("de-chunked body = %q, want %q", got, body)
 	}
 }
+
+// TestBuildReplayResponse_MissingContentLength ensures a non-chunked response
+// always gets exactly one Content-Length derived from the body, even when the
+// recorded header map omits it — otherwise the client waits for EOF to delimit
+// the body and can hang on a keepalive connection.
+func TestBuildReplayResponse_MissingContentLength(t *testing.T) {
+	statusLine := "HTTP/1.1 200 OK\r\n"
+	header := http.Header{
+		"Content-Type": []string{"application/json"}, // deliberately no Content-Length
+	}
+	body := "hello world"
+
+	raw := buildReplayResponse(statusLine, header, body)
+
+	if n := strings.Count(raw, "Content-Length:"); n != 1 {
+		t.Errorf("Content-Length header count = %d, want exactly 1\nraw:\n%s", n, raw)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse failed: %v\nraw:\n%s", err, raw)
+	}
+	defer resp.Body.Close()
+
+	if resp.ContentLength != int64(len(body)) {
+		t.Errorf("ContentLength = %d, want %d", resp.ContentLength, len(body))
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != body {
+		t.Errorf("body = %q, want %q", got, body)
+	}
+}
