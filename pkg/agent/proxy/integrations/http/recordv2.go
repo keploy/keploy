@@ -43,10 +43,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	if sess == nil {
 		return errors.New("recordV2: nil supervisor session")
 	}
+
 	logger := sess.Logger
 	if logger == nil {
 		logger = h.Logger
 	}
+
+	logger.Debug("V2 HTTP record: starting request/response loop", zap.String("client", sess.ClientConnID), zap.String("dest", sess.DestConnID))
 
 	destPort := destPortFromAddr(sess.DestStream)
 
@@ -61,6 +64,8 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// it via ReadChunk so the timestamp is carried regardless of
 		// what ReadBytes does underneath.
 		firstChunk, err := sess.ClientStream.ReadChunk()
+		logger.Debug("V2 HTTP record: first chunk bytes", zap.String("bytes", string(firstChunk.Bytes)))
+
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream ended at start of request", zap.Error(err))
@@ -100,7 +105,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 		// --- Response side --------------------------------------------
 		firstRespChunk, err := sess.DestStream.ReadChunk()
+		logger.Debug("V2 HTTP record: first response chunk bytes", zap.String("bytes", string(firstRespChunk.Bytes)))
 		if err != nil {
+			logger.Debug("V2 HTTP record: failed to read initial response chunk", zap.Error(err))
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				sess.MarkMockIncomplete("http decode error: server closed before response")
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
@@ -114,13 +121,15 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		if len(firstRespChunk.Bytes) == 0 {
+			logger.Debug("V2 HTTP record: empty initial response chunk")
 			sess.MarkMockIncomplete("http decode error: empty initial response chunk")
 			return nil
 		}
 		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
 		resTs := firstRespChunk.WrittenAt
-
-		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp)
+		logger.Debug("V2 HTTP record: initial response chunk", zap.String("bytes", string(finalResp)))
+		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, methodFromRequestLine(finalReq))
+		logger.Debug("V2 HTTP record: completed response read", zap.String("bytes", string(finalResp)))
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -139,7 +148,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		} else if !gotLastWritten.IsZero() {
 			resTs = gotLastWritten
 		}
-
+		logger.Debug("V2 HTTP record: completed request/response pair", zap.String("client", sess.ClientConnID), zap.String("dest", sess.DestConnID), zap.Int("reqBytes", len(finalReq)), zap.Int("respBytes", len(finalResp)), zap.Time("reqTs", reqTs), zap.Time("resTs", resTs))
 		// Build and emit the mock. Identical shape to the legacy path.
 		mock, err := h.buildHTTPMock(&FinalHTTP{
 			Req:              finalReq,
@@ -186,6 +195,8 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 	}
 
 	contentLengthHeader, transferEncodingHeader := parseHeaders(*finalReq)
+	logger := h.Logger
+	logger.Debug("V2 HTTP record: parsed headers", zap.String("content-length", contentLengthHeader), zap.String("transfer-encoding", transferEncodingHeader))
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
@@ -254,7 +265,7 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
 // decides whether to emit a mock.
-func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte) (time.Time, error) {
+func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, finalResp *[]byte, requestMethod string) (time.Time, error) {
 	var lastWr time.Time
 
 	// 1. Complete headers.
@@ -273,6 +284,16 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 			return lastWr, io.EOF
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
+	}
+
+	// RFC 7230 §3.3.3 rule 1: a response to a HEAD request and any 1xx / 204 /
+	// 304 response have no message body and end at the header terminator,
+	// regardless of Content-Length / Transfer-Encoding. Without this a 204
+	// (which carries neither framing header) falls into the read-until-EOF
+	// branch below and, on a keepalive connection, swallows every subsequent
+	// response into this one — so only the first mock is ever recorded.
+	if responseHasNoBody(requestMethod, parseStatusCode(*finalResp)) {
+		return lastWr, nil
 	}
 
 	// 2. Parse headers for body framing.
@@ -353,12 +374,53 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 		}
 		*finalResp = append(*finalResp, chunk.Bytes...)
 	}
+
 }
 
 // parseHeaders extracts Content-Length and Transfer-Encoding header
 // values (if any) from an HTTP message whose headers end with CRLFCRLF.
 // The parse is the same loose style the chunk.go helpers use: split on
 // '\n', trim '\r', skip malformed lines.
+// methodFromRequestLine returns the HTTP method (first token of the request
+// line) from raw request bytes, or "" if it can't be determined.
+func methodFromRequestLine(req []byte) string {
+	sp := bytes.IndexByte(req, ' ')
+	if sp <= 0 {
+		return ""
+	}
+	return string(req[:sp])
+}
+
+// parseStatusCode returns the numeric status code from a response's status
+// line ("HTTP/1.1 204 No Content"), or 0 if it can't be parsed.
+func parseStatusCode(resp []byte) int {
+	end := bytes.IndexByte(resp, '\n')
+	if end < 0 {
+		end = len(resp)
+	}
+	fields := strings.Fields(string(resp[:end]))
+	if len(fields) < 2 {
+		return 0
+	}
+	code, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return code
+}
+
+// responseHasNoBody reports whether an HTTP response is defined to carry no
+// message body per RFC 7230 §3.3.3 rule 1: a response to a HEAD request, or a
+// 1xx / 204 / 304 status. Such a response ends at the header terminator
+// regardless of Content-Length / Transfer-Encoding, so the recorder must not
+// wait for a body.
+func responseHasNoBody(requestMethod string, statusCode int) bool {
+	if strings.EqualFold(requestMethod, "HEAD") {
+		return true
+	}
+	return statusCode == 204 || statusCode == 304 || (statusCode >= 100 && statusCode < 200)
+}
+
 func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 	lines := strings.Split(string(msg), "\n")
 	for _, line := range lines {
@@ -380,6 +442,24 @@ func parseHeaders(msg []byte) (contentLength string, transferEncoding string) {
 		}
 	}
 	return contentLength, transferEncoding
+}
+
+// applyRecordedResponseFraming sets the body-framing headers for a recorded
+// response. net/http.ReadResponse strips the hop-by-hop Transfer-Encoding
+// header out of the header map and decodes the chunked body, so respParsed.Header
+// alone can't tell us whether the response was chunked on the wire. We therefore
+// inspect the raw response bytes: if they were chunked, preserve
+// Transfer-Encoding: chunked and omit Content-Length (a message must not carry
+// both — RFC 7230 §3.3.3); otherwise record the decoded body length as
+// Content-Length, as before.
+func applyRecordedResponseFraming(header http.Header, rawResp []byte, bodyLen int) {
+	_, transferEncoding := parseHeaders(rawResp)
+	if strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+		header.Set("Transfer-Encoding", "chunked")
+		header.Del("Content-Length")
+		return
+	}
+	header.Set("Content-Length", strconv.Itoa(bodyLen))
 }
 
 // destPortFromAddr extracts the destination TCP port from a FakeConn's
@@ -433,7 +513,18 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
+	// _, reqTransferEncoding := parseHeaders(m.Req)
+
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(m.Resp)), req)
+
+	// if reqTransferEncoding != "" {
+	// 	req.Header.Set("Transfer-Encoding", reqTransferEncoding)
+	// }
+
+	for key, values := range req.Header {
+		h.Logger.Debug("Request header", zap.String("key", key), zap.Strings("values", values))
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
@@ -450,7 +541,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}
 		}
-		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		applyRecordedResponseFraming(respParsed.Header, m.Resp, len(respBody))
 	}
 
 	meta := map[string]string{

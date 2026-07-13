@@ -263,7 +263,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			body := stub.Spec.HTTPResp.Body
 			var respBody string
-			var responseString string
 
 			// Fetching the response headers
 			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
@@ -282,17 +281,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				respBody = body
 			}
 
-			var headers string
-			for key, values := range header {
-				if key == "Content-Length" {
-					values = []string{strconv.Itoa(len(respBody))}
-				}
-				for _, value := range values {
-					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-					headers += headerLine
-				}
-			}
-			responseString = statusLine + headers + "\r\n" + "" + respBody
+			responseString := buildReplayResponse(statusLine, header, respBody)
 
 			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
@@ -325,4 +314,44 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 		return err
 	}
+}
+
+// buildReplayResponse serializes a recorded response onto the wire: status
+// line, headers, blank line, body. When the header carries Transfer-Encoding:
+// chunked the body — already Content-Encoding-applied by the caller — is
+// re-framed into HTTP/1.1 chunks and Content-Length is suppressed, since a
+// message must not carry both framings. Otherwise Content-Length is recomputed
+// from the (possibly compressed) body length.
+func buildReplayResponse(statusLine string, header http.Header, respBody string) string {
+	isChunked := strings.Contains(strings.ToLower(header.Get("Transfer-Encoding")), "chunked")
+	if isChunked {
+		respBody = toChunkedBody(respBody)
+	}
+	var b strings.Builder
+	b.WriteString(statusLine)
+	for key, values := range header {
+		if key == "Content-Length" {
+			if isChunked {
+				continue
+			}
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			fmt.Fprintf(&b, "%s: %s\r\n", key, value)
+		}
+	}
+	b.WriteString("\r\n")
+	b.WriteString(respBody)
+	return b.String()
+}
+
+// toChunkedBody frames body as a single HTTP/1.1 chunk followed by the
+// zero-length terminating chunk (RFC 7230 §4.1). An empty body becomes just
+// the terminator. Used on replay to reproduce the chunked transfer-encoding a
+// response was recorded with, since the stored body is de-chunked.
+func toChunkedBody(body string) string {
+	if len(body) == 0 {
+		return "0\r\n\r\n"
+	}
+	return fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
 }

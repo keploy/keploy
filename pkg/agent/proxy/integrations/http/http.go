@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -239,8 +238,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 
 		h.Logger.Debug("This is the response body: " + string(respBody))
-		//Set the content length to the headers.
-		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		// Preserve chunked framing when the raw response was chunked; otherwise
+		// record the decoded body length as Content-Length. Shared with the V2
+		// path (buildHTTPMock) so both record paths stay byte-for-byte identical.
+		applyRecordedResponseFraming(respParsed.Header, mock.Resp, len(respBody))
 	}
 
 	// store the request and responses as mocks
