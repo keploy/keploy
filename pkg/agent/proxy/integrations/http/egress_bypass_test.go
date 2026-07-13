@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestIsOTLPTracesExport(t *testing.T) {
+func TestIsTelemetryEgress(t *testing.T) {
 	mk := func(p string) *url.URL { return &url.URL{Path: p} }
 	cases := []struct {
 		name   string
@@ -13,16 +13,19 @@ func TestIsOTLPTracesExport(t *testing.T) {
 		u      *url.URL
 		want   bool
 	}{
-		{"otlp post traces", "POST", mk("/v1/traces"), true},
+		{"otlp traces", "POST", mk("/v1/traces"), true},
+		{"pyroscope ingest", "POST", mk("/ingest"), true},
 		{"get traces (not export)", "GET", mk("/v1/traces"), false},
-		{"post other path", "POST", mk("/v1/metrics"), false},
-		{"post api endpoint", "POST", mk("/cluster/login"), false},
+		{"get ingest", "GET", mk("/ingest"), false},
+		{"otlp metrics (not bypassed)", "POST", mk("/v1/metrics"), false},
+		{"api endpoint", "POST", mk("/cluster/login"), false},
 		{"nil url", "POST", nil, false},
-		{"trailing segment not matched", "POST", mk("/v1/traces/extra"), false},
+		{"traces trailing segment", "POST", mk("/v1/traces/extra"), false},
+		{"ingest trailing segment", "POST", mk("/ingest/extra"), false},
 	}
 	for _, c := range cases {
-		if got := isOTLPTracesExport(c.method, c.u); got != c.want {
-			t.Errorf("%s: isOTLPTracesExport(%q,%v)=%v want %v", c.name, c.method, c.u, got, c.want)
+		if got := isTelemetryEgress(c.method, c.u); got != c.want {
+			t.Errorf("%s: isTelemetryEgress(%q,%v)=%v want %v", c.name, c.method, c.u, got, c.want)
 		}
 	}
 }

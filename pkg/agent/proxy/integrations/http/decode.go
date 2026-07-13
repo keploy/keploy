@@ -212,19 +212,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
 			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
 
-			// Egress bypass for OTLP trace export (POST /v1/traces). This is live
-			// telemetry the app emits every run, not a recorded dependency — it has
-			// no matching mock, so matching falls through to the HTTP fuzzy-matcher,
-			// which shingles the large (~150 KB) protobuf body. Under replay
-			// concurrency those transient shingle sets dominate the agent heap and
-			// OOM the sidecar (measured: ~432 MB of a ~1.1 GB peak). Short-circuit
-			// with a synthetic 200 — OTLP/HTTP treats any 200 as a successful export,
-			// so the exporter is satisfied and the body is never fuzzy-matched.
-			// Hardcoded pending a configurable egress-bypass rule.
-			if isOTLPTracesExport(input.method, input.url) {
-				h.Logger.Debug("egress bypass: synthesizing 200 for OTLP /v1/traces; skipping mock match",
-					zap.Any("metadata", utils.GetReqMeta(request)))
-				resp := "HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\n\r\n"
+			// Egress bypass for telemetry exports (POST /v1/traces, /ingest). These
+			// are live, fire-and-forget telemetry the app emits every run, not
+			// recorded dependencies — they have no real matching mock, so matching
+			// falls through to the HTTP fuzzy-matcher, which shingles the large
+			// (~150–200 KB) bodies. Under replay concurrency those transient shingle
+			// sets dominate the agent heap and OOM the sidecar (measured: ~432 MB of
+			// a ~1.1 GB peak). Short-circuit with a synthetic 200 — both OTLP/HTTP and
+			// Pyroscope treat any 2xx as success — so the client is satisfied and the
+			// body is never fuzzy-matched. Hardcoded pending a configurable rule.
+			if isTelemetryEgress(input.method, input.url) {
+				h.Logger.Debug("egress bypass: synthesizing 200 for telemetry export; skipping mock match",
+					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
 				if _, werr := clientConn.Write([]byte(resp)); werr != nil {
 					if ctx.Err() != nil {
 						return

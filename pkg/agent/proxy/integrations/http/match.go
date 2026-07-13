@@ -1479,11 +1479,25 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 	return closest
 }
 
-// isOTLPTracesExport reports whether an outgoing request is an OpenTelemetry
-// OTLP/HTTP trace export (POST /v1/traces). Such requests are live telemetry,
-// not a recorded dependency; decodeHTTP short-circuits them with a synthetic
-// 200 so their large protobuf bodies never reach the fuzzy-matcher (see the
-// egress bypass in decode.go).
-func isOTLPTracesExport(method string, u *url.URL) bool {
-	return method == http.MethodPost && u != nil && u.Path == "/v1/traces"
+// telemetryEgressPaths are outgoing telemetry endpoints that carry large,
+// volatile bodies and are NOT real dependencies: OTLP/HTTP trace export
+// (/v1/traces) and the Pyroscope profiler ingest (/ingest). Recording them
+// stores big mocks that at replay schema-match the app's re-emitted telemetry
+// and fall into the fuzzy-matcher, which shingles the ~150–200 KB bodies and
+// OOMs the agent. Bypassing them keeps the pool clean and the matcher out of it.
+var telemetryEgressPaths = map[string]struct{}{
+	"/v1/traces": {}, // OpenTelemetry OTLP/HTTP trace export
+	"/ingest":    {}, // Pyroscope continuous-profiler upload
+}
+
+// isTelemetryEgress reports whether an outgoing request is a fire-and-forget
+// telemetry export (see telemetryEgressPaths). The record paths skip storing
+// these; decodeHTTP short-circuits them with a synthetic 200 so their large
+// bodies never reach the fuzzy-matcher.
+func isTelemetryEgress(method string, u *url.URL) bool {
+	if method != http.MethodPost || u == nil {
+		return false
+	}
+	_, ok := telemetryEgressPaths[u.Path]
+	return ok
 }

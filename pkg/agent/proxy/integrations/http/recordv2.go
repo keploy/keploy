@@ -469,8 +469,8 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	// Do not record OTLP trace exports (POST /v1/traces) — live telemetry, not a
 	// dependency. See http.go/decode.go: recording them creates the volatile
 	// config mocks that drive the replay fuzzy-match OOM.
-	if isOTLPTracesExport(req.Method, req.URL) {
-		h.Logger.Debug("egress bypass: not recording OTLP /v1/traces export", zap.Any("metadata", utils.GetReqMeta(req)))
+	if isTelemetryEgress(req.Method, req.URL) {
+		h.Logger.Debug("egress bypass: not recording telemetry export (/v1/traces, /ingest)", zap.Any("metadata", utils.GetReqMeta(req)))
 		return nil, nil
 	}
 
