@@ -1478,3 +1478,12 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 	}
 	return closest
 }
+
+// isOTLPTracesExport reports whether an outgoing request is an OpenTelemetry
+// OTLP/HTTP trace export (POST /v1/traces). Such requests are live telemetry,
+// not a recorded dependency; decodeHTTP short-circuits them with a synthetic
+// 200 so their large protobuf bodies never reach the fuzzy-matcher (see the
+// egress bypass in decode.go).
+func isOTLPTracesExport(method string, u *url.URL) bool {
+	return method == http.MethodPost && u != nil && u.Path == "/v1/traces"
+}
