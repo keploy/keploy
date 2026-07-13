@@ -243,6 +243,11 @@ func (p *Proxy) recordViaSupervisor(
 
 	for gen := 0; ; gen++ {
 		if gen > 0 {
+			// MEAS(abort-recovery): TEMP INFO — remove before merge.
+			logger.Info("MEAS abort-recovery respawn",
+				zap.String("parser", string(parserType)),
+				zap.Int64("clientConnID", clientConnID),
+				zap.Int("gen", gen))
 			// Respawn: the previous generation aborted (tees paused, its
 			// FakeConns Closed by SessionOnAbort). Swap in fresh FakeConns over
 			// the same still-open tee channels so the new Session wires them.
@@ -345,6 +350,13 @@ func (p *Proxy) recordViaSupervisor(
 		// watchdog) is stopped by the time Run returns — no explicit Close here.
 
 		if !result.FallthroughToPassthrough {
+			// MEAS(abort-recovery): TEMP INFO — remove before merge.
+			logger.Info("MEAS recordViaSupervisor clean-return",
+				zap.String("parser", string(parserType)),
+				zap.Int64("clientConnID", clientConnID),
+				zap.Int("gen", gen),
+				zap.String("status", result.Status.String()),
+				zap.Error(result.Err))
 			// Parser returned normally or with an error. Cancel the relay and
 			// drain, then report the outcome.
 			relayCancel()
@@ -377,6 +389,15 @@ func (p *Proxy) recordViaSupervisor(
 			zap.Bool("recoverable", recoverable),
 			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
 		)
+		// MEAS(abort-recovery): TEMP INFO — remove before merge.
+		logger.Info("MEAS abort detected (fallthrough)",
+			zap.String("parser", string(parserType)),
+			zap.Int64("clientConnID", clientConnID),
+			zap.Int("gen", gen),
+			zap.String("status", result.Status.String()),
+			zap.Bool("recoverable", recoverable),
+			zap.Bool("sawClientChunk", genSawClientChunk.Load()),
+			zap.Error(result.Err))
 
 		// Abort-recovery: for an opted-in parser on a still-alive pooled
 		// connection, respawn a fresh parser generation so recording resumes
@@ -400,6 +421,18 @@ func (p *Proxy) recordViaSupervisor(
 		// than reliably recording a corrupt mock — graceful degradation, not
 		// silent corruption.
 		if !recoverable || gen+1 >= maxAbortRecoveryGenerations || !genSawClientChunk.Load() {
+			// MEAS(abort-recovery): TEMP INFO — remove before merge.
+			reason := "budget"
+			if !recoverable {
+				reason = "not-recoverable"
+			} else if !genSawClientChunk.Load() {
+				reason = "no-client-chunk"
+			}
+			logger.Info("MEAS abort-recovery give-up",
+				zap.String("parser", string(parserType)),
+				zap.Int64("clientConnID", clientConnID),
+				zap.Int("gen", gen),
+				zap.String("reason", reason))
 			<-relayDone
 			return nil
 		}
@@ -420,6 +453,12 @@ func (p *Proxy) recordViaSupervisor(
 				zap.String("parser", string(parserType)),
 				zap.Int("generation", gen),
 			)
+			// MEAS(abort-recovery): TEMP INFO — remove before merge.
+			logger.Info("MEAS abort-recovery give-up",
+				zap.String("parser", string(parserType)),
+				zap.Int64("clientConnID", clientConnID),
+				zap.Int("gen", gen),
+				zap.String("reason", "parser-exit-grace"))
 			<-relayDone
 			return nil
 		}
@@ -428,6 +467,11 @@ func (p *Proxy) recordViaSupervisor(
 		// exited there is nothing left to reattach to next iteration.
 		select {
 		case <-relayDone:
+			// MEAS(abort-recovery): TEMP INFO — remove before merge.
+			logger.Info("MEAS abort-recovery relay-exited-before-respawn",
+				zap.String("parser", string(parserType)),
+				zap.Int64("clientConnID", clientConnID),
+				zap.Int("gen", gen))
 			return nil
 		default:
 		}
