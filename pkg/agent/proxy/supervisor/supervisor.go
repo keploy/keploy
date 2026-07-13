@@ -115,6 +115,15 @@ type Supervisor struct {
 	// abortOnce guards SessionOnAbort invocation.
 	abortOnce sync.Once
 
+	// parserDone is closed when the parser goroutine launched by Run has
+	// fully returned. On the fallthrough abort paths (hang, outer-cancel
+	// grace) Run returns BEFORE the parser goroutine exits — it unblocks
+	// asynchronously once SessionOnAbort closes its FakeConns. A caller that
+	// reuses the underlying streams (abort-recovery in proxy_v2.go) must wait
+	// on this before handing those streams to a new generation, otherwise the
+	// still-live old goroutine can steal a chunk off the shared tee channel.
+	parserDone chan struct{}
+
 	// closed guards repeated Close calls.
 	closed atomic.Bool
 }
@@ -141,6 +150,7 @@ func New(cfg Config) *Supervisor {
 		hungCh:     make(chan struct{}),
 		wdStop:     make(chan struct{}),
 		wdDone:     make(chan struct{}),
+		parserDone: make(chan struct{}),
 	}
 	s.lastProgressNano.Store(time.Now().UnixNano())
 	go s.watchdogLoop()
@@ -168,6 +178,12 @@ func (s *Supervisor) SetActivityProbe(fn func() bool) {
 		s.activityProbe.Store(&fn)
 	}
 }
+
+// ParserDone returns a channel closed when the parser goroutine started by Run
+// has fully returned. It is closed even on the fallthrough abort paths where
+// Run itself returns early, so a caller that recycles the parser's streams can
+// wait for the old goroutine to retire before reattaching them.
+func (s *Supervisor) ParserDone() <-chan struct{} { return s.parserDone }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
 // response. The watchdog only fires while pending. Calling it when
@@ -257,6 +273,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				}
 			}
 			done <- ret
+			// Signal exit AFTER publishing the result so a caller waiting on
+			// ParserDone observes a fully-retired goroutine (no lingering
+			// read of the shared streams).
+			close(s.parserDone)
 		}()
 		ret.err = fn(runCtx, sess)
 	}()

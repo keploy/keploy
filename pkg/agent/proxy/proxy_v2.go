@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -56,6 +57,30 @@ func newRelayDisabled() bool {
 //     the kind of stall the V2 architecture is meant to eliminate.
 //     See invariant I1 in pkg/agent/proxy/README.md.)
 //
+// dropVoidsMock reports whether an OnMarkMockIncomplete callback of the given
+// reason should void the in-flight mock. This is a DENY-list, not an allow-list:
+// every reason voids the mock EXCEPT the two deliberate bulk-silence drops. The
+// callback fires for far more than tee drops — write_error / short_write
+// (relay.go), abort_mock (directive AbortMock), and pre_dispatch_drain_* all
+// mean bytes never reached the peer and the mock must NOT be recorded as
+// complete, for EVERY parser (the callback is wired before the recoverable
+// opt-in check). Only these two are excluded:
+//
+//   - paused: PauseTees (abort — session dead) or KindPauseDir (mock already
+//     finalized) — there is no live mock to void. Critically, during
+//     abort-recovery the tees stay paused while the FRESH generation's session
+//     is already published as curSess, so voiding here would silently drop the
+//     recovered generation's first mock.
+//   - memory_pressure: already covered by pressureRanges in record.go; voiding
+//     here only mis-attributes the loss to a later, unrelated mock.
+//
+// (This is the OPPOSITE filter to the tee's onDropAt orphan-window allow-list,
+// which restricts to channel_full/per_conn_cap to avoid flooding orphanRanges —
+// the two policies are not interchangeable.)
+func dropVoidsMock(reason string) bool {
+	return reason != relay.DropPaused && reason != relay.DropMemoryPressure
+}
+
 // The caller remains responsible for closing srcConn/dstConn in its
 // deferred cleanup; this helper never closes them.
 func (p *Proxy) recordViaSupervisor(
@@ -69,48 +94,21 @@ func (p *Proxy) recordViaSupervisor(
 	clientConnID, destConnID int64,
 	opts models.OutgoingOptions,
 ) error {
-	sv := supervisor.New(supervisor.Config{
-		Logger: logger,
-		// Leave HangBudget / MemCap / PanicReporter defaulted by the
-		// supervisor package. Tune via config once we have production
-		// telemetry on the fallback rate.
-	})
-	defer sv.Close()
-
-	// Parser-facing session is constructed before the relay so its
-	// MarkMockIncomplete / ClearPendingWork hooks can be wired into
-	// the relay's tee callbacks below. ClientStream/DestStream and
-	// the directive channels are patched in after r := relay.New().
-	// Ctx is overwritten by Supervisor.Run with the supervised
-	// lifetime context.
-	svSess := &supervisor.Session{
-		Mocks:            mocks,
-		Logger:           logger,
-		ClientConnID:     fmt.Sprint(clientConnID),
-		DestConnID:       fmt.Sprint(destConnID),
-		Opts:             opts,
-		OnPendingCleared: sv.ClearPendingWork,
-		// Route EmitMock through the SyncMockManager (obtained via
-		// syncMock.Get(), then mgr.AddMock) so V2 parsers pick up the
-		// same firstReqSeen session-window buffering, lifetime
-		// derivation, and drop accounting that legacy parsers (http,
-		// mysql, generic) get. Without this, V2-recorded mocks
-		// captured before the first app test request bypass the
-		// session window and are lost at replay — the symptom that
-		// broke postgres e2e record-build-replay-build runs in
-		// integrations#133 (the app's startup DB queries never found
-		// their mocks).
-		RouteMocksViaSyncMock: true,
-		// Per-app manager carried on the parser ctx by a multi-app caller
-		// (nil otherwise ⇒ EmitMock uses the package-global). Routes V2
-		// parser mocks to the right app's manager, like the legacy parsers.
-		Mgr: syncMock.FromContext(ctx),
-		// Legacy fields kept populated so a migrated parser can still
-		// consult them for fields we haven't promoted yet. The parser
-		// must not touch Ingress/Egress net.Conn values on the V2 path.
-		TLSUpgrader: nil,
-		ErrGroup:    errGrp,
-	}
+	// The relay is created ONCE per connection, but on the abort-recovery
+	// path several parser generations run over its lifetime (see the
+	// generation loop below). Its tee callbacks are wired at relay.New()
+	// time, so they must route to the CURRENT generation's Supervisor and
+	// Session rather than capture a stale gen-0 one. curSv/curSess hold the
+	// live generation; the relay callbacks load them per-call. For a parser
+	// that does not opt into abort recovery there is exactly one generation,
+	// so this indirection is behaviourally identical to a direct wire.
+	var curSv atomic.Pointer[supervisor.Supervisor]
+	var curSess atomic.Pointer[supervisor.Session]
+	// genSawClientChunk records whether the CURRENT generation ever had a
+	// client chunk teed to it. Reset per generation and used as the progress
+	// guard that stops an abort-recovery respawn from spinning on a parser
+	// that dies before reading anything.
+	var genSawClientChunk atomic.Bool
 
 	// Build the relay. It owns srcConn/dstConn for the duration of its
 	// Run call but never closes them. The caller's deferred Close still
@@ -159,10 +157,21 @@ func (p *Proxy) recordViaSupervisor(
 	}
 
 	r := relay.New(relay.Config{
-		Logger:               logger,
-		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
-		BumpActivity:         sv.BumpActivity,
-		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		Logger:       logger,
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger),
+		BumpActivity: func() {
+			if s := curSv.Load(); s != nil {
+				s.BumpActivity()
+			}
+		},
+		OnMarkMockIncomplete: func(reason string) {
+			if !dropVoidsMock(reason) {
+				return
+			}
+			if s := curSess.Load(); s != nil {
+				s.MarkMockIncomplete(reason)
+			}
+		},
 		// Time-attributed complement to OnMarkMockIncomplete: for a genuine
 		// per-op byte-loss drop (channel_full/per_conn_cap only — the tee
 		// excludes memory_pressure/paused, which would flood the ring and
@@ -175,10 +184,17 @@ func (p *Proxy) recordViaSupervisor(
 		// over-suppression is the accepted "drop the TC rather than orphan
 		// it" tradeoff. Fast-follow: thread per-op identity for exact-TC.
 		OnTeeDropWindow: func(_ string, ts time.Time) {
-			svSess.RecordOrphanWindow(ts, ts)
+			if s := curSess.Load(); s != nil {
+				s.RecordOrphanWindow(ts, ts)
+			}
 		},
-		OnClientChunkTeed: sv.MarkPendingWork,
-		RealCertHook:      realCertHook,
+		OnClientChunkTeed: func() {
+			genSawClientChunk.Store(true)
+			if s := curSv.Load(); s != nil {
+				s.MarkPendingWork()
+			}
+		},
+		RealCertHook: realCertHook,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -188,120 +204,234 @@ func (p *Proxy) recordViaSupervisor(
 		PreDispatchPause: preDispatchPause,
 	}, srcConn, dstConn)
 
-	svSess.ClientStream = r.ClientStream()
-	svSess.DestStream = r.DestStream()
-	svSess.Directives = r.Directives()
-	svSess.Acks = r.Acks()
+	// Abort-recovery opt-in (duck-typed like WantsPreDispatchPause): only
+	// parsers that declare SupportsAbortRecovery participate in the
+	// generation loop below; all others keep the historical behaviour — one
+	// generation, then permanent raw passthrough after an abort. Safe only
+	// for client-initiates-on-reuse protocols (http, mongo) where the next
+	// client byte on a pooled connection is always a fresh request boundary;
+	// a server-first-on-reuse protocol must stay opted out.
+	recoverable := false
+	if rp, ok := parser.(interface{ SupportsAbortRecovery() bool }); ok {
+		recoverable = rp.SupportsAbortRecovery()
+	}
 
-	// Teach the hang watchdog to tell an idle parser from a stuck one:
-	// only declare a hang when the relay still holds unconsumed input.
-	// A pooled DB connection sitting between requests (parser blocked on
-	// an empty read) must not be aborted — aborting PauseTees's it and
-	// permanently stops recording on a live connection that gets reused,
-	// which is the go-memory-load-mongo recording dead zone. Set before
-	// Run; the watchdog only consults it once `pending` is armed, which
-	// happens after Run tees the first client chunk.
-	sv.SetActivityProbe(r.HasBufferedInput)
-
-	// Run the relay in its own goroutine under the supervisor's lifetime.
-	// The supervisor's Close (via sv.SessionOnAbort below) closes the
-	// FakeConns so the parser's reads unblock on abort.
+	// Run the relay in its own goroutine under the connection's lifetime.
+	// The relay is created ONCE and outlives every parser generation; each
+	// generation's SessionOnAbort closes the current FakeConns so the parser's
+	// reads unblock on abort.
 	relayDone := make(chan error, 1)
 	relayCtx, relayCancel := context.WithCancel(ctx)
 	defer relayCancel()
-	go func() { relayDone <- r.Run(relayCtx) }()
+	// The relay goroutine is launched inside the loop, once generation 0 is
+	// fully wired (see below) — starting it earlier leaves a startup window
+	// where the first teed chunk's callbacks find curSv/curSess still nil.
 
-	sv.SessionOnAbort = func() {
-		// Pause the tees FIRST so every subsequent chunk drops
-		// cheaply via the pause fast-path (atomic-bool check) instead
-		// of falling through to the channel-full DropChannelFull
-		// branch, which also logs at Debug. On a long-lived
-		// post-abort connection the spam would otherwise be one
-		// log line per chunk for the rest of the connection.
-		//
-		// Pausing does NOT stop the real-socket forwarders — every
-		// byte still reaches its peer. The relay's raw forwarding
-		// continues until peer close; only parser-side delivery is
-		// suppressed.
-		r.PauseTees()
+	// maxAbortRecoveryGenerations bounds respawns so a genuinely broken
+	// parser (one that aborts on every request) cannot spin forever; after
+	// the ceiling the connection falls back to permanent raw passthrough.
+	const maxAbortRecoveryGenerations = 8
 
-		// Then unblock the parser's ClientStream/DestStream reads so
-		// the supervisor's cancel-select can observe the parser
-		// goroutine exiting promptly.
-		_ = r.ClientStream().Close()
-		_ = r.DestStream().Close()
-	}
+	// parserExitGrace bounds how long recovery waits for the aborted
+	// generation's parser goroutine to retire before reattaching its streams.
+	// After SessionOnAbort closes the FakeConns an I/O-bound parser unblocks in
+	// microseconds; the generous ceiling only trips for a parser genuinely
+	// wedged in a CPU loop that ignores ctx and Closed reads, in which case we
+	// abandon recovery rather than race the still-live goroutine on the shared
+	// tee channel.
+	const parserExitGrace = 2 * time.Second
 
-	// Adapter: the parser's RecordOutgoing takes *integrations.RecordSession
-	// but the supervisor's ParserFunc takes *supervisor.Session. Build a
-	// RecordSession whose V2 field points at the supervisor.Session.
-	//
-	// On the V2 path, Ingress/Egress/TLSUpgrader are intentionally nil so
-	// that a parser bug that reaches for the legacy fields surfaces as an
-	// obvious nil panic (which the supervisor catches) rather than a
-	// silent misuse of sockets the relay owns. ErrGroup remains populated
-	// because the legacy integration helper layer (ReadBytes, etc.) still
-	// retrieves it via context.Value in shared code; once every parser
-	// migrates off that accessor the field will be set to nil here as
-	// well.
-	result := sv.Run(ctx, func(parserCtx context.Context, sv2sess *supervisor.Session) error {
-		recSess := &integrations.RecordSession{
-			Ingress:      nil,
-			Egress:       nil,
-			Mocks:        mocks,
-			ErrGroup:     errGrp,
-			TLSUpgrader:  nil,
-			Logger:       logger,
-			ClientConnID: fmt.Sprint(clientConnID),
-			DestConnID:   fmt.Sprint(destConnID),
-			Opts:         opts,
-			V2:           sv2sess,
+	for gen := 0; ; gen++ {
+		if gen > 0 {
+			// Respawn: the previous generation aborted (tees paused, its
+			// FakeConns Closed by SessionOnAbort). Swap in fresh FakeConns over
+			// the same still-open tee channels so the new Session wires them.
+			// The tees stay paused until ResumeTees below — after everything is
+			// wired — so no chunk is delivered to a half-built generation.
+			r.ReattachStreams()
 		}
-		return parser.RecordOutgoing(parserCtx, recSess)
-	}, svSess)
 
-	if result.FallthroughToPassthrough {
+		sv := supervisor.New(supervisor.Config{
+			Logger: logger,
+			// Leave HangBudget / MemCap / PanicReporter defaulted by the
+			// supervisor package. Tune via config once we have production
+			// telemetry on the fallback rate.
+		})
+
+		// Fresh Session per generation. A reused Session would carry a stuck
+		// MarkMockIncomplete flag: during the paused window between abort and
+		// respawn every dropped chunk (DropPaused) still fires onDrop →
+		// MarkMockIncomplete, so a reused Session's next EmitMock would
+		// silently drop the new generation's mocks. The app-scoped
+		// SyncMockManager (Mgr) IS preserved across generations, so
+		// record-session-window continuity (firstReqSeen, lifetime derivation)
+		// is unaffected. RouteMocksViaSyncMock keeps V2 mocks on the same
+		// session-window path as legacy parsers (integrations#133).
+		svSess := &supervisor.Session{
+			Mocks:                 mocks,
+			Logger:                logger,
+			ClientConnID:          fmt.Sprint(clientConnID),
+			DestConnID:            fmt.Sprint(destConnID),
+			Opts:                  opts,
+			OnPendingCleared:      sv.ClearPendingWork,
+			RouteMocksViaSyncMock: true,
+			Mgr:                   syncMock.FromContext(ctx),
+			TLSUpgrader:           nil,
+			ErrGroup:              errGrp,
+		}
+		svSess.ClientStream = r.ClientStream()
+		svSess.DestStream = r.DestStream()
+		svSess.Directives = r.Directives()
+		svSess.Acks = r.Acks()
+
+		// Publish this generation to the relay's indirected tee callbacks
+		// before any chunk is delivered, and reset the per-generation progress
+		// guard.
+		curSv.Store(sv)
+		curSess.Store(svSess)
+		genSawClientChunk.Store(false)
+
+		// Teach the hang watchdog to tell an idle parser from a stuck one:
+		// only declare a hang when the relay still holds unconsumed input.
+		sv.SetActivityProbe(r.HasBufferedInput)
+
+		sv.SessionOnAbort = func() {
+			// Pause the tees FIRST so subsequent chunks drop cheaply via the
+			// pause fast-path instead of the channel-full branch (which logs at
+			// Debug per chunk). Pausing does NOT stop the real-socket
+			// forwarders — every byte still reaches its peer.
+			r.PauseTees()
+			// Then unblock the parser's reads so the supervisor's
+			// cancel-select observes the parser goroutine exiting promptly.
+			_ = r.ClientStream().Close()
+			_ = r.DestStream().Close()
+		}
+
+		if gen > 0 {
+			// This generation is fully wired (streams, curSv/curSess, probe,
+			// abort hook); admit chunks again.
+			r.ResumeTees()
+		} else {
+			// Generation 0 is now fully wired. Launch the relay so the first
+			// teed chunk's callbacks (BumpActivity / MarkPendingWork /
+			// MarkMockIncomplete) route to this live supervisor/session instead
+			// of no-oping on the nil guard. The relay is created ONCE and
+			// outlives every generation.
+			go func() { relayDone <- r.Run(relayCtx) }()
+		}
+
+		// Adapter: the parser's RecordOutgoing takes *integrations.RecordSession
+		// but the supervisor's ParserFunc takes *supervisor.Session. On the V2
+		// path Ingress/Egress/TLSUpgrader are nil so a parser bug that reaches
+		// for the legacy fields surfaces as an obvious nil panic (which the
+		// supervisor catches) rather than a silent misuse of sockets the relay
+		// owns.
+		result := sv.Run(ctx, func(parserCtx context.Context, sv2sess *supervisor.Session) error {
+			recSess := &integrations.RecordSession{
+				Ingress:      nil,
+				Egress:       nil,
+				Mocks:        mocks,
+				ErrGroup:     errGrp,
+				TLSUpgrader:  nil,
+				Logger:       logger,
+				ClientConnID: fmt.Sprint(clientConnID),
+				DestConnID:   fmt.Sprint(destConnID),
+				Opts:         opts,
+				V2:           sv2sess,
+			}
+			return parser.RecordOutgoing(parserCtx, recSess)
+		}, svSess)
+		// sv.Run already ran `defer s.Close()`, so the supervisor (and its
+		// watchdog) is stopped by the time Run returns — no explicit Close here.
+
+		if !result.FallthroughToPassthrough {
+			// Parser returned normally or with an error. Cancel the relay and
+			// drain, then report the outcome.
+			relayCancel()
+			relayErr := <-relayDone
+			if relayErr != nil && !errors.Is(relayErr, context.Canceled) {
+				logger.Debug("relay exited with error", zap.Error(relayErr))
+			}
+			if result.Err != nil {
+				if isNetworkClosedErr(result.Err) {
+					logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
+					return nil
+				}
+				return result.Err
+			}
+			logger.Debug("V2 parser recorded outgoing message successfully",
+				zap.String("parser", string(parserType)),
+				zap.String("status", result.Status.String()),
+			)
+			return nil
+		}
+
+		// ABORT (fallthrough). The relay is still alive and forwarding raw; the
+		// tees are paused and this generation's FakeConns were Closed by
+		// SessionOnAbort.
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
 			zap.String("parser", string(parserType)),
 			zap.String("status", result.Status.String()),
 			zap.Error(result.Err),
+			zap.Int("generation", gen),
+			zap.Bool("recoverable", recoverable),
 			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
 		)
-		// Crucial invariant (I1): the relay keeps forwarding client↔dest
-		// bytes end-to-end during the fallback. We do NOT cancel it here
-		// — cancelling would introduce a gap between the relay stopping
-		// and any replacement read loop starting, exactly the kind of
-		// stall the V2 architecture is meant to eliminate.
+
+		// Abort-recovery: for an opted-in parser on a still-alive pooled
+		// connection, respawn a fresh parser generation so recording resumes
+		// on the next request instead of the connection being permanently
+		// silenced (the go-memory-load-mongo recording dead zone). Give up —
+		// keeping the historical I1 raw passthrough — when the parser is not
+		// opted in, the generation budget is exhausted, or this generation
+		// never saw a client chunk (a parser that dies before reading anything
+		// would otherwise respawn-spin). In every give-up case we do NOT cancel
+		// the relay: it keeps forwarding client↔dest bytes raw until a peer
+		// close triggers a normal Run exit — no stall gap (invariant I1).
 		//
-		// SessionOnAbort has already closed the FakeConns so no further
-		// tee chunks reach the parser side (no partial mocks, I4). The
-		// relay's forwarder goroutines continue draining srcConn/dstConn
-		// until either peer closes the connection, which triggers a
-		// normal Run exit.
-		<-relayDone
-		return nil
-	}
-
-	// Non-fallthrough path: parser returned normally or with an error.
-	// Cancel the relay and drain.
-	relayCancel()
-	relayErr := <-relayDone
-	if relayErr != nil && !errors.Is(relayErr, context.Canceled) {
-		logger.Debug("relay exited with error", zap.Error(relayErr))
-	}
-
-	if result.Err != nil {
-		if isNetworkClosedErr(result.Err) {
-			logger.Debug("V2 parser exited with network-closed error", zap.Error(result.Err))
+		// Scope note: this cleanly recovers the target dead-zone (an abort
+		// between requests — the previous response was dropped at the tee under
+		// memory pressure (armed, not yet paused; the pause comes later with the
+		// abort), never staged, so the reattached generation reads a clean
+		// request boundary). If instead the abort fires MID-request, partial
+		// bytes of the aborted op may remain staged and the reattached
+		// generation reads them mid-frame; a framed protocol desyncs and
+		// re-aborts (bounded by the generation ceiling, then passthrough) rather
+		// than reliably recording a corrupt mock — graceful degradation, not
+		// silent corruption.
+		if !recoverable || gen+1 >= maxAbortRecoveryGenerations || !genSawClientChunk.Load() {
+			<-relayDone
 			return nil
 		}
-		return result.Err
+
+		// Wait for THIS generation's parser goroutine to fully retire before the
+		// next iteration reattaches its streams. On the hang and outer-cancel
+		// grace abort paths sv.Run returns while the parser goroutine is still
+		// alive — it unblocks asynchronously once SessionOnAbort Closed its
+		// FakeConns. The old (now-Closed) FakeConn and the reattached one drain
+		// the SAME tee out-channel, so respawning while the old goroutine can
+		// still read would let it steal a resumed chunk from the new generation
+		// (silent mock loss). If it does not exit within the grace it is
+		// genuinely wedged; give up recovery rather than race it.
+		select {
+		case <-sv.ParserDone():
+		case <-time.After(parserExitGrace):
+			logger.Debug("previous parser generation did not exit within recovery grace; abandoning abort recovery",
+				zap.String("parser", string(parserType)),
+				zap.Int("generation", gen),
+			)
+			<-relayDone
+			return nil
+		}
+
+		// The connection may already be over (peer closed). If the relay has
+		// exited there is nothing left to reattach to next iteration.
+		select {
+		case <-relayDone:
+			return nil
+		default:
+		}
 	}
-	logger.Debug("V2 parser recorded outgoing message successfully",
-		zap.String("parser", string(parserType)),
-		zap.String("status", result.Status.String()),
-	)
-	return nil
 }
 
 // newProxyTLSUpgradeFn adapts keploy's existing TLS helpers into the

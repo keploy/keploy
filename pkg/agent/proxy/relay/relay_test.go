@@ -1149,3 +1149,93 @@ func TestDirectiveUpgradeTLS_PreDispatch_FlushesC2DStashBeforePreambleRead(t *te
 		t.Fatalf("no UpgradeTLS ack — handler hung (likely a regression: C2D stash not flushed before preamble read)")
 	}
 }
+
+// TestAbortRecovery_ResumeTeesReattachRecordsAgain reproduces the recording
+// dead zone at the relay-primitive level and proves ResumeTees +
+// ReattachStreams recover it — deterministically, with no supervisor, timers,
+// or memory guard.
+//
+// Bug: the supervisor abort path pauses the tees and Closes the parser-facing
+// FakeConns. On a POOLED connection the real sockets keep forwarding, but every
+// further request is dropped (paused) and the Closed FakeConns deliver nothing,
+// so recording is permanently silenced on a live connection. The fix swaps in
+// fresh FakeConns over the still-open tee channels and un-pauses the tees so
+// the next request records again.
+func TestAbortRecovery_ResumeTeesReattachRecordsAgain(t *testing.T) {
+	h := newHarness(t, Config{})
+
+	req1 := []byte("REQUEST-ONE")
+	req2 := []byte("REQUEST-TWO")
+	req3 := []byte("REQUEST-THREE")
+
+	// Baseline: a request forwards to the peer AND tees to the parser stream.
+	go h.writeClient(req1)
+	if got := h.readDest(len(req1)); string(got) != string(req1) {
+		t.Fatalf("baseline forward: got %q want %q", got, req1)
+	}
+	if got := mustReadChunkStr(t, h.r.ClientStream()); got != string(req1) {
+		t.Fatalf("baseline record: got %q want %q", got, req1)
+	}
+
+	// Induce an abort exactly as SessionOnAbort does.
+	h.r.PauseTees()
+	_ = h.r.ClientStream().Close()
+	_ = h.r.DestStream().Close()
+
+	// A new request still forwards to the peer (raw path alive) but is NOT
+	// recorded — the paused tee drops it. Gate on the drop count so the drop is
+	// observed BEFORE recovery; otherwise a late tee push could leak req2 into
+	// the reattached stream (a test race, not a product concern).
+	beforeDrops, _ := h.r.DropCounts()
+	go h.writeClient(req2)
+	if got := h.readDest(len(req2)); string(got) != string(req2) {
+		t.Fatalf("post-abort forward: got %q want %q", got, req2)
+	}
+	waitForClientDrop(t, h.r, beforeDrops)
+
+	// The Closed parser stream yields ErrClosed — recording is silenced.
+	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := h.r.ClientStream().ReadChunk(); !errors.Is(err, fakeconn.ErrClosed) {
+		t.Fatalf("post-abort record: expected recording silenced (ErrClosed), got err=%v", err)
+	}
+
+	// Recover: fresh FakeConns over the same tees, then un-pause.
+	nc, _ := h.r.ReattachStreams()
+	h.r.ResumeTees()
+
+	// The next request records again on the fresh stream.
+	go h.writeClient(req3)
+	if got := h.readDest(len(req3)); string(got) != string(req3) {
+		t.Fatalf("post-recovery forward: got %q want %q", got, req3)
+	}
+	if got := mustReadChunkStr(t, nc); got != string(req3) {
+		t.Fatalf("post-recovery record: got %q want %q — ReattachStreams+ResumeTees did not restore recording", got, req3)
+	}
+}
+
+// mustReadChunkStr reads one chunk with a bounded deadline and returns its
+// bytes as a string, failing the test on error.
+func mustReadChunkStr(t *testing.T, s *fakeconn.FakeConn) string {
+	t.Helper()
+	_ = s.SetReadDeadline(time.Now().Add(time.Second))
+	c, err := s.ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	return string(c.Bytes)
+}
+
+// waitForClientDrop blocks until the client→dest tee's drop count exceeds prev,
+// confirming the paused tee dropped the just-forwarded chunk. Bounded so a
+// wedged test fails fast instead of hanging.
+func waitForClientDrop(t *testing.T, r *Relay, prev uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c, _ := r.DropCounts(); c > prev {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("client→dest tee did not drop the post-abort chunk within 1s")
+}

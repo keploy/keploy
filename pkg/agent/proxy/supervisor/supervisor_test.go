@@ -273,6 +273,61 @@ func TestHangFiredWhenUnconsumedInputPresent(t *testing.T) {
 	}
 }
 
+// TestParserDoneSignalsGoroutineExitAfterHang locks in the invariant
+// abort-recovery relies on: on the hang path Run returns BEFORE the parser
+// goroutine exits (it is parked off-ctx, e.g. blocked in FakeConn.Read), and
+// ParserDone stays open until that goroutine actually returns. Recovery waits
+// on ParserDone before reattaching the parser's streams so the dying goroutine
+// cannot steal a resumed chunk off the shared tee channel.
+func TestParserDoneSignalsGoroutineExitAfterHang(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t))
+	// Parser has unconsumed input but makes no progress -> hang fires.
+	s.SetActivityProbe(func() bool { return true })
+	s.MarkPendingWork()
+
+	release := make(chan struct{})
+	exited := make(chan struct{})
+
+	res := s.Run(context.Background(),
+		func(ctx context.Context, sess *Session) error {
+			// Deliberately ignore ctx cancellation to model a parser parked in
+			// FakeConn.Read (which does not observe ctx and only unblocks on
+			// Close). It returns only when the test releases it — standing in
+			// for SessionOnAbort closing the FakeConns.
+			<-release
+			close(exited)
+			return nil
+		},
+		&Session{})
+
+	if res.Status != StatusHung {
+		t.Fatalf("status: got %s, want hung", res.Status)
+	}
+
+	// Run has returned on the hang path, but the parser goroutine is still
+	// blocked on release. ParserDone MUST NOT be closed yet.
+	select {
+	case <-s.ParserDone():
+		t.Fatal("ParserDone closed while the parser goroutine is still alive")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release the parser (models SessionOnAbort unblocking the read).
+	close(release)
+
+	select {
+	case <-s.ParserDone():
+	case <-time.After(time.Second):
+		t.Fatal("ParserDone did not close after the parser goroutine exited")
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("parser goroutine did not return")
+	}
+}
+
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

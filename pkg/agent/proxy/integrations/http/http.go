@@ -116,6 +116,18 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 // knob is the env KEPLOY_NEW_RELAY=off handled in proxy_v2.go.
 func (h *HTTP) IsV2() bool { return true }
 
+// SupportsAbortRecovery opts HTTP into the supervisor's per-generation parser
+// respawn (proxy_v2.go). After an abort silences the relay tees, recovery
+// reattaches fresh streams and re-runs RecordOutgoing so a later request on the
+// same pooled connection still records, instead of raw-forwarding for the rest
+// of the connection's life.
+//
+// Safe for HTTP because it is client-initiates-on-reuse — the next client byte
+// on a pooled keep-alive connection is always a fresh request boundary — and
+// the parser holds no per-connection state across RecordOutgoing calls (the
+// HTTP struct carries only a logger; all framing state is local to recordV2).
+func (h *HTTP) SupportsAbortRecovery() bool { return true }
+
 // RecordOutgoing dispatches to the V2 path when the supervisor has
 // attached a session via RecordSession.V2, and to the legacy path
 // otherwise. Keeping both paths live lets the dispatcher / rollback
