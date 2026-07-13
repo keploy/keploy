@@ -991,6 +991,22 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		_, err = Decompress(logger, "br", invalidBrotliData)
 		require.Error(t, err)
 	})
+
+	// Guards against a decompression bomb: a small compressed payload that would
+	// expand past the cap must error rather than allocate unbounded memory (#3867).
+	t.Run("DecompressionBombGuard", func(t *testing.T) {
+		payload := strings.Repeat("a", 100)
+
+		// Under and at the limit: returned intact.
+		out, err := readAllCapped(strings.NewReader(payload), int64(len(payload)))
+		require.NoError(t, err)
+		assert.Equal(t, payload, string(out))
+
+		// Over the limit: errors instead of returning oversized data.
+		_, err = readAllCapped(strings.NewReader(payload), int64(len(payload)-1))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decompression bomb")
+	})
 }
 
 // TestFilterMocks_678 validates the filtering and sorting of mocks in Test and Config modes.
