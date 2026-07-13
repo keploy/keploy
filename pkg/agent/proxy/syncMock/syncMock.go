@@ -1029,11 +1029,23 @@ func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
 	if m == nil || start.IsZero() {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordOrphanWindowLocked(start, end)
+}
+
+// recordOrphanWindowLocked appends an orphan window; the caller MUST already
+// hold m.mu. Split out from RecordOrphanWindow so in-loop droppers that already
+// run under m.mu — the stale-cutoff reap in ResolveRange — can record a window
+// without releasing and reacquiring the lock. m.mu is not reentrant, so calling
+// the public method from inside the ResolveRange critical section would deadlock.
+func (m *SyncMockManager) recordOrphanWindowLocked(start, end time.Time) {
+	if start.IsZero() {
+		return
+	}
 	if end.IsZero() || end.Before(start) {
 		end = start
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.orphanRanges = append(m.orphanRanges, pressureRange{start: start, end: end})
 	// Orphan windows are recorded per voided mock — far more frequently than
 	// pressure ranges (a few per second) — so avoid the reallocate-and-copy on
@@ -1445,6 +1457,30 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// lifetime carve-out at the top of the loop and never reach
 		// this branch.)
 		if mockTime.Before(cutoffTime) {
+			// This per-test mock decoded too late (the recorder fell behind —
+			// memory-pressure GC pauses under a load spike delay decode by
+			// seconds) to land in any live window, and is now past the 7 s
+			// horizon. Its owning TC was already captured at the ingress, so a
+			// silent reap here strands it: replay finds the operation with no
+			// recorded mock and reports match_phase=no_mocks. This is the tail
+			// of the go-memory-load-mongo flake that survived the pressure-range
+			// and resync-orphan suppressors — both cover the *drop* of chunks,
+			// but here the chunks were delivered and framed; the mock is lost at
+			// this stale-cutoff reap while draining the buffer, out of their reach.
+			//
+			// Record the mock's own wire window as an orphan window so record.go
+			// suppresses the owning TC instead of streaming it mock-less. This
+			// completes the same suppression contract the other post-capture
+			// mock-loss paths already honour — emitMockCore's incomplete-mock
+			// drop records an orphan window (session.go), and the sendToOutChan
+			// capacity drop records the owning TC name (recordDroppedTC) — via
+			// whichever ledger fits; here the wire window is what we have. Only
+			// per-test mocks reach this branch (session/connection tiers are
+			// carved out at the top of the loop), so every reap is a genuine
+			// per-TC orphan. Done under m.mu via the *Locked variant since the
+			// public RecordOrphanWindow would re-lock and deadlock inside this
+			// critical section.
+			m.recordOrphanWindowLocked(mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock)
 			// Per-mock diagnostic: a per-test mock that fell off the
 			// stale-buffer cutoff almost always means the recorder
 			// kept emitting after the dedup queue had advanced past

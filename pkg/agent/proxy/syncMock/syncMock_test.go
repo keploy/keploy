@@ -1366,6 +1366,71 @@ func TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan(t *testing.T) {
 	if !sent[0].Spec.ReqTimestampMock.Equal(inWindowTs) {
 		t.Fatalf("expected the in-window mock flushed; got ts %v (orphan must be dropped)", sent[0].Spec.ReqTimestampMock)
 	}
+	// The reaped orphan owns a TC captured at ingress: dropping it from the
+	// output stream is correct, but it MUST leave an orphan window covering its
+	// own wire instant so record.go suppresses that TC instead of streaming it
+	// mock-less. Without this the go-memory-load-mongo stale-cutoff strand
+	// reaches replay as match_phase=no_mocks.
+	if ok, _ := mgr.WasMockOrphanedInWindow(orphanTs, orphanTs); !ok {
+		t.Fatalf("expected an orphan window covering the stale-cutoff-reaped mock at %v", orphanTs)
+	}
+}
+
+// TestStaleCutoffOrphanWindowCoversOwningTCHTTPWindow is the direct regression
+// for the go-memory-load-mongo `no_mocks` tail (keploy #4354): under a memory-
+// pressure load spike the recorder falls behind, a per-test mongo mock decodes
+// >7 s after its request, misses every live window, and is reaped by the stale-
+// cutoff. Its owning test case was already captured at the HTTP ingress, so the
+// reap MUST leave an orphan window spanning the mock's [req, res] wire window;
+// record.go ORs WasMockOrphanedInWindow into its TC suppressor, so a TC whose
+// HTTP [req, resp] window straddles the reaped operation is suppressed rather
+// than streamed mock-less. Verified by mutation: deleting the
+// recordOrphanWindowLocked call in the stale-cutoff branch fails this test.
+func TestStaleCutoffOrphanWindowCoversOwningTCHTTPWindow(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *models.Mock, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetFirstRequestSignaled()
+	// Past the startup window so the reaped mock is a genuine non-startup per-
+	// test orphan (inside the window every ingest is tagged IsStartup + rescued).
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
+
+	// A mongo mock decoded far too late: its wire window is ancient (>7 s) and
+	// owns no live window, so it hits the stale cutoff. Both timestamps are set,
+	// as on a real recorded mongo exchange (req → response). Kind Mongo matters:
+	// it is NOT in kindsWithImplicitSessionLifetime, so it derives to
+	// LifetimePerTest and genuinely reaches the per-test stale-cutoff branch
+	// rather than being carved out as a session/connection mock upstream.
+	reqTs := time.Now().Add(-25 * time.Second)
+	resTs := reqTs.Add(3 * time.Millisecond)
+	mgr.AddMock(&models.Mock{
+		Kind: models.Mongo,
+		Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+	})
+
+	// A later resolve for an unrelated current test drains the buffer; the
+	// ancient mock is reaped by the stale cutoff.
+	now := time.Now()
+	mgr.ResolveRange(now, now.Add(5*time.Millisecond), "current-test", true, false)
+
+	// The stale mock must NOT have been flushed to the output stream.
+	select {
+	case m := <-ch:
+		t.Fatalf("stale mock must be reaped, not flushed; got ts %v", m.Spec.ReqTimestampMock)
+	default:
+	}
+
+	// The owning TC's HTTP [req, resp] window brackets the mongo operation
+	// (app receives the HTTP request, queries mongo, returns the response), so a
+	// window straddling [reqTs, resTs] must report the mock as orphaned →
+	// record.go suppresses it. Pre-fix this returns false and the TC strands.
+	httpReq := reqTs.Add(-1 * time.Millisecond)
+	httpResp := resTs.Add(1 * time.Millisecond)
+	if ok, n := mgr.WasMockOrphanedInWindow(httpReq, httpResp); !ok {
+		t.Fatalf("expected the reaped stale mock to leave an orphan window covering the owning TC HTTP window [%v,%v] (got ok=%v n=%d)", httpReq, httpResp, ok, n)
+	}
 }
 
 // TestDeleteMocksStrictlyBeforeRescuesLateKeptMock is the regression for
