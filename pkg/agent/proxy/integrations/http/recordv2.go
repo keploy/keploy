@@ -426,7 +426,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
 		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
+			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
 			if err != nil {
 				return nil, fmt.Errorf("decompress request body: %w", err)
 			}
@@ -445,7 +445,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
 		if respParsed.Header.Get("Content-Encoding") != "" {
-			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
 			if err != nil {
 				return nil, fmt.Errorf("decompress response body: %w", err)
 			}

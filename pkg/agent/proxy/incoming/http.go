@@ -176,7 +176,9 @@ var feederInFlightBytes atomic.Int64
 // *http.Response (each carrying up to MaxTestCaseSize=5MB of body) and
 // runs io.ReadAll a second time inside Capture to materialise its own
 // reqBody/respBody copy, so peak transient memory per in-flight
-// goroutine is ~10 MB. Without a cap the parser launches one goroutine
+// goroutine is ~10 MB — a bound that holds only because Capture caps
+// decompression at MaxTestCaseSize per body (pkg.Decompress).
+// Without a cap the parser launches one goroutine
 // per HTTP exchange unconditionally; the go-memory-load workload
 // (k6 firing 42 concurrent VUs against /large_payload endpoints)
 // piles hundreds of these goroutines up faster than the unbuffered
