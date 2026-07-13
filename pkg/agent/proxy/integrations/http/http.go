@@ -257,6 +257,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
+	// Do not record OTLP trace exports (POST /v1/traces). They are live
+	// telemetry, not a dependency: recording them stores volatile, large
+	// config-tier mocks that at replay schema-match the app's re-emitted
+	// exports and fall into the fuzzy-matcher, which shingles the ~150 KB
+	// bodies and OOMs the sidecar. Keeping them out of the pool removes the
+	// candidates entirely. Hardcoded pending a configurable egress-bypass rule.
+	if isOTLPTracesExport(req.Method, req.URL) {
+		h.Logger.Debug("egress bypass: not recording OTLP /v1/traces export", zap.Any("metadata", utils.GetReqMeta(req)))
+		return nil
+	}
+
 	newMock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
