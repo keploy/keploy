@@ -283,12 +283,29 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				// cluster resolver config if steering unmocked in-cluster names is
 				// relied upon.
 				//
-				// Logged at Info, not Debug: this is the one path that relays a
-				// possibly-genuine recording gap as a valid empty answer instead
-				// of a mock miss, so it stays discoverable in a replay report.
-				p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]))
+				// Logging: this branch is on the HOT path — glibc fires A+AAAA for
+				// essentially every hostname and every IPv4-only cluster service
+				// yields an AAAA NODATA here — so an unconditional Info would spam.
+				//   - mocking disabled: not a "mock miss" at all (the operator
+				//     wants real DNS); log at Debug.
+				//   - mocking enabled: keep it discoverable (a genuinely unrecorded
+				//     record of this type also relays empty here) but dedupe to
+				//     once per (name,qtype) so the signal survives without the spam.
+				if mockingEnabled {
+					if _, dup := p.nodataRelayLogged.LoadOrStore(generateCacheKey(question.Name, question.Qtype), struct{}{}); !dup {
+						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
+							zap.String("query", question.Name),
+							zap.String("qtype", dns.TypeToString[question.Qtype]))
+					} else {
+						p.logger.Debug("DNS mock miss: upstream NODATA, relaying (already logged for this name/qtype)",
+							zap.String("query", question.Name),
+							zap.String("qtype", dns.TypeToString[question.Qtype]))
+					}
+				} else {
+					p.logger.Debug("DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
+						zap.String("query", question.Name),
+						zap.String("qtype", dns.TypeToString[question.Qtype]))
+				}
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
 			// Upstream returned a genuinely negative answer: NXDOMAIN,
