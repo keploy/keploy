@@ -260,32 +260,23 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 					zap.Int("answers", len(fwdResp.Answer)))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			// NODATA — upstream returned NOERROR with zero answer RRs. This is
-			// a *valid* negative answer ("the name exists but has no record of
-			// this type"), not a resolution failure, so relay it as-is even
-			// when mocking is enabled. The canonical case is an AAAA query for
-			// an IPv4-only cluster service (e.g. postgres.<ns>.svc.cluster.local):
-			// glibc's getaddrinfo always issues A+AAAA in parallel, the AAAA leg
-			// legitimately has no record, and the app connects over the A record.
-			// Unlike NXDOMAIN there is no unknown name to steer to the proxy IP,
-			// and raising ErrMockNotFound here would fail replay for essentially
-			// every app that resolves an in-cluster dependency by name.
+			// NODATA — upstream returned NOERROR with zero answer RRs: a *valid*
+			// negative answer ("the name exists but has no record of this type"),
+			// distinct from NXDOMAIN. Relay it as-is even with mocking enabled.
+			// The distinction that matters: NXDOMAIN (name absent) still falls
+			// through to #2006 proxy-IP steering below; NODATA does not, because
+			// fabricating an A→proxy-IP for a name that authoritatively has no
+			// such record is less correct than the honest empty answer. Kept
+			// qtype-agnostic on purpose (the IPv6-only empty-A case is symmetric).
+			// See the PR description and the AAAA / A-query regression tests for
+			// the full rationale and the deliberately-loosened bare-name-A case.
 			//
-			// This relay is deliberately qtype-AGNOSTIC (it also covers an A
-			// NODATA), not restricted to AAAA — the symmetric IPv6-only case
-			// (empty A → app falls back to AAAA) is a real scenario. It is safe
-			// w.r.t. the #2006 proxy-IP steering because steering exists for
-			// names that DON'T RESOLVE: a name the app genuinely needs but that
-			// isn't recorded comes back as NXDOMAIN (name absent → still steered
-			// below) or a real A. NODATA means the name EXISTS with no record of
-			// this type; fabricating an A→proxy-IP for it would make the app dial
-			// the proxy for a service that authoritatively has no A record, which
-			// is less correct than relaying the truthful empty answer. The only
-			// loosened case is an IPv4-only app hitting a bare name that returns
-			// A NODATA — a narrow window that previously got steered and now gets
-			// an honest empty answer (see the A-query regression test).
+			// Logged at Info, not Debug: this is the one path that relays a
+			// possibly-genuine recording gap as a valid empty answer instead of a
+			// mock miss, so it must stay discoverable in a replay report rather
+			// than vanish into debug output.
 			if fwdResp.Rcode == dns.RcodeSuccess {
-				p.logger.Debug("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer",
+				p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}

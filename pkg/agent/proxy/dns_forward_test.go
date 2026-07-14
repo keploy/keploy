@@ -521,6 +521,51 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSte
 	}
 }
 
+// TestGenerateCacheKey_QtypeIsolated locks the invariant that makes the
+// qtype-agnostic NODATA relay safe: an AAAA NODATA cached under one key must not
+// be served for a following A query on the same name. The cache key includes the
+// qtype today; this guards it against a future cache-key refactor.
+func TestGenerateCacheKey_QtypeIsolated(t *testing.T) {
+	name := "postgres.checkr.svc.cluster.local"
+	aKey := generateCacheKey(name, dns.TypeA)
+	aaaaKey := generateCacheKey(name, dns.TypeAAAA)
+	if aKey == aaaaKey {
+		t.Fatalf("A and AAAA cache keys must differ (else an AAAA NODATA would be served for an A query); both = %q", aKey)
+	}
+}
+
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty documents the
+// intended behavior for a name that returns NODATA on BOTH A and AAAA (unmocked):
+// each leg is relayed as an honest empty answer rather than steered. The net app
+// effect is EAI_NODATA (no address) — an accepted trade for the mocked-service
+// case, since a genuinely-needed unmocked name resolves to NXDOMAIN (still
+// steered), not NODATA.
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NODATA for whatever qtype is asked
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		q := dns.Question{Name: "ipv-less.svc.", Qtype: qtype, Qclass: dns.ClassINET}
+		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
+			t.Fatalf("%s: expected relayed empty NOERROR, got %+v", dns.TypeToString[qtype], entry.Msg)
+		}
+		if !entry.FromUpstream {
+			t.Errorf("%s: relayed NODATA must be FromUpstream", dns.TypeToString[qtype])
+		}
+	}
+}
+
 // TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
 // confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
 // real cluster-internal name still passes through unchanged after Fix B.
