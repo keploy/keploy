@@ -2753,6 +2753,18 @@ func ExtractHostAndPort(curlCmd string) (string, string, error) {
 }
 
 func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration) error {
+	addr := net.JoinHostPort(host, port)
+	// Probe once up front so an already-listening port returns without paying
+	// the ticker's first-tick (1s) latency below — this is what makes the
+	// readiness gates truly instant for an app that is already accepting.
+	if conn, err := net.DialTimeout("tcp", addr, 800*time.Millisecond); err == nil {
+		_ = conn.Close()
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -2763,7 +2775,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 800*time.Millisecond)
+			conn, err := net.DialTimeout("tcp", addr, 800*time.Millisecond)
 			if err == nil {
 				err := conn.Close()
 				if err != nil {

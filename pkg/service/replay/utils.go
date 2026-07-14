@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -239,6 +240,43 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 					zap.String("port", port),
 					zap.Duration("ceiling", ceiling),
 					zap.Error(err))
+			}
+		}
+
+		// Non-docker apps whose ready address is known — a k8s replay pod's app
+		// Service, a remote host, a native app on a fixed host:port — gate on that
+		// address accepting a TCP connection. This is the TCP-accept analog of the
+		// docker published-port gate above (and of --health-url) for apps that
+		// expose no HTTP health endpoint. dockerPublishedHostPort only fires for a
+		// docker `-p` publish, so this covers everyone else who can name the app's
+		// address. Bounded by its own HealthPollTimeout ceiling (default 60s) and
+		// the same best-effort contract: it can only ever wait LONGER than --delay,
+		// never shorter, and a warn-not-fail on timeout so replay never regresses
+		// vs the pure --delay behavior. It is purely a readiness probe and never
+		// rewrites a request target (unlike test.port).
+		if addr := strings.TrimSpace(cfg.Test.AppReadyProbeAddr); addr != "" {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil || port == "" {
+				logger.Error("invalid test.appReadyProbeAddr; expected host:port — skipping the readiness probe",
+					zap.String("addr", addr),
+					zap.Error(err))
+			} else {
+				if host == "" {
+					host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate
+				}
+				ceiling := cfg.Test.HealthPollTimeout
+				if ceiling <= 0 {
+					ceiling = 60 * time.Second
+				}
+				if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+					if ctx.Err() != nil {
+						return false
+					}
+					logger.Warn("app ready-probe address did not accept a connection within the ceiling; firing tests anyway (replay may see connection refused)",
+						zap.String("addr", addr),
+						zap.Duration("ceiling", ceiling),
+						zap.Error(err))
+				}
 			}
 		}
 		return true
