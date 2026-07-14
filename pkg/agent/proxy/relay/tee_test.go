@@ -115,6 +115,123 @@ func TestTee_DropOnMemoryPressure(t *testing.T) {
 	}
 }
 
+// TestTee_PressureSelfManagedSkipsMemoryPressureDrop locks in the deep fix
+// for the go-memory-load-mongo tail dead zone: a tee whose parser self-manages
+// memory pressure (mongo/v2) must NOT drop chunks under memoryguard pressure,
+// so the length-prefix reassembler is never desynced by a mid-message drop and
+// stays byte-synced across the pause.
+func TestTee_PressureSelfManagedSkipsMemoryPressureDrop(t *testing.T) {
+	t.Parallel()
+	var memPressure atomic.Bool // the memCheck (memoryguard) signal, not the paused flag
+	memPressure.Store(true)
+	tt, _, rec := newTestTee(t, 1<<20, 4, memPressure.Load)
+	tt.setPressureSelfManaged(true)
+
+	if !tt.push(mkChunk("hello")) {
+		t.Fatalf("pressureSelfManaged tee must deliver (not drop) under memory pressure")
+	}
+	got := <-tt.readCh()
+	if string(got.Bytes) != "hello" {
+		t.Fatalf("got bytes %q, want %q", got.Bytes, "hello")
+	}
+	if rec.count(DropMemoryPressure) != 0 {
+		t.Fatalf("self-managed tee must record no memory_pressure drop, got %v", rec.snapshot())
+	}
+}
+
+// TestTee_PressureSelfManagedStillDropsCapacityAndPaused guards the boundary
+// of the opt-out: only the memory_pressure path is suppressed. Genuine
+// mid-message byte loss (per_conn_cap AND channel_full) and the abort/finalize
+// pause MUST still drop — the capacity paths so the parser resyncs on real byte
+// loss (and memory stays bounded), the pause because an aborted/finalized
+// session has no live mock.
+func TestTee_PressureSelfManagedStillDropsCapacityAndPaused(t *testing.T) {
+	t.Parallel()
+
+	// per_conn_cap still fires even while pressure is active and self-managed.
+	var pressure atomic.Bool
+	pressure.Store(true)
+	ttCap, _, recCap := newTestTee(t, 4, 16, pressure.Load)
+	ttCap.setPressureSelfManaged(true)
+	if ttCap.push(mkChunk("abcde")) { // 5 bytes > cap 4
+		t.Fatalf("oversized push must still trip per_conn_cap under self-managed pressure")
+	}
+	if recCap.count(DropPerConnCap) != 1 {
+		t.Fatalf("want 1 per_conn_cap drop, got %v", recCap.snapshot())
+	}
+	if recCap.count(DropMemoryPressure) != 0 {
+		t.Fatalf("memory_pressure must be opted out, got %v", recCap.snapshot())
+	}
+
+	// channel_full still fires: with a large cap but chanBuf=1 and no reader,
+	// staging saturates and the self-managed tee must drop (bounding memory)
+	// rather than silently backlog forever.
+	var pressure2 atomic.Bool
+	pressure2.Store(true)
+	ttChan, _, recChan := newTestTee(t, 1<<30, 1, pressure2.Load)
+	ttChan.setPressureSelfManaged(true)
+	for i := 0; i < 10; i++ {
+		ttChan.push(mkChunk("x"))
+	}
+	time.Sleep(20 * time.Millisecond) // let the drain goroutine settle its buffer
+	if recChan.count(DropChannelFull) == 0 {
+		t.Fatalf("self-managed tee must still drop on channel_full, got %v", recChan.snapshot())
+	}
+	if recChan.count(DropMemoryPressure) != 0 {
+		t.Fatalf("memory_pressure must be opted out, got %v", recChan.snapshot())
+	}
+
+	// paused (PauseTees abort / KindPauseDir finalize) still drops.
+	ttPause, _, recPause := newTestTee(t, 1<<20, 4, nil)
+	ttPause.setPressureSelfManaged(true)
+	ttPause.setPaused(true)
+	if ttPause.push(mkChunk("x")) {
+		t.Fatalf("paused tee must still drop under self-managed pressure")
+	}
+	if recPause.count(DropPaused) != 1 {
+		t.Fatalf("want 1 paused drop, got %v", recPause.snapshot())
+	}
+}
+
+// TestTee_PressureSelfManagedSurvivesPauseResume is the load-bearing invariant
+// for the abort-recovery interaction: the mongo opt-in is set ONCE per
+// connection, before the parser-generation loop, and the relay/tees outlive
+// every generation. A SessionOnAbort → PauseTees → ResumeTees respawn cycle
+// must NOT clobber pressureSelfManaged — otherwise the recovered generation
+// would resume dropping mongo chunks under pressure and re-open the very dead
+// zone this fixes. setPaused mirrors what Pause/ResumeTees drive.
+func TestTee_PressureSelfManagedSurvivesPauseResume(t *testing.T) {
+	t.Parallel()
+	var memPressure atomic.Bool
+	memPressure.Store(true)
+	tt, _, rec := newTestTee(t, 1<<20, 4, memPressure.Load)
+	tt.setPressureSelfManaged(true)
+
+	// Delivered under pressure before the abort.
+	if !tt.push(mkChunk("before")) {
+		t.Fatalf("pre-abort push must deliver under self-managed pressure")
+	}
+	<-tt.readCh()
+
+	// Abort: PauseTees drops; then ResumeTees re-arms delivery.
+	tt.setPaused(true)
+	if tt.push(mkChunk("during-abort")) {
+		t.Fatalf("push while paused (aborted) must drop")
+	}
+	tt.setPaused(false)
+
+	// After resume, the self-managed opt-out MUST still hold under pressure.
+	if !tt.push(mkChunk("after")) {
+		t.Fatalf("post-resume push must still deliver under self-managed pressure — pressureSelfManaged was clobbered by the pause/resume cycle")
+	}
+	if string((<-tt.readCh()).Bytes) != "after" {
+		t.Fatalf("post-resume chunk mismatch")
+	}
+	if rec.count(DropMemoryPressure) != 0 {
+		t.Fatalf("no memory_pressure drop expected across the whole cycle, got %v", rec.snapshot())
+	}
+}
+
 func TestTee_DropOnPerConnCap(t *testing.T) {
 	t.Parallel()
 	// A single chunk LARGER than the cap always trips per_conn_cap on the

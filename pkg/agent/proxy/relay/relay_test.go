@@ -250,6 +250,43 @@ func TestTeeDropOnMemoryGuard(t *testing.T) {
 	}
 }
 
+// TestRelaySetPressureSelfManagedDeliversUnderMemoryGuard is the relay-level
+// counterpart to TestTeeDropOnMemoryGuard: with SetPressureSelfManaged(true)
+// the parser-facing FakeConn STILL receives chunks while the memory guard is
+// asserting pressure (the parser sheds memory itself and must stay byte-synced),
+// and no memory_pressure drop is recorded. Real traffic flows either way.
+func TestRelaySetPressureSelfManagedDeliversUnderMemoryGuard(t *testing.T) {
+	t.Parallel()
+	var pressure atomic.Bool
+	pressure.Store(true)
+	drops := newDropSink()
+
+	h := newHarness(t, Config{
+		MemoryGuardCheck:     pressure.Load,
+		OnMarkMockIncomplete: drops.record,
+	})
+	h.r.SetPressureSelfManaged(true)
+
+	go h.writeClient([]byte("visible"))
+	got := h.readDest(len("visible"))
+	if string(got) != "visible" {
+		t.Fatalf("dest got %q, want %q", got, "visible")
+	}
+
+	// The FakeConn DOES receive the chunk despite active memory pressure.
+	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(2 * time.Second))
+	c, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ClientStream should have delivered the chunk under self-managed pressure, got err %v", err)
+	}
+	if string(c.Bytes) != "visible" {
+		t.Fatalf("FakeConn got %q, want %q", c.Bytes, "visible")
+	}
+	if drops.count(DropMemoryPressure) != 0 {
+		t.Fatalf("self-managed relay must record no memory_pressure drop, got %v", drops.snapshot())
+	}
+}
+
 func TestTeeDropOnPerConnCap(t *testing.T) {
 	t.Parallel()
 	drops := newDropSink()

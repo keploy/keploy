@@ -247,6 +247,20 @@ func (r *Relay) ResumeTees() {
 	r.teeD2C.setPaused(false)
 }
 
+// SetPressureSelfManaged toggles the memory-pressure drop opt-out on both
+// tees. When enabled the tees stop dropping chunks under memoryguard pressure
+// and rely on the parser to shed memory itself while staying byte-synced — so
+// a length-prefix reassembler is never desynced by a mid-message pressure drop
+// (the root of the go-memory-load-mongo tail dead zone). Opted into per
+// connection in recordViaSupervisor by parsers that implement
+// SelfManagesMemoryPressure() (mongo/v2). Capacity drops
+// (channel_full/per_conn_cap) and the abort/finalize pause are unaffected, so
+// a genuine mid-message byte loss still triggers the parser's resync.
+func (r *Relay) SetPressureSelfManaged(v bool) {
+	r.teeC2D.setPressureSelfManaged(v)
+	r.teeD2C.setPressureSelfManaged(v)
+}
+
 // ReattachStreams builds fresh client/dest FakeConns over the SAME still-open
 // tee out-channels and atomically swaps them in, returning the new pair. The
 // previous FakeConns were one-way Closed by SessionOnAbort and cannot be

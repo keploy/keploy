@@ -216,6 +216,21 @@ func (p *Proxy) recordViaSupervisor(
 		recoverable = rp.SupportsAbortRecovery()
 	}
 
+	// Memory-pressure self-management opt-in (duck-typed like the others). A
+	// parser that stays byte-synced across a memoryguard pause and sheds
+	// memory itself (mongo/v2 skip-discards whole messages under pressure)
+	// tells the relay to STOP dropping its chunks under memory pressure. A
+	// mid-message pressure drop desyncs the length-prefix reassembler, which
+	// then cannot re-anchor on the app's large multi-chunk messages under the
+	// pressure sawtooth and silently stops recording the pooled connection for
+	// the rest of the run — the go-memory-load-mongo tail dead zone. Only the
+	// memory_pressure tee-drop is suppressed; capacity drops and the
+	// abort/finalize pause are unchanged, so genuine mid-message byte loss
+	// still triggers the parser's resync.
+	if pm, ok := parser.(interface{ SelfManagesMemoryPressure() bool }); ok && pm.SelfManagesMemoryPressure() {
+		r.SetPressureSelfManaged(true)
+	}
+
 	// Run the relay in its own goroutine under the connection's lifetime.
 	// The relay is created ONCE and outlives every parser generation; each
 	// generation's SessionOnAbort closes the current FakeConns so the parser's

@@ -90,6 +90,22 @@ type tee struct {
 	// while still forwarding real bytes.
 	paused atomic.Bool
 
+	// pressureSelfManaged, when set, makes push SKIP the memoryguard
+	// (memCheck) drop path: the parser owns memory-pressure handling for
+	// this connection. A length-prefix reassembler (mongo/v2) that is fed a
+	// mid-message chunk drop can no longer trust its buffer head and must
+	// content-scan to re-anchor — which, for the app's large multi-chunk
+	// messages under the memory guard's sawtooth, can never buffer a whole
+	// message before the next drop and so stays permanently desynced,
+	// silently stopping recording for the pooled connection (the
+	// go-memory-load-mongo tail dead zone). Such a parser instead stays
+	// byte-synced across a pause and sheds memory itself (skip-discarding
+	// whole messages), so the tee must NOT drop its chunks for pressure.
+	// Only the memory_pressure path is skipped; the paused (abort/finalize)
+	// and capacity (channel_full/per_conn_cap) drop paths are unaffected —
+	// a genuine mid-message capacity drop still fires so the parser resyncs.
+	pressureSelfManaged atomic.Bool
+
 	// drops counts dropped chunks for this direction. Exposed via
 	// [tee.dropCount] for diagnostics and tests.
 	drops atomic.Uint64
@@ -163,6 +179,10 @@ func (t *tee) dropCount() uint64 { return t.drops.Load() }
 // reason [DropPaused] without consuming capacity.
 func (t *tee) setPaused(p bool) { t.paused.Store(p) }
 
+// setPressureSelfManaged toggles whether push skips the memoryguard
+// (DropMemoryPressure) drop path for this tee. See the field doc.
+func (t *tee) setPressureSelfManaged(v bool) { t.pressureSelfManaged.Store(v) }
+
 // push admits a chunk into staging. Returns true on success, false on
 // drop. A drop invokes onDrop with the reason string and does not
 // alter the byte counter.
@@ -182,7 +202,7 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		t.drop(DropPaused, teeChunkTs(c))
 		return false
 	}
-	if t.memCheck != nil && t.memCheck() {
+	if t.memCheck != nil && t.memCheck() && !t.pressureSelfManaged.Load() {
 		t.drop(DropMemoryPressure, teeChunkTs(c))
 		return false
 	}
