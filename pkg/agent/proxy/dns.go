@@ -270,6 +270,20 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// Unlike NXDOMAIN there is no unknown name to steer to the proxy IP,
 			// and raising ErrMockNotFound here would fail replay for essentially
 			// every app that resolves an in-cluster dependency by name.
+			//
+			// This relay is deliberately qtype-AGNOSTIC (it also covers an A
+			// NODATA), not restricted to AAAA — the symmetric IPv6-only case
+			// (empty A → app falls back to AAAA) is a real scenario. It is safe
+			// w.r.t. the #2006 proxy-IP steering because steering exists for
+			// names that DON'T RESOLVE: a name the app genuinely needs but that
+			// isn't recorded comes back as NXDOMAIN (name absent → still steered
+			// below) or a real A. NODATA means the name EXISTS with no record of
+			// this type; fabricating an A→proxy-IP for it would make the app dial
+			// the proxy for a service that authoritatively has no A record, which
+			// is less correct than relaying the truthful empty answer. The only
+			// loosened case is an IPv4-only app hitting a bare name that returns
+			// A NODATA — a narrow window that previously got steered and now gets
+			// an honest empty answer (see the A-query regression test).
 			if fwdResp.Rcode == dns.RcodeSuccess {
 				p.logger.Debug("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer",
 					zap.String("query", question.Name),
@@ -288,17 +302,16 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// (relaying NXDOMAIN crashes apps using bare service names
 			// like "localstack" or "postgres" — issue #2006).
 			if !mockingEnabled {
-				p.logger.Debug("DNS mock miss: upstream returned negative/empty answer; mocking disabled, returning upstream response",
+				p.logger.Debug("DNS mock miss: upstream returned negative answer; mocking disabled, returning upstream response",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			p.logger.Debug("DNS mock miss: upstream returned negative/empty answer; falling back to synthetic DNS response",
+			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
-				zap.Int("rcode", fwdResp.Rcode),
-				zap.Int("answers", len(fwdResp.Answer)))
+				zap.Int("rcode", fwdResp.Rcode))
 		} else if fwdErr != nil {
 			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
 				zap.String("query", question.Name),

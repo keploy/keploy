@@ -480,6 +480,47 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs(t *testi
 	}
 }
 
+// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSteered
+// pins the deliberate, qtype-agnostic scope of the NODATA relay. An A-query
+// NODATA (name exists, no A record) is relayed as an honest empty answer rather
+// than steered to the proxy IP (#2006). This is the one behavioral change to the
+// steering path: previously a bare-name A that didn't resolve fell through to
+// the synthetic proxy-IP A. The decision is that NODATA means the name
+// authoritatively has no A record, so fabricating a proxy IP would be less
+// correct than the truthful empty answer; genuinely-absent names still return
+// NXDOMAIN and are still steered (covered by the NXDOMAIN test above).
+func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSteered(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // NOERROR, zero answers -> NODATA on the A query
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected the relayed NODATA response, got nil Msg")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("Rcode = %d, want RcodeSuccess (empty NOERROR relayed, not steered)", entry.Msg.Rcode)
+	}
+	if len(entry.Msg.Answer) != 0 {
+		t.Fatalf("A-query NODATA must be relayed empty, not steered to a synthetic proxy-IP A; got %d answers: %v",
+			len(entry.Msg.Answer), entry.Msg.Answer)
+	}
+	if !entry.FromUpstream {
+		t.Error("relayed NODATA must be cached as FromUpstream")
+	}
+}
+
 // TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
 // confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
 // real cluster-internal name still passes through unchanged after Fix B.
