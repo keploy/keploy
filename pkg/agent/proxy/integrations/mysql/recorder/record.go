@@ -97,6 +97,18 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 					zap.String("connKey", opts.ConnKey))
 				return nil
 			}
+			// A connection whose first captured server packet is not the
+			// HandshakeV10 greeting was joined mid-stream (opened before
+			// recording started, e.g. a pre-warmed connection pool). Its
+			// greeting — and thus the server capability flags needed to
+			// decode any of its packets — can never be recovered, so skip it
+			// gracefully instead of failing the capture. Connections captured
+			// from their first byte are unaffected.
+			if errors.Is(err, wire.ErrServerGreetingNotFound) {
+				logger.Warn("skipping MySQL connection joined mid-stream: no server greeting was captured, so it cannot be recorded. This connection was opened before recording started (e.g. a pre-warmed connection pool). To capture it, restart the application after starting the recording so its connections are re-established and captured from the greeting.",
+					zap.String("connKey", opts.ConnKey))
+				return nil
+			}
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
 			return nil
