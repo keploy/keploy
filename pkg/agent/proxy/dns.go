@@ -250,32 +250,42 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
-			// Only accept the upstream answer when it actually resolved
-			// the name (RcodeSuccess with at least one Answer RR).
-			if fwdResp.Rcode == dns.RcodeSuccess && len(fwdResp.Answer) > 0 {
-				p.logger.Debug("DNS mock miss resolved via upstream forward",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-					zap.Int("rcode", fwdResp.Rcode),
-					zap.Int("answers", len(fwdResp.Answer)))
-				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
-			}
-			// NODATA — upstream returned NOERROR with zero answer RRs: a *valid*
-			// negative answer ("the name exists but has no record of this type"),
-			// distinct from NXDOMAIN. Relay it as-is even with mocking enabled.
-			// The distinction that matters: NXDOMAIN (name absent) still falls
-			// through to #2006 proxy-IP steering below; NODATA does not, because
-			// fabricating an A→proxy-IP for a name that authoritatively has no
-			// such record is less correct than the honest empty answer. Kept
-			// qtype-agnostic on purpose (the IPv6-only empty-A case is symmetric).
-			// See the PR description and the AAAA / A-query regression tests for
-			// the full rationale and the deliberately-loosened bare-name-A case.
-			//
-			// Logged at Info, not Debug: this is the one path that relays a
-			// possibly-genuine recording gap as a valid empty answer instead of a
-			// mock miss, so it must stay discoverable in a replay report rather
-			// than vanish into debug output.
+			// A RcodeSuccess response splits into two cases by answer count:
+			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
+			// a non-success rcode falls through to the #2006 steering below.
 			if fwdResp.Rcode == dns.RcodeSuccess {
+				if len(fwdResp.Answer) > 0 {
+					// Resolved — relay the real answer.
+					p.logger.Debug("DNS mock miss resolved via upstream forward",
+						zap.String("query", question.Name),
+						zap.String("qtype", dns.TypeToString[question.Qtype]),
+						zap.Int("rcode", fwdResp.Rcode),
+						zap.Int("answers", len(fwdResp.Answer)))
+					return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+				}
+				// NODATA — NOERROR + zero answer RRs: a *valid* negative answer
+				// ("the name exists but has no record of this type"), distinct
+				// from NXDOMAIN. Relay it as-is even with mocking enabled. Only
+				// NXDOMAIN (name absent) falls through to #2006 proxy-IP steering
+				// below; fabricating an A→proxy-IP for a name that authoritatively
+				// has no such record would be less correct than the honest empty
+				// answer. Kept qtype-agnostic on purpose (the IPv6-only empty-A
+				// case is symmetric). See issue #2006 and the regression tests
+				// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_* for the
+				// deliberately-loosened bare-name-A case.
+				//
+				// Caveat (resolver-config-dependent): the "genuinely-needed
+				// unmocked names return NXDOMAIN, not NODATA" assumption holds for
+				// bare names on most resolvers, but a search-domain / ndots setup
+				// (systemd-resolved, k8s pod DNS) can qualify a name into a zone
+				// that answers NODATA — such a name would now get an empty answer
+				// instead of being steered. Narrow; validate against the target
+				// cluster resolver config if steering unmocked in-cluster names is
+				// relied upon.
+				//
+				// Logged at Info, not Debug: this is the one path that relays a
+				// possibly-genuine recording gap as a valid empty answer instead
+				// of a mock miss, so it stays discoverable in a replay report.
 				p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]))

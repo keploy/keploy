@@ -566,6 +566,46 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing
 	}
 }
 
+// TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP
+// pins that non-success rcodes OTHER than NXDOMAIN still steer to the proxy IP
+// after the branch restructure. SERVFAIL (like NXDOMAIN, REFUSED, …) is a
+// genuinely-negative answer and must NOT slip into the NODATA relay branch —
+// it falls through to the synthetic proxy-IP fallback so eBPF can intercept
+// and match a recorded mock (#2006).
+func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure // SERVFAIL
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	p := newProxyWithUpstream(t, addr, 2*time.Second)
+	emptyMgr := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(emptyMgr.Close)
+	p.mockManager = emptyMgr
+
+	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+
+	if entry.Msg == nil {
+		t.Fatal("expected synthetic proxy-IP fallback, got nil Msg")
+	}
+	if entry.Msg.Rcode != dns.RcodeSuccess {
+		t.Errorf("SERVFAIL must be steered to a synthetic success response, got rcode %d", entry.Msg.Rcode)
+	}
+	if len(entry.Msg.Answer) != 1 {
+		t.Fatalf("expected 1 synthetic A answer (steered), got %d", len(entry.Msg.Answer))
+	}
+	if a, ok := entry.Msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("127.0.0.1")) {
+		t.Errorf("expected synthetic A 127.0.0.1 (proxy steering), got %v", entry.Msg.Answer[0])
+	}
+	if entry.FromUpstream {
+		t.Error("steered synthetic response must not be marked FromUpstream")
+	}
+}
+
 // TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough
 // confirms that a *valid* upstream answer (Rcode=0, with Answer RRs) for a
 // real cluster-internal name still passes through unchanged after Fix B.
