@@ -867,6 +867,11 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// Surface the async-egress verdict at replay wind-down (logs once; the
+	// StopProxyServer path also calls this, whichever fires first wins).
+	if p.asyncEngine != nil {
+		p.asyncEngine.LogReport(p.logger)
+	}
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.
@@ -2559,6 +2564,12 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	<-ctx.Done()
 
 	p.logger.Info("stopping proxy server...")
+
+	// Surface the async-egress verdict (served / shape-flags / not-exercised)
+	// at end of replay so it is visible in keploy's output.
+	if p.asyncEngine != nil {
+		p.asyncEngine.LogReport(p.logger)
+	}
 
 	// Coordinated shutdown sequence (PLAN.md §3.7, partial I8).
 	//

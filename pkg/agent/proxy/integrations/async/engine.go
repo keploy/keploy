@@ -38,6 +38,8 @@ type Engine struct {
 
 	pass, flag int
 	flags      []string
+
+	logOnce sync.Once // LogReport fires at most once (multiple shutdown seams call it)
 }
 
 func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]AsyncParser) *Engine {
@@ -178,6 +180,27 @@ func (e *Engine) Report() ReportSnapshot {
 	out := ReportSnapshot{Pass: e.pass, Flag: e.flag, NotExercised: ne}
 	out.Flags = append(out.Flags, e.flags...)
 	return out
+}
+
+// LogReport emits the async verdict tally so it is visible in keploy's output
+// at end of replay: served-and-shape-matched, shape-flags (served despite
+// request drift), and armed-but-never-polled (not-exercised). Each shape flag
+// is logged at Warn since drift is an anomaly, not expected-default state.
+func (e *Engine) LogReport(logger *zap.Logger) {
+	e.logOnce.Do(func() {
+		s := e.Report()
+		if s.Pass == 0 && s.Flag == 0 && s.NotExercised == 0 {
+			return // no async activity (e.g. record mode) — stay quiet
+		}
+		logger.Info("async egress verdict",
+			zap.Int("served", s.Pass),
+			zap.Int("shape_flags", s.Flag),
+			zap.Int("not_exercised", s.NotExercised))
+		for _, f := range s.Flags {
+			logger.Warn("async egress shape drift (served recorded response anyway)",
+				zap.String("detail", f))
+		}
+	})
 }
 
 func seqOf(m *models.Mock) int       { return atoiOr(m.Spec.Metadata[models.MetaAsyncSeq], 0) }

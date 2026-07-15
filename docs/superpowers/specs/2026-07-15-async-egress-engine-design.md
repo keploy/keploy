@@ -419,10 +419,16 @@ consumer) under `sudo keploy record`/`test`:
   (skip=pass). Only startup / `--delay`-window deliveries are reliably served.
   A faithful demonstration of mid-sequence ordered serving needs either a
   fast/aligned poller or a keploy-paced delivery mode (future work).
-- **Finding B — verdict visibility:** the engine computes the shape-flag and
-  not-exercised counts in `Report()`, but nothing surfaces them in keploy's
-  test summary/logs yet. Wiring `Engine.Report()` into the replay summary is
-  required for the verdict (and any shape drift) to be visible.
+- **Finding B — verdict visibility (RESOLVED):** `Engine.Report()` is now
+  surfaced via `Engine.LogReport` at the proxy wind-down seams
+  (`SetGracefulShutdown` / `StopProxyServer`, fired once). Replay emits
+  `async egress verdict {served, shape_flags, not_exercised}` at INFO and one
+  WARN per shape drift. Demonstrated end-to-end: mutating a served mock's
+  recorded request method (`GET`→`PUT`) flipped the verdict to
+  `shape_flags: 1` with `async egress shape drift ... GET /poll vs /poll?...`,
+  the recorded response was still served, and the sync tests still passed
+  (async verdict is reported, non-blocking). Baseline run showed
+  `served:1, shape_flags:0, not_exercised:11` (the 11 quantifying Finding A).
 
 ## 10. Known limitations / future work
 
