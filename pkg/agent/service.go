@@ -103,6 +103,14 @@ type WindowedProxy interface {
 	SetMocksWithWindow(ctx context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error
 }
 
+// AsyncMockLoader is an optional Proxy capability. The agent hands the proxy
+// the COMPLETE async-mock corpus exactly once (at mock-store time) so the
+// async engine can build its per-lane ordered streams. Proxies without async
+// support simply don't implement it.
+type AsyncMockLoader interface {
+	LoadAsyncMocks(mocks []*models.Mock)
+}
+
 // FirstWindowStartReader is an optional extension implemented by proxies
 // that can report the earliest test window start observed by their
 // underlying MockManager. Consumed by the agent's tier-aware

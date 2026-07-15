@@ -2806,6 +2806,20 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	return nil
 }
 
+// Compile-time proof that *Proxy satisfies the agent's optional
+// AsyncMockLoader capability. pkg/agent/proxy already imports pkg/agent
+// (as agent), and pkg/agent does not import back, so this asserts without
+// introducing an import cycle.
+var _ agent.AsyncMockLoader = (*Proxy)(nil)
+
+// LoadAsyncMocks forwards the complete async-mock corpus to the async engine
+// (run-once inside Engine.Load). No-op when async is not configured.
+func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
+	if p.asyncEngine != nil {
+		p.asyncEngine.Load(mocks)
+	}
+}
+
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	if m := p.getMockManager(); m != nil {
 		m.SetFilteredMocks(filtered)
