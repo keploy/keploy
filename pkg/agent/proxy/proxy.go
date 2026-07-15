@@ -181,6 +181,12 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
+	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
+	// IPv4-only cluster service yields an AAAA NODATA here, so an un-deduped
+	// Info line would run on almost every resolution. See resolveUncachedDNSResponse.
+	nodataRelayLogged sync.Map // map[string]struct{} keyed by generateCacheKey
+
 	//to store the nsswitch.conf file data
 	nsSwitchMutex             sync.Mutex
 	nsswitchData              []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
