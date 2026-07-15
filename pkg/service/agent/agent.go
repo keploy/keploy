@@ -643,6 +643,13 @@ func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	return out
 }
 
+// wantsAsyncMocks reports whether the proxy consumes async mocks, so store
+// paths can skip the (otherwise unconditional) async-tag scan when it doesn't.
+func (a *Agent) wantsAsyncMocks() bool {
+	_, ok := a.Proxy.(coreAgent.AsyncMockLoader)
+	return ok
+}
+
 // loadAsyncIntoProxy hands the async corpus to the proxy if it supports it.
 // Engine.Load is run-once, so callers pass the COMPLETE async corpus in a
 // single call per store path — never per window.
@@ -714,7 +721,9 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	a.finalizeClientMocks(ctx, storage)
 	// Non-stream path keeps everything resident, so the complete async corpus
 	// is exactly the async subset of filtered+unfiltered.
-	a.loadAsyncIntoProxy(append(collectAsyncMocks(filtered), collectAsyncMocks(unfiltered)...))
+	if a.wantsAsyncMocks() {
+		a.loadAsyncIntoProxy(append(collectAsyncMocks(filtered), collectAsyncMocks(unfiltered)...))
+	}
 	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
@@ -794,6 +803,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// per-test async egress is parked on disk, not left in storage.filtered, so
 	// collecting from the resident slices afterward would silently drop it.
 	var asyncMocks []*models.Mock
+	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -807,7 +817,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
-		if mock.Spec.Metadata[models.MetaAsync] == "true" {
+		if wantAsync && mock.Spec.Metadata[models.MetaAsync] == "true" {
 			asyncMocks = append(asyncMocks, mock)
 		}
 		if i < header.FilteredCount {

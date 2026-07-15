@@ -6,9 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -53,12 +51,12 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	if live == nil || live.Spec.HTTPReq == nil || recorded == nil || recorded.Spec.HTTPReq == nil {
 		return false, "missing request payload"
 	}
-	liveStripped := stripVolatile(live, lane.VolatileParams)
-	liveReq, err := mockToReq(liveStripped)
+	vol := volatileSet(lane.VolatileParams)
+	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
 		return false, "unparseable live request: " + err.Error()
 	}
-	rec := stripVolatile(recorded, lane.VolatileParams)
+	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
 	// result means the single candidate matched.
 	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, true)
@@ -90,15 +88,24 @@ func hostAndPath(r *models.HTTPReq) (host, p string) {
 	return host, p
 }
 
-// stripVolatile returns a shallow copy of the mock with volatile query params
-// removed from URL + URLParams, so key-set comparison ignores them.
-func stripVolatile(m *models.Mock, volatile []string) *models.Mock {
-	if len(volatile) == 0 {
-		return m
+// volatileSet builds the volatile-param lookup set once, so a caller stripping
+// both the live and recorded request doesn't rebuild it twice.
+func volatileSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
 	}
-	vol := make(map[string]bool, len(volatile))
-	for _, v := range volatile {
-		vol[v] = true
+	vol := make(map[string]bool, len(names))
+	for _, n := range names {
+		vol[n] = true
+	}
+	return vol
+}
+
+// stripVolatile returns a shallow copy of the mock with the volatile query
+// params (vol) removed from URL + URLParams, so key-set comparison ignores them.
+func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
+	if len(vol) == 0 {
+		return m
 	}
 	req := *m.Spec.HTTPReq
 	if u, err := url.Parse(req.URL); err == nil {
@@ -143,52 +150,6 @@ func mockToReq(m *models.Mock) (*req, error) {
 	}, nil
 }
 
-// buildMockResponseBytes serializes a recorded HTTP mock's response to raw
-// wire bytes (status line + headers + recomputed Content-Length + body,
-// compressing the body when Content-Encoding is set). Extracted from the
-// inline matched-mock path so the async serving branch reuses identical logic.
-func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
-	if stub == nil || stub.Spec.HTTPResp == nil {
-		return nil, fmt.Errorf("async/http: mock %q has no response to serialize", func() string {
-			if stub != nil {
-				return stub.Name
-			}
-			return ""
-		}())
-	}
-	if err := stub.HydrateResponse(); err != nil {
-		return nil, err
-	}
-	protoMajor, protoMinor := 1, 1
-	if stub.Spec.HTTPReq != nil {
-		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
-	}
-	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
-		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
-	var respBody string
-	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-		if err != nil {
-			return nil, err
-		}
-		respBody = string(compressed)
-	} else {
-		respBody = body
-	}
-	var headers string
-	for key, values := range header {
-		if key == "Content-Length" {
-			values = []string{strconv.Itoa(len(respBody))}
-		}
-		for _, value := range values {
-			headers += fmt.Sprintf("%s: %s\r\n", key, value)
-		}
-	}
-	return []byte(statusLine + headers + "\r\n" + respBody), nil
-}
-
 // liveReqToMock wraps the matcher's parsed request as a *models.Mock so the
 // transport-agnostic engine (which speaks only *models.Mock) can route/verify it.
 func liveReqToMock(input *req) *models.Mock {
@@ -208,6 +169,8 @@ func liveReqToMock(input *req) *models.Mock {
 }
 
 // flakyHeaderNoise returns the package flaky-header list as a header-noise map.
+// Shared by MatchRequestShape and decode.go's auto-header-noise setup so the
+// two can't drift.
 func flakyHeaderNoise() map[string][]string {
 	nm := make(map[string][]string, len(flakyHeaders))
 	for _, fh := range flakyHeaders {

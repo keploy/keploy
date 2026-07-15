@@ -160,14 +160,10 @@ type Proxy struct {
 
 	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
 	// async-lane replay state: registered parsers and the per-test
-	// position counter consumed by Engine.Decide's anchor gating.
+	// position counter consumed by Engine.Decide's anchor gating. The
+	// "first window doesn't count as a completed test" rule is owned by
+	// Engine.AdvanceWindow, so this struct keeps no async bookkeeping.
 	asyncEngine *async.Engine
-	// asyncWindowSeen marks that at least one SetMocksWithWindow call has
-	// been observed. The FIRST window corresponds to the app reaching its
-	// first test (no prior test to count as completed); every window
-	// after that means one more test finished, so only then do we call
-	// asyncEngine.OnTestComplete.
-	asyncWindowSeen bool
 
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
@@ -2856,12 +2852,8 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 		p.dnsCache.Purge()
 	}
 	if p.asyncEngine != nil {
-		// First window = app reaching its first test; no test completed yet.
-		// Every subsequent window = one more completed test.
-		if p.asyncWindowSeen {
-			p.asyncEngine.OnTestComplete()
-		}
-		p.asyncWindowSeen = true
+		// Engine owns the "first window doesn't count" rule; advance blindly.
+		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
 }

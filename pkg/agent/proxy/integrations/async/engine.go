@@ -9,10 +9,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// asyncEntry is a recorded async mock with its ordering/anchor ints parsed
+// once at Load, so the hot path never re-parses the string metadata.
+type asyncEntry struct {
+	mock      *models.Mock
+	seq       int
+	anchorPos int
+}
+
 type laneStream struct {
 	lane   models.AsyncLane
-	mocks  []*models.Mock // sorted by asyncSeq
-	cursor int            // next unconsumed index
+	mocks  []asyncEntry // sorted by seq
+	cursor int          // next unconsumed index
 }
 
 // ReportSnapshot is a point-in-time copy of the engine's verdict tallies.
@@ -27,14 +35,14 @@ type ReportSnapshot struct {
 // and AsyncParser delegates. Safe for concurrent use.
 type Engine struct {
 	logger    *zap.Logger
-	laneOrder []models.AsyncLane          // caller-declared order; first match wins in LaneFor
-	lanes     map[string]models.AsyncLane // by name, for O(1) lookup
-	parsers   map[string]AsyncParser      // by lane.Type
+	laneOrder []models.AsyncLane     // caller-declared order; first match wins in LaneFor, by-name lookup scans it
+	parsers   map[string]AsyncParser // by lane.Type
 
-	mu        sync.Mutex
-	loaded    bool                   // true once Load has partitioned+sorted streams; makes Load idempotent
-	streams   map[string]*laneStream // by lane name
-	completed int                    // number of testcases completed
+	mu         sync.Mutex
+	loaded     bool                   // true once Load has partitioned+sorted streams; makes Load idempotent
+	streams    map[string]*laneStream // by lane name
+	completed  int                    // number of testcases completed
+	windowSeen bool                   // AdvanceWindow: first window doesn't count as a completed test
 
 	pass, flag int
 	flags      []string
@@ -43,19 +51,25 @@ type Engine struct {
 }
 
 func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]AsyncParser) *Engine {
-	lm := make(map[string]models.AsyncLane, len(lanes))
 	order := make([]models.AsyncLane, 0, len(lanes))
-	for _, l := range lanes {
-		lm[l.Name] = l
-		order = append(order, l)
-	}
+	order = append(order, lanes...)
 	return &Engine{
 		logger:    logger,
 		laneOrder: order,
-		lanes:     lm,
 		parsers:   parsers,
 		streams:   make(map[string]*laneStream),
 	}
+}
+
+// laneByName finds a declared lane by name. Lane counts are tiny (caller-
+// declared config), so a linear scan is cheaper than a parallel map.
+func (e *Engine) laneByName(name string) (models.AsyncLane, bool) {
+	for _, l := range e.laneOrder {
+		if l.Name == name {
+			return l, true
+		}
+	}
+	return models.AsyncLane{}, false
 }
 
 // Load partitions async-tagged mocks into per-lane, seq-ordered streams.
@@ -73,7 +87,7 @@ func (e *Engine) Load(mocks []*models.Mock) {
 			continue
 		}
 		name := m.Spec.Metadata[models.MetaAsyncLane]
-		lane, ok := e.lanes[name]
+		lane, ok := e.laneByName(name)
 		if !ok {
 			continue
 		}
@@ -82,19 +96,39 @@ func (e *Engine) Load(mocks []*models.Mock) {
 			s = &laneStream{lane: lane}
 			e.streams[name] = s
 		}
-		s.mocks = append(s.mocks, m)
+		s.mocks = append(s.mocks, asyncEntry{
+			mock:      m,
+			seq:       atoiOr(m.Spec.Metadata[models.MetaAsyncSeq], 0),
+			anchorPos: atoiOr(m.Spec.Metadata[models.MetaAnchorPos], 0),
+		})
 	}
 	for _, s := range e.streams {
 		sort.SliceStable(s.mocks, func(i, j int) bool {
-			return seqOf(s.mocks[i]) < seqOf(s.mocks[j])
+			return s.mocks[i].seq < s.mocks[j].seq
 		})
 	}
 	e.loaded = true
 }
 
+// OnTestComplete increments the completed-testcase counter directly. Used by
+// unit tests to simulate test completion; production advances via AdvanceWindow.
 func (e *Engine) OnTestComplete() {
 	e.mu.Lock()
 	e.completed++
+	e.mu.Unlock()
+}
+
+// AdvanceWindow records that the replay runner opened a test window. The first
+// window is the app reaching its first test (no test completed yet); every
+// subsequent window means one more test completed. Owning the "first window
+// doesn't count" rule here lets callers advance unconditionally.
+func (e *Engine) AdvanceWindow() {
+	e.mu.Lock()
+	if e.windowSeen {
+		e.completed++
+	} else {
+		e.windowSeen = true
+	}
 	e.mu.Unlock()
 }
 
@@ -118,8 +152,7 @@ func (e *Engine) CompletedForTest() int {
 
 // LaneFor returns the lane a live request routes to, by asking each lane's
 // parser. Lanes are tried in caller-declared order (as passed to NewEngine)
-// so the FIRST declared matching lane always wins, deterministically — Go
-// map iteration order must not be relied upon here.
+// so the FIRST declared matching lane always wins, deterministically.
 func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	for _, lane := range e.laneOrder {
 		p := e.parsers[lane.Type]
@@ -130,39 +163,45 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	return models.AsyncLane{}, false
 }
 
-// Decide returns the recorded mock to serve, or a keep-alive payload.
+// Decide returns the recorded mock to serve, or a keep-alive payload. The
+// (potentially expensive) shape match runs OUTSIDE the engine lock so poll
+// traffic on one lane never serializes unrelated lanes' Load/Report/advance.
 func (e *Engine) Decide(lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	p := e.parsers[lane.Type]
-	s := e.streams[lane.Name]
-	if s != nil && s.cursor < len(s.mocks) && e.isArmedLocked(s.mocks[s.cursor]) {
-		recorded := s.mocks[s.cursor]
+	var recorded *models.Mock
+	if s := e.streams[lane.Name]; s != nil && s.cursor < len(s.mocks) && e.completed >= s.mocks[s.cursor].anchorPos {
+		recorded = s.mocks[s.cursor].mock
 		s.cursor++
-		if p != nil {
-			if ok, detail := p.MatchRequestShape(live, recorded, lane); ok {
-				e.pass++
-			} else {
-				e.flag++
-				e.flags = append(e.flags, lane.Name+": "+detail)
-			}
-		} else if e.logger != nil {
+	}
+	e.mu.Unlock()
+
+	if recorded == nil {
+		if p == nil {
+			return nil, nil, nil
+		}
+		ka, err := p.EmptyResponse(lane)
+		return nil, ka, err
+	}
+
+	if p == nil {
+		if e.logger != nil {
 			e.logger.Warn("async: no parser registered for lane type; serving recorded mock unverified",
 				zap.String("lane", lane.Name), zap.String("type", lane.Type))
 		}
-		return recorded, nil, nil // serve recorded either way
+		return recorded, nil, nil // serve recorded even without a shape verdict
 	}
-	if p == nil {
-		return nil, nil, nil
-	}
-	ka, err := p.EmptyResponse(lane)
-	return nil, ka, err
-}
 
-// isArmedLocked reports whether a mock's anchor has been reached. Caller holds mu.
-func (e *Engine) isArmedLocked(m *models.Mock) bool {
-	return e.completed >= anchorPosOf(m)
+	ok, detail := p.MatchRequestShape(live, recorded, lane) // unlocked — may parse/compare
+	e.mu.Lock()
+	if ok {
+		e.pass++
+	} else {
+		e.flag++
+		e.flags = append(e.flags, lane.Name+": "+detail)
+	}
+	e.mu.Unlock()
+	return recorded, nil, nil // serve recorded either way
 }
 
 // Report snapshots verdict tallies, counting undrained armed mocks as not-exercised.
@@ -172,7 +211,7 @@ func (e *Engine) Report() ReportSnapshot {
 	ne := 0
 	for _, s := range e.streams {
 		for i := s.cursor; i < len(s.mocks); i++ {
-			if e.isArmedLocked(s.mocks[i]) {
+			if e.completed >= s.mocks[i].anchorPos {
 				ne++
 			}
 		}
@@ -202,9 +241,6 @@ func (e *Engine) LogReport(logger *zap.Logger) {
 		}
 	})
 }
-
-func seqOf(m *models.Mock) int       { return atoiOr(m.Spec.Metadata[models.MetaAsyncSeq], 0) }
-func anchorPosOf(m *models.Mock) int { return atoiOr(m.Spec.Metadata[models.MetaAnchorPos], 0) }
 
 func atoiOr(s string, d int) int {
 	if n, err := strconv.Atoi(s); err == nil {

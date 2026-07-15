@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
@@ -153,9 +154,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if headerNoise == nil {
 					headerNoise = make(map[string][]string)
 				}
-				for _, hdr := range flakyHeaders {
+				for hdr, noise := range flakyHeaderNoise() {
 					if _, exists := headerNoise[hdr]; !exists {
-						headerNoise[hdr] = []string{}
+						headerNoise[hdr] = noise
 					}
 				}
 			}
@@ -252,35 +253,29 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if h.asyncEngine != nil {
 				live := liveReqToMock(input)
 				if lane, laneOK := h.asyncEngine.LaneFor(live); laneOK {
+					// failAsync reports err via errCh unless the context is
+					// already cancelled; the caller returns right after.
+					failAsync := func(e error, msg string) {
+						if ctx.Err() != nil {
+							return
+						}
+						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- e
+					}
 					recorded, keepAlive, derr := h.asyncEngine.Decide(lane, live)
 					if derr != nil {
-						if ctx.Err() != nil {
-							return
-						}
-						utils.LogError(h.Logger, derr, "async: engine decide failed", zap.Any("metadata", utils.GetReqMeta(request)))
-						errCh <- derr
+						failAsync(derr, "async: engine decide failed")
 						return
 					}
-					var out []byte
+					out := keepAlive
 					if recorded != nil {
-						out, derr = h.buildMockResponseBytes(recorded)
-						if derr != nil {
-							if ctx.Err() != nil {
-								return
-							}
-							utils.LogError(h.Logger, derr, "async: failed to serialize recorded delivery", zap.Any("metadata", utils.GetReqMeta(request)))
-							errCh <- derr
+						if out, derr = h.buildMockResponseBytes(recorded); derr != nil {
+							failAsync(derr, "async: failed to serialize recorded delivery")
 							return
 						}
-					} else {
-						out = keepAlive
 					}
 					if _, werr := clientConn.Write(out); werr != nil {
-						if ctx.Err() != nil {
-							return
-						}
-						utils.LogError(h.Logger, werr, "async: failed to write delivery/keep-alive to client", zap.Any("metadata", utils.GetReqMeta(request)))
-						errCh <- werr
+						failAsync(werr, "async: failed to write delivery/keep-alive to client")
 						return
 					}
 					// Read the next poll on this keep-alive connection and loop,
@@ -383,4 +378,50 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 		return err
 	}
+}
+
+// buildMockResponseBytes serializes a recorded HTTP mock's response to raw
+// wire bytes (status line + headers + recomputed Content-Length + body,
+// compressing the body when Content-Encoding is set). It lives here (not in
+// async.go) because it is the shared serializer for BOTH the ordinary
+// matched-mock path and the async serving branch.
+func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	name := ""
+	if stub != nil {
+		name = stub.Name
+	}
+	if stub == nil || stub.Spec.HTTPResp == nil {
+		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
+	}
+	if err := stub.HydrateResponse(); err != nil {
+		return nil, err
+	}
+	protoMajor, protoMinor := 1, 1
+	if stub.Spec.HTTPReq != nil {
+		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
+	}
+	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
+		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
+	body := stub.Spec.HTTPResp.Body
+	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+	var respBody string
+	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+		if err != nil {
+			return nil, err
+		}
+		respBody = string(compressed)
+	} else {
+		respBody = body
+	}
+	var headers string
+	for key, values := range header {
+		if key == "Content-Length" {
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			headers += fmt.Sprintf("%s: %s\r\n", key, value)
+		}
+	}
+	return []byte(statusLine + headers + "\r\n" + respBody), nil
 }
