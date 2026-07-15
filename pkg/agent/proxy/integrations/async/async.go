@@ -30,6 +30,3 @@ type AsyncParser interface {
 type AsyncAware interface {
 	SetAsyncEngine(e *Engine)
 }
-
-// Engine is a forward declaration; the real implementation is defined in engine.go (Task 3).
-type Engine struct{}
