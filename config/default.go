@@ -106,6 +106,8 @@ record:
     # Number of chunk slots (~32 KiB each). Zero falls through to
     # the built-in default. Bump for bursty traffic.
     queueSize: 1024
+async:
+    lanes: []
 configPath: ""
 bypassRules: []
 disableMapping: false
