@@ -96,6 +96,24 @@ func (e *Engine) OnTestComplete() {
 	e.mu.Unlock()
 }
 
+// RegisterParser attaches a parser for a lane type. Called only during
+// Proxy.InitIntegrations (startup, before any serving).
+func (e *Engine) RegisterParser(t string, p AsyncParser) {
+	e.mu.Lock()
+	if e.parsers == nil {
+		e.parsers = map[string]AsyncParser{}
+	}
+	e.parsers[t] = p
+	e.mu.Unlock()
+}
+
+// CompletedForTest exposes the completed-testcase counter for wiring tests.
+func (e *Engine) CompletedForTest() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.completed
+}
+
 // LaneFor returns the lane a live request routes to, by asking each lane's
 // parser. Lanes are tried in caller-declared order (as passed to NewEngine)
 // so the FIRST declared matching lane always wins, deterministically — Go

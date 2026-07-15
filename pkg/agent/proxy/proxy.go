@@ -31,6 +31,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -156,6 +157,17 @@ type Proxy struct {
 	sessionMu   sync.RWMutex
 	session     *agent.Session
 	mockManager *MockManager
+
+	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
+	// async-lane replay state: registered parsers and the per-test
+	// position counter consumed by Engine.Decide's anchor gating.
+	asyncEngine *async.Engine
+	// asyncWindowSeen marks that at least one SetMocksWithWindow call has
+	// been observed. The FIRST window corresponds to the app reaching its
+	// first test (no prior test to count as completed); every window
+	// after that means one more test finished, so only then do we call
+	// asyncEngine.OnTestComplete.
+	asyncWindowSeen bool
 
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
@@ -695,6 +707,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		opts.Record.RecordBuffer.QueueSize,
 	)
 
+	if len(opts.Async.Lanes) > 0 {
+		// Parser instances are attached in InitIntegrations via AsyncAware;
+		// start with an empty parser map (RegisterParser fills it there).
+		proxy.asyncEngine = async.NewEngine(logger, opts.Async.Lanes, map[string]async.AsyncParser{})
+	}
+
 	// Plumb the proxy logger into the package-singleton SyncMockManager
 	// so its drop-path Error emissions actually reach the host logger.
 	// zap.L() would silently fall back to Nop here — syncMock loads at
@@ -990,6 +1008,14 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		logger := p.logger.With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
+		if p.asyncEngine != nil {
+			if aw, ok := prs.(async.AsyncAware); ok {
+				aw.SetAsyncEngine(p.asyncEngine)
+				if ap, ok := prs.(async.AsyncParser); ok {
+					p.asyncEngine.RegisterParser(string(parserType), ap)
+				}
+			}
+		}
 		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
@@ -2797,6 +2823,14 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil {
+		// First window = app reaching its first test; no test completed yet.
+		// Every subsequent window = one more completed test.
+		if p.asyncWindowSeen {
+			p.asyncEngine.OnTestComplete()
+		}
+		p.asyncWindowSeen = true
 	}
 	return nil
 }
