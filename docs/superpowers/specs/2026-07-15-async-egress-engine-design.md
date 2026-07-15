@@ -212,9 +212,15 @@ func (r *AsyncRecorder) AfterTestCaseInsert(_ context.Context, info *record.Test
     return nil
 }
 
-// AfterMockInsert stamps async metadata on any egress mock that matches a
+// BeforeMockInsert stamps async metadata on any egress mock that matches a
 // declared lane. No-op when no lane is configured (zero-impact guarantee).
-func (r *AsyncRecorder) AfterMockInsert(_ context.Context, info *record.MockContext) error {
+// MUST be the Before hook: mockDB.InsertMock persists the mock, so a stamp
+// applied in AfterMockInsert never reaches the recorded YAML (verified by the
+// e2e). Testcase windows are tracked in AfterTestCaseInsert because
+// TestCase.Name is only assigned by InsertTestCase (anchorPos is
+// timestamp-derived and correct either way; the After hook makes the
+// human-readable anchorAfter name correct too).
+func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *record.MockContext) error {
     if len(r.cfg.Lanes) == 0 {
         return nil
     }
@@ -395,6 +401,28 @@ Behavior falls out of the above:
 | 8 | `anchorAfter=startup` | Armed from the start — bootstrap pollers work before the first test. |
 | 9 | Lane endpoint called inside a test window at record | Still async (lane is authoritative); anchored to the last *completed* test. |
 | 10 | Zero lanes configured | Engine no-op; record & replay byte-identical. |
+
+## 10a. E2E findings (real `keploy record`/`test` against a long-poll sample)
+
+Verified end-to-end with a sample app (ingress `/step` + background long-poll
+consumer) under `sudo keploy record`/`test`:
+
+- **Record ✅** — poll egress correctly stamped `async/lane/anchorAfter/
+  anchorPos/asyncSeq`; effective-testcase anchor observed (startup→0,
+  `get-step-2`→2, …). Bug caught + fixed: stamping must run in
+  `BeforeMockInsert` (see §7).
+- **Replay ✅ (partial)** — startup-anchored delivery served; unarmed polls got
+  the `204` keep-alive; all sync tests pass; zero-impact holds.
+- **Finding A — replay timing:** keploy replays the sync tests in ~ms, so a
+  periodic background poller rarely polls into the sub-ms inter-test gaps.
+  Mid-sequence deliveries therefore stay unarmed → keep-alive → not-exercised
+  (skip=pass). Only startup / `--delay`-window deliveries are reliably served.
+  A faithful demonstration of mid-sequence ordered serving needs either a
+  fast/aligned poller or a keploy-paced delivery mode (future work).
+- **Finding B — verdict visibility:** the engine computes the shape-flag and
+  not-exercised counts in `Report()`, but nothing surfaces them in keploy's
+  test summary/logs yet. Wiring `Engine.Report()` into the replay summary is
+  required for the verdict (and any shape drift) to be visible.
 
 ## 10. Known limitations / future work
 
