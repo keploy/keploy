@@ -104,3 +104,47 @@ func TestPluggableSecondTransport(t *testing.T) {
 		t.Fatalf("engine must serve any transport unchanged, got %v", rec)
 	}
 }
+
+// TestLaneForFirstDeclaredWins proves LaneFor is deterministic when more than
+// one lane's parser could match the same live request: the FIRST lane passed
+// to NewEngine must always win, regardless of Go's randomized map iteration
+// order over e.lanes.
+func TestLaneForFirstDeclaredWins(t *testing.T) {
+	first := models.AsyncLane{Name: "first", Type: "fake"}
+	second := models.AsyncLane{Name: "second", Type: "fake2"}
+	e := NewEngine(zap.NewNop(), []models.AsyncLane{first, second}, map[string]AsyncParser{
+		"fake":  &fakeParser{matches: true, shapeOK: true, empty: []byte("KA1")},
+		"fake2": &fakeParser{matches: true, shapeOK: true, empty: []byte("KA2")},
+	})
+	for i := 0; i < 20; i++ {
+		got, ok := e.LaneFor(&models.Mock{})
+		if !ok || got.Name != "first" {
+			t.Fatalf("iteration %d: want first-declared lane %q, got %+v (ok=%v)", i, first.Name, got, ok)
+		}
+	}
+}
+
+// TestLoadIsIdempotent proves a second Load call with the same mocks is a
+// no-op once Decide has already advanced a stream's cursor: it must not
+// re-sort/re-serve an already-consumed mock.
+func TestLoadIsIdempotent(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	mocks := []*models.Mock{
+		asyncMock("L", 1, 0, "a"),
+		asyncMock("L", 2, 0, "b"),
+	}
+	lane := models.AsyncLane{Name: "L", Type: "fake"}
+
+	e.Load(mocks)
+	got1, _, _ := e.Decide(lane, &models.Mock{}) // consumes "a", cursor -> 1
+	if got1 == nil || got1.Spec.HTTPResp.Body != "a" {
+		t.Fatalf("first Decide: want %q, got %v", "a", got1)
+	}
+
+	e.Load(mocks) // re-Load same mocks; must be a no-op
+
+	got2, _, _ := e.Decide(lane, &models.Mock{}) // should serve "b", not re-serve "a"
+	if got2 == nil || got2.Spec.HTTPResp.Body != "b" {
+		t.Fatalf("second Decide after re-Load: want %q, got %v", "b", got2)
+	}
+}
