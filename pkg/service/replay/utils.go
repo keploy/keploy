@@ -171,6 +171,134 @@ func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
 	return "", "", false
 }
 
+// keployReadinessProbePath is the path the reset-resend readiness probe requests.
+// It is deliberately one no real app routes, so a well-behaved server answers it
+// with a 404 WITHOUT invoking an application handler — the probe therefore never
+// consumes a mock or triggers an app side effect. Any HTTP response to it (the
+// 404 included) still proves the proxy→app path is serving.
+const keployReadinessProbePath = "/keploy/__readiness_probe__"
+
+// resetProbeRequestTimeout bounds a single readiness probe round-trip.
+const resetProbeRequestTimeout = 800 * time.Millisecond
+
+// resetProbeInterval is the pause between readiness probe attempts.
+const resetProbeInterval = 200 * time.Millisecond
+
+// resolveProbeTarget returns the scheme, host and port the test case's HTTP
+// request is ACTUALLY dialed to, so the readiness probe hits the SAME endpoint
+// (and address family) the real request will. It must mirror the simulation's
+// resolution — the recorded tc.HTTPReq.URL is NOT the dial target: SimulateHTTP
+// rewrites it via ResolveTestTarget (ConfigHost/--host override, replaceWith,
+// port precedence). In the couchbase suite the recorded host is 127.0.0.1 but
+// the default ConfigHost "localhost" rewrites it to localhost → IPv6 ::1, which
+// is exactly the path that resets; probing the recorded 127.0.0.1 would gate on
+// IPv4 (which never resets) and defeat the fix. Returns ok=false for a nil /
+// non-HTTP test case or an unresolvable target (the caller then falls back to
+// the docker published-port TCP gate).
+//
+// It resolves from the pre-template-render URL, so a {{ }} placeholder in the
+// host/port (as opposed to the path/query/body, where they actually live) would
+// make the probe target diverge from the dial. That is best-effort only: a wrong
+// target just times out within resetResendReadyTimeout and the bounded re-send
+// still runs, so it never affects correctness.
+func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
+	if tc == nil || tc.Kind != models.HTTP {
+		return "", "", "", false
+	}
+	urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
+	hostToUse := testCfg.Host
+	if hostToUse == "" {
+		hostToUse = "localhost"
+	}
+	configPort := effectiveHTTPConfigPort(tc, testCfg)
+
+	target, err := pkg.ResolveTestTarget(tc.HTTPReq.URL, urlReplacements, portMappings, hostToUse, tc.AppPort, configPort, true, logger)
+	if err != nil {
+		return "", "", "", false
+	}
+	u, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || u == nil {
+		return "", "", "", false
+	}
+	scheme = u.Scheme
+	if scheme != "http" && scheme != "https" {
+		return "", "", "", false
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", "", "", false
+	}
+	port = u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme, host, port, true
+}
+
+// waitForHTTPServing polls until an HTTP round-trip to host:port completes with
+// ANY status — proving the proxy→app path actually serves — or ctx expires. A
+// transport reset / refusal / timeout counts as not-ready and keeps waiting.
+//
+// This is the HTTP-level counterpart to a bare TCP-accept gate: docker's
+// userland-proxy ACCEPTS a freshly-published host-port connection and only then
+// resets it mid-response under load, so a completed TCP handshake does NOT imply
+// the next request will land. Only a finished HTTP exchange proves the app is
+// truly reachable. Fresh (keep-alive-disabled) connections mirror the real
+// per-request connect the proxy resets. The probe hits a keploy-reserved 404
+// path (see keployReadinessProbePath) so a well-behaved app answers it without
+// invoking a handler; and in the reset (failure) state the userland-proxy resets
+// the probe before the app ever sees it, so it never reaches application code.
+func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
+	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), keployReadinessProbePath)
+	client := &http.Client{
+		Timeout: resetProbeRequestTimeout,
+		// Don't follow redirects — any 3xx already proves the app serves.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{
+			// Fresh connection per probe so we exercise the same connect the
+			// userland-proxy resets, rather than reusing a warm one.
+			DisableKeepAlives: true,
+			// Never route a loopback readiness probe through an env proxy.
+			Proxy: nil,
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	probe := func() bool {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return false // transport reset / refused / timeout → not ready yet
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return true // any HTTP response means the app is serving
+	}
+
+	if probe() {
+		return nil
+	}
+	ticker := time.NewTicker(resetProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if probe() {
+				return nil
+			}
+		}
+	}
+}
+
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
