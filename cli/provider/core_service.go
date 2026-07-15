@@ -42,6 +42,12 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, nil, cfg)
+	if len(cfg.Async.Lanes) > 0 {
+		if rec, ok := recordSvc.(*record.Recorder); ok {
+			parsers := record.ResolveAsyncParsers(logger, cfg.Async.Lanes)
+			rec.SetRecordHooks(record.NewAsyncRecorder(logger, cfg.Async.Lanes, parsers))
+		}
+	}
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
