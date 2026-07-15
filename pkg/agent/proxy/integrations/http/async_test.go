@@ -176,3 +176,36 @@ func TestLiveReqToMockCarriesMethodURLBody(t *testing.T) {
 		t.Fatalf("liveReqToMock lost fields: %+v", m.Spec.HTTPReq)
 	}
 }
+
+func TestMatchesLaneQueryFlag(t *testing.T) {
+	h := newHTTP()
+	lane := models.AsyncLane{
+		Name: "config-watch", Type: "http",
+		Match:      map[string]string{"path": "/v1/buckets/stream-relay"},
+		MatchQuery: map[string]string{"watch": "true"},
+	}
+	poll := httpMock("p", "GET", "http://cfg/v1/buckets/stream-relay?watch=true&version=3")
+	boot := httpMock("b", "GET", "http://cfg/v1/buckets/stream-relay?watch=false")
+	if !h.MatchesLane(poll, lane) {
+		t.Fatal("watch=true long-poll should match the lane")
+	}
+	if h.MatchesLane(boot, lane) {
+		t.Fatal("watch=false boot 'get current' call must NOT match the lane")
+	}
+}
+
+func TestMatchesLanePathRegex(t *testing.T) {
+	h := newHTTP()
+	lane := models.AsyncLane{
+		Name: "tenant-rules", Type: "http",
+		Match: map[string]string{"pathRegex": "^/v1/tenant/[0-9]+/rules/[A-Z_]+$"},
+	}
+	good := httpMock("g", "GET", "http://svc/v1/tenant/42/rules/LAST_MILE")
+	bad := httpMock("b", "GET", "http://svc/v1/tenant/x/rules/lower")
+	if !h.MatchesLane(good, lane) {
+		t.Fatal("numeric tenant + upper-case use-case should match the regex lane")
+	}
+	if h.MatchesLane(bad, lane) {
+		t.Fatal("non-numeric tenant / lower-case use-case must not match the regex lane")
+	}
+}

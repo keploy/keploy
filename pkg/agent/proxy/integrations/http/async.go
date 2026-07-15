@@ -8,6 +8,7 @@ import (
 	"path"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -25,17 +26,55 @@ func (h *HTTP) MatchesLane(m *models.Mock, lane models.AsyncLane) bool {
 		return false
 	}
 	host, p := hostAndPath(m.Spec.HTTPReq)
+	matched := false
 	if hg := lane.Match["host"]; hg != "" {
+		matched = true
 		if ok, _ := path.Match(hg, host); !ok {
 			return false
 		}
 	}
-	if pg := lane.Match["path"]; pg != "" {
+	// pathRegex, when set, is the path check (a regex alternative to the glob
+	// match.path — for URLs a glob can't express, e.g. numeric-id segments).
+	// Reuses pkg/matcher's cached, fail-closed regex helper.
+	if pr := lane.Match["pathRegex"]; pr != "" {
+		matched = true
+		if ok, _ := matcher.MatchesAnyRegex(p, []string{pr}); !ok {
+			return false
+		}
+	} else if pg := lane.Match["path"]; pg != "" {
+		matched = true
 		if ok, _ := path.Match(pg, p); !ok {
 			return false
 		}
 	}
-	return lane.Match["host"] != "" || lane.Match["path"] != ""
+	if len(lane.MatchQuery) > 0 {
+		matched = true
+		q := queryOf(m.Spec.HTTPReq)
+		for k, v := range lane.MatchQuery {
+			if q.Get(k) != v {
+				return false
+			}
+		}
+	}
+	return matched
+}
+
+// queryOf returns the request's query params, URLParams-first (the recorded
+// source of truth) with the parsed URL as fallback — the same precedence as
+// match.go / mismatch_render.go. Returns nil when there are none (Get is
+// nil-safe), avoiding a throwaway allocation.
+func queryOf(r *models.HTTPReq) url.Values {
+	if len(r.URLParams) > 0 {
+		vals := make(url.Values, len(r.URLParams))
+		for k, v := range r.URLParams {
+			vals.Set(k, v)
+		}
+		return vals
+	}
+	if u, err := url.Parse(r.URL); err == nil {
+		return u.Query()
+	}
+	return nil
 }
 
 // MatchRequestShape reuses SchemaMatch against the single recorded mock.
