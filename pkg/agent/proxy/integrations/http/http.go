@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -46,6 +47,7 @@ func init() {
 type HTTP struct {
 	Logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
+	asyncEngine *async.Engine
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
