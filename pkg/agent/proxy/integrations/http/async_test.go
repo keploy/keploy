@@ -1,7 +1,10 @@
 package http
 
 import (
+	"net/http"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -133,5 +136,43 @@ func TestMatchRequestShapeRecordedURLParamsKeyDrift(t *testing.T) {
 	ok, _ := h.MatchRequestShape(live, recorded, laneNotify())
 	if ok {
 		t.Fatal("non-volatile query key drift (page vs other) must report shape mismatch")
+	}
+}
+
+func TestBuildMockResponseBytes(t *testing.T) {
+	h := newHTTP()
+	// A stale Content-Length (999) in the recorded header must be recomputed to
+	// the actual body length. Note: the serializer only *overrides* an existing
+	// Content-Length key; it does not synthesize one when absent — this mirrors
+	// the original inline replay path exactly (byte-identity constraint).
+	stub := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{ProtoMajor: 1, ProtoMinor: 1},
+		HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "hello", Header: map[string]string{"Content-Type": "text/plain", "Content-Length": "999"}},
+	}}
+	out, err := h.buildMockResponseBytes(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.HasPrefix(s, "HTTP/1.1 200 OK\r\n") {
+		t.Fatalf("bad status line: %q", s)
+	}
+	if !strings.Contains(s, "Content-Length: 5\r\n") {
+		t.Fatalf("content-length not recomputed: %q", s)
+	}
+	if !strings.HasSuffix(s, "\r\n\r\nhello") {
+		t.Fatalf("body not appended: %q", s)
+	}
+}
+
+func TestLiveReqToMockCarriesMethodURLBody(t *testing.T) {
+	u, _ := url.Parse("http://notify.internal.svc/v1/poll?cursor=7")
+	hdr := http.Header{}
+	hdr.Set("X-A", "b")
+	in := &req{method: "GET", url: u, header: hdr, body: []byte("q")}
+	m := liveReqToMock(in)
+	if m.Spec.HTTPReq.Method != "GET" || m.Spec.HTTPReq.URL != u.String() ||
+		m.Spec.HTTPReq.Body != "q" || m.Spec.HTTPReq.Header["X-A"] != "b" {
+		t.Fatalf("liveReqToMock lost fields: %+v", m.Spec.HTTPReq)
 	}
 }

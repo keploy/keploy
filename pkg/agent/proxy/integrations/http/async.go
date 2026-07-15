@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -139,6 +141,70 @@ func mockToReq(m *models.Mock) (*req, error) {
 		header: hdr,
 		body:   []byte(m.Spec.HTTPReq.Body),
 	}, nil
+}
+
+// buildMockResponseBytes serializes a recorded HTTP mock's response to raw
+// wire bytes (status line + headers + recomputed Content-Length + body,
+// compressing the body when Content-Encoding is set). Extracted from the
+// inline matched-mock path so the async serving branch reuses identical logic.
+func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	if stub == nil || stub.Spec.HTTPResp == nil {
+		return nil, fmt.Errorf("async/http: mock %q has no response to serialize", func() string {
+			if stub != nil {
+				return stub.Name
+			}
+			return ""
+		}())
+	}
+	if err := stub.HydrateResponse(); err != nil {
+		return nil, err
+	}
+	protoMajor, protoMinor := 1, 1
+	if stub.Spec.HTTPReq != nil {
+		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
+	}
+	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
+		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
+	body := stub.Spec.HTTPResp.Body
+	header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+	var respBody string
+	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+		if err != nil {
+			return nil, err
+		}
+		respBody = string(compressed)
+	} else {
+		respBody = body
+	}
+	var headers string
+	for key, values := range header {
+		if key == "Content-Length" {
+			values = []string{strconv.Itoa(len(respBody))}
+		}
+		for _, value := range values {
+			headers += fmt.Sprintf("%s: %s\r\n", key, value)
+		}
+	}
+	return []byte(statusLine + headers + "\r\n" + respBody), nil
+}
+
+// liveReqToMock wraps the matcher's parsed request as a *models.Mock so the
+// transport-agnostic engine (which speaks only *models.Mock) can route/verify it.
+func liveReqToMock(input *req) *models.Mock {
+	hdr := map[string]string{}
+	for k := range input.header {
+		hdr[k] = input.header.Get(k)
+	}
+	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{},
+		HTTPReq: &models.HTTPReq{
+			Method: models.Method(input.method),
+			URL:    input.url.String(),
+			Header: hdr,
+			Body:   string(input.body),
+		},
+	}}
 }
 
 // flakyHeaderNoise returns the package flaky-header list as a header-noise map.

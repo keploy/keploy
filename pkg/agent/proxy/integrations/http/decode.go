@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
@@ -244,6 +243,58 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				continue
 			}
 
+			// Async serving short-circuit. When this outgoing request routes to
+			// a configured async lane, the transport-agnostic engine — not the
+			// normal mock matcher — decides what to serve: either a recorded
+			// delivery (once its anchor position has been reached) or a
+			// keep-alive payload to keep the client polling. Mirrors the
+			// telemetry short-circuit above: write, read the next poll, continue.
+			if h.asyncEngine != nil {
+				live := liveReqToMock(input)
+				if lane, laneOK := h.asyncEngine.LaneFor(live); laneOK {
+					recorded, keepAlive, derr := h.asyncEngine.Decide(lane, live)
+					if derr != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						utils.LogError(h.Logger, derr, "async: engine decide failed", zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- derr
+						return
+					}
+					var out []byte
+					if recorded != nil {
+						out, derr = h.buildMockResponseBytes(recorded)
+						if derr != nil {
+							if ctx.Err() != nil {
+								return
+							}
+							utils.LogError(h.Logger, derr, "async: failed to serialize recorded delivery", zap.Any("metadata", utils.GetReqMeta(request)))
+							errCh <- derr
+							return
+						}
+					} else {
+						out = keepAlive
+					}
+					if _, werr := clientConn.Write(out); werr != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						utils.LogError(h.Logger, werr, "async: failed to write delivery/keep-alive to client", zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- werr
+						return
+					}
+					// Read the next poll on this keep-alive connection and loop,
+					// mirroring the telemetry short-circuit and matched-response paths.
+					reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+					if err != nil {
+						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
+						errCh <- nil
+						return
+					}
+					continue
+				}
+			}
+
 			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -291,51 +342,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			// Load the response body if it was spilled to disk (no-op otherwise).
-			if err := stub.HydrateResponse(); err != nil {
-				utils.LogError(h.Logger, err, "failed to hydrate spilled http response", zap.Any("metadata", utils.GetReqMeta(request)))
+			// Serialize the matched mock's response to wire bytes (hydrates a
+			// spilled body, recomputes Content-Length, compresses per
+			// Content-Encoding). Shared with the async serving branch above.
+			respBytes, err := h.buildMockResponseBytes(stub)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}
-
-			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-
-			body := stub.Spec.HTTPResp.Body
-			var respBody string
-			var responseString string
-
-			// Fetching the response headers
-			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
-
-			//Check if the content encoding is present in the header
-			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
-					errCh <- err
-					return
-				}
-				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
-				respBody = string(compressedBody)
-			} else {
-				respBody = body
-			}
-
-			var headers string
-			for key, values := range header {
-				if key == "Content-Length" {
-					values = []string{strconv.Itoa(len(respBody))}
-				}
-				for _, value := range values {
-					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-					headers += headerLine
-				}
-			}
-			responseString = statusLine + headers + "\r\n" + "" + respBody
-
+			responseString := string(respBytes)
 			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
-			_, err = clientConn.Write([]byte(responseString))
+			_, err = clientConn.Write(respBytes)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
