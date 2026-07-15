@@ -250,18 +250,68 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
 		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
-			// Only accept the upstream answer when it actually resolved
-			// the name (RcodeSuccess with at least one Answer RR).
-			if fwdResp.Rcode == dns.RcodeSuccess && len(fwdResp.Answer) > 0 {
-				p.logger.Debug("DNS mock miss resolved via upstream forward",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-					zap.Int("rcode", fwdResp.Rcode),
-					zap.Int("answers", len(fwdResp.Answer)))
+			// A RcodeSuccess response splits into two cases by answer count:
+			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
+			// a non-success rcode falls through to the #2006 steering below.
+			if fwdResp.Rcode == dns.RcodeSuccess {
+				if len(fwdResp.Answer) > 0 {
+					// Resolved — relay the real answer.
+					p.logger.Debug("DNS mock miss resolved via upstream forward",
+						zap.String("query", question.Name),
+						zap.String("qtype", dns.TypeToString[question.Qtype]),
+						zap.Int("rcode", fwdResp.Rcode),
+						zap.Int("answers", len(fwdResp.Answer)))
+					return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
+				}
+				// NODATA — NOERROR + zero answer RRs: a *valid* negative answer
+				// ("the name exists but has no record of this type"), distinct
+				// from NXDOMAIN. Relay it as-is even with mocking enabled. Only
+				// NXDOMAIN (name absent) falls through to #2006 proxy-IP steering
+				// below; fabricating an A→proxy-IP for a name that authoritatively
+				// has no such record would be less correct than the honest empty
+				// answer. Kept qtype-agnostic on purpose (the IPv6-only empty-A
+				// case is symmetric). See issue #2006 and the regression tests
+				// TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_* for the
+				// deliberately-loosened bare-name-A case.
+				//
+				// Caveat (resolver-config-dependent): the "genuinely-needed
+				// unmocked names return NXDOMAIN, not NODATA" assumption holds for
+				// bare names on most resolvers, but a search-domain / ndots setup
+				// (systemd-resolved, k8s pod DNS) can qualify a name into a zone
+				// that answers NODATA — such a name would now get an empty answer
+				// instead of being steered. Narrow; validate against the target
+				// cluster resolver config if steering unmocked in-cluster names is
+				// relied upon.
+				//
+				// Logging: this branch is on the HOT path — glibc fires A+AAAA for
+				// essentially every hostname and every IPv4-only cluster service
+				// yields an AAAA NODATA here — so an unconditional Info would spam.
+				//   - mocking disabled: not a "mock miss" at all (the operator
+				//     wants real DNS); log at Debug.
+				//   - mocking enabled: keep it discoverable (a genuinely unrecorded
+				//     record of this type also relays empty here) but dedupe to
+				//     once per (name,qtype) so the signal survives without the spam.
+				if mockingEnabled {
+					if _, dup := p.nodataRelayLogged.LoadOrStore(generateCacheKey(question.Name, question.Qtype), struct{}{}); !dup {
+						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
+							zap.String("query", question.Name),
+							zap.String("qtype", dns.TypeToString[question.Qtype]))
+					} else {
+						p.logger.Debug("DNS mock miss: upstream NODATA, relaying (already logged for this name/qtype)",
+							zap.String("query", question.Name),
+							zap.String("qtype", dns.TypeToString[question.Qtype]))
+					}
+				} else {
+					p.logger.Debug("DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
+						zap.String("query", question.Name),
+						zap.String("qtype", dns.TypeToString[question.Qtype]))
+				}
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			// Upstream returned a negative or empty answer (NXDOMAIN,
-			// SERVFAIL, or success with no RRs).
+			// Upstream returned a genuinely negative answer: NXDOMAIN,
+			// SERVFAIL, or any other non-success rcode (REFUSED, NOTIMP,
+			// FORMERR, …) — everything except the RcodeSuccess cases handled
+			// above.
 			// When mocking is disabled the operator wants real DNS
 			// behaviour, so honour the upstream negative answer as-is.
 			// When mocking is enabled, a negative answer must NOT reach
@@ -270,17 +320,16 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// (relaying NXDOMAIN crashes apps using bare service names
 			// like "localstack" or "postgres" — issue #2006).
 			if !mockingEnabled {
-				p.logger.Debug("DNS mock miss: upstream returned negative/empty answer; mocking disabled, returning upstream response",
+				p.logger.Debug("DNS mock miss: upstream returned negative answer; mocking disabled, returning upstream response",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 					zap.Int("rcode", fwdResp.Rcode))
 				return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 			}
-			p.logger.Debug("DNS mock miss: upstream returned negative/empty answer; falling back to synthetic DNS response",
+			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
-				zap.Int("rcode", fwdResp.Rcode),
-				zap.Int("answers", len(fwdResp.Answer)))
+				zap.Int("rcode", fwdResp.Rcode))
 		} else if fwdErr != nil {
 			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
 				zap.String("query", question.Name),

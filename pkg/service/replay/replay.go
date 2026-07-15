@@ -4098,11 +4098,11 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 			return nil, false, drained
 		}
 
-		// Re-gate on the app's published host port accepting a connection so we
-		// re-send only once the app/proxy is ready again, not blindly. Best
-		// effort: if we can't determine a waitable port (native app, unmapped
-		// publish) we proceed — the bounded attempts still protect us.
-		r.waitForResetResendReady(ctx)
+		// Re-gate on the app actually serving again (HTTP-level, on the same
+		// endpoint the request dials) so we re-send only once the app/proxy is
+		// ready, not blindly. Best effort: if we can't determine a probeable
+		// target we proceed — the bounded attempts still protect us.
+		r.waitForResetResendReady(ctx, testCase, testSetID)
 
 		r.logger.Warn("test request reset by app/proxy before any mock was consumed; re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt),
@@ -4159,16 +4159,35 @@ func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockSt
 	return false, nil
 }
 
-// waitForResetResendReady best-effort gates a reset re-send on the app's
-// published docker host port accepting a TCP connection again, bounded by
-// resetResendReadyTimeout. It is a no-op for native apps / unmapped publishes.
-func (r *Replayer) waitForResetResendReady(ctx context.Context) {
+// waitForResetResendReady best-effort gates a reset re-send on the app actually
+// serving again, bounded by resetResendReadyTimeout.
+//
+// It prefers an HTTP-level probe against the SAME endpoint the test request is
+// dialed to — resolved via resolveProbeTarget, which mirrors the simulation's
+// ResolveTestTarget (ConfigHost/--host, replaceWith, port precedence) rather than
+// the raw recorded URL. This makes the gate address-family-correct (an IPv6
+// "localhost" dial is gated on the IPv6 path, not a mismatched IPv4 127.0.0.1)
+// and, unlike a bare TCP-accept gate, it does not declare readiness while
+// docker's userland-proxy is still accepting-then-resetting connections
+// mid-response. For a non-HTTP or unresolvable target it falls back to the docker
+// published host-port TCP gate (no-op for native apps / unmapped publishes). On
+// timeout it returns and lets the bounded re-send attempts run.
+func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models.TestCase, testSetID string) {
+	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
+	defer cancel()
+
+	if scheme, host, port, ok := resolveProbeTarget(r.config.Test, testCase, testSetID, r.logger); ok {
+		if err := waitForHTTPServing(wctx, scheme, host, port); err != nil {
+			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
+				zap.String("host", host), zap.String("port", port), zap.Error(err))
+		}
+		return
+	}
+
 	host, port, ok := dockerPublishedHostPort(r.config.Command)
 	if !ok {
 		return
 	}
-	wctx, cancel := context.WithTimeout(ctx, resetResendReadyTimeout)
-	defer cancel()
 	if err := pkg.WaitForPort(wctx, host, port, resetResendReadyTimeout); err != nil {
 		r.logger.Debug("app host port not ready before reset re-send; re-sending anyway",
 			zap.String("host", host), zap.String("port", port), zap.Error(err))
