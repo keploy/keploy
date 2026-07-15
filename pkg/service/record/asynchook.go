@@ -33,6 +33,11 @@ func NewAsyncRecorder(logger *zap.Logger, lanes []models.AsyncLane, parsers map[
 	return &AsyncRecorder{logger: logger, lanes: lanes, parsers: parsers, seq: map[string]int{}}
 }
 
+// AfterTestCaseInsert tracks each ingress testcase's window START. Uses the
+// After hook because TestCase.Name is assigned by InsertTestCase — reading it
+// in the Before hook would capture an empty id (anchorAfter). anchorPos is
+// timestamp-derived so it is correct either way; the After hook makes the
+// human-readable anchorAfter name correct too.
 func (r *AsyncRecorder) AfterTestCaseInsert(_ context.Context, info *TestCaseContext) error {
 	if info == nil || info.TestCase == nil {
 		return nil
@@ -46,7 +51,11 @@ func (r *AsyncRecorder) AfterTestCaseInsert(_ context.Context, info *TestCaseCon
 	return nil
 }
 
-func (r *AsyncRecorder) AfterMockInsert(_ context.Context, info *MockContext) error {
+// BeforeMockInsert stamps async metadata on any egress mock that matches a
+// declared lane. MUST be the Before hook: mockDB.InsertMock persists the mock,
+// so a mutation applied After would never reach the recorded YAML (mirrors the
+// enterprise obfuscator, which also mutates in Before*).
+func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) error {
 	if info == nil || info.Mock == nil || len(r.lanes) == 0 {
 		return nil
 	}

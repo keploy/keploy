@@ -45,7 +45,7 @@ func TestAnchorIsEffectiveTestcaseDuringWindow(t *testing.T) {
 
 	// delivery COMPLETES mid-T2 (base+6s): effective testcase = T2, effect from T3.
 	m := egress("lane", base.Add(6*time.Second))
-	_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
 	md := m.Spec.Metadata
 	if md[models.MetaAsync] != "true" || md[models.MetaAsyncLane] != "L" {
@@ -63,7 +63,7 @@ func TestAnchorInGapUsesLastStartedTest(t *testing.T) {
 		TestCase: &models.TestCase{Name: "T1", HTTPReq: models.HTTPReq{Timestamp: base}}})
 	// delivery completes after T1 started, before any later test -> anchor T1/pos1
 	m := egress("lane", base.Add(2*time.Second))
-	_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 	if m.Spec.Metadata[models.MetaAnchorAfter] != "T1" || m.Spec.Metadata[models.MetaAnchorPos] != "1" {
 		t.Fatalf("gap delivery must anchor to last started test T1/pos1: %+v", m.Spec.Metadata)
 	}
@@ -72,7 +72,7 @@ func TestAnchorInGapUsesLastStartedTest(t *testing.T) {
 func TestStartupAnchorBeforeFirstTest(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("lane", time.Unix(500, 0))
-	_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 	if m.Spec.Metadata[models.MetaAnchorAfter] != models.AnchorStartup ||
 		m.Spec.Metadata[models.MetaAnchorPos] != "0" {
 		t.Fatalf("pre-first-test egress must anchor to startup/0: %+v", m.Spec.Metadata)
@@ -105,7 +105,7 @@ func TestAnchorOrderIndependentWithStartupNamedTest(t *testing.T) {
 		}
 
 		m := egress("lane", delivery)
-		_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+		_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
 		md := m.Spec.Metadata
 		if md[models.MetaAnchorAfter] != "startup" || md[models.MetaAnchorPos] != "2" {
@@ -121,7 +121,7 @@ func TestAnchorOrderIndependentWithStartupNamedTest(t *testing.T) {
 func TestNonLaneEgressUntouched(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("normal", time.Unix(2000, 0))
-	_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 	if _, ok := m.Spec.Metadata[models.MetaAsync]; ok {
 		t.Fatalf("non-lane egress must not be stamped: %+v", m.Spec.Metadata)
 	}

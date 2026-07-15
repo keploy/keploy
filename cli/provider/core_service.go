@@ -42,6 +42,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlMappingDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, nil, cfg)
+	logger.Debug("async: lanes parsed from config", zap.Int("count", len(cfg.Async.Lanes)))
 	if len(cfg.Async.Lanes) > 0 {
 		if rec, ok := recordSvc.(*record.Recorder); ok {
 			parsers := record.ResolveAsyncParsers(logger, cfg.Async.Lanes)
