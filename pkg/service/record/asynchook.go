@@ -53,7 +53,16 @@ func (r *AsyncRecorder) AfterMockInsert(_ context.Context, info *MockContext) er
 	m := info.Mock
 	for _, lane := range r.lanes {
 		p := r.parsers[lane.Type]
-		if p == nil || !p.MatchesLane(m, lane) {
+		if p == nil {
+			// Lane is declared but its parser never resolved (see
+			// ResolveAsyncParsers): we cannot evaluate MatchesLane, so this
+			// mock is left unstamped for this lane. Surface it here, at
+			// record time, rather than failing silently.
+			r.logger.Warn("async lane parser unresolved; mock left unstamped",
+				zap.String("lane", lane.Name), zap.String("type", lane.Type))
+			continue
+		}
+		if !p.MatchesLane(m, lane) {
 			continue
 		}
 		r.mu.Lock()
@@ -83,12 +92,14 @@ func (r *AsyncRecorder) AfterMockInsert(_ context.Context, info *MockContext) er
 func (r *AsyncRecorder) anchorLocked(ts int64) (string, int) {
 	id, pos := models.AnchorStartup, 0
 	var best int64
+	var found bool
 	for _, w := range r.tests {
 		if w.startedAt <= ts {
 			pos++
-			if id == models.AnchorStartup || w.startedAt >= best {
+			if !found || w.startedAt >= best {
 				best = w.startedAt
 				id = w.id
+				found = true
 			}
 		}
 	}

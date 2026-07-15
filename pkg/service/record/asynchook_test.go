@@ -79,6 +79,45 @@ func TestStartupAnchorBeforeFirstTest(t *testing.T) {
 	}
 }
 
+// TestAnchorOrderIndependentWithStartupNamedTest proves the anchor tie-break
+// no longer relies on models.AnchorStartup as a "no candidate yet" sentinel:
+// a testcase literally named "startup" that started LATE must still win over
+// an earlier-started "T1", regardless of insertion order.
+func TestAnchorOrderIndependentWithStartupNamedTest(t *testing.T) {
+	base := time.Unix(1000, 0)
+	early := base                          // T1 starts here
+	late := base.Add(5 * time.Second)      // "startup"-named window starts here
+	delivery := base.Add(10 * time.Second) // completes after both
+
+	insertAndCheck := func(t *testing.T, insertStartupFirst bool) {
+		r := newAsyncRec()
+		startupWindow := &TestCaseContext{
+			TestCase: &models.TestCase{Name: "startup", HTTPReq: models.HTTPReq{Timestamp: late}}}
+		t1Window := &TestCaseContext{
+			TestCase: &models.TestCase{Name: "T1", HTTPReq: models.HTTPReq{Timestamp: early}}}
+
+		if insertStartupFirst {
+			_ = r.AfterTestCaseInsert(context.Background(), startupWindow)
+			_ = r.AfterTestCaseInsert(context.Background(), t1Window)
+		} else {
+			_ = r.AfterTestCaseInsert(context.Background(), t1Window)
+			_ = r.AfterTestCaseInsert(context.Background(), startupWindow)
+		}
+
+		m := egress("lane", delivery)
+		_ = r.AfterMockInsert(context.Background(), &MockContext{Mock: m})
+
+		md := m.Spec.Metadata
+		if md[models.MetaAnchorAfter] != "startup" || md[models.MetaAnchorPos] != "2" {
+			t.Fatalf("expected anchor to latest-started window named %q at pos 2, got: %+v",
+				"startup", md)
+		}
+	}
+
+	t.Run("startup inserted first", func(t *testing.T) { insertAndCheck(t, true) })
+	t.Run("startup inserted second", func(t *testing.T) { insertAndCheck(t, false) })
+}
+
 func TestNonLaneEgressUntouched(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("normal", time.Unix(2000, 0))
