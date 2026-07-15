@@ -1279,11 +1279,11 @@ func (e *Engine) RegisterParser(t string, p AsyncParser) {
 			p.asyncEngine.OnTestComplete()
 		}
 		p.asyncWindowSeen = true
-		// Load async streams once, from the full unfiltered pool.
-		p.asyncEngine.Load(unFiltered)
 	}
 ```
-(`Load` is idempotent per mock because it appends only `MetaAsync=="true"` mocks; to avoid double-append on repeated windows, guard with a `loaded bool` on Engine — add `if e.loaded { return }; e.loaded = true` at the top of `Load` under the lock.)
+**CORRECTED (do NOT Load from `unFiltered` here).** `SetMocksWithWindow` only ever receives *windowed subsets* per test — never the complete async corpus. So this seam is used for **position advance ONLY**. The complete-corpus `engine.Load` happens once at the **agent's `StoreMocks`/`StoreMocksStream` seam** (see sub-task 6b), where `ClientMockStorage` holds the full set. `engine.Load` is already run-once/idempotent (Task 3), so 6b calls it exactly once with the complete async subset.
+
+> **Task 6 is split into 6a/6b/6c** — 6a: Proxy field + construct + inject + position-advance + test (this section's Steps 1–4, minus the Load line). 6b: `Proxy.LoadAsyncMocks` + call from the agent `StoreMocks` seam with the complete corpus. 6c: `decode.go` serving branch (this section's Step 5). Briefs authored directly by the controller.
 
 - [ ] **Step 5: Add the decode.go lane-routing branch**
 
