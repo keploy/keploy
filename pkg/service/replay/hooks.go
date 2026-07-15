@@ -41,7 +41,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	// Extract URL replacements and port mappings: merge global + per-test-set
 	// (test-set level overrides global for same key)
-	urlReplacements, portMappings := h.mergeReplaceWith(testSetID)
+	urlReplacements, portMappings := mergeReplaceWith(h.cfg.Test, testSetID)
 
 	switch tc.Kind {
 	case models.HTTP:
@@ -156,9 +156,11 @@ func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {
 }
 
 // mergeReplaceWith extracts and merges URL replacements and port mappings
-// from global and per-test-set replaceWith configuration.
-func (h *Hooks) mergeReplaceWith(testSetID string) (map[string]string, map[uint32]uint32) {
-	rw := h.cfg.Test.ReplaceWith
+// from global and per-test-set replaceWith configuration. It is a free function
+// (reading only config.Test) so the reset-resend readiness probe can resolve the
+// same effective dial target the simulation uses — see resolveProbeTarget.
+func mergeReplaceWith(testCfg config.Test, testSetID string) (map[string]string, map[uint32]uint32) {
+	rw := testCfg.ReplaceWith
 	hasData := len(rw.Global.URL) > 0 || len(rw.Global.Port) > 0 || len(rw.TestSets) > 0
 	if !hasData {
 		return nil, nil
