@@ -135,22 +135,37 @@ ensure_success_phrase() {
 }
 
 # wait_port_free NAME PORT [TIMEOUT_SEC]
-# Block until nothing is listening on localhost:PORT (or TIMEOUT_SEC elapses).
-# Deterministic replacement for a fixed `sleep` after killing a process that
-# owns a port: the next bind must not race a socket that is still being
-# released, which is what surfaces as "listen tcp :PORT: bind: address already
-# in use" and fails the run intermittently. Returns as soon as the port is
-# actually free, so it is normally sub-second. `nc -z` is already used elsewhere
-# in this script to poll for a port coming UP; here we poll for it going DOWN.
+# Block until localhost:PORT is genuinely BIND-able again (or TIMEOUT_SEC
+# elapses). Deterministic replacement for a fixed `sleep` after killing a
+# process that owns a port: the next phase's server must not race a socket that
+# is still being released, which surfaces as
+# "listen tcp :PORT: bind: address already in use" and fails the run
+# intermittently.
+#
+# This must NOT use `nc -z`: a connect probe only detects a LISTENING socket, so
+# it reports the port "free" the instant the previous listener stops accepting —
+# while a socket the previous keploy phase left on the port in a NON-listen
+# state (TIME-WAIT from a server-side close, or a still-closing FIN-WAIT /
+# CLOSE-WAIT) is invisible to it yet still blocks a fresh bind(). That gap is the
+# exact intermittent EADDRINUSE this guard exists to prevent. `ss` sees every
+# TCP state, so we poll it for ANY socket whose LOCAL port is PORT and only
+# proceed once none remain. The timeout must exceed the 60s TCP TIME-WAIT so a
+# genuine TIME-WAIT (which a non-SO_REUSEADDR listener cannot bind over) is
+# waited out rather than raced; normal transitions have no lingering socket and
+# return sub-second. On timeout the offending sockets are dumped for triage.
 wait_port_free() {
-  local name=$1 port=$2 timeout=${3:-30}
+  local name=$1 port=$2 timeout=${3:-90}
   local deadline=$(( $(date +%s) + timeout ))
-  # Bare `nc -z` (no -w): on some netcat builds -w makes -z report an occupied
-  # port as free, which would defeat the whole check. Wall-clock deadline (not
-  # an iteration count) so a slow per-probe nc can't stretch the bound.
-  while nc -z localhost "$port" 2>/dev/null; do
+  # Command substitution (not `ss | grep -q`): a pipe lets `grep -q` close early,
+  # `ss` catch SIGPIPE, and `set -o pipefail` propagate that as a non-zero
+  # condition — which would falsely read as "port free" while it is still held.
+  # `[ -n "$(...)" ]` has no pipe, so the check stays deterministic under pipefail.
+  while [ -n "$(ss -Htan "sport = :$port" 2>/dev/null)" ]; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "⚠️ $name still holding port $port after ${timeout}s"
+      echo "⚠️ $name still holding port $port after ${timeout}s:"
+      # Root-owned (keploy launches the server under sudo), so dump with
+      # privileges to surface the holding PID for triage.
+      run_with_keploy_privileges ss -Htanp "sport = :$port" 2>/dev/null || true
       return 1
     fi
     sleep 1
