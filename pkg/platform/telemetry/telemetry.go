@@ -141,14 +141,31 @@ func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 // and "aborted" for an error path that surfaced a stopReason. Record
 // always captures one test-set per invocation, so a test-set count is
 // intentionally omitted.
-func (tel *Telemetry) RecordSessionCompleted(testCount, mockCount int64, durationMs int64, status string) {
+func (tel *Telemetry) RecordSessionCompleted(testCount, mockCount int64, durationMs int64, status string, stopReason string) {
 	dataMap := map[string]interface{}{
 		"test_count":  testCount,
 		"mock_count":  mockCount,
 		"duration_ms": durationMs,
 		"status":      status,
+		// Categorized (low-cardinality) reason the session ended — powers the
+		// "where do record sessions get stuck" funnel. Raw reason text is not
+		// sent; hard crashes go to Sentry. See CategorizeStopReason.
+		"stop_reason": CategorizeStopReason(stopReason),
 	}
 	tel.sendTracked(models.TeleEventRecordSessionCompleted, dataMap)
+}
+
+// TestRunAborted fires when a replay (`keploy test`) invocation stops
+// gracefully BEFORE the normal TestRun summary is emitted — e.g. setup or
+// instrumentation failed before any test set ran. It carries the same
+// categorized stop_reason so the replay funnel can show where test runs die
+// on the way in. Not emitted on user interrupt or on a completed run.
+func (tel *Telemetry) TestRunAborted(stopReason string) {
+	dataMap := map[string]interface{}{
+		"status":      "aborted",
+		"stop_reason": CategorizeStopReason(stopReason),
+	}
+	tel.sendTracked(models.TeleEventTestRunAborted, dataMap)
 }
 
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{}) {

@@ -48,6 +48,17 @@ const (
 	// GenericResponses payload slices and owns the typed frame model +
 	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
+
+	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
+	// traffic parser ever produces it. The recorder emits a Mock with this Kind
+	// on the /outgoing stream to tell the CLI to revoke (delete) test cases
+	// whose owned mock was capacity-dropped AFTER the TC had already streamed
+	// (the deferred-orphan case that stream-time suppression cannot catch). The
+	// revoked TC names ride in Spec.Metadata. The CLI diverts this frame into a
+	// revoke set instead of persisting it; the agent emits it ONLY to a CLI that
+	// negotiated OutgoingOptions.SupportsDroppedRevoke, so an older CLI (which
+	// never sets that flag) never receives it and cannot mis-persist it.
+	RevokedTests Kind = "keploy-revoked-tests"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -91,6 +102,40 @@ type Mock struct {
 	// list is skipped (treated as noise). Written by the enterprise
 	// secret-protection obfuscator.
 	Noise []string `json:"Noise,omitempty" bson:"noise,omitempty" yaml:"noise,omitempty"`
+
+	// responseHydrator lazily loads an elided response (HTTPResp/MongoResponses)
+	// at serve time; set only for spilled per-test mocks by the agent disk store.
+	// Unexported so gob ignores it — never crosses the wire or a recording.
+	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+}
+
+// SetResponseHydrator installs the lazy response loader (agent disk-residency).
+func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)) {
+	m.responseHydrator = fn
+}
+
+// HasSpilledResponse reports whether the response is elided (needs hydration).
+func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
+
+// HydrateResponse loads an elided response into Spec; no-op if not spilled, so
+// serve paths can call it unconditionally before reading the response.
+func (m *Mock) HydrateResponse() error {
+	fn := m.responseHydrator
+	if fn == nil {
+		return nil
+	}
+	httpResp, mongoResp, err := fn()
+	if err != nil {
+		return err
+	}
+	if httpResp != nil {
+		m.Spec.HTTPResp = httpResp
+	}
+	if mongoResp != nil {
+		m.Spec.MongoResponses = mongoResp
+	}
+	m.responseHydrator = nil
+	return nil
 }
 
 // TestModeInfo is in-memory-only bookkeeping attached to each Mock once it
@@ -826,6 +871,9 @@ func (m *Mock) DeepCopy() *Mock {
 		},
 		ConnectionID: m.ConnectionID,
 	}
+
+	// Carry the loader so tree copies can still hydrate their elided response.
+	c.responseHydrator = m.responseHydrator
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

@@ -4,8 +4,9 @@ package http_test
 // (DefaultRoutes) wired to a stub Service, behind an httptest server, driven by
 // the real AgentClient. Proves the client streams the corpus and the real
 // /storemocks handler decodes the header and drives StoreMocksStream. Streaming
-// is the only wire format (client and agent ship in lockstep) — no negotiation,
-// no legacy fallback.
+// is the default wire format; StoreMocks falls back to the legacy single-shot
+// framing only when an older agent rejects the stream with 400 (covered in
+// agent_fallback_test.go).
 
 import (
 	"context"
@@ -73,8 +74,8 @@ func fixtures() (filtered, unfiltered []*models.Mock) {
 }
 
 // End-to-end: the client streams to the real agent routes, which decode the
-// header and drive StoreMocksStream. (Streaming is the only path now — client
-// and agent ship in lockstep, so there's no negotiation or legacy fallback.)
+// header and drive StoreMocksStream. (Streaming is the default path; the legacy
+// single-shot fallback for older agents is covered in agent_fallback_test.go.)
 func TestStoreMocks_StreamsToAgent(t *testing.T) {
 	svc := &stubSvc{}
 	r := chi.NewRouter()

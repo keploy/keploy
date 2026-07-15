@@ -101,6 +101,10 @@ type TestSetConfig interface {
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
 	TestRun(success int, failure int, testSets int, mocksConsumed int, runStatus string, metadata map[string]interface{})
+	// TestRunAborted records a graceful replay stop that happened before the
+	// TestRun summary was emitted (e.g. setup/instrumentation failed before
+	// any test set ran), carrying a categorized stop_reason for the funnel.
+	TestRunAborted(stopReason string)
 	MockTestRun(utilizedMocks int)
 }
 

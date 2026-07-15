@@ -212,6 +212,38 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
 			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
 
+			// Egress bypass for telemetry exports (POST /v1/traces, /ingest). These
+			// are live, fire-and-forget telemetry the app emits every run, not
+			// recorded dependencies — they have no real matching mock, so matching
+			// falls through to the HTTP fuzzy-matcher, which shingles the large
+			// (~150–200 KB) bodies. Under replay concurrency those transient shingle
+			// sets dominate the agent heap and OOM the sidecar (measured: ~432 MB of
+			// a ~1.1 GB peak). Short-circuit with a synthetic 200 — both OTLP/HTTP and
+			// Pyroscope treat any 2xx as success — so the client is satisfied and the
+			// body is never fuzzy-matched. Hardcoded pending a configurable rule.
+			if isTelemetryEgress(input.method, input.url) {
+				h.Logger.Debug("egress bypass: synthesizing 200 for telemetry export; skipping mock match",
+					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+				if _, werr := clientConn.Write([]byte(resp)); werr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(h.Logger, werr, "egress bypass: failed to write synthetic /v1/traces response", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- werr
+					return
+				}
+				// Read the next request on this keep-alive connection and loop,
+				// mirroring the matched-response path below.
+				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+				if err != nil {
+					h.Logger.Debug("egress bypass: client closed connection after /v1/traces", zap.Error(err))
+					errCh <- nil
+					return
+				}
+				continue
+			}
+
 			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -256,6 +288,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if stub == nil {
 				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- errors.New("matched mock is nil")
+				return
+			}
+
+			// Load the response body if it was spilled to disk (no-op otherwise).
+			if err := stub.HydrateResponse(); err != nil {
+				utils.LogError(h.Logger, err, "failed to hydrate spilled http response", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- err
 				return
 			}
 
