@@ -1016,11 +1016,15 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		if p.asyncEngine != nil {
+			// Register any AsyncParser so the engine can route to it
+			// (LaneFor/Decide) — AsyncParser alone is sufficient. Separately
+			// setter-inject the engine into parsers that implement AsyncAware
+			// so they can reach it when serving.
+			if ap, ok := prs.(async.AsyncParser); ok {
+				p.asyncEngine.RegisterParser(string(parserType), ap)
+			}
 			if aw, ok := prs.(async.AsyncAware); ok {
 				aw.SetAsyncEngine(p.asyncEngine)
-				if ap, ok := prs.(async.AsyncParser); ok {
-					p.asyncEngine.RegisterParser(string(parserType), ap)
-				}
 			}
 		}
 		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))

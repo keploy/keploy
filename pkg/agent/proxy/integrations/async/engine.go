@@ -186,7 +186,8 @@ func (e *Engine) Decide(lane models.AsyncLane, live *models.Mock) (*models.Mock,
 
 	if p == nil {
 		if e.logger != nil {
-			e.logger.Warn("async: no parser registered for lane type; serving recorded mock unverified",
+			e.logger.Debug("async: no parser registered for lane type; serving recorded mock unverified — "+
+				"check async.lanes[].type matches a registered integration that implements AsyncParser",
 				zap.String("lane", lane.Name), zap.String("type", lane.Type))
 		}
 		return recorded, nil, nil // serve recorded even without a shape verdict
@@ -224,7 +225,7 @@ func (e *Engine) Report() ReportSnapshot {
 // LogReport emits the async verdict tally so it is visible in keploy's output
 // at end of replay: served-and-shape-matched, shape-flags (served despite
 // request drift), and armed-but-never-polled (not-exercised). Each shape flag
-// is logged at Warn since drift is an anomaly, not expected-default state.
+// is logged at Info with a remediation hint.
 func (e *Engine) LogReport(logger *zap.Logger) {
 	e.logOnce.Do(func() {
 		s := e.Report()
@@ -236,7 +237,9 @@ func (e *Engine) LogReport(logger *zap.Logger) {
 			zap.Int("shape_flags", s.Flag),
 			zap.Int("not_exercised", s.NotExercised))
 		for _, f := range s.Flags {
-			logger.Warn("async egress shape drift (served recorded response anyway)",
+			logger.Info("async egress shape drift (served recorded response anyway); "+
+				"re-record if the request legitimately changed, or widen the lane's "+
+				"volatileParams / match to treat the varying part as noise",
 				zap.String("detail", f))
 		}
 	})

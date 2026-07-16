@@ -63,11 +63,11 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 	for _, lane := range r.lanes {
 		p := r.parsers[lane.Type]
 		if p == nil {
-			// Lane is declared but its parser never resolved (see
-			// ResolveAsyncParsers): we cannot evaluate MatchesLane, so this
-			// mock is left unstamped for this lane. Surface it here, at
-			// record time, rather than failing silently.
-			r.logger.Warn("async lane parser unresolved; mock left unstamped",
+			// Lane is declared but its parser never resolved. ResolveAsyncParsers
+			// already reports that once at startup with a fix hint; this fires per
+			// mock, so keep it at Debug to avoid flooding a real recording.
+			r.logger.Debug("async lane parser unresolved; mock left unstamped — "+
+				"ensure lane.type matches a registered integration implementing AsyncParser",
 				zap.String("lane", lane.Name), zap.String("type", lane.Type))
 			continue
 		}
@@ -125,13 +125,17 @@ func ResolveAsyncParsers(logger *zap.Logger, lanes []models.AsyncLane) map[strin
 		}
 		reg := integrations.Registered[integrations.IntegrationType(lane.Type)]
 		if reg == nil {
-			logger.Warn("async lane type not registered", zap.String("type", lane.Type))
+			logger.Error("async lane type not registered; its mocks will not be stamped async — "+
+				"set async.lanes[].type to a registered integration name",
+				zap.String("type", lane.Type))
 			continue
 		}
 		if ap, ok := reg.Initializer(logger).(async.AsyncParser); ok {
 			out[lane.Type] = ap
 		} else {
-			logger.Warn("async lane parser does not implement AsyncParser", zap.String("type", lane.Type))
+			logger.Error("async lane integration does not implement async.AsyncParser; its mocks will not be stamped async — "+
+				"pick a lane type whose integration supports async (currently: http), or add AsyncParser to it",
+				zap.String("type", lane.Type))
 		}
 	}
 	return out
