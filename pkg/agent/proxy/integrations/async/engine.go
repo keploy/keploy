@@ -1,6 +1,7 @@
 package async
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"sync"
@@ -15,6 +16,7 @@ type asyncEntry struct {
 	mock      *models.Mock
 	seq       int
 	anchorPos int
+	poll      bool // MetaAsyncPoll: HOLD this delivery at Decide until anchorPos is reached
 }
 
 type laneStream struct {
@@ -28,6 +30,7 @@ type ReportSnapshot struct {
 	Pass         int
 	Flag         int
 	NotExercised int
+	Held         int
 	Flags        []string
 }
 
@@ -39,13 +42,14 @@ type Engine struct {
 	parsers   map[string]AsyncParser // by lane.Type
 
 	mu         sync.Mutex
+	cond       *sync.Cond             // signaled whenever completed/windowSeen changes; wakes held POLL Decide calls
 	loaded     bool                   // true once Load has partitioned+sorted streams; makes Load idempotent
 	streams    map[string]*laneStream // by lane name
 	completed  int                    // number of testcases completed
 	windowSeen bool                   // AdvanceWindow: first window doesn't count as a completed test
 
-	pass, flag int
-	flags      []string
+	pass, flag, held int
+	flags            []string
 
 	logOnce         sync.Once // LogReport fires at most once (multiple shutdown seams call it)
 	nonWindowedOnce sync.Once // WarnNonWindowed fires at most once (SetMocks runs per test-set)
@@ -70,12 +74,14 @@ func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]
 			zap.Any("match", l.Match),
 			zap.Any("matchQuery", l.MatchQuery))
 	}
-	return &Engine{
+	e := &Engine{
 		logger:    logger,
 		laneOrder: laneOrder,
 		parsers:   parsers,
 		streams:   make(map[string]*laneStream),
 	}
+	e.cond = sync.NewCond(&e.mu)
+	return e
 }
 
 // WarnNonWindowed logs once that async replay is running on the non-windowed
@@ -133,6 +139,7 @@ func (e *Engine) Load(mocks []*models.Mock) {
 			mock:      m,
 			seq:       atoiOr(m.Spec.Metadata[models.MetaAsyncSeq], 0),
 			anchorPos: atoiOr(m.Spec.Metadata[models.MetaAnchorPos], 0),
+			poll:      m.Spec.Metadata[models.MetaAsyncPoll] == "true",
 		})
 	}
 	for _, s := range e.streams {
@@ -148,6 +155,7 @@ func (e *Engine) Load(mocks []*models.Mock) {
 func (e *Engine) OnTestComplete() {
 	e.mu.Lock()
 	e.completed++
+	e.cond.Broadcast()
 	e.mu.Unlock()
 }
 
@@ -162,6 +170,7 @@ func (e *Engine) AdvanceWindow() {
 	} else {
 		e.windowSeen = true
 	}
+	e.cond.Broadcast()
 	e.mu.Unlock()
 }
 
@@ -188,7 +197,7 @@ func (e *Engine) CompletedForTest() int {
 // so the FIRST declared matching lane always wins, deterministically.
 func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	for _, lane := range e.laneOrder {
-		p := e.parsers[lane.Type]
+		p := e.parsers[lane.BaseType()]
 		if p != nil && p.MatchesLane(m, lane) {
 			return lane, true
 		}
@@ -196,27 +205,79 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	return models.AsyncLane{}, false
 }
 
-// Decide returns the recorded mock to serve, or a keep-alive payload. The
-// (potentially expensive) shape match runs OUTSIDE the engine lock so poll
-// traffic on one lane never serializes unrelated lanes' Load/Report/advance.
-func (e *Engine) Decide(lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
+// Decide returns the recorded mock to serve, or a keep-alive payload.
+//
+// A POLL delivery (asyncEntry.poll, stamped from models.MetaAsyncPoll) is HELD
+// here on e.cond until completed reaches its anchorPos or ctx is done.
+// cond.Wait releases e.mu while parked, so AdvanceWindow/OnTestComplete are
+// NEVER gated by an outstanding held poll — that is the non-blocking
+// invariant this method must preserve. A non-poll delivery that isn't armed
+// yet returns a keep-alive immediately (unchanged pre-hold behavior). The
+// (potentially expensive) shape match itself still runs OUTSIDE the engine
+// lock, in decideServe, so poll traffic on one lane never serializes
+// unrelated lanes' Load/Report/advance.
+func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
+	p := e.parsers[lane.BaseType()]
+
 	e.mu.Lock()
-	p := e.parsers[lane.Type]
-	var recorded *models.Mock
-	if s := e.streams[lane.Name]; s != nil && s.cursor < len(s.mocks) && e.completed >= s.mocks[s.cursor].anchorPos {
-		recorded = s.mocks[s.cursor].mock
-		s.cursor++
+	s := e.streams[lane.Name]
+	if s == nil || s.cursor >= len(s.mocks) {
+		e.mu.Unlock()
+		return e.keepAlive(p, lane) // exhausted / unknown lane
 	}
-	e.mu.Unlock()
-
-	if recorded == nil {
-		if p == nil {
-			return nil, nil, nil
+	entry := s.mocks[s.cursor]
+	if entry.poll && e.completed < entry.anchorPos {
+		// Hold: wake a cond waiter on ctx cancel too.
+		stop := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				e.mu.Lock()
+				e.cond.Broadcast()
+				e.mu.Unlock()
+			case <-stop:
+			}
+		}()
+		for e.completed < entry.anchorPos && ctx.Err() == nil {
+			e.cond.Wait()
 		}
-		ka, err := p.EmptyResponse(lane)
-		return nil, ka, err
+		close(stop)
+		if ctx.Err() != nil {
+			e.mu.Unlock()
+			return e.keepAlive(p, lane)
+		}
+		// re-read: cursor may not have moved (single consumer per lane), but
+		// completed advanced; fall through to arm.
+	} else if e.completed < entry.anchorPos {
+		// non-poll, not armed: immediate keep-alive (unchanged behavior).
+		e.mu.Unlock()
+		return e.keepAlive(p, lane)
 	}
+	recorded := s.mocks[s.cursor].mock
+	if s.mocks[s.cursor].poll {
+		e.held++
+	}
+	s.cursor++
+	e.mu.Unlock()
+	return e.decideServe(ctx, p, lane, recorded, live)
+}
 
+// keepAlive returns the parser's "no data yet" payload for lane. Nil-safe:
+// when no parser is registered for the lane's base type, it returns a bare
+// (nil, nil, nil) rather than panicking.
+func (e *Engine) keepAlive(p AsyncParser, lane models.AsyncLane) (*models.Mock, []byte, error) {
+	if p == nil {
+		return nil, nil, nil
+	}
+	ka, err := p.EmptyResponse(lane)
+	return nil, ka, err
+}
+
+// decideServe runs the shape-match/verdict for a recorded delivery that has
+// been armed (and, for polls, already released from its hold) and is about to
+// be served. ctx is accepted for symmetry with Decide/future cancellation-
+// aware matching; the match itself is synchronous today.
+func (e *Engine) decideServe(_ context.Context, p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
 	if p == nil {
 		if e.logger != nil {
 			e.logger.Debug("async: no parser registered for lane type; serving recorded mock unverified — "+
@@ -250,7 +311,7 @@ func (e *Engine) Report() ReportSnapshot {
 			}
 		}
 	}
-	out := ReportSnapshot{Pass: e.pass, Flag: e.flag, NotExercised: ne}
+	out := ReportSnapshot{Pass: e.pass, Flag: e.flag, NotExercised: ne, Held: e.held}
 	out.Flags = append(out.Flags, e.flags...)
 	return out
 }
@@ -268,7 +329,8 @@ func (e *Engine) LogReport(logger *zap.Logger) {
 		logger.Info("async egress verdict",
 			zap.Int("served", s.Pass),
 			zap.Int("shape_flags", s.Flag),
-			zap.Int("not_exercised", s.NotExercised))
+			zap.Int("not_exercised", s.NotExercised),
+			zap.Int("held", s.Held))
 		for _, f := range s.Flags {
 			logger.Info("async egress shape drift (served recorded response anyway); "+
 				"re-record if the request legitimately changed, or widen the lane's "+

@@ -262,7 +262,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
 						errCh <- e
 					}
-					recorded, keepAlive, derr := h.asyncEngine.Decide(lane, live)
+					recorded, keepAlive, derr := h.asyncEngine.Decide(ctx, lane, live)
 					if derr != nil {
 						failAsync(derr, "async: engine decide failed")
 						return

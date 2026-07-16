@@ -60,7 +60,7 @@ func TestLoadAsyncMocksForwardsToEngine(t *testing.T) {
 	nonAsync := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{}}}
 	p.LoadAsyncMocks([]*models.Mock{asyncMock("L", 1, "a"), nonAsync, asyncMock("L", 2, "b")})
 
-	rec, _, _ := eng.Decide(lane, &models.Mock{})
+	rec, _, _ := eng.Decide(context.Background(), lane, &models.Mock{})
 	if rec == nil || rec.Spec.HTTPResp.Body != "a" {
 		t.Fatalf("want first async mock 'a', got %v", rec)
 	}
