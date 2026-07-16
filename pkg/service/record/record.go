@@ -24,6 +24,38 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	// mappingDrainGrace hard-caps how long recording shutdown waits for the agent
+	// to flush the test<->mock mappings it has already resolved. Bounded so a
+	// wedged agent cannot hang exit, and kept under the 30s DrainErrGroup budget
+	// that Start's teardown gives the group this drain runs in — overshooting that
+	// would trade a lost tail for a teardown timeout, which is no better.
+	mappingDrainGrace = 15 * time.Second
+
+	// mappingIdleGrace ends the shutdown drain once the mapping stream falls idle.
+	// The agent holds the stream open for the whole session, so idleness — not EOF
+	// — is what signals the tail is through. Sized well above the agent's
+	// per-mapping flush latency so a slow flush is not mistaken for completion.
+	mappingIdleGrace = 3 * time.Second
+)
+
+// stopTimer disarms t, draining its channel if it had already fired, so a later
+// Reset starts from a clean state.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// resetTimer re-arms t for d, safely draining any pending fire first.
+func resetTimer(t *time.Timer, d time.Duration) {
+	stopTimer(t)
+	t.Reset(d)
+}
+
 // consumeMappings correlates each test<->mock mapping the agent streams to its
 // real mock entries and persists it to mappings.yaml. It runs until mappings is
 // closed by the producer, and returns only then — ctx bounds nothing here by
@@ -904,11 +936,48 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	g.Go(func() error {
 		defer close(mappingChan)
 
-		// Create context that cancels with parent
+		// A mapping is the LAST artifact a recorded test produces: it is derived,
+		// and the agent can only emit it once that test's mock range has resolved.
+		// So when recording stops, a burst for the most recently recorded tests is
+		// still queued inside the agent. Tearing the stream down the instant ctx was
+		// done dropped that burst SILENTLY — the entries never reach the consumer, so
+		// not even a write error is logged. mappings.yaml then omitted the tail of
+		// every endpoint, and replay reported "no_mocks" (candidates: 0) for exactly
+		// those tests, because resolveMockSets picks mapping-based selection per test
+		// SET and has no per-test fallback for a test that is missing.
+		//
+		// It is tempting to assume the tail has already been flushed by now because
+		// teardown stops the app first. That is only true for the NATIVE path: under
+		// docker-compose keploy never runs the app at all (see the CommandType check
+		// above), runAppErrGrp is empty, its drain returns instantly, and reqCtxCancel
+		// therefore fires within milliseconds of SIGINT — with the agent's queue still
+		// full. Docker-compose is what most e2e lanes and many users run, and it is
+		// where this bug was measured: 27 of 342 tests lost, all tails.
+		//
+		// So on shutdown keep the stream open and keep draining. Stop as soon as the
+		// tail is through — the agent closing the stream, or the stream falling idle —
+		// and hard-cap the total wait so a wedged agent cannot hang exit.
 		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
+
+		drained := make(chan struct{})
+		defer close(drained)
 		go func() {
-			<-ctx.Done()
+			select {
+			case <-drained:
+				return // finished before shutdown — nothing to wait for
+			case <-ctx.Done():
+			}
+			select {
+			case <-drained: // tail fully drained
+			case <-time.After(mappingDrainGrace):
+				// Hitting the cap means the agent never finished flushing, so the
+				// tail is truncated here — the same damage this drain prevents.
+				// Say so: silence is what made the original bug so hard to find.
+				r.logger.Warn("timed out draining test-mock mappings on shutdown",
+					zap.Duration("waited", mappingDrainGrace),
+					zap.String("next_step", "mappings.yaml may be missing the last recorded tests and replay can report no_mocks for them; re-record the test set and report this if it recurs"))
+			}
 			cancel()
 		}()
 
@@ -921,24 +990,50 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			return fmt.Errorf("failed to get mappings: %w", err)
 		}
 
+		// idle is armed only once shutdown has begun. While recording is live, gaps
+		// between mappings are normal and must never end the stream; once shutdown
+		// starts, a gap long enough means the agent has nothing left to flush (it
+		// holds the stream open for the whole session, so it will not close it).
+		idle := time.NewTimer(mappingIdleGrace)
+		defer idle.Stop()
+		stopTimer(idle)
+
 		for {
+			// While recording is live, wake on ctx.Done(); once draining, wait on the
+			// idle timer instead. Arming both would let an already-closed ctx.Done()
+			// spin the loop.
+			var idleC <-chan time.Time
+			var shutdownC <-chan struct{}
+			if ctx.Err() != nil {
+				resetTimer(idle, mappingIdleGrace)
+				idleC = idle.C
+			} else {
+				shutdownC = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-shutdownC:
+				// Shutdown began: re-loop to arm the idle timer and start draining.
+				continue
+			case <-mapCtx.Done():
+				// Hard cap reached, or the stream was torn down.
+				return nil
+			case <-idleC:
+				// Draining and nothing for mappingIdleGrace: the tail is through.
+				return nil
 			case m, ok := <-ch:
 				if !ok {
 					return nil
 				}
 				select {
-				case <-ctx.Done():
+				case <-mapCtx.Done():
 					// Hand off the mapping we already took off the stream before
-					// unwinding — cancellation is not a licence to drop data we
-					// are holding. Both cases are ready once ctx is done, so the
-					// runtime picks at random and this would otherwise lose the
-					// last in-flight mapping about half the time, which is the
-					// tail this fix exists to keep. The consumer is still ranging
-					// (it stops only when this goroutine closes the channel on
-					// return), so the send completes. Mirrors the outgoing
+					// unwinding — cancellation is not a licence to drop data we are
+					// holding. Both cases are ready once mapCtx is done, so the
+					// runtime picks at random and this would otherwise lose the last
+					// in-flight mapping about half the time. The consumer is still
+					// ranging (it stops only when this goroutine closes the channel
+					// on return), so the send completes. Mirrors the outgoing
 					// producer above.
 					mappingChan <- m
 					return ctx.Err()
