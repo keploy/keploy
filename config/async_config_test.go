@@ -16,7 +16,6 @@ async:
         host: "notify.internal.svc"
         path: "/v1/poll*"
       volatileParams: ["cursor"]
-      notExercised: skip
 `
 	var c Config
 	if err := yaml3.Unmarshal([]byte(src), &c); err != nil {
@@ -34,8 +33,5 @@ async:
 	}
 	if len(l.VolatileParams) != 1 || l.VolatileParams[0] != "cursor" {
 		t.Fatalf("bad volatileParams: %+v", l.VolatileParams)
-	}
-	if l.NotExercised != "skip" {
-		t.Fatalf("bad notExercised: %q", l.NotExercised)
 	}
 }

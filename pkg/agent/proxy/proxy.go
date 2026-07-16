@@ -2843,6 +2843,12 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 		m.SetUnFilteredMocks(unFiltered)
 		p.dnsCache.Purge()
 	}
+	if p.asyncEngine != nil {
+		// This non-windowed path never advances the async window (only
+		// SetMocksWithWindow does), so test-anchored deliveries can't arm
+		// here. Warn once rather than silently reporting them not-exercised.
+		p.asyncEngine.WarnNonWindowed()
+	}
 
 	return nil
 }

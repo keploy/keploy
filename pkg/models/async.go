@@ -41,7 +41,6 @@ type AsyncLane struct {
 	// (watch=false) as ordinary non-async egress.
 	MatchQuery     map[string]string `json:"matchQuery,omitempty" yaml:"matchQuery,omitempty" mapstructure:"matchQuery"`
 	VolatileParams []string          `json:"volatileParams,omitempty" yaml:"volatileParams,omitempty" mapstructure:"volatileParams"`
-	NotExercised   string            `json:"notExercised,omitempty" yaml:"notExercised,omitempty" mapstructure:"notExercised"` // skip|fail (default skip)
 }
 
 // EffectiveName returns the caller-supplied Name, or a deterministic name
@@ -50,9 +49,9 @@ type AsyncLane struct {
 // same routing config, so it works as the join key stamped on mocks
 // (MetaAsyncLane) at record and looked up by the replay engine.
 //
-// volatileParams and notExercised are deliberately EXCLUDED: they are
-// replay-time tuning a user may set differently between the record and replay
-// runs, and letting them shift the name would break that record→replay join.
+// volatileParams is deliberately EXCLUDED: it is replay-time tuning a user may
+// set differently between the record and replay runs, and letting it shift the
+// name would break that record→replay join.
 func (l AsyncLane) EffectiveName() string {
 	if l.Name != "" {
 		return l.Name

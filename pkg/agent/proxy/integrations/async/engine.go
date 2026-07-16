@@ -47,19 +47,51 @@ type Engine struct {
 	pass, flag int
 	flags      []string
 
-	logOnce sync.Once // LogReport fires at most once (multiple shutdown seams call it)
+	logOnce         sync.Once // LogReport fires at most once (multiple shutdown seams call it)
+	nonWindowedOnce sync.Once // WarnNonWindowed fires at most once (SetMocks runs per test-set)
 }
 
 func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]AsyncParser) *Engine {
 	// WithEffectiveNames both fills omitted names (matching what the recorder
 	// stamped) and returns its own copy, so laneOrder is safe from caller
 	// mutation.
+	laneOrder := models.WithEffectiveNames(lanes)
+	// Surface each lane's resolved match criteria once at startup. An
+	// over-broad match (e.g. path "/*" or a host glob that covers a real
+	// dependency) silently captures ordinary sync egress: once that lane's
+	// recorded stream drains, every such request gets an empty keep-alive
+	// instead of its real recorded response. Logging the resolved criteria
+	// makes an over-broad glob visible; keep a lane's match as narrow as the
+	// poll endpoint.
+	for _, l := range laneOrder {
+		logger.Info("async egress lane configured",
+			zap.String("lane", l.Name),
+			zap.String("type", l.Type),
+			zap.Any("match", l.Match),
+			zap.Any("matchQuery", l.MatchQuery))
+	}
 	return &Engine{
 		logger:    logger,
-		laneOrder: models.WithEffectiveNames(lanes),
+		laneOrder: laneOrder,
 		parsers:   parsers,
 		streams:   make(map[string]*laneStream),
 	}
+}
+
+// WarnNonWindowed logs once that async replay is running on the non-windowed
+// mock path (Proxy.SetMocks, the fallback used when the proxy does not
+// implement WindowedProxy). That path never calls AdvanceWindow, so the
+// completed counter stays at 0 and only startup-anchored (anchorPos == 0)
+// deliveries ever arm — every test-anchored delivery would otherwise report
+// not-exercised with no indication that gating never advanced. Full async
+// replay requires the windowed mock manager.
+func (e *Engine) WarnNonWindowed() {
+	e.nonWindowedOnce.Do(func() {
+		e.logger.Warn("async egress lanes are configured but replay is using the " +
+			"non-windowed mock path; only startup-anchored deliveries will arm and " +
+			"test-anchored deliveries will report not-exercised — full async replay " +
+			"requires the windowed mock manager (WindowedProxy)")
+	})
 }
 
 // laneByName finds a declared lane by name. Lane counts are tiny (caller-

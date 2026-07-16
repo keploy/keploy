@@ -65,9 +65,9 @@ func TestEffectiveNameGeneratedDistinctForDifferentRouting(t *testing.T) {
 }
 
 // The generated name depends ONLY on routing identity (type + match +
-// matchQuery). volatileParams and notExercised are replay-time tuning a user
-// may set differently between record and replay, so they must NOT change the
-// name — otherwise the record→replay join key would break.
+// matchQuery). volatileParams is replay-time tuning a user may set differently
+// between record and replay, so it must NOT change the name — otherwise the
+// record→replay join key would break.
 func TestEffectiveNameStableAcrossReplayTuning(t *testing.T) {
 	rec := AsyncLane{
 		Type:       "http",
@@ -79,10 +79,9 @@ func TestEffectiveNameStableAcrossReplayTuning(t *testing.T) {
 		Match:          map[string]string{"pathRegex": "^/poll$"},
 		MatchQuery:     map[string]string{"watch": "true"},
 		VolatileParams: []string{"version", "cursor"},
-		NotExercised:   "fail",
 	}
 	if rec.EffectiveName() != replay.EffectiveName() {
-		t.Fatalf("name must ignore volatileParams/notExercised: %q vs %q",
+		t.Fatalf("name must ignore volatileParams: %q vs %q",
 			rec.EffectiveName(), replay.EffectiveName())
 	}
 }
