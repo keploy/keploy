@@ -3,6 +3,7 @@ package async
 import (
 	"context"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,76 @@ func TestDecideHoldsNonHTTPPollKind(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("non-HTTP poll never released")
 	}
+}
+
+// TestDecideConcurrentSameLaneServesInOrderByAnchor proves a parked poll's
+// wake re-peeks the CURRENT cursor entry rather than trusting the entry it
+// captured before parking. Two concurrent same-lane Decide calls both park on
+// mock1 (anchorPos 1, cursor 0). When completed reaches 1, only ONE of them
+// may serve mock1 and advance the cursor to mock2 (anchorPos 2) — the other
+// must re-check the (now-advanced) cursor's own anchor and stay parked, NOT
+// serve mock2 early just because it woke up. Without the re-peek loop, the
+// second caller trusts its stale pre-wait entry, whose anchorPos (1) is
+// already satisfied, and serves the not-yet-armed mock2 immediately.
+func TestDecideConcurrentSameLaneServesInOrderByAnchor(t *testing.T) {
+	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
+	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
+	mock1 := &models.Mock{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
+		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
+		models.MetaAsyncSeq: "1", models.MetaAnchorPos: "1",
+	}}}
+	mock2 := &models.Mock{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
+		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
+		models.MetaAsyncSeq: "2", models.MetaAnchorPos: "2",
+	}}}
+	e.Load([]*models.Mock{mock1, mock2})
+
+	done := make(chan *models.Mock, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
+			done <- rec
+		}()
+	}
+
+	// Let both goroutines reach cond.Wait before advancing anything.
+	time.Sleep(50 * time.Millisecond)
+
+	e.AdvanceWindow() // windowSeen = true, completed stays 0
+	e.AdvanceWindow() // completed = 1: only mock1 (anchorPos 1) may resolve
+
+	select {
+	case rec := <-done:
+		if rec != mock1 {
+			t.Fatalf("completed=1: want mock1 (anchorPos 1) served, got %+v", rec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no Decide resolved after completed=1; mock1 should have armed")
+	}
+
+	// The other Decide must still be parked: mock2's anchorPos (2) is not yet
+	// reached. If it resolves here, it served a not-yet-armed delivery.
+	select {
+	case rec := <-done:
+		t.Fatalf("second Decide resolved before its anchor (completed=1); got %+v — served mock2 too early", rec)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	e.AdvanceWindow() // completed = 2: mock2 now armed
+
+	select {
+	case rec := <-done:
+		if rec != mock2 {
+			t.Fatalf("completed=2: want mock2 (anchorPos 2) served, got %+v", rec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Decide never resolved after completed=2")
+	}
+
+	wg.Wait()
 }
 
 // TestLaneForResolvesByBaseType proves LaneFor routes a "httpPoll" lane's live

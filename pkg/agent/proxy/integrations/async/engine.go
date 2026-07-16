@@ -216,50 +216,58 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 // (potentially expensive) shape match itself still runs OUTSIDE the engine
 // lock, in decideServe, so poll traffic on one lane never serializes
 // unrelated lanes' Load/Report/advance.
+//
+// The hold is a re-peek LOOP, not a single wait-then-serve: under concurrent
+// same-lane Decide calls, another consumer can advance s.cursor while this
+// call is parked in cond.Wait. Every wake (and the initial pass) re-reads the
+// CURRENT s.mocks[s.cursor] and re-checks its own anchorPos before serving —
+// serving a stale, pre-wait entry could arm a later, not-yet-armed delivery.
 func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
 	p := e.parsers[lane.BaseType()]
 
 	e.mu.Lock()
-	s := e.streams[lane.Name]
-	if s == nil || s.cursor >= len(s.mocks) {
-		e.mu.Unlock()
-		return e.keepAlive(p, lane) // exhausted / unknown lane
-	}
-	entry := s.mocks[s.cursor]
-	if entry.poll && e.completed < entry.anchorPos {
-		// Hold: wake a cond waiter on ctx cancel too.
-		stop := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				e.mu.Lock()
-				e.cond.Broadcast()
-				e.mu.Unlock()
-			case <-stop:
-			}
-		}()
-		for e.completed < entry.anchorPos && ctx.Err() == nil {
-			e.cond.Wait()
+	// One ctx-done bridge for the whole call: spawned once, stopped on
+	// return. It only needs to wake a parked cond.Wait below on cancellation;
+	// AdvanceWindow/OnTestComplete broadcast for the normal-progress case.
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			e.mu.Lock()
+			e.cond.Broadcast()
+			e.mu.Unlock()
+		case <-stop:
 		}
-		close(stop)
+	}()
+	defer close(stop)
+
+	for {
+		s := e.streams[lane.Name]
+		if s == nil || s.cursor >= len(s.mocks) {
+			e.mu.Unlock()
+			return e.keepAlive(p, lane) // exhausted / unknown lane
+		}
+		entry := s.mocks[s.cursor]
+		if e.completed >= entry.anchorPos {
+			if entry.poll {
+				e.held++
+			}
+			recorded := entry.mock
+			s.cursor++
+			e.mu.Unlock()
+			return e.decideServe(ctx, p, lane, recorded, live)
+		}
+		if !entry.poll {
+			// non-poll, not armed: immediate keep-alive (unchanged behavior).
+			e.mu.Unlock()
+			return e.keepAlive(p, lane)
+		}
 		if ctx.Err() != nil {
 			e.mu.Unlock()
 			return e.keepAlive(p, lane)
 		}
-		// re-read: cursor may not have moved (single consumer per lane), but
-		// completed advanced; fall through to arm.
-	} else if e.completed < entry.anchorPos {
-		// non-poll, not armed: immediate keep-alive (unchanged behavior).
-		e.mu.Unlock()
-		return e.keepAlive(p, lane)
+		e.cond.Wait() // releases e.mu; loop re-peeks the (possibly advanced) cursor on wake
 	}
-	recorded := s.mocks[s.cursor].mock
-	if s.mocks[s.cursor].poll {
-		e.held++
-	}
-	s.cursor++
-	e.mu.Unlock()
-	return e.decideServe(ctx, p, lane, recorded, live)
 }
 
 // keepAlive returns the parser's "no data yet" payload for lane. Nil-safe:
