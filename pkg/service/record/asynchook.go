@@ -30,7 +30,9 @@ type AsyncRecorder struct {
 }
 
 func NewAsyncRecorder(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]async.AsyncParser) *AsyncRecorder {
-	return &AsyncRecorder{logger: logger, lanes: lanes, parsers: parsers, seq: map[string]int{}}
+	// Fill in any omitted lane names so the stamped MetaAsyncLane value is the
+	// same deterministic key the replay engine re-derives.
+	return &AsyncRecorder{logger: logger, lanes: models.WithEffectiveNames(lanes), parsers: parsers, seq: map[string]int{}}
 }
 
 // AfterTestCaseInsert tracks each ingress testcase's window START. Uses the

@@ -51,11 +51,12 @@ type Engine struct {
 }
 
 func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]AsyncParser) *Engine {
-	order := make([]models.AsyncLane, 0, len(lanes))
-	order = append(order, lanes...)
+	// WithEffectiveNames both fills omitted names (matching what the recorder
+	// stamped) and returns its own copy, so laneOrder is safe from caller
+	// mutation.
 	return &Engine{
 		logger:    logger,
-		laneOrder: order,
+		laneOrder: models.WithEffectiveNames(lanes),
 		parsers:   parsers,
 		streams:   make(map[string]*laneStream),
 	}

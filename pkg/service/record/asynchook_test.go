@@ -118,6 +118,29 @@ func TestAnchorOrderIndependentWithStartupNamedTest(t *testing.T) {
 	t.Run("startup inserted second", func(t *testing.T) { insertAndCheck(t, false) })
 }
 
+// A lane declared WITHOUT a name must still stamp a stable, non-empty lane
+// key — the deterministic EffectiveName — so the replay engine (which derives
+// the same key from the same lane config) can find the stream.
+func TestGeneratedLaneNameStampedWhenNameOmitted(t *testing.T) {
+	lane := models.AsyncLane{Type: "http", Match: map[string]string{"pathRegex": "^/poll$"}}
+	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
+		map[string]async.AsyncParser{"http": laneStub{}})
+
+	m := egress("lane", time.Unix(500, 0))
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
+
+	want := lane.EffectiveName()
+	if want == "" {
+		t.Fatal("EffectiveName must be non-empty for a nameless lane")
+	}
+	if got := m.Spec.Metadata[models.MetaAsyncLane]; got != want {
+		t.Fatalf("stamped lane = %q, want generated %q", got, want)
+	}
+	if m.Spec.Metadata[models.MetaAsync] != "true" {
+		t.Fatalf("nameless lane egress must still be stamped async: %+v", m.Spec.Metadata)
+	}
+}
+
 func TestNonLaneEgressUntouched(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("normal", time.Unix(2000, 0))
