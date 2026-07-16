@@ -107,3 +107,26 @@ func TestWithEffectiveNamesFillsEmptyPreservesProvided(t *testing.T) {
 		t.Fatal("WithEffectiveNames mutated the caller's slice")
 	}
 }
+
+func TestAsyncLaneIsPollAndBaseType(t *testing.T) {
+	cases := []struct {
+		typ      string
+		wantPoll bool
+		wantBase string
+	}{
+		{"http", false, "http"},
+		{"httpPoll", true, "http"},
+		{"HTTPPOLL", true, "HTTP"}, // suffix strip is case-insensitive on the suffix only
+		{"mongoPoll", true, "mongo"},
+		{"", false, ""},
+	}
+	for _, c := range cases {
+		l := AsyncLane{Type: c.typ}
+		if l.IsPoll() != c.wantPoll {
+			t.Fatalf("%q: IsPoll=%v want %v", c.typ, l.IsPoll(), c.wantPoll)
+		}
+		if l.BaseType() != c.wantBase {
+			t.Fatalf("%q: BaseType=%q want %q", c.typ, l.BaseType(), c.wantBase)
+		}
+	}
+}

@@ -11,11 +11,13 @@ import (
 // Async metadata keys stamped on an ordinary egress mock's Spec.Metadata
 // when it matches a declared async lane at record time.
 const (
-	MetaAsync       = "async"       // "true"
-	MetaAsyncLane   = "lane"        // lane name
-	MetaAnchorAfter = "anchorAfter" // last completed testcase Name, or "startup" (readability)
-	MetaAnchorPos   = "anchorPos"   // number of testcases completed before this egress fired (decimal)
-	MetaAsyncSeq    = "asyncSeq"    // per-lane order counter (decimal)
+	MetaAsync        = "async"        // "true"
+	MetaAsyncLane    = "lane"         // lane name
+	MetaAnchorAfter  = "anchorAfter"  // last completed testcase Name, or "startup" (readability)
+	MetaAnchorPos    = "anchorPos"    // number of testcases completed before this egress fired (decimal)
+	MetaAsyncSeq     = "asyncSeq"     // per-lane order counter (decimal)
+	MetaAsyncPoll    = "poll"         // "true" on a held long-poll delivery
+	MetaPollDurationMs = "pollDurationMs" // recorded open-duration (ms), fidelity only
 )
 
 // AnchorStartup is the MetaAnchorAfter value for async mocks that fired
@@ -113,6 +115,23 @@ func writeSortedKV(w io.Writer, m map[string]string) {
 		io.WriteString(w, m[k])
 		io.WriteString(w, "\x00")
 	}
+}
+
+// IsPoll reports whether this lane is a long-poll lane — its Type ends in
+// "Poll" (case-insensitive on the suffix). A poll lane's replay deliveries are
+// HELD open until their resolve testcase instead of served immediately.
+func (l AsyncLane) IsPoll() bool {
+	return len(l.Type) > len("Poll") && strings.EqualFold(l.Type[len(l.Type)-len("Poll"):], "Poll")
+}
+
+// BaseType returns the parser type backing the lane: the Type with any "Poll"
+// suffix stripped ("httpPoll" -> "http"), so poll lanes resolve to the same
+// parser as their non-poll base.
+func (l AsyncLane) BaseType() string {
+	if l.IsPoll() {
+		return l.Type[:len(l.Type)-len("Poll")]
+	}
+	return l.Type
 }
 
 // laneSlug builds a short, readable, alnum-hyphen token from the lane's path
