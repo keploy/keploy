@@ -79,6 +79,45 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 	}
 }
 
+// resolveMappingEntries correlates a test's mapping tempIDs to the persisted
+// MockEntries in correlationMap, dropping each consumed tempID as it goes. It
+// EXCLUDES async-egress mocks (those in asyncMockIDs): they are served at replay
+// by the async engine from the complete corpus, so they must never be recorded
+// as a testcase's per-test mock — even when a background egress's timestamp
+// happened to fall inside the testcase's request window (the agent's mapper bins
+// purely by timestamp and has no async awareness). The Mock loop stores the
+// async marker before it publishes the tempID to correlationMap, so a resolved
+// tempID always has its async status already decided.
+func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map) []models.MockEntry {
+	var realMockEntries []models.MockEntry
+	for _, tempID := range mapping.MockIDs {
+		var realEntry models.MockEntry
+		found := false
+		// Simple retry loop (fast spin) to wait for the Mock Loop.
+		for i := 0; i < 50; i++ { // Wait up to ~500ms
+			if val, ok := correlationMap.Load(tempID); ok {
+				realEntry = val.(models.MockEntry)
+				found = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !found {
+			r.logger.Error("Failed to correlate mock mapping",
+				zap.String("test", mapping.TestName),
+				zap.String("tempMockID", tempID),
+				zap.String("next_step", "ensure mapping store is enabled, avoid high parallelism, or re-record if mappings are inconsistent"))
+			continue
+		}
+		correlationMap.Delete(tempID)
+		if _, isAsync := asyncMockIDs.Load(tempID); isAsync {
+			continue
+		}
+		realMockEntries = append(realMockEntries, realEntry)
+	}
+	return realMockEntries
+}
+
 // GetRecordHooks returns the current hooks.
 func (r *Recorder) GetRecordHooks() RecordHooks {
 	return r.hooks
@@ -419,6 +458,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
 	var correlationMap sync.Map
+	// asyncMockIDs holds tempIDs stamped MetaAsync; resolveMappingEntries uses it
+	// to keep async-egress mocks out of the per-test mappings (see its doc).
+	var asyncMockIDs sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -546,6 +588,11 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
 			}
+			// The AsyncRecorder hook stamps MetaAsync in BeforeMockInsert above;
+			// remember it so the mapping goroutine below never per-test maps it.
+			if mock.Spec.Metadata[models.MetaAsync] == "true" {
+				asyncMockIDs.Store(tempID, struct{}{})
+			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -582,33 +629,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 
 	errGrp.Go(func() error {
 		for mapping := range frames.Mappings {
-			var realMockEntries []models.MockEntry
-
-			for _, tempID := range mapping.MockIDs {
-
-				var realEntry models.MockEntry
-				found := false
-
-				// Simple retry loop (fast spin) to wait for the Mock Loop
-				for i := 0; i < 50; i++ { // Wait up to ~500ms
-					if val, ok := correlationMap.Load(tempID); ok {
-						realEntry = val.(models.MockEntry)
-						found = true
-						break
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-
-				if found {
-					realMockEntries = append(realMockEntries, realEntry)
-					correlationMap.Delete(tempID)
-				} else {
-					r.logger.Error("Failed to correlate mock mapping",
-						zap.String("test", mapping.TestName),
-						zap.String("tempMockID", tempID),
-						zap.String("next_step", "ensure mapping store is enabled, avoid high parallelism, or re-record if mappings are inconsistent"))
-				}
-			}
+			realMockEntries := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs)
 
 			// Write to mappings.yaml
 			if len(realMockEntries) > 0 {
