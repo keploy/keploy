@@ -3,15 +3,28 @@
 # E2E test for the async-egress engine (keploy#4368) via the async-config-poll
 # sample (keploy/samples-java).
 #
-# The app long-polls a config service in the background
+# The app watches a config service in the background
 # (GET /v1/buckets/app-config?watch=true&version=N) from a daemon thread — async
 # relative to the ingress testcases. keploy.yml declares this as an async lane
 # ("config-watch", version treated as volatile). This script records the two
 # HTTP tests (/health, /rules/{useCase}) plus the MySQL + config-service egress,
-# then replays with the real deps down and asserts:
-#   1. every recorded test-set replays PASSED, and
-#   2. the async-egress engine actually served watch polls with no shape drift
-#      (`async egress verdict` -> served >= 1, shape_flags == 0).
+# then replays with the real deps down.
+#
+# It runs in one of two scenarios (SCENARIO env, default "periodic"):
+#
+#   periodic  — the app polls on a fast interval and the stub answers each poll
+#               immediately (lane type: http). Asserts the async engine SERVED
+#               the watch polls with no shape drift (served >= 1, shape_flags 0).
+#
+#   httppoll  — the app opens a SINGLE watch poll (WATCH_ONCE) and the stub HOLDS
+#               it open for a server-timeout (POLL_HOLD_SECONDS) before answering
+#               (lane type: httpPoll, via keploy-httppoll.yml). Asserts the poll
+#               is recorded as kind:HttpPoll with a pollDurationMs, and that at
+#               replay the async engine HELD it until its resolve testcase and
+#               then served it (held >= 1). NOTE: the >60s hang-watchdog
+#               exemption that lets a long-held poll be recorded at all is unit-
+#               tested (supervisor TestHangNotDetectedWhenSuspended); this e2e
+#               uses a short hold so CI stays fast.
 #
 # NOTE: this sample is deliberately Spring Boot 1.5 / Java 8, so this script does
 # NOT source update-java.sh (which pins Java 17). The calling workflow sets up
@@ -35,9 +48,31 @@ die() {
 trap die ERR
 
 APP_JAVA="${JAVA_HOME:?JAVA_HOME must be set by the workflow}/bin/java"
-# Fast poll + widened request window so a watch poll reliably lands inside a
-# testcase at replay (so the async lane is exercised, not just drained).
-APP_ENV="env WATCH_INTERVAL_MS=150 RULES_DELAY_MS=600"
+
+# --- Scenario selection ---
+SCENARIO="${SCENARIO:-periodic}"
+echo "Async scenario: $SCENARIO"
+case "$SCENARIO" in
+  periodic)
+    # Fast poll + widened request window so a watch poll reliably lands inside a
+    # testcase at replay (so the async lane is exercised, not just drained).
+    APP_ENV="env WATCH_INTERVAL_MS=150 RULES_DELAY_MS=600"
+    STUB_ENV=""
+    POLL_SETTLE=4          # seconds to let background polls be recorded
+    ;;
+  httppoll)
+    # One watch poll (WATCH_ONCE), held open by the stub for POLL_HOLD_SECONDS so
+    # Keploy records a single server-timeout long-poll as kind:HttpPoll. Uses the
+    # httpPoll lane config (keploy-httppoll.yml).
+    APP_ENV="env WATCH_ONCE=true RULES_DELAY_MS=600"
+    POLL_HOLD_SECONDS=5
+    STUB_ENV="POLL_HOLD_SECONDS=${POLL_HOLD_SECONDS}"
+    POLL_SETTLE=$((POLL_HOLD_SECONDS + 5))   # hold + margin for the poll to resolve & be recorded
+    cp keploy-httppoll.yml keploy.yml        # activate the httpPoll lane for this run
+    ;;
+  *)
+    echo "::error::unknown SCENARIO='$SCENARIO' (expected periodic|httppoll)"; exit 1 ;;
+esac
 
 wait_for_mysql() {
   section "Wait for MySQL (real networked server)"
@@ -54,6 +89,7 @@ wait_for_mysql() {
 
 wait_for_config_stub() {
   section "Wait for config-service stub (:9100)"
+  # watch=false so the readiness probe is never held (POLL_HOLD only holds watch=true).
   for _ in $(seq 1 30); do
     if [[ "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:9100/v1/buckets/app-config?watch=false&version=0' 2>/dev/null)" == "200" ]]; then
       echo "config-stub is ready."; endsec; return 0
@@ -97,7 +133,7 @@ section "Start dependencies (MySQL + config-service stub)"
 # only awaited (wait_for_mysql) just before the app boots under keploy.
 docker compose up -d
 ( cd config-stub && go build -o /tmp/acp-config-stub . )
-/tmp/acp-config-stub > config-stub.log 2>&1 &
+env ${STUB_ENV} /tmp/acp-config-stub > config-stub.log 2>&1 &
 CONFIG_STUB_PID=$!
 endsec
 wait_for_config_stub
@@ -119,13 +155,23 @@ echo "=== drive the recorded tests ==="
 curl -s -o /dev/null -w "GET /health          -> %{http_code}\n" http://127.0.0.1:8080/health
 curl -s -o /dev/null -w "GET /rules/ORDER_FLOW -> %{http_code}\n" \
   -H "X-Tenant-Id: ACME" -H "X-Agent-Id: 957" http://127.0.0.1:8080/rules/ORDER_FLOW
-sleep 4  # let a few background watch polls be recorded
+echo "Letting the background watch poll(s) resolve & record (${POLL_SETTLE}s)…"
+sleep "$POLL_SETTLE"
 echo "Sending SIGINT to keploy ($KEPLOY_PID) for graceful shutdown"
 sudo kill -INT "$KEPLOY_PID" 2>/dev/null || true
 set +e; wait "$KEPLOY_PID"; echo "Record exit: $?"; set -e
 if grep -q "WARNING: DATA RACE" record.txt; then echo "::error::Data race during record"; cat record.txt; exit 1; fi
 echo "== recorded mock kinds =="; grep -aE "^kind:" keploy/test-set-0/mocks.yaml 2>/dev/null | sort | uniq -c
 echo "== async-stamped mocks =="; grep -ac 'async: "true"' keploy/test-set-0/mocks.yaml 2>/dev/null || true
+
+# httppoll: the single watch poll must be recorded as kind:HttpPoll with an
+# open-duration (pollDurationMs). This is the record-side proof of the feature.
+if [[ "$SCENARIO" == "httppoll" ]]; then
+  hp=$(grep -acE '^kind: HttpPoll$' keploy/test-set-0/mocks.yaml 2>/dev/null || true)
+  [[ "${hp:-0}" -ge 1 ]] || { echo "::error::httppoll: no kind:HttpPoll mock recorded — the long-poll was not captured"; exit 1; }
+  grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded HttpPoll mock has no pollDurationMs"; exit 1; }
+  echo "httppoll: recorded ${hp} HttpPoll mock(s) with pollDurationMs."
+fi
 endsec
 
 section "Shutdown deps before test mode"
@@ -160,7 +206,7 @@ echo "All ingress tests PASSED"
 endsec
 
 section "Check async-egress verdict"
-# The engine prints e.g.: async egress verdict {"served": 2, "shape_flags": 0, "not_exercised": 6}
+# The engine prints e.g.: async egress verdict {"served": 2, "shape_flags": 0, "not_exercised": 6, "held": 0}
 verdict=$(grep -aoE '"served": [0-9]+, "shape_flags": [0-9]+, "not_exercised": [0-9]+' test_logs.txt | tail -n1 || true)
 [[ "$verdict" =~ \"served\":\ ([0-9]+),\ \"shape_flags\":\ ([0-9]+) ]] \
   || { echo "::error::No 'async egress verdict' line in replay log — async lane was not evaluated"; exit 1; }
@@ -173,7 +219,15 @@ if [[ "$flags" -ne 0 ]]; then
   echo "::error::async engine reported ${flags} shape drift(s) — the volatile 'version' param should have matched cleanly"; exit 1
 fi
 echo "Async-egress engine served ${served} watch poll(s) with no shape drift."
+
+# httppoll: the poll must have been HELD until its resolve testcase (not served
+# on arrival). held >= 1 is the replay-side proof of the feature.
+if [[ "$SCENARIO" == "httppoll" ]]; then
+  held=$(grep -aoE '"held": [0-9]+' test_logs.txt | tail -n1 | grep -oE '[0-9]+' || true)
+  [[ "${held:-0}" -ge 1 ]] || { echo "::error::httppoll: async engine held 0 polls — the poll was not held until its resolve testcase"; exit 1; }
+  echo "httppoll: async engine held ${held} poll(s) until their resolve testcase."
+fi
 endsec
 
-echo "async-config-poll e2e passed (ingress PASSED + async lane served, no drift)."
+echo "async-config-poll e2e passed — scenario=${SCENARIO} (ingress PASSED + async lane exercised, no drift)."
 exit 0

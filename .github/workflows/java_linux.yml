@@ -221,7 +221,13 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
-    name: async-config-poll (${{ matrix.config.job }})
+        # periodic: fast poller, stub answers immediately, lane type http ->
+        #   asserts the async engine SERVED the polls (served >= 1).
+        # httppoll: one held long-poll (server timeout), lane type httpPoll ->
+        #   asserts kind:HttpPoll + pollDurationMs recorded and the engine HELD
+        #   it until its resolve testcase at replay (held >= 1).
+        scenario: [periodic, httppoll]
+    name: async-config-poll (${{ matrix.scenario }} / ${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -239,7 +245,12 @@ jobs:
       - name: Checkout samples-java repository
         uses: actions/checkout@v4
         with:
-          repository: keploy/samples-java
+          # TEMP: the httppoll scenario needs the async-config-poll sample
+          # changes from keploy/samples-java#147, not yet on main. Pin the fork
+          # branch until #147 merges, then REVERT this to
+          # `repository: keploy/samples-java` (main). See keploy#4368.
+          repository: Aditya-eddy/samples-java
+          ref: async-config-poll-httppoll
           path: samples-java
 
       # Spring Boot 1.5 sample -> Java 8 (not the Java 17 the other jobs use);
@@ -261,6 +272,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          SCENARIO: ${{ matrix.scenario }}
         run: |
           cd samples-java/async-config-poll
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh
