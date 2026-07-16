@@ -661,8 +661,19 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// tls-server-end-point digest with bpf_probe_write_user, which the
 		// verifier gates behind CAP_SYS_ADMIN — CAP_BPF/CAP_PERFMON alone are
 		// insufficient. Only grant it when the shim is explicitly enabled.
-		capAdd = append(capAdd, &yaml.Node{Kind: yaml.ScalarNode, Value: "SYS_ADMIN",
-			LineComment: "required by the channel-binding shim (bpf_probe_write_user)"})
+		capAdd = appendCapIfMissing(capAdd, "SYS_ADMIN",
+			"required by the channel-binding shim (bpf_probe_write_user)")
+	}
+
+	// On a host without a cgroup2 (unified) hierarchy (legacy cgroup v1), the
+	// agent mounts one itself at runtime for its eBPF cgroup hooks
+	// (agent.DetectCgroupPath). mount(2) needs CAP_SYS_ADMIN and an unconfined
+	// seccomp/AppArmor profile, so grant them — but only in that case, to keep
+	// the agent least-privileged on the common cgroup v2 host.
+	needsCgroupV2Mount := !cgroupV2AvailableOnHost()
+	if needsCgroupV2Mount {
+		capAdd = appendCapIfMissing(capAdd, "SYS_ADMIN",
+			"required to mount a cgroup2 hierarchy for eBPF hooks (host uses legacy cgroup v1)")
 	}
 
 	// Create the service YAML node structure
@@ -682,6 +693,20 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
 		},
+	}
+
+	if needsCgroupV2Mount {
+		// Docker's default seccomp profile already permits mount(2) once
+		// CAP_SYS_ADMIN is granted (the mount rule includes CAP_SYS_ADMIN), so
+		// seccomp need not be relaxed. Its default AppArmor profile, however,
+		// denies mount outright, so AppArmor must be unconfined for the agent to
+		// mount a cgroup2 hierarchy on a legacy cgroup v1 host.
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
+			}},
+		)
 	}
 
 	// Add environment variables
