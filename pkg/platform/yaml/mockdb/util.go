@@ -46,7 +46,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 
 	var spec any
 	switch mock.Kind {
-	case models.HTTP:
+	case models.HTTP, models.HttpPoll:
 		spec = models.HTTPSchema{
 			Metadata:         mock.Spec.Metadata,
 			Request:          *mock.Spec.HTTPReq,
@@ -300,7 +300,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 
-	case models.HTTP:
+	case models.HTTP, models.HttpPoll:
 		httpSpec := models.HTTPSchema{
 			Metadata: mock.Spec.Metadata,
 
@@ -646,7 +646,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			continue
 		}
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HttpPoll:
 			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
@@ -1284,7 +1284,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 		}
 
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HttpPoll:
 			var s models.HTTPSchema
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal http mock %q: %w", m.Name, err)
