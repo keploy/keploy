@@ -63,7 +63,7 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 	}
 	m := info.Mock
 	for _, lane := range r.lanes {
-		p := r.parsers[lane.Type]
+		p := r.parsers[lane.BaseType()]
 		if p == nil {
 			// Lane is declared but its parser never resolved. ResolveAsyncParsers
 			// already reports that once at startup with a fix hint; this fires per
@@ -91,6 +91,18 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 		m.Spec.Metadata[models.MetaAnchorAfter] = anchorID
 		m.Spec.Metadata[models.MetaAnchorPos] = strconv.Itoa(anchorPos)
 		m.Spec.Metadata[models.MetaAsyncSeq] = strconv.Itoa(seq)
+
+		if lane.IsPoll() {
+			m.Spec.Metadata[models.MetaAsyncPoll] = "true"
+			durMs := m.Spec.ResTimestampMock.Sub(m.Spec.ReqTimestampMock).Milliseconds()
+			if durMs < 0 {
+				durMs = 0
+			}
+			m.Spec.Metadata[models.MetaPollDurationMs] = strconv.FormatInt(durMs, 10)
+			if pk, ok := models.PollKindFor(m.Kind); ok {
+				m.Kind = pk
+			}
+		}
 		return nil
 	}
 	return nil
@@ -122,22 +134,23 @@ func (r *AsyncRecorder) anchorLocked(ts int64) (string, int) {
 func ResolveAsyncParsers(logger *zap.Logger, lanes []models.AsyncLane) map[string]async.AsyncParser {
 	out := map[string]async.AsyncParser{}
 	for _, lane := range lanes {
-		if _, done := out[lane.Type]; done {
+		base := lane.BaseType()
+		if _, done := out[base]; done {
 			continue
 		}
-		reg := integrations.Registered[integrations.IntegrationType(lane.Type)]
+		reg := integrations.Registered[integrations.IntegrationType(base)]
 		if reg == nil {
 			logger.Error("async lane type not registered; its mocks will not be stamped async — "+
 				"set async.lanes[].type to a registered integration name",
-				zap.String("type", lane.Type))
+				zap.String("type", base))
 			continue
 		}
 		if ap, ok := reg.Initializer(logger).(async.AsyncParser); ok {
-			out[lane.Type] = ap
+			out[base] = ap
 		} else {
 			logger.Error("async lane integration does not implement async.AsyncParser; its mocks will not be stamped async — "+
 				"pick a lane type whose integration supports async (currently: http), or add AsyncParser to it",
-				zap.String("type", lane.Type))
+				zap.String("type", base))
 		}
 	}
 	return out

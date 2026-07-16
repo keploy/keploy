@@ -149,3 +149,27 @@ func TestNonLaneEgressUntouched(t *testing.T) {
 		t.Fatalf("non-lane egress must not be stamped: %+v", m.Spec.Metadata)
 	}
 }
+
+// A poll lane (Type ends in "Poll") stamps MetaAsyncPoll + pollDurationMs and
+// re-kinds the mock via the registry; a non-poll lane leaves both untouched.
+func TestPollLaneStampsPollMetaAndReKinds(t *testing.T) {
+	models.RegisterPollKind(models.HTTP, models.HttpPoll)
+	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
+	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
+		map[string]async.AsyncParser{"http": laneStub{}}) // keyed by BaseType
+
+	m := egress("lane", time.Unix(1000, 0))
+	m.Kind = models.HTTP
+	m.Spec.ReqTimestampMock = time.Unix(999, 0) // open 1s before resolve
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
+
+	if m.Spec.Metadata[models.MetaAsyncPoll] != "true" {
+		t.Fatalf("poll lane must stamp MetaAsyncPoll: %+v", m.Spec.Metadata)
+	}
+	if m.Spec.Metadata[models.MetaPollDurationMs] != "1000" {
+		t.Fatalf("pollDurationMs = %q want 1000", m.Spec.Metadata[models.MetaPollDurationMs])
+	}
+	if m.Kind != models.HttpPoll {
+		t.Fatalf("poll-lane mock kind = %q want HttpPoll", m.Kind)
+	}
+}
