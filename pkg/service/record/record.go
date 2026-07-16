@@ -24,6 +24,44 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// consumeMappings correlates each test<->mock mapping the agent streams to its
+// real mock entries and persists it to mappings.yaml. It runs until mappings is
+// closed by the producer, and returns only then — ctx bounds nothing here by
+// design.
+//
+// Mappings are the last artifact a recorded test produces (the agent resolves a
+// test's mock range only once that test is done), so the tail of every endpoint
+// arrives while recording is already shutting down. Writes therefore run on a
+// context detached from ctx: on a cancelled one the yaml store refuses every
+// write and those tests vanish from mappings.yaml, which replay then reports as
+// no_mocks. Detaching here rather than relying on the caller keeps that
+// guarantee local to the loop that depends on it — see the persistCtx note in
+// Start for the same requirement on the test-case and mock stores.
+func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map) error {
+	persistCtx := context.WithoutCancel(ctx)
+
+	for mapping := range mappings {
+		realMockEntries := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs)
+
+		// Write to mappings.yaml
+		if len(realMockEntries) > 0 {
+			err := r.mappingDb.Upsert(persistCtx, testSetID, mapping.TestName, realMockEntries)
+			if err != nil {
+				// Deliberately not utils.LogError: it suppresses
+				// context.Canceled, which is exactly the class this write used
+				// to fail with, so the lost tail left no trace in the logs at
+				// all. A mapping that goes missing here is a no_mocks failure
+				// at replay — it must never be silent again.
+				r.logger.Error("failed to save mapping",
+					zap.String("test", mapping.TestName),
+					zap.Error(err),
+					zap.String("next_step", "this test's mocks will be missing from mappings.yaml and replay will report no_mocks for it; re-record the test set"))
+			}
+		}
+	}
+	return nil
+}
+
 type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
@@ -168,6 +206,34 @@ func (r *Recorder) Start(ctx context.Context) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
+	// persistCtx is the context the test-case and mock stores are written on,
+	// detached from ctx on purpose. (consumeMappings makes the same guarantee for
+	// mappings.yaml itself.)
+	//
+	// Capture and persistence are driven by different contexts, and the gap
+	// between them is where recorded data used to disappear. The agent streams on
+	// reqCtx (see below), which is WithoutCancel'd and so survives SIGINT — it
+	// stops only at reqCtxCancel() in teardown, AFTER the user app has been
+	// stopped and drained. The consumer goroutines below, however, are children of
+	// ctx, which cancels the instant SIGINT lands. So for the whole teardown
+	// window (a NotifyGracefulShutdown of up to 10s, then an app drain of up to
+	// 30s) the agent kept handing us test cases, mocks and mappings while every
+	// store refused to write them: the yaml path returns ctx.Err() on a cancelled
+	// ctx, and the callers below treated that as "shutting down, skip" — silently.
+	//
+	// The damage was worst for mappings, which are emitted LAST (the agent can
+	// only resolve a test's mock range once that test is done), so the tail of
+	// every endpoint landed squarely in that window: mappings.yaml lost those
+	// tests and replay reported "no_mocks" (candidates: 0) for exactly them. A
+	// dropped mock insert compounded it by also skipping its correlationMap entry,
+	// stranding the mapping that referenced it even when the mapping did arrive.
+	//
+	// Writes must therefore outlive cancellation. This does NOT risk a hung
+	// teardown: the consumers are `range` loops that end when the agent closes its
+	// streams (at reqCtxCancel), each write is a local file op, and Start's
+	// teardown still bounds the whole group with DrainErrGroup.
+	persistCtx := context.WithoutCancel(ctx)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
 	runAppCtx := context.WithoutCancel(ctx)
@@ -529,9 +595,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testSetID", newTestSetID),
 					zap.String("testCaseName", testCase.Name))
 			}
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				if ctx.Err() != nil {
+					// Once shutdown has begun nothing reads insertTestErrChan —
+					// Start's select has returned and the channel is closed on
+					// Start's way out — so reporting through it is unsafe. Log
+					// instead of dropping the error on the floor: with persistCtx
+					// the write no longer fails merely because we are shutting
+					// down, so an error here is real and the operator needs it.
+					utils.LogError(r.logger, err, "failed to record test case during shutdown",
+						zap.String("testCaseName", testCase.Name),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertTestErrChan <- err
@@ -593,9 +668,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			err := r.mockDB.InsertMock(persistCtx, mock, newTestSetID)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				if ctx.Err() != nil {
+					// See the sibling note on the test-case insert: insertMockErrChan
+					// is no longer safe to report through once teardown has begun. A
+					// skipped mock also skips its correlationMap entry below, which
+					// strands the mapping that references it — so this must be loud.
+					utils.LogError(r.logger, err, "failed to record mock during shutdown",
+						zap.String("mockName", mock.Name),
+						zap.String("mockKind", mock.GetKind()),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertMockErrChan <- err
@@ -628,18 +711,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
-		for mapping := range frames.Mappings {
-			realMockEntries := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs)
-
-			// Write to mappings.yaml
-			if len(realMockEntries) > 0 {
-				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockEntries)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to save mapping")
-				}
-			}
-		}
-		return nil
+		return r.consumeMappings(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs)
 	})
 
 	if r.config.CommandType != string(utils.DockerCompose) {
@@ -855,6 +927,16 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				}
 				select {
 				case <-ctx.Done():
+					// Hand off the mapping we already took off the stream before
+					// unwinding — cancellation is not a licence to drop data we
+					// are holding. Both cases are ready once ctx is done, so the
+					// runtime picks at random and this would otherwise lose the
+					// last in-flight mapping about half the time, which is the
+					// tail this fix exists to keep. The consumer is still ranging
+					// (it stops only when this goroutine closes the channel on
+					// return), so the send completes. Mirrors the outgoing
+					// producer above.
+					mappingChan <- m
 					return ctx.Err()
 				case mappingChan <- m:
 				}
