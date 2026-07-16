@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Async metadata keys stamped on an ordinary egress mock's Spec.Metadata
@@ -159,4 +160,21 @@ func laneSlug(l AsyncLane) string {
 		s = strings.TrimRight(s[:maxSlug], "-")
 	}
 	return s
+}
+
+// pollKinds maps a base mock Kind to the Kind used when the same egress is
+// recorded on a poll lane. Parsers register their poll kind at init() via
+// RegisterPollKind; a base with no registration keeps its own kind (still a
+// valid held poll — the engine keys on MetaAsyncPoll, not the kind).
+var pollKinds sync.Map // map[Kind]Kind
+
+// RegisterPollKind registers poll as the recorded kind for base's poll lanes.
+func RegisterPollKind(base, poll Kind) { pollKinds.Store(base, poll) }
+
+// PollKindFor returns the registered poll kind for base, or (base, false).
+func PollKindFor(base Kind) (Kind, bool) {
+	if v, ok := pollKinds.Load(base); ok {
+		return v.(Kind), true
+	}
+	return base, false
 }

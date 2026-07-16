@@ -59,6 +59,10 @@ const (
 	// negotiated OutgoingOptions.SupportsDroppedRevoke, so an older CLI (which
 	// never sets that flag) never receives it and cannot mis-persist it.
 	RevokedTests Kind = "keploy-revoked-tests"
+
+	// HttpPoll is an HTTP long-poll async delivery. Same wire payload as HTTP
+	// (see mockdb util.go); the distinct kind labels held long-poll mocks.
+	HttpPoll Kind = "HttpPoll"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side

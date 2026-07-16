@@ -130,3 +130,14 @@ func TestAsyncLaneIsPollAndBaseType(t *testing.T) {
 		}
 	}
 }
+
+func TestPollKindRegistry(t *testing.T) {
+	if _, ok := PollKindFor("SomeUnregisteredKind"); ok {
+		t.Fatal("unregistered base must return ok=false")
+	}
+	RegisterPollKind(HTTP, HttpPoll)
+	got, ok := PollKindFor(HTTP)
+	if !ok || got != HttpPoll {
+		t.Fatalf("PollKindFor(HTTP) = %q,%v want HttpPoll,true", got, ok)
+	}
+}
