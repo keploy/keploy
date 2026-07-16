@@ -197,6 +197,137 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 	}
 }
 
+// TestHangNotFiredWhenIdleNoUnconsumedInput is the regression for the
+// go-memory-load-mongo recording dead zone. A pooled connection whose
+// last exchange was abandoned (its response dropped under memory
+// pressure, so no mock cleared `pending`) sits idle between requests
+// with the parser blocked on an empty read. The activity probe reports
+// no unconsumed input; the watchdog MUST NOT declare a hang, because
+// aborting would PauseTees the live connection and permanently stop
+// recording. Without the probe gate this false-hangs after the budget.
+func TestHangNotFiredWhenIdleNoUnconsumedInput(t *testing.T) {
+	t.Parallel()
+	aborted := make(chan struct{})
+	s := New(shortCfg(t)) // 50ms budget
+	s.SessionOnAbort = func() { close(aborted) }
+	// Parser is idle: caught up, nothing left to read.
+	s.SetActivityProbe(func() bool { return false })
+	// A request was teed but never produced a mock (abandoned exchange),
+	// so `pending` is stuck armed.
+	s.MarkPendingWork()
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	// Five budgets of wallclock: an idle parser must survive.
+	select {
+	case r := <-done:
+		t.Fatalf("watchdog aborted an idle parser (false-hang): %+v", r)
+	case <-aborted:
+		t.Fatalf("SessionOnAbort fired for an idle parser (false-hang)")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Cleanup.
+	s.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("parser did not exit after Close")
+	}
+}
+
+// TestHangFiredWhenUnconsumedInputPresent proves the probe gate does not
+// weaken genuine hang detection: a parser that still has unconsumed
+// input but makes no progress within the budget is still aborted.
+func TestHangFiredWhenUnconsumedInputPresent(t *testing.T) {
+	t.Parallel()
+	aborted := make(chan struct{})
+	s := New(shortCfg(t))
+	s.SessionOnAbort = func() { close(aborted) }
+	// Parser has input it is failing to make progress on.
+	s.SetActivityProbe(func() bool { return true })
+	s.MarkPendingWork()
+
+	res := s.Run(context.Background(),
+		func(ctx context.Context, sess *Session) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		&Session{})
+
+	if res.Status != StatusHung {
+		t.Fatalf("status: got %s, want hung", res.Status)
+	}
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		t.Fatalf("SessionOnAbort not invoked for a genuinely stuck parser")
+	}
+}
+
+// TestParserDoneSignalsGoroutineExitAfterHang locks in the invariant
+// abort-recovery relies on: on the hang path Run returns BEFORE the parser
+// goroutine exits (it is parked off-ctx, e.g. blocked in FakeConn.Read), and
+// ParserDone stays open until that goroutine actually returns. Recovery waits
+// on ParserDone before reattaching the parser's streams so the dying goroutine
+// cannot steal a resumed chunk off the shared tee channel.
+func TestParserDoneSignalsGoroutineExitAfterHang(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t))
+	// Parser has unconsumed input but makes no progress -> hang fires.
+	s.SetActivityProbe(func() bool { return true })
+	s.MarkPendingWork()
+
+	release := make(chan struct{})
+	exited := make(chan struct{})
+
+	res := s.Run(context.Background(),
+		func(ctx context.Context, sess *Session) error {
+			// Deliberately ignore ctx cancellation to model a parser parked in
+			// FakeConn.Read (which does not observe ctx and only unblocks on
+			// Close). It returns only when the test releases it — standing in
+			// for SessionOnAbort closing the FakeConns.
+			<-release
+			close(exited)
+			return nil
+		},
+		&Session{})
+
+	if res.Status != StatusHung {
+		t.Fatalf("status: got %s, want hung", res.Status)
+	}
+
+	// Run has returned on the hang path, but the parser goroutine is still
+	// blocked on release. ParserDone MUST NOT be closed yet.
+	select {
+	case <-s.ParserDone():
+		t.Fatal("ParserDone closed while the parser goroutine is still alive")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release the parser (models SessionOnAbort unblocking the read).
+	close(release)
+
+	select {
+	case <-s.ParserDone():
+	case <-time.After(time.Second):
+		t.Fatal("ParserDone did not close after the parser goroutine exited")
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("parser goroutine did not return")
+	}
+}
+
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

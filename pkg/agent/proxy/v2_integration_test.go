@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
+	"golang.org/x/sync/errgroup"
 )
 
 // Two independent net.Pipes: one for the (app-client, proxy-client-side)
@@ -426,5 +428,191 @@ func TestV2_KillSwitchLifecycle(t *testing.T) {
 	ks.Reset()
 	if ks.Enabled() {
 		t.Fatal("Reset did not disable")
+	}
+}
+
+// -------- Abort-recovery parser --------
+
+// recoverableFakeParser is a V2 parser that opts into abort recovery. Its
+// FIRST generation reads one request, drains the paired response, then returns
+// an error (→ StatusError → FallthroughToPassthrough → the generation loop
+// must respawn). Every later generation reads a request+response and emits a
+// mock. It announces each generation start on genStarted and each request it
+// read on readReqs, so the test can gate steps deterministically and prove a
+// fresh generation ran on the SAME pooled connection after the abort.
+type recoverableFakeParser struct {
+	gen        atomic.Int32
+	genStarted chan int
+	readReqs   chan string
+}
+
+func (p *recoverableFakeParser) IsV2() bool                  { return true }
+func (p *recoverableFakeParser) SupportsAbortRecovery() bool { return true }
+
+// MatchType / MockOutgoing satisfy the integrations.Integrations interface;
+// unused on the record path this test exercises.
+func (p *recoverableFakeParser) MatchType(_ context.Context, _ []byte) bool { return true }
+func (p *recoverableFakeParser) MockOutgoing(_ context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	return nil
+}
+
+func (p *recoverableFakeParser) RecordOutgoing(_ context.Context, sess *integrations.RecordSession) error {
+	g := int(p.gen.Add(1))
+	p.genStarted <- g
+	v2 := sess.V2
+	c, err := v2.ClientStream.ReadChunk()
+	if err != nil {
+		return err // clean teardown (ErrClosed) — a normal exit, not a fallthrough
+	}
+	p.readReqs <- string(c.Bytes)
+	// Drain the paired response so no bytes from this exchange leak into the
+	// next generation's fresh stream.
+	r, rerr := v2.DestStream.ReadChunk()
+	if g == 1 {
+		return errParserDecode{} // abort → the loop must recover
+	}
+	if rerr != nil {
+		return rerr
+	}
+	return v2.EmitMock(&models.Mock{
+		Name: "recovered",
+		Spec: models.MockSpec{
+			ReqTimestampMock: c.ReadAt,
+			ResTimestampMock: r.WrittenAt,
+			Metadata:         map[string]string{"req": string(c.Bytes)},
+		},
+	})
+}
+
+// TestDropVoidsMock pins the mock-void policy as a DENY-list: every
+// OnMarkMockIncomplete reason voids the in-flight mock EXCEPT the two deliberate
+// bulk-silence drops. Genuine byte-loss reasons — channel_full, per_conn_cap,
+// write_error, short_write, abort_mock, pre_dispatch_drain_* — mean the peer
+// never got the bytes, so the mock must not be recorded as complete (this
+// applies to every parser, not just recovery opt-ins). "paused" must NOT void
+// (during recovery the fresh session is already published, so voiding would drop
+// its first mock); "memory_pressure" is covered by pressureRanges.
+func TestDropVoidsMock(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   bool
+	}{
+		{relay.DropChannelFull, true},
+		{relay.DropPerConnCap, true},
+		{"write_error", true},
+		{"short_write", true},
+		{"abort_mock", true},
+		{"pre_dispatch_drain_c2d_write_error", true},
+		{"pre_dispatch_drain_d2c_short_write", true},
+		{"some_future_byte_loss_reason", true},
+		{relay.DropPaused, false},
+		{relay.DropMemoryPressure, false},
+	}
+	for _, c := range cases {
+		if got := dropVoidsMock(c.reason); got != c.want {
+			t.Errorf("dropVoidsMock(%q) = %v, want %v", c.reason, got, c.want)
+		}
+	}
+}
+
+// TestV2_AbortRecovery_RespawnsAndRecordsNextRequest drives the real
+// recordViaSupervisor generation loop end-to-end: generation 1 aborts (error
+// return) and the loop must respawn a fresh parser generation that records the
+// NEXT request on the same pooled connection — instead of the connection being
+// permanently silenced (the go-memory-load-mongo recording dead zone). Every
+// step is gated on an explicit signal, so there are no sleeps or timing races.
+func TestV2_AbortRecovery_RespawnsAndRecordsNextRequest(t *testing.T) {
+	pp := newPipePair(t)
+	parser := &recoverableFakeParser{
+		genStarted: make(chan int, 8),
+		readReqs:   make(chan string, 8),
+	}
+
+	// Destination echoes each request with a "reply:" prefix, forever.
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, err := pp.destSrv.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := pp.destSrv.Write(append([]byte("reply:"), buf[:n]...)); err != nil {
+				return
+			}
+		}
+	}()
+
+	mocks := make(chan *models.Mock, 8)
+	var eg errgroup.Group
+	p := &Proxy{}
+	done := make(chan error, 1)
+	go func() {
+		done <- p.recordViaSupervisor(context.Background(), pp.proxySrc, pp.proxyDst,
+			parser, "testparser", mocks, &eg, zaptest.NewLogger(t), 1, 2, models.OutgoingOptions{})
+	}()
+
+	writeAndDrainReply := func(req string) {
+		if _, err := pp.clientApp.Write([]byte(req)); err != nil {
+			t.Fatalf("client write %q: %v", req, err)
+		}
+		_ = pp.clientApp.SetReadDeadline(time.Now().Add(2 * time.Second))
+		b := make([]byte, 64)
+		if _, err := pp.clientApp.Read(b); err != nil {
+			t.Fatalf("client read reply for %q: %v", req, err)
+		}
+	}
+
+	// Generation 1 starts and blocks on its first read.
+	if g := recvIntWithin(t, parser.genStarted, 2*time.Second); g != 1 {
+		t.Fatalf("first generation index = %d, want 1", g)
+	}
+	// Drive gen 1: it reads req-one and the reply, then returns an error →
+	// abort → the loop respawns generation 2.
+	writeAndDrainReply("req-one")
+	if got := recvStrWithin(t, parser.readReqs, 2*time.Second); got != "req-one" {
+		t.Fatalf("gen 1 read %q, want req-one", got)
+	}
+
+	// Generation 2 must be respawned (proving recovery) and be ready to read.
+	if g := recvIntWithin(t, parser.genStarted, 3*time.Second); g != 2 {
+		t.Fatalf("second generation index = %d, want 2 — abort-recovery did not respawn a fresh parser generation", g)
+	}
+	// Drive gen 2: it must record the NEXT request on the reused connection.
+	writeAndDrainReply("req-two")
+	if got := recvStrWithin(t, parser.readReqs, 3*time.Second); got != "req-two" {
+		t.Fatalf("gen 2 read %q, want req-two — recording did not resume on the reused connection after abort", got)
+	}
+	if g := parser.gen.Load(); g < 2 {
+		t.Fatalf("parser ran %d generation(s), want >= 2", g)
+	}
+
+	// Gen 2 returns cleanly (StatusOK) after emitting, so recordViaSupervisor
+	// returns on its own.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recordViaSupervisor did not return after a clean generation")
+	}
+}
+
+func recvIntWithin(t *testing.T, ch chan int, d time.Duration) int {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(d):
+		t.Fatalf("no int received within %v", d)
+		return 0
+	}
+}
+
+func recvStrWithin(t *testing.T, ch chan string, d time.Duration) string {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(d):
+		t.Fatalf("no string received within %v", d)
+		return ""
 	}
 }

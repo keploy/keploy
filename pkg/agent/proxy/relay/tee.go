@@ -3,6 +3,7 @@ package relay
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
@@ -28,6 +29,17 @@ const (
 	DropPaused = "paused"
 )
 
+// dropWindowCoalesceNanos is the minimum gap between two onDropAt
+// orphan-window recordings on the same tee. One overflowing operation is
+// many chunks sharing near-identical wire timestamps; without coalescing
+// each would push a separate zero-width window into the count-bounded
+// orphanRanges ring. 1ms comfortably collapses a single operation's chunk
+// burst (sub-millisecond on the wire) while still recording distinct
+// windows for operations that are milliseconds apart — small enough that
+// even a tight burst of orphaned reads (observed ~1.8ms apart) each keep
+// their own window.
+const dropWindowCoalesceNanos = int64(1_000_000)
+
 // tee is the accounting wrapper around the internal staging channel
 // between the forwarder goroutines and the FakeConn. For each direction
 // the forwarder calls push(c); that either enqueues the chunk onto an
@@ -50,6 +62,17 @@ type tee struct {
 	memCheck func() bool
 	onDrop   func(reason string)
 
+	// onDropAt is called on every drop with the reason AND the wire
+	// timestamp of the dropped chunk. Unlike onDrop (which sets the
+	// session's global incomplete-mock flag, voiding some LATER,
+	// possibly-unrelated mock), this reports the EXACT instant the
+	// lost bytes were on the wire — so the supervisor can record an
+	// orphan window that overlaps the owning TC's own HTTP window and
+	// suppress precisely that TC. Recorded synchronously on the
+	// forward path, so it is immune to parser decode lag (the reason
+	// the previous next-mock-void attribution missed most orphans).
+	onDropAt func(reason string, ts time.Time)
+
 	// staging is the internal buffered channel. Forwarders push into
 	// it; the drain goroutine pulls out.
 	staging chan fakeconn.Chunk
@@ -67,9 +90,38 @@ type tee struct {
 	// while still forwarding real bytes.
 	paused atomic.Bool
 
+	// pressureSelfManaged, when set, makes push SKIP the memoryguard
+	// (memCheck) drop path: the parser owns memory-pressure handling for
+	// this connection. A length-prefix reassembler (mongo/v2) that is fed a
+	// mid-message chunk drop can no longer trust its buffer head and must
+	// content-scan to re-anchor — which, for the app's large multi-chunk
+	// messages under the memory guard's sawtooth, can never buffer a whole
+	// message before the next drop and so stays permanently desynced,
+	// silently stopping recording for the pooled connection (the
+	// go-memory-load-mongo tail dead zone). Such a parser instead stays
+	// byte-synced across a pause and sheds memory itself (skip-discarding
+	// whole messages), so the tee must NOT drop its chunks for pressure.
+	// Only the memory_pressure path is skipped; the paused (abort/finalize)
+	// and capacity (channel_full/per_conn_cap) drop paths are unaffected —
+	// a genuine mid-message capacity drop still fires so the parser resyncs.
+	pressureSelfManaged atomic.Bool
+
 	// drops counts dropped chunks for this direction. Exposed via
 	// [tee.dropCount] for diagnostics and tests.
 	drops atomic.Uint64
+
+	// lastDropRecNanos is the wire timestamp (UnixNano) of the most
+	// recent chunk for which onDropAt actually recorded an orphan
+	// window. onDropAt fires PER CHUNK, but one overflowing operation
+	// is hundreds of chunks sharing near-identical timestamps; recording
+	// a window for every one would flood the count-bounded orphanRanges
+	// ring (evicting windows for earlier, not-yet-checked TCs). We
+	// coalesce: a new drop within dropWindowCoalesceNanos of the last
+	// recorded one is skipped — collapsing an operation's chunk burst to
+	// ~one window while still separating distinct operations (which are
+	// milliseconds apart). Best-effort under concurrent pushes (a benign
+	// extra record at worst); onDrop/MarkMockIncomplete is unaffected.
+	lastDropRecNanos atomic.Int64
 
 	// closeMu is held in read mode during a push's channel send and
 	// in write mode by close. This ensures no in-flight send is racing
@@ -92,13 +144,14 @@ type tee struct {
 // newTee wires a staging channel, an out channel, and a drain
 // goroutine that moves chunks from staging to out while maintaining
 // the bytes counter.
-func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
+func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, memCheck func() bool, onDrop func(reason string), onDropAt func(reason string, ts time.Time), logger *zap.Logger) *tee {
 	t := &tee{
 		dir:      dir,
 		logger:   logger,
 		cap:      capBytes,
 		memCheck: memCheck,
 		onDrop:   onDrop,
+		onDropAt: onDropAt,
 		staging:  make(chan fakeconn.Chunk, chanBuf),
 		out:      make(chan fakeconn.Chunk, chanBuf),
 		done:     make(chan struct{}),
@@ -112,6 +165,12 @@ func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, memCheck func()
 // relay can wrap it in a [fakeconn.FakeConn].
 func (t *tee) readCh() <-chan fakeconn.Chunk { return t.out }
 
+// hasStagedBytes reports whether the tee is holding chunks that have
+// been read from the socket but not yet drained to the FakeConn. Part
+// of the relay's "unconsumed input" signal (see Relay.HasBufferedInput)
+// the hang watchdog uses to avoid false-hanging an idle parser.
+func (t *tee) hasStagedBytes() bool { return t.bytes.Load() > 0 }
+
 // dropCount returns the number of chunks dropped since construction.
 // Safe to call concurrently.
 func (t *tee) dropCount() uint64 { return t.drops.Load() }
@@ -119,6 +178,10 @@ func (t *tee) dropCount() uint64 { return t.drops.Load() }
 // setPaused toggles delivery. When paused, push immediately drops with
 // reason [DropPaused] without consuming capacity.
 func (t *tee) setPaused(p bool) { t.paused.Store(p) }
+
+// setPressureSelfManaged toggles whether push skips the memoryguard
+// (DropMemoryPressure) drop path for this tee. See the field doc.
+func (t *tee) setPressureSelfManaged(v bool) { t.pressureSelfManaged.Store(v) }
 
 // push admits a chunk into staging. Returns true on success, false on
 // drop. A drop invokes onDrop with the reason string and does not
@@ -136,11 +199,11 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		return false
 	}
 	if t.paused.Load() {
-		t.drop(DropPaused)
+		t.drop(DropPaused, teeChunkTs(c))
 		return false
 	}
-	if t.memCheck != nil && t.memCheck() {
-		t.drop(DropMemoryPressure)
+	if t.memCheck != nil && t.memCheck() && !t.pressureSelfManaged.Load() {
+		t.drop(DropMemoryPressure, teeChunkTs(c))
 		return false
 	}
 	n := int64(len(c.Bytes))
@@ -152,7 +215,7 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	// an over- or under-count of one chunk; the cap is a soft limit
 	// by contract.
 	if t.bytes.Load()+n > t.cap {
-		t.drop(DropPerConnCap)
+		t.drop(DropPerConnCap, teeChunkTs(c))
 		return false
 	}
 
@@ -173,9 +236,24 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		return true
 	default:
 		t.closeMu.RUnlock()
-		t.drop(DropChannelFull)
+		t.drop(DropChannelFull, teeChunkTs(c))
 		return false
 	}
+}
+
+// teeChunkTs returns the wire timestamp of a chunk for orphan-window
+// attribution: the client-read time (ReadAt) when set, else the
+// dest-write time (WrittenAt). Both are stamped by the forwarder with
+// the same wall clock the ingress uses for HTTP TC request/response
+// timestamps, so a [ts, ts] window recorded here overlaps the owning
+// TC's HTTP window. A pre-dispatch stash chunk carries only ReadAt; a
+// forwarded chunk carries both. Zero when neither is set (the caller
+// then records nothing).
+func teeChunkTs(c fakeconn.Chunk) time.Time {
+	if !c.ReadAt.IsZero() {
+		return c.ReadAt
+	}
+	return c.WrittenAt
 }
 
 // drop bumps counters and notifies. Kept small so push stays inlineable.
@@ -189,10 +267,42 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // "incomplete mock" enable --debug to see them, normal runs stay
 // quiet. Subsequent drops still increment drops_total and fire onDrop
 // unchanged — only the log emission is rate-limited.
-func (t *tee) drop(reason string) {
+func (t *tee) drop(reason string, ts time.Time) {
 	n := t.drops.Add(1)
 	if t.onDrop != nil {
 		t.onDrop(reason)
+	}
+	// Report the dropped chunk's own wire instant so the supervisor can
+	// record an orphan window and suppress a TC whose HTTP window contains
+	// it — but ONLY for genuine per-operation byte loss: channel_full and
+	// per_conn_cap. Recorded on the forward path (decode-lag immune), unlike
+	// the onDrop next-mock-void which attributes the loss to a later mock.
+	// Attribution is by time only (the tee has no TC/mock identity), so a
+	// concurrent healthy TC whose HTTP window straddles this instant may
+	// also be suppressed — the same coverage-for-stability tradeoff the
+	// pressure-range path makes; exact-owner attribution is a fast-follow.
+	//
+	// memory_pressure and paused are DELIBERATELY EXCLUDED — both drop every
+	// chunk for a sustained interval, so each would write thousands of
+	// zero-width instants into the count-bounded, global orphanRanges ring.
+	// That (a) floods the ring, evicting the real channel_full/per_conn_cap
+	// windows before the >7s-lagging record.go reads them, and (b)
+	// mass-suppresses healthy TCs on every connection whose window contains
+	// one of those instants — turning one visible replay orphan into many
+	// silent coverage losses.
+	//   - memory_pressure: a pause lasts seconds and is ALREADY covered by
+	//     pressureRanges (which record.go consults, and which cover any TC
+	//     straddling the pause) — recording it here is pure redundant flood.
+	//   - paused: setPaused(true) comes from PauseTees (abort — session is
+	//     dead) or KindPauseDir (the mock was finalized, further traffic is
+	//     noise); both raw-forward until close with no live mock to suppress.
+	if (reason == DropChannelFull || reason == DropPerConnCap) && t.onDropAt != nil && !ts.IsZero() {
+		n := ts.UnixNano()
+		last := t.lastDropRecNanos.Load()
+		if last == 0 || n-last >= dropWindowCoalesceNanos || last-n >= dropWindowCoalesceNanos {
+			t.lastDropRecNanos.Store(n)
+			t.onDropAt(reason, ts)
+		}
 	}
 	if t.logger != nil && n&(n-1) == 0 {
 		// n is a power of two (1, 2, 4, 8, ...) — log this drop.

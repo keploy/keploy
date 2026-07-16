@@ -52,6 +52,40 @@ func TestReadFromChunks(t *testing.T) {
 	}
 }
 
+func TestHasBuffered(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 2)
+	f := New(ch, nil, nil)
+
+	if f.HasBuffered() {
+		t.Fatalf("empty FakeConn: HasBuffered = true, want false")
+	}
+
+	// A queued chunk counts as unconsumed input.
+	ch <- Chunk{Dir: FromClient, Bytes: []byte("hello"), ReadAt: time.Unix(1, 0)}
+	if !f.HasBuffered() {
+		t.Fatalf("queued chunk: HasBuffered = false, want true")
+	}
+
+	// A partial Read leaves the remainder stashed → still buffered.
+	buf := make([]byte, 2)
+	if n, err := f.Read(buf); err != nil || n != 2 {
+		t.Fatalf("Read: n=%d err=%v", n, err)
+	}
+	if !f.HasBuffered() {
+		t.Fatalf("after partial read (3 bytes stashed): HasBuffered = false, want true")
+	}
+
+	// Drain the stash → nothing left → not buffered (parser is now idle).
+	rest := make([]byte, 3)
+	if n, err := f.Read(rest); err != nil || n != 3 {
+		t.Fatalf("Read rest: n=%d err=%v", n, err)
+	}
+	if f.HasBuffered() {
+		t.Fatalf("after consuming all bytes: HasBuffered = true, want false")
+	}
+}
+
 func TestLastWrittenTimeZeroBeforeAnyChunk(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk)

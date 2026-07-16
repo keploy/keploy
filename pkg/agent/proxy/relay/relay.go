@@ -42,11 +42,15 @@ type Relay struct {
 	teeD2C *tee
 
 	// clientStream is the FakeConn parsers read to consume
-	// client-produced bytes.
-	clientStream *fakeconn.FakeConn
+	// client-produced bytes. Held behind an atomic pointer so the
+	// abort-recovery path (ReattachStreams) can swap in a fresh FakeConn
+	// for a new parser generation while the SessionOnAbort callback may
+	// concurrently read it. The forwarder hot path never touches this —
+	// it reads the tees directly — so the swap has no bearing on I1.
+	clientStream atomic.Pointer[fakeconn.FakeConn]
 	// destStream is the FakeConn parsers read to consume
-	// destination-produced bytes.
-	destStream *fakeconn.FakeConn
+	// destination-produced bytes; same atomic treatment as clientStream.
+	destStream atomic.Pointer[fakeconn.FakeConn]
 
 	// directives is the parser-writable directive channel. The
 	// processor goroutine reads from here.
@@ -159,6 +163,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.TeeChanBuf,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
+		cfg.OnTeeDropWindow,
 		cfg.Logger,
 	)
 	r.teeD2C = newTee(
@@ -167,6 +172,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.TeeChanBuf,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
+		cfg.OnTeeDropWindow,
 		cfg.Logger,
 	)
 
@@ -175,13 +181,13 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		localAddr = src.LocalAddr()
 		remoteAddr = src.RemoteAddr()
 	}
-	r.clientStream = fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
+	r.clientStream.Store(fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr))
 	var destLocal, destRemote net.Addr
 	if dst != nil {
 		destLocal = dst.LocalAddr()
 		destRemote = dst.RemoteAddr()
 	}
-	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
+	r.destStream.Store(fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote))
 
 	return r
 }
@@ -189,12 +195,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 // ClientStream returns the parser-facing FakeConn populated with
 // chunks read from the real client (bytes flowing client → dest).
 // Safe to call before or after Run starts.
-func (r *Relay) ClientStream() *fakeconn.FakeConn { return r.clientStream }
+func (r *Relay) ClientStream() *fakeconn.FakeConn { return r.clientStream.Load() }
 
 // DestStream returns the parser-facing FakeConn populated with chunks
 // read from the real destination (bytes flowing dest → client). Safe
 // to call before or after Run starts.
-func (r *Relay) DestStream() *fakeconn.FakeConn { return r.destStream }
+func (r *Relay) DestStream() *fakeconn.FakeConn { return r.destStream.Load() }
 
 // Directives returns the parser-writable directive channel. Parsers
 // send [directive.Directive] values here; the relay's directive
@@ -226,6 +232,83 @@ func (r *Relay) DropCounts() (c2d, d2c uint64) {
 func (r *Relay) PauseTees() {
 	r.teeC2D.setPaused(true)
 	r.teeD2C.setPaused(true)
+}
+
+// ResumeTees reverses PauseTees: it re-arms both tees so subsequent
+// chunks are delivered to the parser-facing FakeConns again. Used only by
+// the abort-recovery respawn path in recordViaSupervisor to bring a still-
+// alive pooled connection back into recording after its parser generation
+// aborted (any trigger: hang / mem-cap / panic / parser error). Reuses
+// setPaused(false), the same primitive handleResumeDir uses to reverse a
+// KindPauseDir pause. Callers MUST ReattachStreams (fresh FakeConns) before
+// the resumed tees deliver, because SessionOnAbort Closed the old ones.
+func (r *Relay) ResumeTees() {
+	r.teeC2D.setPaused(false)
+	r.teeD2C.setPaused(false)
+}
+
+// SetPressureSelfManaged toggles the memory-pressure drop opt-out on both
+// tees. When enabled the tees stop dropping chunks under memoryguard pressure
+// and rely on the parser to shed memory itself while staying byte-synced — so
+// a length-prefix reassembler is never desynced by a mid-message pressure drop
+// (the root of the go-memory-load-mongo tail dead zone). Opted into per
+// connection in recordViaSupervisor by parsers that implement
+// SelfManagesMemoryPressure() (mongo/v2). Capacity drops
+// (channel_full/per_conn_cap) and the abort/finalize pause are unaffected, so
+// a genuine mid-message byte loss still triggers the parser's resync.
+func (r *Relay) SetPressureSelfManaged(v bool) {
+	r.teeC2D.setPressureSelfManaged(v)
+	r.teeD2C.setPressureSelfManaged(v)
+}
+
+// ReattachStreams builds fresh client/dest FakeConns over the SAME still-open
+// tee out-channels and atomically swaps them in, returning the new pair. The
+// previous FakeConns were one-way Closed by SessionOnAbort and cannot be
+// revived; the tees themselves stay open until Run's teardown, so their out
+// channels remain valid receivers for a fresh FakeConn.
+//
+// Only the recordViaSupervisor goroutine calls this, one generation at a time,
+// so it never races itself. Run's teardown Close (on peer close) CAN race it —
+// recordViaSupervisor does a non-blocking relayDone check before looping but
+// the relay may exit in the gap. That race is benign: every stream field is an
+// atomic Pointer (Store/Load), and once the drain goroutines close the tee out
+// channels a freshly attached FakeConn simply reads io.EOF instead of blocking.
+func (r *Relay) ReattachStreams() (client, dest *fakeconn.FakeConn) {
+	var localAddr, remoteAddr net.Addr
+	if src := r.src.Load(); src != nil && *src != nil {
+		localAddr = (*src).LocalAddr()
+		remoteAddr = (*src).RemoteAddr()
+	}
+	var destLocal, destRemote net.Addr
+	if dst := r.dst.Load(); dst != nil && *dst != nil {
+		destLocal = (*dst).LocalAddr()
+		destRemote = (*dst).RemoteAddr()
+	}
+	nc := fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
+	nd := fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
+	r.clientStream.Store(nc)
+	r.destStream.Store(nd)
+	return nc, nd
+}
+
+// HasBufferedInput reports whether either direction currently holds
+// input the parser has not yet consumed — bytes staged in a tee, or a
+// chunk queued/stashed in a FakeConn. The supervisor's hang watchdog
+// consults this (via SetActivityProbe) so a parser that is merely idle —
+// blocked reading an empty stream, e.g. a pooled DB connection sitting
+// between requests — is not mistaken for one that is hung. A hang is
+// declared only when there is genuinely unconsumed input the parser is
+// failing to make progress on. Without this discriminator, an idle
+// connection whose last exchange was abandoned (its response dropped
+// under memory pressure, so no mock was emitted to clear the
+// supervisor's `pending` flag) is false-hanged after the budget and
+// permanently silenced via PauseTees — recording never resumes on the
+// live pooled connection, producing the go-memory-load-mongo recording
+// dead zone. Safe for concurrent use: atomic byte counters plus the
+// FakeConn's own synchronised buffer check.
+func (r *Relay) HasBufferedInput() bool {
+	return r.teeC2D.hasStagedBytes() || r.teeD2C.hasStagedBytes() ||
+		r.clientStream.Load().HasBuffered() || r.destStream.Load().HasBuffered()
 }
 
 // Run starts the forwarder, drain, and directive-processor goroutines
@@ -372,8 +455,8 @@ func (r *Relay) run(ctx context.Context) error {
 	r.teeD2C.waitDone()
 
 	// Close the FakeConns so any blocked parser Read returns ErrClosed.
-	_ = r.clientStream.Close()
-	_ = r.destStream.Close()
+	_ = r.clientStream.Load().Close()
+	_ = r.destStream.Load().Close()
 
 	// Signal the directive processor to exit and wait for it. Use the
 	// idempotent closer because either forwarder's defer may have

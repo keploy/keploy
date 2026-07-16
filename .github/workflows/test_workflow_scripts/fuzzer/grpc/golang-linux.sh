@@ -134,6 +134,46 @@ ensure_success_phrase() {
  exit 1
 }
 
+# wait_port_free NAME PORT [TIMEOUT_SEC]
+# Block until localhost:PORT is genuinely BIND-able again (or TIMEOUT_SEC
+# elapses). Deterministic replacement for a fixed `sleep` after killing a
+# process that owns a port: the next phase's server must not race a socket that
+# is still being released, which surfaces as
+# "listen tcp :PORT: bind: address already in use" and fails the run
+# intermittently.
+#
+# This must NOT use `nc -z`: a connect probe only detects a LISTENING socket, so
+# it reports the port "free" the instant the previous listener stops accepting —
+# while a socket the previous keploy phase left on the port in a NON-listen
+# state (TIME-WAIT from a server-side close, or a still-closing FIN-WAIT /
+# CLOSE-WAIT) is invisible to it yet still blocks a fresh bind(). That gap is the
+# exact intermittent EADDRINUSE this guard exists to prevent. `ss` sees every
+# TCP state, so we poll it for ANY socket whose LOCAL port is PORT and only
+# proceed once none remain. The timeout must exceed the 60s TCP TIME-WAIT so a
+# genuine TIME-WAIT (which a non-SO_REUSEADDR listener cannot bind over) is
+# waited out rather than raced; normal transitions have no lingering socket and
+# return sub-second. On timeout the offending sockets are dumped for triage.
+wait_port_free() {
+  local name=$1 port=$2 timeout=${3:-90}
+  local deadline=$(( $(date +%s) + timeout ))
+  # Command substitution (not `ss | grep -q`): a pipe lets `grep -q` close early,
+  # `ss` catch SIGPIPE, and `set -o pipefail` propagate that as a non-zero
+  # condition — which would falsely read as "port free" while it is still held.
+  # `[ -n "$(...)" ]` has no pipe, so the check stays deterministic under pipefail.
+  while [ -n "$(ss -Htan "sport = :$port" 2>/dev/null)" ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "⚠️ $name still holding port $port after ${timeout}s:"
+      # Root-owned (keploy launches the server under sudo), so dump with
+      # privileges to surface the holding PID for triage.
+      run_with_keploy_privileges ss -Htanp "sport = :$port" 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "✅ $name port $port is free"
+  return 0
+}
+
 
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
@@ -188,7 +228,15 @@ if [ "$MODE" = "incoming" ]; then
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
- sleep 2 # Give a moment for the port to be released
+ # The HTTP client started above (:18080) is otherwise never stopped in the
+ # incoming path, so it leaks into the json cycle where a fresh client cannot
+ # bind :18080 (and the stale one silently serves /run against a dead server).
+ # Stop it here, at the source of the leak.
+ sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+ # Wait for the ports to be released instead of a fixed sleep that races the
+ # yaml replay's server re-bind on :50051.
+ wait_port_free "gRPC server" 50051 || true
+ wait_port_free "HTTP client" 18080 || true
 
  echo "Waiting for processes to settle"
 
@@ -240,14 +288,23 @@ if [ "$MODE" = "incoming" ]; then
 
  if json_pass_supported; then
    echo "🧪 Re-running incoming with --storage-format json"
-   # The yaml replay above started the fuzzer server with `keploy -c`.
-   # Keploy stops itself, but the server child it spawned can keep
-   # owning :50051, so the json record's app-launch fails with
-   # "listen tcp :50051: bind: address already in use" and keploy
-   # bails before capturing any test case. Force-kill anything still
-   # holding :50051 before the json record's app starts.
+   # Before the json cycle rebinds :50051 (server) and :18080 (client), make
+   # sure the yaml cycle's processes are gone AND their ports are released.
+   # Two leftovers otherwise race the json binds:
+   #   * :50051 — the yaml replay's `keploy test -c` server can still be
+   #     unwinding when `keploy test` returns; the json record's app then hits
+   #     "listen tcp :50051: bind: address already in use" and keploy bails
+   #     before capturing any test case.
+   #   * :18080 — the yaml cycle's HTTP client is never stopped, so a fresh
+   #     json client cannot bind it and the stale one silently serves /run
+   #     against a server that never came up (1000 nil mismatches).
+   # Kill both and WAIT for the sockets to close (bounded) rather than trusting
+   # a fixed sleep. (The yaml teardown already stops the client; this is the
+   # defensive backstop at the actual bind boundary.)
    sudo pkill -f "$FUZZER_SERVER_BIN" || true
-   sleep 2
+   sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+   wait_port_free "gRPC server" 50051 || true
+   wait_port_free "HTTP client" 18080 || true
    if [[ "$RECORD_SRC" == "latest" ]]; then
      "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming_json.txt &
    else

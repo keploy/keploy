@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.uber.org/zap"
@@ -124,6 +125,21 @@ type Config struct {
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
 
+	// OnTeeDropWindow is invoked ONLY for genuine per-operation byte-loss
+	// drops (channel_full, per_conn_cap) with the drop reason AND the
+	// dropped chunk's wire timestamp (coalesced per operation, not one call
+	// per chunk). memory_pressure and paused drops do NOT invoke it — they
+	// fire per-chunk for a sustained interval and would flood/mass-suppress
+	// (see tee.drop). Callers wire this to the supervisor's
+	// RecordOrphanWindow so TCs whose HTTP window contains that instant are
+	// suppressed — the dropped chunk's mock cannot be recorded, so replaying
+	// its TC would orphan it (match_phase=no_mocks). The decode-lag-immune,
+	// time-attributed complement to OnMarkMockIncomplete (which only voids a
+	// later, possibly-unrelated mock via the session flag). Attribution is
+	// by time, so a concurrent overlap may over-suppress a healthy TC — an
+	// accepted coverage-for-stability tradeoff. Nil is safe.
+	OnTeeDropWindow func(reason string, ts time.Time)
+
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
 	// this to the supervisor's MarkPendingWork so the activity
@@ -194,6 +210,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.OnMarkMockIncomplete == nil {
 		out.OnMarkMockIncomplete = func(string) {}
+	}
+	if out.OnTeeDropWindow == nil {
+		out.OnTeeDropWindow = func(string, time.Time) {}
 	}
 	return out
 }
