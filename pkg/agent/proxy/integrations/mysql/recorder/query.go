@@ -148,37 +148,67 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		asyncMySQLDecode(decoderCtx, logger, decodeChan, mocks, decodeCtx, clientConn, opts)
 	}()
 
-	// forwardClient/forwardDest: always feed bytes to the decoder for
-	// connections that started in recording mode. The entry-point check
-	// above handles new connections under pressure (passthrough); once
-	// recording started, dropping mid-connection bytes creates orphan TCs.
+	// enqueueDecode hands a captured chunk to the async decoder WITHOUT ever
+	// dropping it. This enforces, on the buffchan→decodeChan hop, the same
+	// "captured bytes MUST land" invariant that readRelay already enforces on
+	// the socket→buffchan hop (see the readRelay comment above).
+	//
+	// The previous code here dropped on a full decodeChan (`if len<cap { select
+	// {…; default:} }`), which under a burst — e.g. HikariCP opening its whole
+	// pool at once, each connection streaming a multi-packet session-probe
+	// result set — silently discarded the result-set BODY chunks (column defs +
+	// rows) while the small terminating OK survived. The decoder then recorded
+	// the response as a bare OK, so at replay the driver's loadServerVariables
+	// read nothing and the pool failed. Dropping recording bytes is exactly
+	// what corrupts mocks; we must not do it.
+	//
+	// Fast path: if the channel has space, send directly. Otherwise BLOCK until
+	// the decoder drains, applying natural backpressure up through the buff
+	// chans to the sockets (TCP flow control) — the correct trade for a
+	// recorder: fidelity over a brief throughput dip. The decoder runs on a
+	// context detached from the parent (decoderCtx), so it keeps draining even
+	// during shutdown; the ctx-guarded escape is only a deadlock backstop and,
+	// on the parent-cancel path, the drainBuffChans grace window + cleanup
+	// handle the tail. memoryguard remains the outer safety valve: under memory
+	// pressure recording pauses to pure passthrough (top of this function), so
+	// blocking here can never grow unbounded.
+	enqueueDecode := func(fromClient bool, buf []byte) {
+		if buf == nil {
+			return
+		}
+		cp := make([]byte, len(buf))
+		copy(cp, buf)
+		var item mysqlDecodeItem
+		if fromClient {
+			item = mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}
+		} else {
+			item = mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}
+		}
+		if len(decodeChan) < cap(decodeChan) {
+			decodeChan <- item
+			return
+		}
+		select {
+		case decodeChan <- item:
+		case <-ctx.Done():
+		}
+	}
+
+	// forwardClient/forwardDest: relay the chunk on the wire, then feed a copy
+	// to the decoder (no-drop). Used by the shutdown-time drainBuffChans sweep.
 	forwardClient := func(buf []byte) {
 		if buf == nil {
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if len(decodeChan) < cap(decodeChan) {
-			cp := make([]byte, len(buf))
-			copy(cp, buf)
-			select {
-			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
-			default:
-			}
-		}
+		enqueueDecode(true, buf)
 	}
 	forwardDest := func(buf []byte) {
 		if buf == nil {
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if len(decodeChan) < cap(decodeChan) {
-			cp := make([]byte, len(buf))
-			copy(cp, buf)
-			select {
-			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
-			default:
-			}
-		}
+		enqueueDecode(false, buf)
 	}
 
 	// drainBuffChans gives the relay channels a short grace window to
@@ -293,17 +323,11 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Non-blocking send to async decode. Check channel capacity
-			// before copying to avoid allocation/GC churn when the decoder
-			// can't keep up (the copy would just be dropped).
-			if len(decodeChan) < cap(decodeChan) {
-				buf := make([]byte, len(buffer))
-				copy(buf, buffer)
-				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
-				default:
-				}
-			}
+			// Hand to the async decoder WITHOUT dropping (see enqueueDecode):
+			// a full decodeChan blocks here (backpressure) rather than
+			// discarding the chunk, so multi-packet result sets are never
+			// truncated at record time.
+			enqueueDecode(true, buffer)
 
 		case buffer, ok := <-destBuffChan:
 			if !ok {
@@ -322,15 +346,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Non-blocking send to async decode.
-			if len(decodeChan) < cap(decodeChan) {
-				buf := make([]byte, len(buffer))
-				copy(buf, buffer)
-				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
-				default:
-				}
-			}
+			// Hand to the async decoder WITHOUT dropping (see enqueueDecode).
+			// This is the load-bearing one: the server RESPONSE body (column
+			// defs + rows of a result set) must reach the decoder intact.
+			enqueueDecode(false, buffer)
 
 		case err, ok := <-errChan:
 			if !ok || err == nil {

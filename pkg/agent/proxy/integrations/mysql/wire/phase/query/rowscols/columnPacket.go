@@ -75,6 +75,21 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	packet.OrgName = string(orgName)
 	pos += n
 
+	// Bounds guard for the fixed-length metadata block that follows. From the
+	// current pos we read, at FIXED offsets: the 0x0c length byte (1) +
+	// character_set (2) + column_length (4) + type (1) + flags (2) +
+	// decimals (1) + filler (2) = 13 bytes. Without this guard a short or
+	// misrouted buffer (e.g. a non-column packet decoded here because an
+	// upstream column-count was wrong, or a genuinely truncated packet) would
+	// index past the slice and PANIC — crashing the async decoder goroutine and
+	// tearing down the whole connection's recording (observed as
+	// "Recovered from panic ... closing active connections"). Returning an error
+	// instead lets the caller degrade gracefully (it logs and resets to
+	// stateExpectCommand) so the rest of the session still records.
+	if pos+13 > len(b) {
+		return nil, pos, fmt.Errorf("short column-definition packet: need 13 bytes for fixed-field block at pos %d, buffer len %d", pos, len(b))
+	}
+
 	// skip [0x0c] (length of fixed-length fields)
 	packet.FixedLength = 0x0c
 	pos++

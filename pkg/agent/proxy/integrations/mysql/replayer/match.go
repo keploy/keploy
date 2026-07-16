@@ -764,6 +764,31 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	if matchedResp == nil {
+		// System-variable read (SELECT @@[session.|global.]<var>) with no exact
+		// mock. Connector/J issues these LIVE during connection setup
+		// (useLocalSessionState=false) — e.g. getTransactionIsolation() →
+		// "SELECT @@session.transaction_isolation" — and they are frequently
+		// absent from the recording (read at replay, not at record). Their value
+		// IS recorded, though: the connection-setup probe
+		// "SELECT @@... AS <var>, ..." captured every session variable in one
+		// result set. Serve <var>'s REAL recorded value as a correctly-framed
+		// single-column result set, instead of cross-serving a different var's
+		// mock (see Part A in matchQuery). Same spirit as the graceful
+		// control-statement OK just below — deterministic, recorded data, no
+		// fabrication. Only runs when no exact mock matched, so recorded
+		// system-var reads are unaffected.
+		if req.Header.Type == sCOM_QUERY {
+			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+				if varName, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
+					if resp := buildSessionVarResponse(logger, pool, varName, decodeCtx); resp != nil {
+						logger.Debug("served system-variable read from recorded session probe",
+							zap.String("var", varName))
+						return resp, true, nil, nil
+					}
+				}
+			}
+		}
+
 		// Graceful generic OK for common control statements (no mocks)
 		if req.Header.Type == sCOM_QUERY {
 			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
@@ -1202,6 +1227,24 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 				zap.String("actual query", actualQuery))
 			return true, matchCount
 		}
+	}
+
+	// A PURE single system-variable read (SELECT @@[session.]<var>, no columns
+	// list / FROM / expression) is matched by EXACT text ONLY: it is semantically
+	// identified by WHICH variable it reads, so a different @@var must never be
+	// served as a length/structure "fallback". This is the exact defect behind
+	// "Could not map transaction isolation '0'": SELECT @@session.transaction_
+	// isolation (unrecorded, issued live by Connector/J) was cross-served the
+	// recorded SELECT @@session.transaction_read_only mock's value "0" purely
+	// because both are 38-byte non-DML SELECTs (matchCount==1 on equal
+	// PayloadLength). Returning score 0 keeps this candidate out of the
+	// score-based fallback; an un-matched read is resolved from the recorded
+	// session probe in matchCommand. Scoped via parseSingleSystemVarRead (NOT a
+	// bare "SELECT @@" prefix) so a real DML query that merely projects a
+	// variable — e.g. "SELECT @@version, u.name FROM users u WHERE ..." — keeps
+	// its normal DML fuzzy-matching.
+	if _, isPureVarRead := parseSingleSystemVarRead(actualQuery); isPureVarRead && expectedQuery != actualQuery {
+		return false, 0
 	}
 
 	// check if any of them the query is dml and other is not, then there is no match.
@@ -1873,4 +1916,139 @@ func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, act
 		}
 	}
 	return score
+}
+
+// stripLeadingSQLComment removes leading /* ... */ blocks (Connector/J prepends
+// a version banner and a "/* ping */" marker) plus surrounding whitespace.
+func stripLeadingSQLComment(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, "/*") {
+		i := strings.Index(s, "*/")
+		if i < 0 {
+			break
+		}
+		s = strings.TrimSpace(s[i+2:])
+	}
+	return s
+}
+
+
+// parseSingleSystemVarRead parses "SELECT @@[session.|global.|local.]<var>" and
+// returns the bare variable name (e.g. "transaction_isolation"). ok is false for
+// anything that isn't a SINGLE bare variable read (multi-column, AS aliases,
+// expressions, function calls) — so it only fires for the deterministic
+// single-variable probes Connector/J issues at connection setup.
+func parseSingleSystemVarRead(query string) (string, bool) {
+	s := stripLeadingSQLComment(query)
+	if len(s) < 8 || !strings.EqualFold(s[:7], "SELECT ") {
+		return "", false
+	}
+	rest := strings.TrimSpace(s[len("SELECT"):])
+	if !strings.HasPrefix(rest, "@@") {
+		return "", false
+	}
+	rest = strings.TrimPrefix(rest, "@@")
+	// Single variable only: reject multi-column / AS / expressions / calls.
+	if strings.ContainsAny(rest, ", ()\t\n") {
+		return "", false
+	}
+	if low := strings.ToLower(rest); strings.HasPrefix(low, "session.") {
+		rest = rest[len("session."):]
+	} else if strings.HasPrefix(low, "global.") {
+		rest = rest[len("global."):]
+	} else if strings.HasPrefix(low, "local.") {
+		rest = rest[len("local."):]
+	}
+	rest = strings.TrimRight(rest, "; ")
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// resolveVarFromProbe scans the mock pool for a recorded result set carrying a
+// column whose label equals varName. The connection-setup probe
+// ("SELECT @@... AS <var>, ...") aliases every column to its bare variable name,
+// so this recovers the REAL recorded value + column definition for varName.
+func resolveVarFromProbe(pool []*models.Mock, varName string) (*mysql.ColumnDefinition41, mysql.ColumnEntry, bool) {
+	for _, m := range pool {
+		if m == nil {
+			continue
+		}
+		for ri := range m.Spec.MySQLResponses {
+			trs, ok := m.Spec.MySQLResponses[ri].PacketBundle.Message.(*mysql.TextResultSet)
+			if !ok || len(trs.Rows) == 0 {
+				continue
+			}
+			for ci, col := range trs.Columns {
+				if col != nil && strings.EqualFold(col.Name, varName) && ci < len(trs.Rows[0].Values) {
+					return col, trs.Rows[0].Values[ci], true
+				}
+			}
+		}
+	}
+	return nil, mysql.ColumnEntry{}, false
+}
+
+// buildSessionVarResponse builds a single-column text result set carrying the
+// recorded value of varName (from resolveVarFromProbe). It reuses the probe's
+// real column definition (correct type/charset) and value, framed with the
+// sequence IDs of a 1-column result set (col-count=1, column=2, row=3,
+// OK-terminator=4). The wire encoder recomputes packet lengths from the encoded
+// bodies, so only the sequence IDs must be set here. Returns nil when varName
+// isn't present in any recorded result set (caller falls through to its normal
+// no-match handling).
+func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName string, decodeCtx *wire.DecodeContext) *mysql.Response {
+	// The single-column framing built below is the CLIENT_DEPRECATE_EOF form
+	// (no intermediate EOF after the column; an OK-replacing-EOF terminator at
+	// sequence 4). Every modern JVM MySQL driver (Connector/J 8.x, MariaDB
+	// Connector/J) negotiates deprecate-EOF, which is the only case this
+	// proxyless-JSSE path targets. If a connection did NOT negotiate it, DON'T
+	// synthesize — fall through to normal no-match handling — rather than emit a
+	// mis-sequenced result set. This keeps the fix from being wrong on a
+	// non-deprecate-EOF driver instead of silently corrupting its framing.
+	if decodeCtx == nil || !decodeCtx.DeprecateEOF() {
+		if logger != nil {
+			logger.Debug("session-variable resolver skipped: connection did not negotiate CLIENT_DEPRECATE_EOF",
+				zap.String("var", varName))
+		}
+		return nil
+	}
+	col, val, found := resolveVarFromProbe(pool, varName)
+	if !found || col == nil {
+		return nil
+	}
+	c := *col // copy; we only overwrite header/name, keeping the probe's type/charset/length
+	c.Header = mysql.Header{SequenceID: 2}
+	c.Name = varName
+	c.OrgName = varName
+	trs := &mysql.TextResultSet{
+		ColumnCount:     1,
+		Columns:         []*mysql.ColumnDefinition41{&c},
+		EOFAfterColumns: nil, // CLIENT_DEPRECATE_EOF (Connector/J 8.x): no intermediate EOF
+		Rows: []*mysql.TextRow{{
+			Header: mysql.Header{SequenceID: 3},
+			Values: []mysql.ColumnEntry{val},
+		}},
+		// OK-replacing-EOF terminator at sequence 4 (deprecate-eof form):
+		// 0xFE + affected_rows(0) + last_insert_id(0) + status_flags(0x0002) + warnings(0).
+		FinalResponse: &mysql.GenericResponse{
+			Type: "OK",
+			Data: []byte{0x07, 0x00, 0x00, 0x04, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00},
+		},
+	}
+	if logger != nil {
+		logger.Debug("built single-column session-variable result set",
+			zap.String("var", varName), zap.Any("value", val.Value))
+	}
+	return &mysql.Response{
+		PacketBundle: mysql.PacketBundle{
+			Header: &mysql.PacketInfo{
+				// Frames the FIRST sub-packet (column-count = 1 byte) at seq 1.
+				Header: &mysql.Header{PayloadLength: 1, SequenceID: 1},
+				Type:   mysql.StatusToString(mysql.OK), // cosmetic; encoder dispatches on Message type
+			},
+			Message: trs,
+		},
+	}
 }
