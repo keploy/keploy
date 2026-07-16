@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,7 +14,134 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
+
+// fakeInstr is a minimal Instrumentation whose mapping stream is driven by the
+// test. GetIncoming/GetOutgoing return live-but-silent channels so
+// GetTestAndMockChans wires up exactly as it does in production.
+type fakeInstr struct {
+	mappings chan models.TestMockMapping
+	incoming chan *models.TestCase
+	outgoing chan *models.Mock
+}
+
+func (f *fakeInstr) Setup(context.Context, string, models.SetupOptions) error { return nil }
+func (f *fakeInstr) GetIncoming(context.Context, models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return f.incoming, nil
+}
+func (f *fakeInstr) GetOutgoing(context.Context, models.OutgoingOptions) (<-chan *models.Mock, error) {
+	return f.outgoing, nil
+}
+func (f *fakeInstr) GetMappings(context.Context, models.IncomingOptions) (<-chan models.TestMockMapping, error) {
+	return f.mappings, nil
+}
+func (f *fakeInstr) Run(context.Context, models.RunOptions) models.AppError { return models.AppError{} }
+func (f *fakeInstr) MakeAgentReadyForDockerCompose(context.Context) error   { return nil }
+func (f *fakeInstr) NotifyGracefulShutdown(context.Context) error           { return nil }
+func (f *fakeInstr) StreamPcapArtifacts(context.Context, string) error      { return nil }
+
+// TestGetTestAndMockChans_DrainsMappingTailOnShutdown is the other half of the
+// go-memory-load-mongo reproduction: persisting the tail is worthless if the tail
+// never arrives.
+//
+// Recording stops and the agent still has resolved mappings queued. The pre-fix
+// code cancelled the mapping stream the instant ctx was done, so those never
+// reached the consumer at all — no write was attempted, so no error was logged.
+// Measured in CI even WITH the write fixed: 27 of 342 tests lost, all tails.
+//
+// It is tempting to assume teardown stops the app first and the agent has already
+// flushed. That holds only for the native path: under docker-compose keploy never
+// runs the app, so reqCtx is cancelled within milliseconds of SIGINT with the
+// agent's queue still full. That is the configuration this bug was measured in.
+func TestGetTestAndMockChans_DrainsMappingTailOnShutdown(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	r := &Recorder{logger: zap.NewNop(), instrumentation: f, config: &config.Config{}}
+
+	g, gctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(gctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+
+	frames, err := r.GetTestAndMockChans(ctx)
+	require.NoError(t, err)
+
+	var got []string
+	collected := make(chan struct{})
+	go func() {
+		defer close(collected)
+		for m := range frames.Mappings {
+			got = append(got, m.TestName)
+		}
+	}()
+
+	// Recording stops FIRST — the real ordering. The agent has already resolved
+	// these tests and flushes them on the still-open stream immediately after.
+	cancel()
+
+	tail := []string{"post-orders-63", "post-orders-64", "post-orders-65"}
+	for _, tn := range tail {
+		select {
+		case f.mappings <- models.TestMockMapping{TestName: tn, MockIDs: []string{"mock-" + tn}}:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("mapping for %q was never accepted after shutdown began: the stream was "+
+				"torn down while the agent still had it queued, so this test is dropped from "+
+				"mappings.yaml and replay reports no_mocks for it", tn)
+		}
+	}
+	close(f.mappings)
+
+	select {
+	case <-collected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mapping consumer did not finish after the stream closed")
+	}
+
+	assert.Equal(t, tail, got,
+		"every mapping the agent flushes after shutdown begins must reach the consumer; "+
+			"a missing tail is the go-memory-load-mongo no_mocks flake")
+}
+
+// TestGetTestAndMockChans_MappingDrainStopsWhenIdle guards the drain itself: the
+// agent holds the stream open for the whole session and never closes it, so the
+// drain cannot wait for EOF — it must end once the stream falls idle, or recording
+// would hang on exit. This one does not fail pre-fix (there was no drain to hang);
+// it pins the bound that makes the drain safe.
+func TestGetTestAndMockChans_MappingDrainStopsWhenIdle(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	r := &Recorder{logger: zap.NewNop(), instrumentation: f, config: &config.Config{}}
+
+	g, gctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(gctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+
+	frames, err := r.GetTestAndMockChans(ctx)
+	require.NoError(t, err)
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for range frames.Mappings { //nolint:revive // draining
+		}
+	}()
+
+	// Shut down and send nothing more: the stream stays open (as the real agent's
+	// does), so the drain must exit on the idle bound rather than hang.
+	cancel()
+
+	select {
+	case <-closed:
+	case <-time.After(mappingIdleGrace + 10*time.Second):
+		t.Fatal("mapping drain did not stop after the stream fell idle — shutdown would hang")
+	}
+}
 
 // These tests pin the contract behind the go-memory-load-mongo "no_mocks" flake:
 // a record session that is shutting down must still persist everything the agent
