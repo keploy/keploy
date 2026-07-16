@@ -125,6 +125,16 @@ type Session struct {
 	// Nil is safe.
 	OnPendingCleared func()
 
+	// SuspendWatchdog, when non-nil, permanently disarms the hang
+	// watchdog for this connection. A parser calls it once it identifies
+	// the in-flight request as a long-poll (e.g. an async httpPoll lane):
+	// such a request holds the connection open with no byte progress for
+	// far longer than the hang budget, which the watchdog would otherwise
+	// abort as a hang (falling through to passthrough and losing the
+	// mock). Typically wired to supervisor.SuspendWatchdog by the
+	// dispatcher. Nil is safe.
+	SuspendWatchdog func()
+
 	// RouteMocksViaSyncMock, when true, makes EmitMock deliver the
 	// mock via the package-singleton syncMock.SyncMockManager
 	// (AddMock) instead of directly sending on s.Mocks. Production

@@ -98,6 +98,17 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 
+		// If this request routes to a long-poll async lane, disarm the
+		// supervisor's hang watchdog for this connection before we block on
+		// the response: a poll legitimately holds the connection open with no
+		// byte progress for far longer than the hang budget, and would
+		// otherwise be aborted (falling through to passthrough) before the
+		// delivery arrives — so the poll's mock would never be recorded.
+		if sess.SuspendWatchdog != nil && h.isPollLaneRequest(finalReq) {
+			logger.Debug("V2 HTTP record: request matched a poll lane; suspending hang watchdog for this connection")
+			sess.SuspendWatchdog()
+		}
+
 		// --- Response side --------------------------------------------
 		firstRespChunk, err := sess.DestStream.ReadChunk()
 		if err != nil {
@@ -399,6 +410,35 @@ func destPortFromAddr(conn net.Conn) uint {
 		return uint(tcp.Port)
 	}
 	return 0
+}
+
+// isPollLaneRequest reports whether the raw HTTP request routes to a
+// configured async lane whose type is a poll variant (lane.IsPoll()).
+// Matching is by request shape only (host/path/query, via the engine's
+// LaneFor), so it is valid at record time before any mock is emitted.
+// recordV2 uses it to disarm the supervisor's hang watchdog for long-poll
+// connections. Returns false when no async engine is configured or the
+// request is malformed.
+func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
+	if h.asyncEngine == nil {
+		return false
+	}
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+	if err != nil {
+		return false
+	}
+	urlParams := map[string]string{}
+	for k, vs := range req.URL.Query() {
+		if len(vs) > 0 {
+			urlParams[k] = vs[0]
+		}
+	}
+	lane, ok := h.asyncEngine.LaneFor(&models.Mock{Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+		URL:       req.URL.String(),
+		URLParams: urlParams,
+		Header:    map[string]string{"Host": req.Host},
+	}}})
+	return ok && lane.IsPoll()
 }
 
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy

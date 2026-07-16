@@ -197,6 +197,50 @@ func TestHangNotDetectedWhenIdle(t *testing.T) {
 	}
 }
 
+// A long-poll request makes no byte progress for far longer than the hang
+// budget while the server holds the connection open. SuspendWatchdog disarms
+// the hang detection for that connection so the parser is not aborted (which
+// would fall through to passthrough and lose the mock), even though pending
+// work is armed.
+func TestHangNotDetectedWhenSuspended(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t)) // 50ms budget
+
+	// Arm pending work (as the relay does when the request bytes are teed),
+	// then suspend the watchdog (as the dispatcher does once the request is
+	// matched to a poll lane).
+	s.MarkPendingWork()
+	s.SuspendWatchdog()
+
+	done := make(chan Result, 1)
+	parserStarted := make(chan struct{})
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				close(parserStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	<-parserStarted
+	// Pending is armed and several budgets elapse, but the watchdog is
+	// suspended for this poll connection, so it must not fire.
+	select {
+	case r := <-done:
+		t.Fatalf("watchdog fired while suspended: %+v", r)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	s.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("parser did not exit after Close")
+	}
+}
+
 func TestHangResetOnActivity(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
