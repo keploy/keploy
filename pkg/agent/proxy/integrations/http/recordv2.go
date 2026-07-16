@@ -426,24 +426,22 @@ func destPortFromAddr(conn net.Conn) uint {
 // connections. Returns false when no async engine is configured or the
 // request is malformed.
 func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
-	if h.asyncEngine == nil {
+	if h.asyncEngine == nil || !h.asyncEngine.HasPollLanes() {
 		return false
 	}
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+	parsed, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
 	if err != nil {
 		return false
 	}
-	urlParams := map[string]string{}
-	for k, vs := range req.URL.Query() {
-		if len(vs) > 0 {
-			urlParams[k] = vs[0]
-		}
-	}
-	lane, ok := h.asyncEngine.LaneFor(&models.Mock{Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
-		URL:       req.URL.String(),
-		URLParams: urlParams,
-		Header:    map[string]string{"Host": req.Host},
-	}}})
+	// Reuse liveReqToMock (the same request→mock shaping the replay LaneFor
+	// path uses in decode.go) so record- and replay-time lane matching stay
+	// consistent — in particular it leaves URLParams unset so queryOf does the
+	// full multi-value query parse rather than a truncated first-value view.
+	lane, ok := h.asyncEngine.LaneFor(liveReqToMock(&req{
+		method: parsed.Method,
+		url:    parsed.URL,
+		header: parsed.Header,
+	}))
 	return ok && lane.IsPoll()
 }
 

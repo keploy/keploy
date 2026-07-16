@@ -40,6 +40,7 @@ type Engine struct {
 	logger    *zap.Logger
 	laneOrder []models.AsyncLane     // caller-declared order; first match wins in LaneFor, by-name lookup scans it
 	parsers   map[string]AsyncParser // by lane.Type
+	hasPoll   bool                   // true if any configured lane is a poll lane; lets the record path skip poll detection when none are
 
 	mu         sync.Mutex
 	cond       *sync.Cond             // signaled whenever completed/windowSeen changes; wakes held POLL Decide calls
@@ -74,15 +75,28 @@ func NewEngine(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]
 			zap.Any("match", l.Match),
 			zap.Any("matchQuery", l.MatchQuery))
 	}
+	hasPoll := false
+	for _, l := range laneOrder {
+		if l.IsPoll() {
+			hasPoll = true
+			break
+		}
+	}
 	e := &Engine{
 		logger:    logger,
 		laneOrder: laneOrder,
 		parsers:   parsers,
+		hasPoll:   hasPoll,
 		streams:   make(map[string]*laneStream),
 	}
 	e.cond = sync.NewCond(&e.mu)
 	return e
 }
+
+// HasPollLanes reports whether any configured lane is a poll lane. The record
+// path uses it to skip poll detection (and its request re-parse) entirely when
+// no poll lanes are configured.
+func (e *Engine) HasPollLanes() bool { return e.hasPoll }
 
 // WarnNonWindowed logs once that async replay is running on the non-windowed
 // mock path (Proxy.SetMocks, the fallback used when the proxy does not
@@ -225,20 +239,18 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
 	e.mu.Lock()
 	p := e.parsers[lane.BaseType()]
-	// One ctx-done bridge for the whole call: spawned once, stopped on
-	// return. It only needs to wake a parked cond.Wait below on cancellation;
-	// AdvanceWindow/OnTestComplete broadcast for the normal-progress case.
-	stop := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			e.mu.Lock()
-			e.cond.Broadcast()
-			e.mu.Unlock()
-		case <-stop:
+	// A ctx-done bridge wakes a parked cond.Wait below on cancellation
+	// (normal progress is covered by AdvanceWindow/OnTestComplete broadcasts).
+	// It is only needed once we actually park, so it is registered lazily
+	// before the first Wait — the immediate-return paths that dominate
+	// non-poll async traffic never pay for it. stopBridge is idempotent and
+	// safe to call after the callback has run.
+	var stopBridge func() bool // context.AfterFunc's stop; nil until we park
+	defer func() {
+		if stopBridge != nil {
+			stopBridge()
 		}
 	}()
-	defer close(stop)
 
 	for {
 		s := e.streams[lane.Name]
@@ -254,7 +266,7 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 			recorded := entry.mock
 			s.cursor++
 			e.mu.Unlock()
-			return e.decideServe(ctx, p, lane, recorded, live)
+			return e.decideServe(p, lane, recorded, live)
 		}
 		if !entry.poll {
 			// non-poll, not armed: immediate keep-alive (unchanged behavior).
@@ -264,6 +276,13 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 		if ctx.Err() != nil {
 			e.mu.Unlock()
 			return e.keepAlive(p, lane)
+		}
+		if stopBridge == nil {
+			stopBridge = context.AfterFunc(ctx, func() {
+				e.mu.Lock()
+				e.cond.Broadcast()
+				e.mu.Unlock()
+			})
 		}
 		e.cond.Wait() // releases e.mu; loop re-peeks the (possibly advanced) cursor on wake
 	}
@@ -284,7 +303,7 @@ func (e *Engine) keepAlive(p AsyncParser, lane models.AsyncLane) (*models.Mock, 
 // been armed (and, for polls, already released from its hold) and is about to
 // be served. ctx is accepted for symmetry with Decide/future cancellation-
 // aware matching; the match itself is synchronous today.
-func (e *Engine) decideServe(_ context.Context, p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
+func (e *Engine) decideServe(p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
 	if p == nil {
 		if e.logger != nil {
 			e.logger.Debug("async: no parser registered for lane type; serving recorded mock unverified — "+
