@@ -605,6 +605,43 @@ func TestMemCapAborts(t *testing.T) {
 	}
 }
 
+// SuspendWatchdog disables ONLY no-progress hang detection. A suspended
+// (poll-lane) connection must still be aborted on a mem-cap breach — the
+// per-connection buffer cap protects memory regardless of poll status.
+func TestMemCapAbortsEvenWhenSuspended(t *testing.T) {
+	t.Parallel()
+	s := New(shortCfg(t))
+	s.MarkPendingWork()
+	s.SuspendWatchdog()
+
+	parserStarted := make(chan struct{})
+	done := make(chan Result, 1)
+	go func() {
+		done <- s.Run(context.Background(),
+			func(ctx context.Context, sess *Session) error {
+				close(parserStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			&Session{})
+	}()
+
+	<-parserStarted
+	s.MarkMemCapExceeded()
+
+	select {
+	case res := <-done:
+		if res.Status != StatusMemCap {
+			t.Fatalf("status: got %s, want mem_cap (suspend must not disable mem-cap protection)", res.Status)
+		}
+		if !res.FallthroughToPassthrough {
+			t.Fatalf("fallthrough: got false, want true")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("mem cap did not abort a suspended parser")
+	}
+}
+
 func TestBumpActivityIsCheap(t *testing.T) {
 	t.Parallel()
 	s := New(shortCfg(t))

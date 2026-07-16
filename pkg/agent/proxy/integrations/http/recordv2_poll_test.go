@@ -67,3 +67,21 @@ func TestIsPollLaneRequestNilEngine(t *testing.T) {
 		t.Fatalf("nil async engine must not match any poll lane")
 	}
 }
+
+// Malformed request bytes must return false, not panic — the request read
+// on the record path can hand over garbage on a decode error.
+func TestIsPollLaneRequestMalformed(t *testing.T) {
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	h.SetAsyncEngine(async.NewEngine(zaptest.NewLogger(t),
+		[]models.AsyncLane{{
+			Name:       "config-watch",
+			Type:       "httpPoll",
+			Match:      map[string]string{"pathRegex": "^/v1/buckets/stream-relay$"},
+			MatchQuery: map[string]string{"watch": "true"},
+		}},
+		map[string]async.AsyncParser{"http": h}))
+
+	if h.isPollLaneRequest([]byte("\x00\x01 not a valid http request \xff")) {
+		t.Fatalf("malformed request must not match a poll lane")
+	}
+}

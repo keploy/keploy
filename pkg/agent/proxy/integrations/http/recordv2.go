@@ -50,6 +50,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 	destPort := destPortFromAddr(sess.DestStream)
 
+	// watchdogSuspended latches once this connection's watchdog has been
+	// disarmed for a poll lane, so we don't re-parse and re-match every
+	// subsequent request on a keep-alive poll-poll-poll connection.
+	watchdogSuspended := false
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -104,9 +109,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// byte progress for far longer than the hang budget, and would
 		// otherwise be aborted (falling through to passthrough) before the
 		// delivery arrives — so the poll's mock would never be recorded.
-		if sess.SuspendWatchdog != nil && h.isPollLaneRequest(finalReq) {
+		if !watchdogSuspended && sess.SuspendWatchdog != nil && h.isPollLaneRequest(finalReq) {
 			logger.Debug("V2 HTTP record: request matched a poll lane; suspending hang watchdog for this connection")
 			sess.SuspendWatchdog()
+			watchdogSuspended = true
 		}
 
 		// --- Response side --------------------------------------------

@@ -177,6 +177,14 @@ func (s *Supervisor) ClearPendingWork() {
 // to passthrough before the delivery arrives, so the poll's mock would
 // never be recorded. Panic and mem-cap protection stay active; only
 // no-progress hang detection is disabled. Idempotent and concurrency-safe.
+//
+// The disarm is permanent for the connection, not scoped to the in-flight
+// request: on an HTTP/1.1 keep-alive connection that carried a poll, a
+// later genuinely-hung request on the same connection is no longer
+// hang-aborted. This is an accepted, bounded trade-off — the blast radius
+// is one connection, user bytes keep flowing via the relay, and the parked
+// read unblocks on connection close — because poll clients typically
+// dedicate a connection to the poll loop.
 func (s *Supervisor) SuspendWatchdog() {
 	s.suspended.Store(true)
 }
