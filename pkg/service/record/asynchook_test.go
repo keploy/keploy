@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,5 +172,84 @@ func TestPollLaneStampsPollMetaAndReKinds(t *testing.T) {
 	}
 	if m.Kind != models.HttpPoll {
 		t.Fatalf("poll-lane mock kind = %q want HttpPoll", m.Kind)
+	}
+}
+
+// TestPollLaneClampsNegativePollDurationToZero pins the clamp at
+// asynchook.go ~lines 97-100: a poll mock whose ResTimestampMock lands BEFORE
+// its ReqTimestampMock (clock skew / test fixture oddity) must record
+// pollDurationMs as "0", never a negative number.
+func TestPollLaneClampsNegativePollDurationToZero(t *testing.T) {
+	models.RegisterPollKind(models.HTTP, models.HttpPoll)
+	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
+	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
+		map[string]async.AsyncParser{"http": laneStub{}}) // keyed by BaseType
+
+	m := egress("lane", time.Unix(1000, 0)) // ResTimestampMock = 1000
+	m.Kind = models.HTTP
+	m.Spec.ReqTimestampMock = time.Unix(1001, 0) // opens AFTER resolve -> negative raw duration
+	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
+
+	if m.Spec.Metadata[models.MetaAsyncPoll] != "true" {
+		t.Fatalf("poll lane must stamp MetaAsyncPoll: %+v", m.Spec.Metadata)
+	}
+	if m.Spec.Metadata[models.MetaPollDurationMs] != "0" {
+		t.Fatalf("pollDurationMs = %q want clamped 0 (ResTimestampMock before ReqTimestampMock)",
+			m.Spec.Metadata[models.MetaPollDurationMs])
+	}
+}
+
+// TestAsyncPollMockExcludedFromPerTestMapping pins the invariant that a mock
+// stamped async — including a poll delivery stamped MetaAsyncPoll="true" and
+// re-kinded to models.HttpPoll — never appears in a testcase's per-test mock
+// mapping. resolveMappingEntries excludes purely on MetaAsync (asyncMockIDs),
+// never on Kind, so this must hold regardless of the mock's re-kinding. This
+// pins the seam at pkg/service/record/record.go's Mock-loop goroutine
+// (~line 593: `if mock.Spec.Metadata[models.MetaAsync] == "true"` stores the
+// tempID into asyncMockIDs) feeding resolveMappingEntries (~line 91). That
+// full wiring lives inside Recorder.Start, which requires a live agent
+// connection, so this test reaches resolveMappingEntries directly and
+// reconstructs the Mock-loop's asyncMockIDs bookkeeping by hand — noted here
+// as the reachability limit per the review brief.
+func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
+	models.RegisterPollKind(models.HTTP, models.HttpPoll)
+	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
+	rec := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
+		map[string]async.AsyncParser{"http": laneStub{}})
+
+	pollMock := egress("lane", time.Unix(1000, 0))
+	pollMock.Name = "poll-mock-1"
+	pollMock.Kind = models.HTTP
+	pollMock.Spec.ReqTimestampMock = time.Unix(999, 0)
+	_ = rec.BeforeMockInsert(context.Background(), &MockContext{Mock: pollMock})
+
+	if pollMock.Spec.Metadata[models.MetaAsync] != "true" || pollMock.Spec.Metadata[models.MetaAsyncPoll] != "true" {
+		t.Fatalf("setup: expected poll mock stamped async+poll, got %+v", pollMock.Spec.Metadata)
+	}
+	if pollMock.Kind != models.HttpPoll {
+		t.Fatalf("setup: expected poll mock re-kinded to HttpPoll, got %q", pollMock.Kind)
+	}
+
+	// Mirror record.go's Mock-loop bookkeeping (~lines 593-595): every mock
+	// lands in correlationMap, but only ones stamped MetaAsync also land in
+	// asyncMockIDs. An ordinary sync mock gets no asyncMockIDs entry.
+	var correlationMap, asyncMockIDs sync.Map
+	correlationMap.Store(pollMock.Name, models.MockEntry{Name: pollMock.Name, Kind: string(pollMock.Kind)})
+	asyncMockIDs.Store(pollMock.Name, struct{}{})
+
+	const syncMockName = "sync-mock-1"
+	correlationMap.Store(syncMockName, models.MockEntry{Name: syncMockName, Kind: string(models.HTTP)})
+
+	r := &Recorder{logger: zap.NewNop()}
+	mapping := models.TestMockMapping{TestName: "T1", MockIDs: []string{pollMock.Name, syncMockName}}
+	got := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs)
+
+	for _, e := range got {
+		if e.Name == pollMock.Name {
+			t.Fatalf("poll mock %q must be excluded from per-test mapping, got entries: %+v", pollMock.Name, got)
+		}
+	}
+	if len(got) != 1 || got[0].Name != syncMockName {
+		t.Fatalf("expected only the sync mock in the per-test mapping, got: %+v", got)
 	}
 }

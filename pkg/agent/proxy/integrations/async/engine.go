@@ -223,9 +223,8 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 // CURRENT s.mocks[s.cursor] and re-checks its own anchorPos before serving —
 // serving a stale, pre-wait entry could arm a later, not-yet-armed delivery.
 func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
-	p := e.parsers[lane.BaseType()]
-
 	e.mu.Lock()
+	p := e.parsers[lane.BaseType()]
 	// One ctx-done bridge for the whole call: spawned once, stopped on
 	// return. It only needs to wake a parked cond.Wait below on cancellation;
 	// AdvanceWindow/OnTestComplete broadcast for the normal-progress case.

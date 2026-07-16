@@ -12,12 +12,12 @@ import (
 // Async metadata keys stamped on an ordinary egress mock's Spec.Metadata
 // when it matches a declared async lane at record time.
 const (
-	MetaAsync        = "async"        // "true"
-	MetaAsyncLane    = "lane"         // lane name
-	MetaAnchorAfter  = "anchorAfter"  // last completed testcase Name, or "startup" (readability)
-	MetaAnchorPos    = "anchorPos"    // number of testcases completed before this egress fired (decimal)
-	MetaAsyncSeq     = "asyncSeq"     // per-lane order counter (decimal)
-	MetaAsyncPoll    = "poll"         // "true" on a held long-poll delivery
+	MetaAsync          = "async"          // "true"
+	MetaAsyncLane      = "lane"           // lane name
+	MetaAnchorAfter    = "anchorAfter"    // last completed testcase Name, or "startup" (readability)
+	MetaAnchorPos      = "anchorPos"      // number of testcases completed before this egress fired (decimal)
+	MetaAsyncSeq       = "asyncSeq"       // per-lane order counter (decimal)
+	MetaAsyncPoll      = "poll"           // "true" on a held long-poll delivery
 	MetaPollDurationMs = "pollDurationMs" // recorded open-duration (ms), fidelity only
 )
 
@@ -128,6 +128,11 @@ func (l AsyncLane) IsPoll() bool {
 // BaseType returns the parser type backing the lane: the Type with any "Poll"
 // suffix stripped ("httpPoll" -> "http"), so poll lanes resolve to the same
 // parser as their non-poll base.
+//
+// Note: this base keying is CASE-SENSITIVE (an exact match against the
+// registered integration name), even though IsPoll's suffix check is
+// case-insensitive — a lane typo'd as "HTTPPoll" strips to "HTTP", which
+// will NOT resolve against a "http"-registered integration.
 func (l AsyncLane) BaseType() string {
 	if l.IsPoll() {
 		return l.Type[:len(l.Type)-len("Poll")]

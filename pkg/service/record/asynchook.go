@@ -130,7 +130,7 @@ func (r *AsyncRecorder) anchorLocked(ts int64) (string, int) {
 }
 
 // ResolveAsyncParsers builds stateless parser instances from the global
-// registry, keyed by lane.Type. Parsers must implement async.AsyncParser.
+// registry, keyed by lane.BaseType(). Parsers must implement async.AsyncParser.
 func ResolveAsyncParsers(logger *zap.Logger, lanes []models.AsyncLane) map[string]async.AsyncParser {
 	out := map[string]async.AsyncParser{}
 	for _, lane := range lanes {
