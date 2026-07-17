@@ -632,7 +632,7 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	return nil
 }
 
-// collectAsyncMocks returns the async-tagged subset (Spec.Metadata["async"]=="true").
+// collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
 func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	var out []*models.Mock
 	for _, m := range mocks {

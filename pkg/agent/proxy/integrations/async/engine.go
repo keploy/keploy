@@ -108,7 +108,9 @@ func (e *Engine) WarnNonWindowed() {
 	e.nonWindowedOnce.Do(func() {
 		e.logger.Warn("async egress lanes are configured but replay is using the " +
 			"non-windowed mock path; only startup-anchored deliveries will arm and " +
-			"test-anchored deliveries will report not-exercised — full async replay " +
+			"test-anchored deliveries will report not-exercised — and a POLL delivery " +
+			"anchored to a testcase will block its connection until replay teardown " +
+			"(never arms) instead of keep-aliving — full async replay " +
 			"requires the windowed mock manager (WindowedProxy)")
 	})
 }
@@ -210,7 +212,12 @@ func (e *Engine) CompletedForTest() int {
 // so the FIRST declared matching lane always wins, deterministically.
 func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	for _, lane := range e.laneOrder {
+		// Guard the e.parsers read (RegisterParser writes it under e.mu), same
+		// as Decide — so every e.parsers access is locked. MatchesLane runs
+		// unlocked (it only reads the immutable lane + the request mock).
+		e.mu.Lock()
 		p := e.parsers[lane.BaseType()]
+		e.mu.Unlock()
 		if p != nil && p.MatchesLane(m, lane) {
 			return lane, true
 		}

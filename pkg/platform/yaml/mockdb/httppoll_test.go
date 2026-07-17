@@ -59,4 +59,27 @@ func TestAsyncBlockRoundTrips(t *testing.T) {
 	if _, bad := got.Spec.Metadata["async"]; bad {
 		t.Fatalf("async data leaked into Spec.Metadata: %v", got.Spec.Metadata)
 	}
+
+	// Also round-trip through the JSON storage format (MarshalDoc/UnmarshalDoc →
+	// DocToJSON/jsonDocToYamlDoc), the paths mock persistence uses — the async
+	// block must survive those converters too (they were easy to miss and are
+	// covered separately from the yaml.Node path above).
+	jsonBytes, err := yaml.MarshalDoc(yaml.FormatJSON, doc)
+	if err != nil {
+		t.Fatalf("MarshalDoc(json): %v", err)
+	}
+	jdoc, err := yaml.UnmarshalDoc(yaml.FormatJSON, jsonBytes)
+	if err != nil {
+		t.Fatalf("UnmarshalDoc(json): %v", err)
+	}
+	if jdoc.Async == nil || *jdoc.Async != *want {
+		t.Fatalf("json doc round-trip dropped async block: %+v", jdoc.Async)
+	}
+	jout, err := DecodeMocks([]*yaml.NetworkTrafficDoc{jdoc}, zap.NewNop())
+	if err != nil || len(jout) != 1 {
+		t.Fatalf("decode after json round-trip: err=%v n=%d", err, len(jout))
+	}
+	if jout[0].Spec.Async == nil || *jout[0].Spec.Async != *want {
+		t.Fatalf("json round-trip async block: got %+v want %+v", jout[0].Spec.Async, want)
+	}
 }
