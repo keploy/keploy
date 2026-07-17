@@ -3,11 +3,11 @@ package models
 import "testing"
 
 func TestEncodeAsyncLanesEnvEmpty(t *testing.T) {
-	if got := EncodeAsyncLanesEnv(nil); got != "" {
-		t.Fatalf("nil lanes must encode to empty, got %q", got)
+	if got, err := EncodeAsyncLanesEnv(nil); got != "" || err != nil {
+		t.Fatalf("nil lanes must encode to (\"\", nil), got (%q, %v)", got, err)
 	}
-	if got := EncodeAsyncLanesEnv([]AsyncLane{}); got != "" {
-		t.Fatalf("empty lanes must encode to empty, got %q", got)
+	if got, err := EncodeAsyncLanesEnv([]AsyncLane{}); got != "" || err != nil {
+		t.Fatalf("empty lanes must encode to (\"\", nil), got (%q, %v)", got, err)
 	}
 }
 
@@ -26,7 +26,10 @@ func TestAsyncLanesEnvRoundTrip(t *testing.T) {
 		MatchQuery:     map[string]string{"watch": "true"},
 		VolatileParams: []string{"version"},
 	}}
-	enc := EncodeAsyncLanesEnv(in)
+	enc, err := EncodeAsyncLanesEnv(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
 	if enc == "" {
 		t.Fatal("non-empty lanes must encode to a non-empty value")
 	}

@@ -18,17 +18,20 @@ import (
 const AsyncLanesEnvVar = "KEPLOY_ASYNC_LANES"
 
 // EncodeAsyncLanesEnv returns the base64-JSON AsyncLanesEnvVar value for lanes,
-// or "" when there are none — so a producer adds no env entry for a non-async
-// recording and the consumer leaves async off.
-func EncodeAsyncLanesEnv(lanes []AsyncLane) string {
+// or ("", nil) when there are none — so a producer adds no env entry for a
+// non-async recording and the consumer leaves async off. It surfaces a marshal
+// failure (wrapped with the env-var name) rather than swallowing it, symmetric
+// with DecodeAsyncLanesEnv, so a producer never silently ships a recording with
+// async disabled when encoding actually failed.
+func EncodeAsyncLanesEnv(lanes []AsyncLane) (string, error) {
 	if len(lanes) == 0 {
-		return ""
+		return "", nil
 	}
 	b, err := json.Marshal(lanes)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("marshal %s: %w", AsyncLanesEnvVar, err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 // DecodeAsyncLanesEnv decodes an AsyncLanesEnvVar value into lanes. Empty input
