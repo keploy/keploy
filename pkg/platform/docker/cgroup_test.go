@@ -66,28 +66,25 @@ func TestGenerateKeployAgentService_CgroupV2Mount(t *testing.T) {
 	orig := cgroupV2AvailableOnHost
 	defer func() { cgroupV2AvailableOnHost = orig }()
 
-	newSvc := func() *yaml.Node {
+	newSvc := func(opts models.SetupOptions) *yaml.Node {
 		t.Helper()
+		opts.KeployContainer = "keploy-agent"
+		opts.AgentPort, opts.ProxyPort, opts.DnsPort = 16789, 16790, 16791
+		opts.Mode = models.MODE_TEST
 		node, err := (&Impl{
 			logger: zap.NewNop(),
 			conf:   &config.Config{},
-		}).GenerateKeployAgentService(models.SetupOptions{
-			KeployContainer: "keploy-agent",
-			AgentPort:       16789,
-			ProxyPort:       16790,
-			DnsPort:         16791,
-			Mode:            models.MODE_TEST,
-		})
+		}).GenerateKeployAgentService(opts)
 		if err != nil {
 			t.Fatalf("GenerateKeployAgentService: %v", err)
 		}
 		return node
 	}
 
-	// Legacy cgroup v1 host: SYS_ADMIN + unconfined seccomp/AppArmor so the
-	// agent can mount(2) a cgroup2 hierarchy itself.
+	// Legacy cgroup v1 host: SYS_ADMIN + unconfined AppArmor so the agent can
+	// mount(2) a cgroup2 hierarchy itself.
 	cgroupV2AvailableOnHost = func() bool { return false }
-	v1 := newSvc()
+	v1 := newSvc(models.SetupOptions{})
 	if caps := mappingValue(v1, "cap_add"); !sequenceContains(caps, "SYS_ADMIN") {
 		t.Errorf("v1 host: expected SYS_ADMIN in cap_add, got %s", formatSequence(caps))
 	}
@@ -101,14 +98,34 @@ func TestGenerateKeployAgentService_CgroupV2Mount(t *testing.T) {
 		t.Errorf("v1 host: seccomp:unconfined is an over-grant (SYS_ADMIN already unblocks mount in default seccomp); got %s", formatSequence(secOpt))
 	}
 
-	// cgroup v2 host: least-privilege — no cgroup-mount SYS_ADMIN, no security_opt.
+	// Normal file-based docker on a cgroup v2 host: least-privilege — no
+	// cgroup-mount SYS_ADMIN, no security_opt (this process and the agent share
+	// the same cgroup view, so detection is reliable).
 	cgroupV2AvailableOnHost = func() bool { return true }
-	v2 := newSvc()
+	v2 := newSvc(models.SetupOptions{})
 	if sequenceContains(mappingValue(v2, "cap_add"), "SYS_ADMIN") {
 		t.Errorf("v2 host: SYS_ADMIN must not be granted for the cgroup mount")
 	}
 	if so := mappingValue(v2, "security_opt"); so != nil {
 		t.Errorf("v2 host: no security_opt should be added, got %s", formatSequence(so))
+	}
+
+	// Cloud replay (in-memory compose) on a host that reports cgroup v2: the
+	// grant must STILL fire, because cloud replay runs in a nested/DinD
+	// environment where this process's cgroup view (the pod) can differ from the
+	// agent container's, so cgroupV2AvailableOnHost() cannot rule out a
+	// self-mount. Skipping the grant here is what left the agent with EPERM.
+	cgroupV2AvailableOnHost = func() bool { return true }
+	cloud := newSvc(models.SetupOptions{InMemoryCompose: []byte("services: {}\n")})
+	if caps := mappingValue(cloud, "cap_add"); !sequenceContains(caps, "SYS_ADMIN") {
+		t.Errorf("cloud replay: expected SYS_ADMIN even when host reports cgroup v2, got %s", formatSequence(caps))
+	}
+	cloudSecOpt := mappingValue(cloud, "security_opt")
+	if !sequenceContains(cloudSecOpt, "apparmor:unconfined") {
+		t.Errorf("cloud replay: expected apparmor:unconfined even when host reports cgroup v2, got %s", formatSequence(cloudSecOpt))
+	}
+	if sequenceContains(cloudSecOpt, "seccomp:unconfined") {
+		t.Errorf("cloud replay: seccomp:unconfined is an over-grant (SYS_ADMIN already unblocks mount in default seccomp); got %s", formatSequence(cloudSecOpt))
 	}
 }
 

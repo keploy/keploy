@@ -665,15 +665,23 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			"required by the channel-binding shim (bpf_probe_write_user)")
 	}
 
-	// On a host without a cgroup2 (unified) hierarchy (legacy cgroup v1), the
-	// agent mounts one itself at runtime for its eBPF cgroup hooks
-	// (agent.DetectCgroupPath). mount(2) needs CAP_SYS_ADMIN and an unconfined
-	// seccomp/AppArmor profile, so grant them — but only in that case, to keep
-	// the agent least-privileged on the common cgroup v2 host.
-	needsCgroupV2Mount := !cgroupV2AvailableOnHost()
-	if needsCgroupV2Mount {
+	// The agent self-mounts a cgroup2 (unified) hierarchy at runtime for its
+	// eBPF cgroup hooks (agent.DetectCgroupPath) when the host exposes none;
+	// mount(2) needs CAP_SYS_ADMIN and an unconfined AppArmor profile. Grant
+	// those when either:
+	//   - the compose-generating host itself lacks cgroup2 (legacy cgroup v1), or
+	//   - this is the in-memory (cloud replay) path: it runs in a nested / DinD
+	//     environment where THIS process's cgroup view (the pod) can differ from
+	//     the agent container's — the pod may see a cgroup2 mount that the agent
+	//     does not inherit — so cgroupV2AvailableOnHost() cannot reliably predict
+	//     whether the agent will need to self-mount. Skipping the grant there
+	//     leaves the agent unable to mount and it fails with EPERM.
+	// Otherwise (normal file-based docker on a cgroup v2 host, where this process
+	// and the agent share the same cgroup view) keep the agent least-privileged.
+	grantCgroupMountPrivileges := !cgroupV2AvailableOnHost() || len(opts.InMemoryCompose) > 0
+	if grantCgroupMountPrivileges {
 		capAdd = appendCapIfMissing(capAdd, "SYS_ADMIN",
-			"required to mount a cgroup2 hierarchy for eBPF hooks (host uses legacy cgroup v1)")
+			"lets the agent mount a cgroup2 hierarchy for eBPF hooks if the host has none (legacy cgroup v1, or cloud replay's nested/DinD env)")
 	}
 
 	// Create the service YAML node structure
@@ -695,14 +703,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
-	if needsCgroupV2Mount {
+	if grantCgroupMountPrivileges {
 		// Docker's default seccomp profile already permits mount(2) once
 		// CAP_SYS_ADMIN is granted (the mount rule includes CAP_SYS_ADMIN), so
 		// seccomp need not be relaxed. Its default AppArmor profile, however,
 		// denies mount outright, so AppArmor must be unconfined for the agent to
-		// mount a cgroup2 hierarchy on a legacy cgroup v1 host.
+		// mount a cgroup2 hierarchy when the host has none (legacy cgroup v1
+		// hosts, and cloud replay's nested/DinD env where the agent may need to
+		// self-mount even though this process sees cgroup2).
 		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Required to mount a cgroup2 hierarchy for eBPF hooks on a legacy cgroup v1 host."},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "security_opt", HeadComment: "Lets the agent mount a cgroup2 hierarchy for eBPF hooks when the host has none (legacy cgroup v1, or cloud replay's nested env)."},
 			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
 			}},
