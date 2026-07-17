@@ -84,17 +84,21 @@ type Record struct {
 	Synchronous    bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
 	EnableSampling int    `json:"enableSampling" yaml:"enableSampling"`
 	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
-	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
-	// cert-hash libpq folds into the SCRAM proof, so postgres clients running
-	// with channel_binding=require still authenticate through keploy's TLS MITM
-	// against the REAL upstream postgres at record time. Replay does not forward
-	// to the real database — postgres traffic is served from mocks, no SCRAM
-	// handshake actually completes against postgres — so the shim is record-only.
+	// It has two mode-specific behaviors:
+	//   - RECORD: attaches eBPF uprobes to libcrypto's X509_digest and rewrites
+	//     the cert hash libpq folds into the SCRAM proof, so postgres clients
+	//     running with channel_binding=require still authenticate through keploy's
+	//     TLS MITM against the REAL upstream postgres.
+	//   - REPLAY: postgres traffic is served from trust-mode mocks (no real cert,
+	//     so channel binding cannot complete). The shim instead downgrades libpq's
+	//     channel_binding=require to disable so the mocked auth is accepted. This
+	//     intentionally relaxes a security control, but only against keploy's mock.
 	// OSS builds have no implementation registered and ignore this flag entirely;
 	// builds with a registered factory respect it. Defaults to false; flip to
-	// true in keploy.yml under record: to opt in. Requires CAP_BPF + a kernel
-	// that allows bpf_probe_write_user; without those the factory returns an
-	// error and the proxy keeps working for non-PLUS clients.
+	// true in keploy.yml under record: to opt in (the same flag drives both modes;
+	// replay reads it from the record config / the stored auto-replay config).
+	// Requires CAP_BPF + a kernel that allows bpf_probe_write_user; without those
+	// the factory returns an error and the proxy keeps working for non-PLUS clients.
 	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
