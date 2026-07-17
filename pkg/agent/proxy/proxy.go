@@ -3215,7 +3215,7 @@ func (p *Proxy) CloseErrorChannel() {
 func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
 	mgr := syncMock.Get()
 	if mgr != nil {
-		mgr.SetMappingChannel(mappingCh)
+		mgr.SetMappingChannel(ctx, mappingCh)
 	}
 }
 

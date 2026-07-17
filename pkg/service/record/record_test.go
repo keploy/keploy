@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -242,6 +243,145 @@ func TestConsumeMappings_UpsertsIntoExistingFile(t *testing.T) {
 		"the tail mapping must be merged into the existing mappings.yaml during shutdown")
 	assert.Len(t, saved["post-orders-1"], 1,
 		"upserting the tail must not lose mappings written earlier in the session")
+}
+
+// countingMapDb records how many file rewrites the consumer asks for.
+type countingMapDb struct {
+	mu      sync.Mutex
+	writes  int
+	byTest  map[string][]models.MockEntry
+	perCall []int
+}
+
+func (c *countingMapDb) Insert(context.Context, *models.Mapping) error { return nil }
+func (c *countingMapDb) Upsert(ctx context.Context, testSetID, testID string, e []models.MockEntry) error {
+	return c.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: e})
+}
+func (c *countingMapDb) UpsertBatch(_ context.Context, _ string, byTest map[string][]models.MockEntry) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes++
+	c.perCall = append(c.perCall, len(byTest))
+	for k, v := range byTest {
+		c.byTest[k] = v
+	}
+	return nil
+}
+
+// TestConsumeMappings_BatchesWrites pins the fix for the slow-consumer half of
+// the go-memory-load-mongo flake.
+//
+// mappings.yaml is one document, so each write re-encodes the whole file. Writing
+// per mapping is quadratic — measured at 368 tests, 164us for the first write and
+// 19.45ms for the last, ~2.7s of pure rewriting. That is slow enough to
+// back-pressure the agent's mapping stream, and the agent discards what it cannot
+// hand over, so the tests behind the backlog replay as no_mocks.
+//
+// The consumer must therefore drain the stream far faster than it writes: batch
+// the mappings and rewrite once per batch.
+func TestConsumeMappings_BatchesWrites(t *testing.T) {
+	const total = 320
+	db := &countingMapDb{byTest: map[string][]models.MockEntry{}}
+	r := &Recorder{logger: zap.NewNop(), config: &config.Config{}, mappingDb: db}
+
+	var correlationMap, asyncMockIDs sync.Map
+	mappings := make(chan models.TestMockMapping, total)
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf("post-orders-%d", i)
+		correlationMap.Store("temp-"+name, models.MockEntry{Name: "mock-" + name, Kind: string(models.Mongo)})
+		mappings <- models.TestMockMapping{TestName: name, MockIDs: []string{"temp-" + name}}
+	}
+	close(mappings)
+
+	require.NoError(t, r.consumeMappings(context.Background(), "test-set-0", mappings, &correlationMap, &asyncMockIDs))
+
+	db.mu.Lock()
+	writes, saved := db.writes, len(db.byTest)
+	db.mu.Unlock()
+
+	assert.Equal(t, total, saved, "every mapping must still be persisted")
+	assert.LessOrEqual(t, writes, total/mappingFlushBatch+2,
+		"mappings must be batched, not written one file-rewrite per test: %d writes for %d "+
+			"mappings means the consumer is quadratic again and will back-pressure the agent "+
+			"into dropping the tail", writes, total)
+	assert.Greater(t, writes, 0, "mappings must actually reach the store")
+}
+
+// TestConsumeMappings_LateMockDoesNotWipeEarlierOnes pins the delta semantics of
+// a test's mapping.
+//
+// The agent emits a test's mocks when its window resolves, then emits MORE later
+// for mocks it retroactively bins into that already-resolved window. The second
+// emission carries only the late mock — it is a delta. Replacing on it deletes
+// the mocks the first emission recorded, and the test then replays against a short
+// pool (or an empty one), which is the same no_mocks failure by another route.
+func TestConsumeMappings_LateMockDoesNotWipeEarlierOnes(t *testing.T) {
+	const testSetID, test = "test-set-0", "post-orders-1"
+	dir := t.TempDir()
+	r := &Recorder{
+		logger:    zap.NewNop(),
+		config:    &config.Config{},
+		mappingDb: mapdb.New(zap.NewNop(), dir, "mappings"),
+	}
+
+	var correlationMap, asyncMockIDs sync.Map
+	for _, id := range []string{"a", "b", "c"} {
+		correlationMap.Store("temp-"+id, models.MockEntry{Name: "mock-" + id, Kind: string(models.Mongo)})
+	}
+
+	// Resolution emits a and b; a later retroactive bin emits only c.
+	mappings := make(chan models.TestMockMapping, 2)
+	mappings <- models.TestMockMapping{TestName: test, MockIDs: []string{"temp-a", "temp-b"}}
+	mappings <- models.TestMockMapping{TestName: test, MockIDs: []string{"temp-c"}}
+	close(mappings)
+
+	require.NoError(t, r.consumeMappings(context.Background(), testSetID, mappings, &correlationMap, &asyncMockIDs))
+
+	saved, _, err := mapdb.New(zap.NewNop(), dir, "mappings").Get(context.Background(), testSetID)
+	require.NoError(t, err)
+
+	names := make([]string, 0, 3)
+	for _, e := range saved[test] {
+		names = append(names, e.Name)
+	}
+	assert.ElementsMatch(t, []string{"mock-a", "mock-b", "mock-c"}, names,
+		"a late-binned mock is a DELTA: it must be unioned into the test's mapping, not "+
+			"replace it — dropping mock-a/mock-b here means this test replays with a short "+
+			"mock pool and reports a mismatch")
+}
+
+// TestConsumeMappings_FlushesPartialBatchOnTicker covers the path a batching
+// consumer must not get wrong: a recording that produces fewer than a full batch
+// (or trails off) must still persist, rather than holding mappings in memory until
+// the stream closes. Exercises the ticker concurrently with the feed.
+func TestConsumeMappings_FlushesPartialBatchOnTicker(t *testing.T) {
+	db := &countingMapDb{byTest: map[string][]models.MockEntry{}}
+	r := &Recorder{logger: zap.NewNop(), config: &config.Config{}, mappingDb: db}
+
+	var correlationMap, asyncMockIDs sync.Map
+	mappings := make(chan models.TestMockMapping)
+
+	// Feed slowly and never fill a batch, keeping the stream open throughout.
+	go func() {
+		defer close(mappings)
+		for i := 0; i < 3; i++ {
+			name := fmt.Sprintf("post-orders-%d", i)
+			correlationMap.Store("temp-"+name, models.MockEntry{Name: "mock-" + name, Kind: string(models.Mongo)})
+			mappings <- models.TestMockMapping{TestName: name, MockIDs: []string{"temp-" + name}}
+			time.Sleep(mappingFlushInterval + 200*time.Millisecond)
+		}
+	}()
+
+	require.NoError(t, r.consumeMappings(context.Background(), "test-set-0", mappings, &correlationMap, &asyncMockIDs))
+
+	db.mu.Lock()
+	writes, saved := db.writes, len(db.byTest)
+	db.mu.Unlock()
+
+	assert.Equal(t, 3, saved, "every mapping must be persisted")
+	assert.Greater(t, writes, 1,
+		"a partial batch must be flushed by the ticker as recording proceeds, not held in "+
+			"memory until the stream closes: got %d write(s)", writes)
 }
 
 // TestMockStore_RefusesCancelledContext is the reason persistCtx exists, pinned
