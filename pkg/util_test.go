@@ -20,6 +20,74 @@ import (
 	"go.uber.org/zap"
 )
 
+func TestNextIDIgnoresOtherPrefixes(t *testing.T) {
+	tests := []struct {
+		name       string
+		ids        []string
+		identifier string
+		want       string
+	}{
+		{
+			name:       "custom metadata name with numeric suffix does not affect test-set sequence",
+			ids:        []string{"test-set-0", "checkout-flow-999"},
+			identifier: models.TestSetPattern,
+			want:       "test-set-1",
+		},
+		{
+			name:       "test-set IDs do not affect test-run sequence",
+			ids:        []string{"test-run-2", "test-set-99"},
+			identifier: models.TestRunTemplateName,
+			want:       "test-run-3",
+		},
+		{
+			name:       "invalid suffix is ignored",
+			ids:        []string{"test-set-0", "test-set-0 copy", "test-set-final"},
+			identifier: models.TestSetPattern,
+			want:       "test-set-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, NextID(tt.ids, tt.identifier))
+		})
+	}
+}
+
+func TestLastIDIgnoresOtherPrefixes(t *testing.T) {
+	tests := []struct {
+		name       string
+		ids        []string
+		identifier string
+		want       string
+	}{
+		{
+			name:       "custom metadata name with numeric suffix does not affect latest test run",
+			ids:        []string{"test-run-2", "checkout-flow-999"},
+			identifier: models.TestRunTemplateName,
+			want:       "test-run-2",
+		},
+		{
+			name:       "test runs do not affect latest test set",
+			ids:        []string{"test-set-1", "test-run-99"},
+			identifier: models.TestSetPattern,
+			want:       "test-set-1",
+		},
+		{
+			name:       "invalid suffix is ignored",
+			ids:        []string{"test-run-3", "test-run-3 copy", "test-run-final"},
+			identifier: models.TestRunTemplateName,
+			want:       "test-run-3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LastID(tt.ids, tt.identifier))
+		})
+	}
+}
+
 // TestSimulateHTTP_NewRequestError_303 ensures that SimulateHTTP returns an error
 // when http.NewRequestWithContext fails. This is triggered by providing an invalid
 // HTTP method string in the test case.
