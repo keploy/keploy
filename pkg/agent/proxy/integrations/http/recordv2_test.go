@@ -274,6 +274,14 @@ func TestRecordV2_ChunkedTransferEncoding(t *testing.T) {
 		if m.Spec.HTTPResp.Body != "hello world" {
 			t.Errorf("body = %q, want %q", m.Spec.HTTPResp.Body, "hello world")
 		}
+		// A chunked response must be recorded with Transfer-Encoding preserved
+		// and Content-Length omitted (the two framings are mutually exclusive).
+		if te := m.Spec.HTTPResp.Header["Transfer-Encoding"]; te != "chunked" {
+			t.Errorf("Transfer-Encoding = %q, want %q", te, "chunked")
+		}
+		if cl, ok := m.Spec.HTTPResp.Header["Content-Length"]; ok {
+			t.Errorf("Content-Length = %q present in chunked mock; want it omitted", cl)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("no mock emitted")
 	}
@@ -519,5 +527,198 @@ func TestIsV2(t *testing.T) {
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	if !h.IsV2() {
 		t.Fatal("HTTP parser IsV2 returned false — dispatcher would route to legacy path")
+	}
+}
+
+// TestRecordV2_KeepAlive204ThenChunked reproduces the keepalive long-poll bug:
+// a 204 (no Content-Length, no Transfer-Encoding) followed by a second response
+// on the SAME connection. Before the RFC 7230 §3.3.3 bodiless-response rule was
+// added, the 204 fell into read-until-EOF and swallowed the second response, so
+// only one (corrupt) mock was emitted. Now each response is framed independently.
+func TestRecordV2_KeepAlive204ThenChunked(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+
+	req := []byte("GET /config HTTP/1.1\r\nHost: ex.com\r\nContent-Length: 0\r\n\r\n")
+	resp204 := []byte("HTTP/1.1 204 No Content\r\nDate: Sun, 12 Jul 2026 19:39:55 GMT\r\n\r\n")
+	// 30-byte JSON body (0x1e) framed as a single chunk + terminator.
+	body := `{"changed":true,"version":117}`
+	resp200 := []byte("HTTP/1.1 200 OK\r\n" +
+		"Content-Type: application/json\r\n" +
+		"Transfer-Encoding: chunked\r\n\r\n" +
+		"1e\r\n" + body + "\r\n0\r\n\r\n")
+
+	base := time.Unix(1_700_003_000, 0)
+	// Two request/response pairs on one keepalive connection.
+	sendReq(req, base, base)
+	sendReq(req, base.Add(time.Second), base.Add(time.Second))
+	sendResp(resp204, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	sendResp(resp200, base.Add(time.Second), base.Add(time.Second))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2 returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s (204 likely swallowed the next response)")
+	}
+
+	var got []*models.Mock
+	for {
+		select {
+		case m := <-mocks:
+			got = append(got, m)
+			continue
+		case <-time.After(200 * time.Millisecond):
+		}
+		break
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("emitted %d mocks, want 2 (204 then chunked 200)", len(got))
+	}
+	if got[0].Spec.HTTPResp.StatusCode != 204 {
+		t.Errorf("mock[0] status = %d, want 204", got[0].Spec.HTTPResp.StatusCode)
+	}
+	if got[0].Spec.HTTPResp.Body != "" {
+		t.Errorf("mock[0] body = %q, want empty", got[0].Spec.HTTPResp.Body)
+	}
+	if got[1].Spec.HTTPResp.StatusCode != 200 {
+		t.Errorf("mock[1] status = %d, want 200", got[1].Spec.HTTPResp.StatusCode)
+	}
+	if got[1].Spec.HTTPResp.Body != body {
+		t.Errorf("mock[1] body = %q, want %q", got[1].Spec.HTTPResp.Body, body)
+	}
+	if te := got[1].Spec.HTTPResp.Header["Transfer-Encoding"]; te != "chunked" {
+		t.Errorf("mock[1] Transfer-Encoding = %q, want chunked", te)
+	}
+}
+
+// TestRecordV2_Interim100ContinueThenFinal verifies provisional 1xx responses
+// are skipped during recording: a 100 Continue followed by the real 200 on the
+// same connection must record ONE mock for the 200, not the interim 100.
+func TestRecordV2_Interim100ContinueThenFinal(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+
+	req := []byte("POST /submit HTTP/1.1\r\nHost: ex.com\r\nContent-Length: 0\r\n\r\n")
+	// Interim 100 Continue, then the final 200 with a Content-Length body.
+	body := `{"ok":"done"}` // 13 bytes
+	resp := []byte("HTTP/1.1 100 Continue\r\n\r\n" +
+		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n" + body)
+
+	base := time.Unix(1_700_004_000, 0)
+	sendReq(req, base, base)
+	sendResp(resp, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2 returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s")
+	}
+
+	select {
+	case m := <-mocks:
+		if m.Spec.HTTPResp.StatusCode != 200 {
+			t.Errorf("status = %d, want 200 (interim 100 Continue must be skipped)", m.Spec.HTTPResp.StatusCode)
+		}
+		if m.Spec.HTTPResp.Body != body {
+			t.Errorf("body = %q, want %q", m.Spec.HTTPResp.Body, body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no mock emitted")
+	}
+}
+
+// TestResponseHasNoBody locks in the bodiless-terminal status set. HEAD, 204,
+// 205, 304 and 101 are terminal with no body; a normal 200, a provisional 1xx
+// (handled by the interim loop, not here), and a redirect are not.
+func TestResponseHasNoBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		method string
+		status int
+		want   bool
+	}{
+		{"GET", 204, true},
+		{"GET", 205, true},
+		{"GET", 304, true},
+		{"GET", 101, true},
+		{"HEAD", 200, true},
+		{"head", 200, true}, // case-insensitive method
+		{"GET", 200, false},
+		{"GET", 100, false}, // provisional; skipped upstream, not terminal
+		{"GET", 302, false},
+	}
+	for _, c := range cases {
+		if got := responseHasNoBody(c.method, c.status); got != c.want {
+			t.Errorf("responseHasNoBody(%q, %d) = %v, want %v", c.method, c.status, got, c.want)
+		}
+	}
+}
+
+// TestRecordV2_HeadResponsePreservesContentLength verifies a HEAD response keeps
+// the upstream Content-Length (the size the body would be for GET) in the mock
+// instead of having it overwritten to 0 by the empty HEAD body. It also guards
+// against readResponseV2 waiting for a HEAD body that never arrives.
+func TestRecordV2_HeadResponsePreservesContentLength(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+
+	req := []byte("HEAD /file HTTP/1.1\r\nHost: ex.com\r\n\r\n")
+	// HEAD response: Content-Length describes the would-be GET body; no body follows.
+	resp := []byte("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 1234\r\n\r\n")
+
+	base := time.Unix(1_700_005_000, 0)
+	sendReq(req, base, base)
+	sendResp(resp, base.Add(time.Millisecond), base.Add(time.Millisecond))
+	closeReq()
+	closeResp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2 returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s (HEAD Content-Length body wrongly awaited?)")
+	}
+
+	select {
+	case m := <-mocks:
+		if got := m.Spec.HTTPResp.Header["Content-Length"]; got != "1234" {
+			t.Errorf("Content-Length = %q, want \"1234\" (must not be overwritten to 0)", got)
+		}
+		if m.Spec.HTTPResp.Body != "" {
+			t.Errorf("body = %q, want empty (HEAD)", m.Spec.HTTPResp.Body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no mock emitted")
 	}
 }

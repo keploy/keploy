@@ -184,3 +184,21 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 		t.Fatalf("chunkedResponse stuck in loop after %d reads", destConn.readCount)
 	}
 }
+
+// TestToChunkedBody verifies replay re-framing of a de-chunked body back into
+// HTTP/1.1 chunked wire form: one data chunk (hex size) plus the zero-length
+// terminator, and just the terminator for an empty body.
+func TestToChunkedBody(t *testing.T) {
+	if got := toChunkedBody(""); got != "0\r\n\r\n" {
+		t.Errorf("empty body: got %q, want %q", got, "0\r\n\r\n")
+	}
+	if got := toChunkedBody("hello"); got != "5\r\nhello\r\n0\r\n\r\n" {
+		t.Errorf("simple body: got %q, want %q", got, "5\r\nhello\r\n0\r\n\r\n")
+	}
+	// 30-byte body exercises a multi-digit hex chunk size (0x1e).
+	body := `{"changed":true,"version":117}`
+	want := "1e\r\n" + body + "\r\n0\r\n\r\n"
+	if got := toChunkedBody(body); got != want {
+		t.Errorf("multi-digit length: got %q, want %q", got, want)
+	}
+}

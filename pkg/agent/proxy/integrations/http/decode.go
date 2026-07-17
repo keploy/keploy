@@ -302,14 +302,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			body := stub.Spec.HTTPResp.Body
 			var respBody string
-			var responseString string
 
 			// Fetching the response headers
 			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
 
-			//Check if the content encoding is present in the header
-			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+			// Re-compress the body if the recorded response declared a
+			// Content-Encoding (the record path stored it decompressed). Match the
+			// key case-insensitively: pkg.ToHTTPHeader preserves the recorded
+			// casing, so a direct header["Content-Encoding"] lookup could miss a
+			// non-canonical key and send an unencoded body under a Content-Encoding
+			// header, corrupting the response.
+			if encoding := headerGetFold(header, "Content-Encoding"); encoding != "" {
+				compressedBody, err := pkg.Compress(h.Logger, encoding, []byte(body))
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err
@@ -321,19 +325,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				respBody = body
 			}
 
-			var headers string
-			for key, values := range header {
-				if key == "Content-Length" {
-					values = []string{strconv.Itoa(len(respBody))}
-				}
-				for _, value := range values {
-					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-					headers += headerLine
-				}
-			}
-			responseString = statusLine + headers + "\r\n" + "" + respBody
+			responseString := buildReplayResponse(statusLine, header, respBody)
 
-			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			h.Logger.Debug("sending mock response to client", zap.Int("bytes", len(responseString)))
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
@@ -364,4 +358,94 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 		return err
 	}
+}
+
+// transferEncodingIsChunked reports whether a Transfer-Encoding header value
+// declares chunked. Transfer-Encoding is a comma-separated token list, so
+// "chunked" is matched as a whole token (case-insensitive, whitespace-trimmed)
+// rather than a substring — otherwise tokens like "xchunked" would false-match.
+func transferEncodingIsChunked(value string) bool {
+	for _, tok := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "chunked") {
+			return true
+		}
+	}
+	return false
+}
+
+// headerHasChunked reports whether the header map declares chunked
+// transfer-encoding. It scans keys case-insensitively rather than using
+// http.Header.Get: pkg.ToHTTPHeader preserves the recorded key casing, so a
+// non-canonical key (e.g. "transfer-encoding") would be invisible to Get and
+// wrongly send an unchunked body under a Transfer-Encoding: chunked header.
+func headerHasChunked(header http.Header) bool {
+	for key, values := range header {
+		if !strings.EqualFold(key, "Transfer-Encoding") {
+			continue
+		}
+		for _, v := range values {
+			if transferEncodingIsChunked(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// headerGetFold returns the first value of the header whose key matches name
+// case-insensitively, or "". Unlike http.Header.Get it does not assume the key
+// is in canonical form — pkg.ToHTTPHeader preserves the recorded key casing.
+func headerGetFold(header http.Header, name string) string {
+	for key, values := range header {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
+}
+
+// buildReplayResponse serializes a recorded response onto the wire: status
+// line, headers, blank line, body. When the header carries Transfer-Encoding:
+// chunked the body — already Content-Encoding-applied by the caller — is
+// re-framed into HTTP/1.1 chunks and Content-Length is suppressed, since a
+// message must not carry both framings. Otherwise Content-Length is recomputed
+// from the (possibly compressed) body length.
+func buildReplayResponse(statusLine string, header http.Header, respBody string) string {
+	isChunked := headerHasChunked(header)
+	if isChunked {
+		respBody = toChunkedBody(respBody)
+	}
+	var b strings.Builder
+	b.WriteString(statusLine)
+	for key, values := range header {
+		// Content-Length is authoritative here, so drop whatever the recorded
+		// map carried (any casing) and re-emit a single correct one below.
+		if strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			fmt.Fprintf(&b, "%s: %s\r\n", key, value)
+		}
+	}
+	// A non-chunked response always gets exactly one Content-Length derived from
+	// the body — even if the recorded map omitted it — so the client can delimit
+	// the body instead of waiting for EOF (which hangs on keepalive connections).
+	// Chunked responses carry none; the last-chunk marker delimits the body.
+	if !isChunked {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(respBody))
+	}
+	b.WriteString("\r\n")
+	b.WriteString(respBody)
+	return b.String()
+}
+
+// toChunkedBody frames body as a single HTTP/1.1 chunk followed by the
+// zero-length terminating chunk (RFC 7230 §4.1). An empty body becomes just
+// the terminator. Used on replay to reproduce the chunked transfer-encoding a
+// response was recorded with, since the stored body is de-chunked.
+func toChunkedBody(body string) string {
+	if len(body) == 0 {
+		return "0\r\n\r\n"
+	}
+	return fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
 }
