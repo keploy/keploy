@@ -117,6 +117,12 @@ func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
 
+// IsAsync reports whether this mock is async-egress — i.e. it carries an
+// AsyncMeta block. Presence of the block IS the signal (see AsyncMeta); this
+// is the single predicate the record mapping, replay collection, and engine
+// load all discriminate on.
+func (m *Mock) IsAsync() bool { return m.Spec.Async != nil }
+
 // HydrateResponse loads an elided response into Spec; no-op if not spilled, so
 // serve paths can call it unconditionally before reading the response.
 func (m *Mock) HydrateResponse() error {
@@ -253,6 +259,12 @@ type MockSpec struct {
 	// written by the enterprise obfuscator): this records which request-body
 	// fields drift between recording and replay.
 	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
+
+	// Async, when non-nil, marks this mock as async-egress and carries the
+	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
+	// block — kept OUT of the flat parser Metadata above. Serialized as a
+	// top-level `async:` block on the recorded doc. See AsyncMeta.
+	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -938,6 +950,10 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.HTTPResp != nil {
 		httpRespCopy := *m.Spec.HTTPResp
 		c.Spec.HTTPResp = &httpRespCopy
+	}
+	if m.Spec.Async != nil {
+		asyncCopy := *m.Spec.Async
+		c.Spec.Async = &asyncCopy
 	}
 	if m.Spec.GRPCReq != nil {
 		grpcReqCopy := *m.Spec.GRPCReq

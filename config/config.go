@@ -45,6 +45,7 @@ type Config struct {
 	CommandType           string              `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
 	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
+	Async                 Async               `json:"async" yaml:"async" mapstructure:"async"`
 	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
@@ -59,6 +60,12 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
+}
+
+// Async configures the async-egress engine. Empty Lanes => feature off,
+// record & replay byte-identical to today.
+type Async struct {
+	Lanes []models.AsyncLane `json:"lanes" yaml:"lanes" mapstructure:"lanes"`
 }
 
 type Templatize struct {

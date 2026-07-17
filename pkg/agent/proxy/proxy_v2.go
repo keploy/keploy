@@ -90,6 +90,11 @@ func (p *Proxy) recordViaSupervisor(
 		DestConnID:       fmt.Sprint(destConnID),
 		Opts:             opts,
 		OnPendingCleared: sv.ClearPendingWork,
+		// A parser that identifies its in-flight request as a long-poll
+		// async lane calls this to disarm the hang watchdog for the
+		// connection (the poll makes no byte progress for far longer than
+		// the hang budget). See supervisor.SuspendWatchdog.
+		SuspendWatchdog: sv.SuspendWatchdog,
 		// Route EmitMock through the SyncMockManager (obtained via
 		// syncMock.Get(), then mgr.AddMock) so V2 parsers pick up the
 		// same firstReqSeen session-window buffering, lifetime

@@ -55,6 +55,7 @@ type NetworkTrafficDocJSON struct {
 	Kind         models.Kind         `json:"kind"`
 	Name         string              `json:"name"`
 	Spec         json.RawMessage     `json:"spec"`
+	Async        *models.AsyncMeta   `json:"async,omitempty"`
 	Noise        *DocNoise           `json:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`
@@ -79,6 +80,7 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		Kind:         doc.Kind,
 		Name:         doc.Name,
 		Spec:         specBytes,
+		Async:        doc.Async,
 		Noise:        doc.Noise,
 		LastUpdated:  doc.LastUpdated,
 		Curl:         doc.Curl,
@@ -143,6 +145,7 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		Version:      jsonDoc.Version,
 		Kind:         jsonDoc.Kind,
 		Name:         jsonDoc.Name,
+		Async:        jsonDoc.Async,
 		Noise:        jsonDoc.Noise,
 		LastUpdated:  jsonDoc.LastUpdated,
 		Curl:         jsonDoc.Curl,

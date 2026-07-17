@@ -50,6 +50,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 
 	destPort := destPortFromAddr(sess.DestStream)
 
+	// watchdogSuspended latches once this connection's watchdog has been
+	// disarmed for a poll lane, so we don't re-parse and re-match every
+	// subsequent request on a keep-alive poll-poll-poll connection.
+	watchdogSuspended := false
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,6 +101,18 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			sess.MarkMockIncomplete("http decode error: request read failed: " + err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
+		}
+
+		// If this request routes to a long-poll async lane, disarm the
+		// supervisor's hang watchdog for this connection before we block on
+		// the response: a poll legitimately holds the connection open with no
+		// byte progress for far longer than the hang budget, and would
+		// otherwise be aborted (falling through to passthrough) before the
+		// delivery arrives — so the poll's mock would never be recorded.
+		if !watchdogSuspended && sess.SuspendWatchdog != nil && h.isPollLaneRequest(finalReq) {
+			logger.Debug("V2 HTTP record: request matched a poll lane; suspending hang watchdog for this connection")
+			sess.SuspendWatchdog()
+			watchdogSuspended = true
 		}
 
 		// --- Response side --------------------------------------------
@@ -399,6 +416,33 @@ func destPortFromAddr(conn net.Conn) uint {
 		return uint(tcp.Port)
 	}
 	return 0
+}
+
+// isPollLaneRequest reports whether the raw HTTP request routes to a
+// configured async lane whose type is a poll variant (lane.IsPoll()).
+// Matching is by request shape only (host/path/query, via the engine's
+// LaneFor), so it is valid at record time before any mock is emitted.
+// recordV2 uses it to disarm the supervisor's hang watchdog for long-poll
+// connections. Returns false when no async engine is configured or the
+// request is malformed.
+func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
+	if h.asyncEngine == nil || !h.asyncEngine.HasPollLanes() {
+		return false
+	}
+	parsed, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
+	if err != nil {
+		return false
+	}
+	// Reuse liveReqToMock (the same request→mock shaping the replay LaneFor
+	// path uses in decode.go) so record- and replay-time lane matching stay
+	// consistent — in particular it leaves URLParams unset so queryOf does the
+	// full multi-value query parse rather than a truncated first-value view.
+	lane, ok := h.asyncEngine.LaneFor(liveReqToMock(&req{
+		method: parsed.Method,
+		url:    parsed.URL,
+		header: parsed.Header,
+	}))
+	return ok && lane.IsPoll()
 }
 
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy

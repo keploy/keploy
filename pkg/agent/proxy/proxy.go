@@ -31,6 +31,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -156,6 +157,13 @@ type Proxy struct {
 	sessionMu   sync.RWMutex
 	session     *agent.Session
 	mockManager *MockManager
+
+	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
+	// async-lane replay state: registered parsers and the per-test
+	// position counter consumed by Engine.Decide's anchor gating. The
+	// "first window doesn't count as a completed test" rule is owned by
+	// Engine.AdvanceWindow, so this struct keeps no async bookkeeping.
+	asyncEngine *async.Engine
 
 	// sessionResolver, when set, maps a connection's owning TGID to the
 	// session that should handle it. It is the seam by which an external
@@ -701,6 +709,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		opts.Record.RecordBuffer.QueueSize,
 	)
 
+	if len(opts.Async.Lanes) > 0 {
+		// Parser instances are attached in InitIntegrations via AsyncAware;
+		// start with an empty parser map (RegisterParser fills it there).
+		proxy.asyncEngine = async.NewEngine(logger, opts.Async.Lanes, map[string]async.AsyncParser{})
+	}
+
 	// Plumb the proxy logger into the package-singleton SyncMockManager
 	// so its drop-path Error emissions actually reach the host logger.
 	// zap.L() would silently fall back to Nop here — syncMock loads at
@@ -849,6 +863,11 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// Surface the async-egress verdict at replay wind-down (logs once; the
+	// StopProxyServer path also calls this, whichever fires first wins).
+	if p.asyncEngine != nil {
+		p.asyncEngine.LogReport(p.logger)
+	}
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	// Flush any in-flight packet capture so the test-set's pcap is
 	// finalised before the agent is allowed to exit.
@@ -996,6 +1015,18 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		logger := p.logger.With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
+		if p.asyncEngine != nil {
+			// Register any AsyncParser so the engine can route to it
+			// (LaneFor/Decide) — AsyncParser alone is sufficient. Separately
+			// setter-inject the engine into parsers that implement AsyncAware
+			// so they can reach it when serving.
+			if ap, ok := prs.(async.AsyncParser); ok {
+				p.asyncEngine.RegisterParser(string(parserType), ap)
+			}
+			if aw, ok := prs.(async.AsyncAware); ok {
+				aw.SetAsyncEngine(p.asyncEngine)
+			}
+		}
 		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
@@ -2534,6 +2565,12 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 
 	p.logger.Info("stopping proxy server...")
 
+	// Surface the async-egress verdict (served / shape-flags / not-exercised)
+	// at end of replay so it is visible in keploy's output.
+	if p.asyncEngine != nil {
+		p.asyncEngine.LogReport(p.logger)
+	}
+
 	// Coordinated shutdown sequence (PLAN.md §3.7, partial I8).
 	//
 	// 1. Trip the parsing kill switch first. Any connection still in
@@ -2786,11 +2823,31 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	return nil
 }
 
+// Compile-time proof that *Proxy satisfies the agent's optional
+// AsyncMockLoader capability. pkg/agent/proxy already imports pkg/agent
+// (as agent), and pkg/agent does not import back, so this asserts without
+// introducing an import cycle.
+var _ agent.AsyncMockLoader = (*Proxy)(nil)
+
+// LoadAsyncMocks forwards the complete async-mock corpus to the async engine
+// (run-once inside Engine.Load). No-op when async is not configured.
+func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
+	if p.asyncEngine != nil {
+		p.asyncEngine.Load(mocks)
+	}
+}
+
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	if m := p.getMockManager(); m != nil {
 		m.SetFilteredMocks(filtered)
 		m.SetUnFilteredMocks(unFiltered)
 		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil {
+		// This non-windowed path never advances the async window (only
+		// SetMocksWithWindow does), so test-anchored deliveries can't arm
+		// here. Warn once rather than silently reporting them not-exercised.
+		p.asyncEngine.WarnNonWindowed()
 	}
 
 	return nil
@@ -2803,6 +2860,10 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil {
+		// Engine owns the "first window doesn't count" rule; advance blindly.
+		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
 }
