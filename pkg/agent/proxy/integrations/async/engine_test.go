@@ -2,7 +2,6 @@ package async
 
 import (
 	"context"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -15,12 +14,7 @@ func asyncMock(lane string, seq, anchorPos int, respBody string) *models.Mock {
 	return &models.Mock{
 		Kind: models.HTTP,
 		Spec: models.MockSpec{
-			Metadata: map[string]string{
-				models.MetaAsync:     "true",
-				models.MetaAsyncLane: lane,
-				models.MetaAnchorPos: strconv.Itoa(anchorPos),
-				models.MetaAsyncSeq:  strconv.Itoa(seq),
-			},
+			Async:    &models.AsyncMeta{Lane: lane, Seq: seq, AnchorPos: anchorPos},
 			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: respBody},
 		},
 	}
@@ -160,16 +154,15 @@ func (holdStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, 
 }
 func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error) { return []byte("204"), nil }
 
-// A poll delivery (MetaAsyncPoll) is HELD until completed reaches its anchorPos,
+// A poll delivery (Async.Poll) is HELD until completed reaches its anchorPos,
 // then served — while concurrent AdvanceWindow calls never block (the hold must
 // not sit on the lock). A non-poll delivery returns a keep-alive immediately.
 func TestDecideHoldsPollUntilAnchor(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	pollMock := &models.Mock{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
-		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
-		models.MetaAsyncSeq: "1", models.MetaAnchorPos: "2",
-	}}}
+	pollMock := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 2, Poll: true},
+	}}
 	e.Load([]*models.Mock{pollMock})
 
 	done := make(chan *models.Mock, 1)
@@ -198,10 +191,9 @@ func TestDecideHoldsPollUntilAnchor(t *testing.T) {
 func TestDecidePollReleasesOnCtxCancel(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	e.Load([]*models.Mock{{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
-		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
-		models.MetaAsyncSeq: "1", models.MetaAnchorPos: "5",
-	}}}})
+	e.Load([]*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
+		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 5, Poll: true},
+	}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan []byte, 1)
 	go func() { _, ka, _ := e.Decide(ctx, lane, &models.Mock{}); done <- ka }()
@@ -216,20 +208,19 @@ func TestDecidePollReleasesOnCtxCancel(t *testing.T) {
 	}
 }
 
-// Plug-and-play: the hold is keyed on MetaAsyncPoll, NOT the HTTP kind. A
-// non-HTTP kind carrying MetaAsyncPoll is held the same way.
+// Plug-and-play: the hold is keyed on Async.Poll, NOT the HTTP kind. A
+// non-HTTP kind carrying Async.Poll is held the same way.
 func TestDecideHoldsNonHTTPPollKind(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "mongoPoll"}
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"mongo": holdStub{}})
-	e.Load([]*models.Mock{{Kind: models.Mongo, Spec: models.MockSpec{Metadata: map[string]string{
-		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
-		models.MetaAsyncSeq: "1", models.MetaAnchorPos: "1",
-	}}}})
+	e.Load([]*models.Mock{{Kind: models.Mongo, Spec: models.MockSpec{
+		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 1, Poll: true},
+	}}})
 	done := make(chan *models.Mock, 1)
 	go func() { rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); done <- rec }()
 	select {
 	case <-done:
-		t.Fatal("non-HTTP poll returned before anchor; must be held on MetaAsyncPoll")
+		t.Fatal("non-HTTP poll returned before anchor; must be held on Async.Poll")
 	case <-time.After(50 * time.Millisecond):
 	}
 	e.AdvanceWindow() // windowSeen
@@ -253,14 +244,12 @@ func TestDecideHoldsNonHTTPPollKind(t *testing.T) {
 func TestDecideConcurrentSameLaneServesInOrderByAnchor(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	mock1 := &models.Mock{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
-		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
-		models.MetaAsyncSeq: "1", models.MetaAnchorPos: "1",
-	}}}
-	mock2 := &models.Mock{Kind: models.HttpPoll, Spec: models.MockSpec{Metadata: map[string]string{
-		models.MetaAsync: "true", models.MetaAsyncPoll: "true", models.MetaAsyncLane: "L",
-		models.MetaAsyncSeq: "2", models.MetaAnchorPos: "2",
-	}}}
+	mock1 := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 1, Poll: true},
+	}}
+	mock2 := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		Async: &models.AsyncMeta{Lane: "L", Seq: 2, AnchorPos: 2, Poll: true},
+	}}
 	e.Load([]*models.Mock{mock1, mock2})
 
 	done := make(chan *models.Mock, 2)

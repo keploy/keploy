@@ -85,7 +85,7 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 		return false
 	}
 	switch m.Kind {
-	case models.HTTP, models.HttpPoll:
+	case models.HTTP:
 		return m.Spec.HTTPResp != nil && len(m.Spec.HTTPResp.Body) >= responseSpillMinBytes
 	case models.Mongo:
 		return len(m.Spec.MongoResponses) > 0

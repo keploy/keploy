@@ -588,9 +588,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
 			}
-			// The AsyncRecorder hook stamps MetaAsync in BeforeMockInsert above;
+			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
 			// remember it so the mapping goroutine below never per-test maps it.
-			if mock.Spec.Metadata[models.MetaAsync] == "true" {
+			if mock.Spec.Async != nil {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)

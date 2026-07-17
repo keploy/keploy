@@ -55,6 +55,7 @@ type NetworkTrafficDocJSON struct {
 	Kind         models.Kind         `json:"kind"`
 	Name         string              `json:"name"`
 	Spec         json.RawMessage     `json:"spec"`
+	Async        *models.AsyncMeta   `json:"async,omitempty"`
 	Noise        *DocNoise           `json:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty"`
 	Curl         string              `json:"curl,omitempty"`

@@ -3,20 +3,19 @@ package async
 import (
 	"context"
 	"sort"
-	"strconv"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// asyncEntry is a recorded async mock with its ordering/anchor ints parsed
-// once at Load, so the hot path never re-parses the string metadata.
+// asyncEntry is a recorded async mock with its ordering/anchor ints taken from
+// the mock's Async block at Load, so the hot path never re-reads them.
 type asyncEntry struct {
 	mock      *models.Mock
 	seq       int
 	anchorPos int
-	poll      bool // MetaAsyncPoll: HOLD this delivery at Decide until anchorPos is reached
+	poll      bool // Async.Poll: HOLD this delivery at Decide until anchorPos is reached
 }
 
 type laneStream struct {
@@ -136,10 +135,10 @@ func (e *Engine) Load(mocks []*models.Mock) {
 		return
 	}
 	for _, m := range mocks {
-		if m == nil || m.Spec.Metadata[models.MetaAsync] != "true" {
+		if m == nil || m.Spec.Async == nil {
 			continue
 		}
-		name := m.Spec.Metadata[models.MetaAsyncLane]
+		name := m.Spec.Async.Lane
 		lane, ok := e.laneByName(name)
 		if !ok {
 			continue
@@ -151,9 +150,9 @@ func (e *Engine) Load(mocks []*models.Mock) {
 		}
 		s.mocks = append(s.mocks, asyncEntry{
 			mock:      m,
-			seq:       atoiOr(m.Spec.Metadata[models.MetaAsyncSeq], 0),
-			anchorPos: atoiOr(m.Spec.Metadata[models.MetaAnchorPos], 0),
-			poll:      m.Spec.Metadata[models.MetaAsyncPoll] == "true",
+			seq:       m.Spec.Async.Seq,
+			anchorPos: m.Spec.Async.AnchorPos,
+			poll:      m.Spec.Async.Poll,
 		})
 	}
 	for _, s := range e.streams {
@@ -221,7 +220,7 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 
 // Decide returns the recorded mock to serve, or a keep-alive payload.
 //
-// A POLL delivery (asyncEntry.poll, stamped from models.MetaAsyncPoll) is HELD
+// A POLL delivery (asyncEntry.poll, from the mock's Async.Poll) is HELD
 // here on e.cond until completed reaches its anchorPos or ctx is done.
 // cond.Wait releases e.mu while parked, so AdvanceWindow/OnTestComplete are
 // NEVER gated by an outstanding held poll — that is the non-blocking
@@ -364,11 +363,4 @@ func (e *Engine) LogReport(logger *zap.Logger) {
 				zap.String("detail", f))
 		}
 	})
-}
-
-func atoiOr(s string, d int) int {
-	if n, err := strconv.Atoi(s); err == nil {
-		return n
-	}
-	return d
 }

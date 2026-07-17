@@ -42,10 +42,6 @@ func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
 		Initializer: New, Priority: 100,
 	})
-	// httpPoll lanes record their held egress under kind HttpPoll (same wire
-	// payload as HTTP; see mockdb util.go). The engine still keys the hold on
-	// MetaAsyncPoll, so this registration is purely for the on-disk kind label.
-	models.RegisterPollKind(models.HTTP, models.HttpPoll)
 }
 
 type HTTP struct {

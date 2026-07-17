@@ -38,10 +38,14 @@ const (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version      models.Version      `json:"version" yaml:"version"`
-	Kind         models.Kind         `json:"kind" yaml:"kind"`
-	Name         string              `json:"name" yaml:"name"`
-	Spec         yamlLib.Node        `json:"spec" yaml:"spec"`
+	Version models.Version `json:"version" yaml:"version"`
+	Kind    models.Kind    `json:"kind" yaml:"kind"`
+	Name    string         `json:"name" yaml:"name"`
+	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
+	// Async, when present, is the async-egress engine's per-mock bookkeeping
+	// (lane, order, anchor, poll/duration) — a kind-agnostic top-level block,
+	// kept out of the per-kind spec's parser Metadata. See models.AsyncMeta.
+	Async        *models.AsyncMeta   `json:"async,omitempty" yaml:"async,omitempty"`
 	Noise        *DocNoise           `json:"noise,omitempty" yaml:"noise,omitempty"`
 	LastUpdated  *models.LastUpdated `json:"last_updated,omitempty" yaml:"last_updated,omitempty"`
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`

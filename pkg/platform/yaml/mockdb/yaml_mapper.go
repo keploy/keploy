@@ -25,7 +25,6 @@ var mockYAMLMappers sync.Map // map[models.Kind]MockYAMLMapper
 // on-disk shape of an OSS protocol.
 var builtinYAMLKinds = map[models.Kind]struct{}{
 	models.HTTP:        {},
-	models.HttpPoll:    {},
 	models.HTTP2:       {},
 	models.GENERIC:     {},
 	models.MySQL:       {},

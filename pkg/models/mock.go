@@ -59,10 +59,6 @@ const (
 	// negotiated OutgoingOptions.SupportsDroppedRevoke, so an older CLI (which
 	// never sets that flag) never receives it and cannot mis-persist it.
 	RevokedTests Kind = "keploy-revoked-tests"
-
-	// HttpPoll is an HTTP long-poll async delivery. Same wire payload as HTTP
-	// (see mockdb util.go); the distinct kind labels held long-poll mocks.
-	HttpPoll Kind = "HttpPoll"
 )
 
 // MockName constants for the PostgresV3 parser. The integrations-side
@@ -257,6 +253,12 @@ type MockSpec struct {
 	// written by the enterprise obfuscator): this records which request-body
 	// fields drift between recording and replay.
 	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
+
+	// Async, when non-nil, marks this mock as async-egress and carries the
+	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
+	// block — kept OUT of the flat parser Metadata above. Serialized as a
+	// top-level `async:` block on the recorded doc. See AsyncMeta.
+	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3

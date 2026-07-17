@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
@@ -39,10 +38,7 @@ func (fakeAsyncParser) EmptyResponse(_ models.AsyncLane) ([]byte, error) { retur
 
 func asyncMock(lane string, seq int, body string) *models.Mock {
 	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
-		Metadata: map[string]string{
-			models.MetaAsync: "true", models.MetaAsyncLane: lane,
-			models.MetaAnchorPos: "0", models.MetaAsyncSeq: strconv.Itoa(seq),
-		},
+		Async:    &models.AsyncMeta{Lane: lane, Seq: seq, AnchorPos: 0},
 		HTTPResp: &models.HTTPResp{StatusCode: 200, Body: body},
 	}}
 }

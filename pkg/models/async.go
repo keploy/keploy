@@ -6,22 +6,24 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"sync"
 )
 
-// Async metadata keys stamped on an ordinary egress mock's Spec.Metadata
-// when it matches a declared async lane at record time.
-const (
-	MetaAsync          = "async"          // "true"
-	MetaAsyncLane      = "lane"           // lane name
-	MetaAnchorAfter    = "anchorAfter"    // last completed testcase Name, or "startup" (readability)
-	MetaAnchorPos      = "anchorPos"      // number of testcases completed before this egress fired (decimal)
-	MetaAsyncSeq       = "asyncSeq"       // per-lane order counter (decimal)
-	MetaAsyncPoll      = "poll"           // "true" on a held long-poll delivery
-	MetaPollDurationMs = "pollDurationMs" // recorded open-duration (ms), fidelity only
-)
+// AsyncMeta is the async-egress engine's per-mock bookkeeping. It is carried in
+// its OWN block — Spec.Async in memory, a top-level `async:` block on the
+// recorded doc — rather than merged into the owning parser's flat Spec.Metadata.
+// Its PRESENCE (non-nil) marks a mock as async egress; Poll marks a held
+// long-poll delivery whose open-duration is captured in PollDurationMs. A poll
+// mock keeps its base kind (e.g. Http) — poll-ness lives here, not in the Kind.
+type AsyncMeta struct {
+	Lane           string `yaml:"lane" json:"lane" bson:"lane"`                                                             // lane name (routing identity)
+	Seq            int    `yaml:"seq" json:"seq" bson:"seq"`                                                                // per-lane order counter
+	AnchorAfter    string `yaml:"anchorAfter,omitempty" json:"anchorAfter,omitempty" bson:"anchorAfter,omitempty"`          // last completed testcase Name, or "startup" (readability)
+	AnchorPos      int    `yaml:"anchorPos" json:"anchorPos" bson:"anchorPos"`                                              // number of testcases completed before this egress fired
+	Poll           bool   `yaml:"poll,omitempty" json:"poll,omitempty" bson:"poll,omitempty"`                               // held long-poll delivery
+	PollDurationMs int64  `yaml:"pollDurationMs,omitempty" json:"pollDurationMs,omitempty" bson:"pollDurationMs,omitempty"` // recorded open-duration (ms), fidelity only
+}
 
-// AnchorStartup is the MetaAnchorAfter value for async mocks that fired
+// AnchorStartup is the AsyncMeta.AnchorAfter value for async mocks that fired
 // before the first testcase completed.
 const AnchorStartup = "startup"
 
@@ -165,21 +167,4 @@ func laneSlug(l AsyncLane) string {
 		s = strings.TrimRight(s[:maxSlug], "-")
 	}
 	return s
-}
-
-// pollKinds maps a base mock Kind to the Kind used when the same egress is
-// recorded on a poll lane. Parsers register their poll kind at init() via
-// RegisterPollKind; a base with no registration keeps its own kind (still a
-// valid held poll — the engine keys on MetaAsyncPoll, not the kind).
-var pollKinds sync.Map // map[Kind]Kind
-
-// RegisterPollKind registers poll as the recorded kind for base's poll lanes.
-func RegisterPollKind(base, poll Kind) { pollKinds.Store(base, poll) }
-
-// PollKindFor returns the registered poll kind for base, or (base, false).
-func PollKindFor(base Kind) (Kind, bool) {
-	if v, ok := pollKinds.Load(base); ok {
-		return v.(Kind), true
-	}
-	return base, false
 }

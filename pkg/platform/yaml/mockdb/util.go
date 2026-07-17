@@ -35,6 +35,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		Async:        mock.Spec.Async,
 		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
 		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
 		// values are dropped). Request-body noise is only non-empty for a kind whose
@@ -46,7 +47,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 
 	var spec any
 	switch mock.Kind {
-	case models.HTTP, models.HttpPoll:
+	case models.HTTP:
 		spec = models.HTTPSchema{
 			Metadata:         mock.Spec.Metadata,
 			Request:          *mock.Spec.HTTPReq,
@@ -240,6 +241,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		// Async-egress bookkeeping as a kind-agnostic top-level block, set on the
+		// envelope (like Noise) so it survives the per-kind spec projection. nil
+		// for ordinary mocks, so omitempty drops the key.
+		Async: mock.Spec.Async,
 		// Unified noise block (see DocNoise): obfuscator value-regexes (mock.Noise)
 		// plus request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys;
 		// regex values dropped). Set before the mapper/per-kind projection runs so it
@@ -300,7 +305,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 
-	case models.HTTP, models.HttpPoll:
+	case models.HTTP:
 		httpSpec := models.HTTPSchema{
 			Metadata: mock.Spec.Metadata,
 
@@ -637,6 +642,9 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 				mock.Spec.ReqBodyNoise = rb
 			}
+			// Restore the kind-agnostic async block off the doc envelope
+			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			mock.Spec.Async = m.Async
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -646,7 +654,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			continue
 		}
 		switch m.Kind {
-		case models.HTTP, models.HttpPoll:
+		case models.HTTP:
 			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
@@ -811,6 +819,7 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 
@@ -1284,7 +1293,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 		}
 
 		switch m.Kind {
-		case models.HTTP, models.HttpPoll:
+		case models.HTTP:
 			var s models.HTTPSchema
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal http mock %q: %w", m.Name, err)
@@ -1515,6 +1524,7 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

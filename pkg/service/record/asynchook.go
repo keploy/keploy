@@ -2,7 +2,6 @@ package record
 
 import (
 	"context"
-	"strconv"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -83,26 +82,21 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 		anchorID, anchorPos := r.anchorLocked(m.Spec.ResTimestampMock.UnixNano())
 		r.mu.Unlock()
 
-		if m.Spec.Metadata == nil {
-			m.Spec.Metadata = map[string]string{}
+		// Async bookkeeping goes in its own block (Spec.Async), NOT the flat
+		// parser Metadata. The mock keeps its base kind (e.g. Http); poll-ness
+		// is Async.Poll, not a distinct Kind.
+		async := &models.AsyncMeta{
+			Lane:        lane.Name,
+			Seq:         seq,
+			AnchorAfter: anchorID,
+			AnchorPos:   anchorPos,
 		}
-		m.Spec.Metadata[models.MetaAsync] = "true"
-		m.Spec.Metadata[models.MetaAsyncLane] = lane.Name
-		m.Spec.Metadata[models.MetaAnchorAfter] = anchorID
-		m.Spec.Metadata[models.MetaAnchorPos] = strconv.Itoa(anchorPos)
-		m.Spec.Metadata[models.MetaAsyncSeq] = strconv.Itoa(seq)
-
 		if lane.IsPoll() {
-			m.Spec.Metadata[models.MetaAsyncPoll] = "true"
+			async.Poll = true
 			durMs := m.Spec.ResTimestampMock.Sub(m.Spec.ReqTimestampMock).Milliseconds()
-			if durMs < 0 {
-				durMs = 0
-			}
-			m.Spec.Metadata[models.MetaPollDurationMs] = strconv.FormatInt(durMs, 10)
-			if pk, ok := models.PollKindFor(m.Kind); ok {
-				m.Kind = pk
-			}
+			async.PollDurationMs = max(durMs, 0)
 		}
+		m.Spec.Async = async
 		return nil
 	}
 	return nil

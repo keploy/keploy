@@ -636,7 +636,7 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 func collectAsyncMocks(mocks []*models.Mock) []*models.Mock {
 	var out []*models.Mock
 	for _, m := range mocks {
-		if m != nil && m.Spec.Metadata[models.MetaAsync] == "true" {
+		if m != nil && m.Spec.Async != nil {
 			out = append(out, m)
 		}
 	}
@@ -817,7 +817,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		}
 		mock := &m
 		mock.DeriveLifetime()
-		if wantAsync && mock.Spec.Metadata[models.MetaAsync] == "true" {
+		if wantAsync && mock.Spec.Async != nil {
 			asyncMocks = append(asyncMocks, mock)
 		}
 		if i < header.FilteredCount {

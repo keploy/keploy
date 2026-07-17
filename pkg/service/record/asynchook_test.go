@@ -48,12 +48,12 @@ func TestAnchorIsEffectiveTestcaseDuringWindow(t *testing.T) {
 	m := egress("lane", base.Add(6*time.Second))
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
-	md := m.Spec.Metadata
-	if md[models.MetaAsync] != "true" || md[models.MetaAsyncLane] != "L" {
-		t.Fatalf("not stamped async: %+v", md)
+	a := m.Spec.Async
+	if a == nil || a.Lane != "L" {
+		t.Fatalf("not stamped async: %+v", a)
 	}
-	if md[models.MetaAnchorAfter] != "T2" || md[models.MetaAnchorPos] != "2" || md[models.MetaAsyncSeq] != "1" {
-		t.Fatalf("delivery mid-T2 must anchor to effective testcase T2/pos2: %+v", md)
+	if a.AnchorAfter != "T2" || a.AnchorPos != 2 || a.Seq != 1 {
+		t.Fatalf("delivery mid-T2 must anchor to effective testcase T2/pos2: %+v", a)
 	}
 }
 
@@ -65,8 +65,8 @@ func TestAnchorInGapUsesLastStartedTest(t *testing.T) {
 	// delivery completes after T1 started, before any later test -> anchor T1/pos1
 	m := egress("lane", base.Add(2*time.Second))
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
-	if m.Spec.Metadata[models.MetaAnchorAfter] != "T1" || m.Spec.Metadata[models.MetaAnchorPos] != "1" {
-		t.Fatalf("gap delivery must anchor to last started test T1/pos1: %+v", m.Spec.Metadata)
+	if a := m.Spec.Async; a == nil || a.AnchorAfter != "T1" || a.AnchorPos != 1 {
+		t.Fatalf("gap delivery must anchor to last started test T1/pos1: %+v", m.Spec.Async)
 	}
 }
 
@@ -74,9 +74,8 @@ func TestStartupAnchorBeforeFirstTest(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("lane", time.Unix(500, 0))
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
-	if m.Spec.Metadata[models.MetaAnchorAfter] != models.AnchorStartup ||
-		m.Spec.Metadata[models.MetaAnchorPos] != "0" {
-		t.Fatalf("pre-first-test egress must anchor to startup/0: %+v", m.Spec.Metadata)
+	if a := m.Spec.Async; a == nil || a.AnchorAfter != models.AnchorStartup || a.AnchorPos != 0 {
+		t.Fatalf("pre-first-test egress must anchor to startup/0: %+v", m.Spec.Async)
 	}
 }
 
@@ -108,10 +107,10 @@ func TestAnchorOrderIndependentWithStartupNamedTest(t *testing.T) {
 		m := egress("lane", delivery)
 		_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
-		md := m.Spec.Metadata
-		if md[models.MetaAnchorAfter] != "startup" || md[models.MetaAnchorPos] != "2" {
+		a := m.Spec.Async
+		if a == nil || a.AnchorAfter != "startup" || a.AnchorPos != 2 {
 			t.Fatalf("expected anchor to latest-started window named %q at pos 2, got: %+v",
-				"startup", md)
+				"startup", a)
 		}
 	}
 
@@ -134,11 +133,8 @@ func TestGeneratedLaneNameStampedWhenNameOmitted(t *testing.T) {
 	if want == "" {
 		t.Fatal("EffectiveName must be non-empty for a nameless lane")
 	}
-	if got := m.Spec.Metadata[models.MetaAsyncLane]; got != want {
-		t.Fatalf("stamped lane = %q, want generated %q", got, want)
-	}
-	if m.Spec.Metadata[models.MetaAsync] != "true" {
-		t.Fatalf("nameless lane egress must still be stamped async: %+v", m.Spec.Metadata)
+	if m.Spec.Async == nil || m.Spec.Async.Lane != want {
+		t.Fatalf("stamped lane = %+v, want generated lane %q", m.Spec.Async, want)
 	}
 }
 
@@ -146,15 +142,14 @@ func TestNonLaneEgressUntouched(t *testing.T) {
 	r := newAsyncRec()
 	m := egress("normal", time.Unix(2000, 0))
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
-	if _, ok := m.Spec.Metadata[models.MetaAsync]; ok {
-		t.Fatalf("non-lane egress must not be stamped: %+v", m.Spec.Metadata)
+	if m.Spec.Async != nil {
+		t.Fatalf("non-lane egress must not be stamped: %+v", m.Spec.Async)
 	}
 }
 
-// A poll lane (Type ends in "Poll") stamps MetaAsyncPoll + pollDurationMs and
-// re-kinds the mock via the registry; a non-poll lane leaves both untouched.
-func TestPollLaneStampsPollMetaAndReKinds(t *testing.T) {
-	models.RegisterPollKind(models.HTTP, models.HttpPoll)
+// A poll lane (Type ends in "Poll") sets Async.Poll + PollDurationMs and leaves
+// the mock's base kind (Http) unchanged — poll-ness is Async.Poll, not a Kind.
+func TestPollLaneStampsPollMeta(t *testing.T) {
 	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
 	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
 		map[string]async.AsyncParser{"http": laneStub{}}) // keyed by BaseType
@@ -164,14 +159,15 @@ func TestPollLaneStampsPollMetaAndReKinds(t *testing.T) {
 	m.Spec.ReqTimestampMock = time.Unix(999, 0) // open 1s before resolve
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
-	if m.Spec.Metadata[models.MetaAsyncPoll] != "true" {
-		t.Fatalf("poll lane must stamp MetaAsyncPoll: %+v", m.Spec.Metadata)
+	a := m.Spec.Async
+	if a == nil || !a.Poll {
+		t.Fatalf("poll lane must set Async.Poll: %+v", a)
 	}
-	if m.Spec.Metadata[models.MetaPollDurationMs] != "1000" {
-		t.Fatalf("pollDurationMs = %q want 1000", m.Spec.Metadata[models.MetaPollDurationMs])
+	if a.PollDurationMs != 1000 {
+		t.Fatalf("PollDurationMs = %d want 1000", a.PollDurationMs)
 	}
-	if m.Kind != models.HttpPoll {
-		t.Fatalf("poll-lane mock kind = %q want HttpPoll", m.Kind)
+	if m.Kind != models.HTTP {
+		t.Fatalf("poll-lane mock kind = %q want Http (poll-ness is not a kind)", m.Kind)
 	}
 }
 
@@ -180,7 +176,6 @@ func TestPollLaneStampsPollMetaAndReKinds(t *testing.T) {
 // its ReqTimestampMock (clock skew / test fixture oddity) must record
 // pollDurationMs as "0", never a negative number.
 func TestPollLaneClampsNegativePollDurationToZero(t *testing.T) {
-	models.RegisterPollKind(models.HTTP, models.HttpPoll)
 	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
 	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
 		map[string]async.AsyncParser{"http": laneStub{}}) // keyed by BaseType
@@ -190,29 +185,27 @@ func TestPollLaneClampsNegativePollDurationToZero(t *testing.T) {
 	m.Spec.ReqTimestampMock = time.Unix(1001, 0) // opens AFTER resolve -> negative raw duration
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
-	if m.Spec.Metadata[models.MetaAsyncPoll] != "true" {
-		t.Fatalf("poll lane must stamp MetaAsyncPoll: %+v", m.Spec.Metadata)
+	a := m.Spec.Async
+	if a == nil || !a.Poll {
+		t.Fatalf("poll lane must set Async.Poll: %+v", a)
 	}
-	if m.Spec.Metadata[models.MetaPollDurationMs] != "0" {
-		t.Fatalf("pollDurationMs = %q want clamped 0 (ResTimestampMock before ReqTimestampMock)",
-			m.Spec.Metadata[models.MetaPollDurationMs])
+	if a.PollDurationMs != 0 {
+		t.Fatalf("PollDurationMs = %d want clamped 0 (ResTimestampMock before ReqTimestampMock)",
+			a.PollDurationMs)
 	}
 }
 
-// TestAsyncPollMockExcludedFromPerTestMapping pins the invariant that a mock
-// stamped async — including a poll delivery stamped MetaAsyncPoll="true" and
-// re-kinded to models.HttpPoll — never appears in a testcase's per-test mock
-// mapping. resolveMappingEntries excludes purely on MetaAsync (asyncMockIDs),
-// never on Kind, so this must hold regardless of the mock's re-kinding. This
-// pins the seam at pkg/service/record/record.go's Mock-loop goroutine
-// (~line 593: `if mock.Spec.Metadata[models.MetaAsync] == "true"` stores the
-// tempID into asyncMockIDs) feeding resolveMappingEntries (~line 91). That
-// full wiring lives inside Recorder.Start, which requires a live agent
-// connection, so this test reaches resolveMappingEntries directly and
-// reconstructs the Mock-loop's asyncMockIDs bookkeeping by hand — noted here
-// as the reachability limit per the review brief.
+// TestAsyncPollMockExcludedFromPerTestMapping pins the invariant that an async
+// mock — including a held poll delivery (Async.Poll=true, kind still Http) —
+// never appears in a testcase's per-test mock mapping. resolveMappingEntries
+// excludes purely on the async marker (asyncMockIDs), never on Kind, so this
+// must hold. It pins the seam at pkg/service/record/record.go's Mock-loop
+// goroutine (`if mock.Spec.Async != nil` stores the tempID into asyncMockIDs)
+// feeding resolveMappingEntries. That full wiring lives inside Recorder.Start,
+// which requires a live agent connection, so this test reaches
+// resolveMappingEntries directly and reconstructs the Mock-loop's asyncMockIDs
+// bookkeeping by hand — noted here as the reachability limit.
 func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
-	models.RegisterPollKind(models.HTTP, models.HttpPoll)
 	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
 	rec := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
 		map[string]async.AsyncParser{"http": laneStub{}})
@@ -223,15 +216,15 @@ func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
 	pollMock.Spec.ReqTimestampMock = time.Unix(999, 0)
 	_ = rec.BeforeMockInsert(context.Background(), &MockContext{Mock: pollMock})
 
-	if pollMock.Spec.Metadata[models.MetaAsync] != "true" || pollMock.Spec.Metadata[models.MetaAsyncPoll] != "true" {
-		t.Fatalf("setup: expected poll mock stamped async+poll, got %+v", pollMock.Spec.Metadata)
+	if pollMock.Spec.Async == nil || !pollMock.Spec.Async.Poll {
+		t.Fatalf("setup: expected poll mock stamped async+poll, got %+v", pollMock.Spec.Async)
 	}
-	if pollMock.Kind != models.HttpPoll {
-		t.Fatalf("setup: expected poll mock re-kinded to HttpPoll, got %q", pollMock.Kind)
+	if pollMock.Kind != models.HTTP {
+		t.Fatalf("setup: poll mock keeps kind Http (poll-ness is not a kind), got %q", pollMock.Kind)
 	}
 
-	// Mirror record.go's Mock-loop bookkeeping (~lines 593-595): every mock
-	// lands in correlationMap, but only ones stamped MetaAsync also land in
+	// Mirror record.go's Mock-loop bookkeeping: every mock lands in
+	// correlationMap, but only async ones (Spec.Async != nil) also land in
 	// asyncMockIDs. An ordinary sync mock gets no asyncMockIDs entry.
 	var correlationMap, asyncMockIDs sync.Map
 	correlationMap.Store(pollMock.Name, models.MockEntry{Name: pollMock.Name, Kind: string(pollMock.Kind)})
