@@ -4,6 +4,7 @@ package integrations
 import (
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -66,6 +67,61 @@ type IntegrationsV2 interface {
 
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
+}
+
+// boundaryResetHooks are callbacks run at every replay TEST-SET BOUNDARY
+// (MockManager.ResetForReplaySession, invoked from Proxy.Mock() before the
+// controller ships and the agent rebuilds the next set's pool). One replay
+// pod serves every test-set sequentially, so any per-session cache a parser
+// builds while serving set N would otherwise survive into set N+1 and stack
+// on top of the incoming pool — the transition double-residency that drives
+// the auto-replay agent OOM.
+//
+// The canonical registrant is mongo/v2's encoded-section LRU
+// (integrations/pkg/mongo/v2.ResetEncodeSectionCache): a rebuildable,
+// bounded-but-non-trivial cache of parsed ext-JSON sections that is only
+// valid for the mocks of the set currently being served. Dropping it at the
+// boundary returns that memory before the next set's bulk decode begins.
+//
+// Contract for hooks: cheap, idempotent, and safe to call concurrently with
+// active matchers. The reset fires at the boundary, but a long-lived parser
+// goroutine (e.g. the postgres-v3 runLoop kept warm across the boundary by
+// --keep-app-alive) can still be draining the previous set — a hook must
+// only drop REBUILDABLE state, never state whose loss would corrupt an
+// in-flight match. keploy cannot import the private integrations module
+// (dependency direction is integrations→keploy), so parsers self-register
+// here from their package init() instead of keploy calling them directly.
+var (
+	boundaryResetMu    sync.RWMutex
+	boundaryResetHooks []func()
+)
+
+// RegisterBoundaryResetHook adds fn to the set run by RunBoundaryResetHooks.
+// Intended to be called once from a parser's init(); there is deliberately
+// no unregister — parser registration is process-global and permanent, and
+// the hooks are re-run on every test-set boundary for the process lifetime.
+// A nil fn is ignored. Safe for concurrent use.
+func RegisterBoundaryResetHook(fn func()) {
+	if fn == nil {
+		return
+	}
+	boundaryResetMu.Lock()
+	boundaryResetHooks = append(boundaryResetHooks, fn)
+	boundaryResetMu.Unlock()
+}
+
+// RunBoundaryResetHooks invokes every registered boundary-reset hook. Called
+// by MockManager.ResetForReplaySession at each replay test-set boundary.
+// Snapshots the slice under a read lock so a hook that (indirectly) registers
+// another hook cannot deadlock or observe a torn slice.
+func RunBoundaryResetHooks() {
+	boundaryResetMu.RLock()
+	hooks := make([]func(), len(boundaryResetHooks))
+	copy(hooks, boundaryResetHooks)
+	boundaryResetMu.RUnlock()
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 // MockMemDb is the runtime mock pool contract consumed by every parser's
