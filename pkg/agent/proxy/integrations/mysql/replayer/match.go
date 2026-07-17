@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -779,6 +780,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// system-var reads are unaffected.
 		if req.Header.Type == sCOM_QUERY {
 			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+				// First: an unrecorded single system-variable read is resolved
+				// from the connection-setup probe (see the block comment above
+				// and Part A in matchQuery). Ordered BEFORE the control-statement
+				// OK so the read is answered with its REAL recorded value rather
+				// than a bare OK.
 				if varName, isVarRead := parseSingleSystemVarRead(qp.Query); isVarRead {
 					if resp := buildSessionVarResponse(logger, pool, varName, decodeCtx); resp != nil {
 						logger.Debug("served system-variable read from recorded session probe",
@@ -786,12 +792,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 						return resp, true, nil, nil
 					}
 				}
-			}
-		}
 
-		// Graceful generic OK for common control statements (no mocks)
-		if req.Header.Type == sCOM_QUERY {
-			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+				// Graceful generic OK for common control statements (no mocks)
 				q := strings.TrimSpace(qp.Query)
 				switch {
 				case strings.EqualFold(q, "BEGIN"),
@@ -1243,8 +1245,16 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	// bare "SELECT @@" prefix) so a real DML query that merely projects a
 	// variable — e.g. "SELECT @@version, u.name FROM users u WHERE ..." — keeps
 	// its normal DML fuzzy-matching.
-	if _, isPureVarRead := parseSingleSystemVarRead(actualQuery); isPureVarRead && expectedQuery != actualQuery {
-		return false, 0
+	//
+	// The cheap string inequality is checked FIRST so parseSingleSystemVarRead
+	// is not even called on an equal-query candidate. On non-equal candidates
+	// the parse early-exits after a couple of prefix comparisons for anything
+	// that is not "SELECT @@...", so it is strictly cheaper than the
+	// sqlparser.IsDML parse that already runs per candidate just below.
+	if expectedQuery != actualQuery {
+		if _, isPureVarRead := parseSingleSystemVarRead(actualQuery); isPureVarRead {
+			return false, 0
+		}
 	}
 
 	// check if any of them the query is dml and other is not, then there is no match.
@@ -1932,7 +1942,6 @@ func stripLeadingSQLComment(s string) string {
 	return s
 }
 
-
 // parseSingleSystemVarRead parses "SELECT @@[session.|global.|local.]<var>" and
 // returns the bare variable name (e.g. "transaction_isolation"). ok is false for
 // anything that isn't a SINGLE bare variable read (multi-column, AS aliases,
@@ -1940,10 +1949,17 @@ func stripLeadingSQLComment(s string) string {
 // single-variable probes Connector/J issues at connection setup.
 func parseSingleSystemVarRead(query string) (string, bool) {
 	s := stripLeadingSQLComment(query)
-	if len(s) < 8 || !strings.EqualFold(s[:7], "SELECT ") {
+	// Require the SELECT keyword followed by at least one whitespace character.
+	// Match any whitespace (space, tab, CR, LF) rather than a single literal
+	// space, so "SELECT\t@@x" is recognised too.
+	const kw = "SELECT"
+	if len(s) <= len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
 		return "", false
 	}
-	rest := strings.TrimSpace(s[len("SELECT"):])
+	if next := s[len(kw)]; next != ' ' && next != '\t' && next != '\r' && next != '\n' {
+		return "", false
+	}
+	rest := strings.TrimSpace(s[len(kw):])
 	if !strings.HasPrefix(rest, "@@") {
 		return "", false
 	}
@@ -1967,10 +1983,23 @@ func parseSingleSystemVarRead(query string) (string, bool) {
 }
 
 // resolveVarFromProbe scans the mock pool for a recorded result set carrying a
-// column whose label equals varName. The connection-setup probe
-// ("SELECT @@... AS <var>, ...") aliases every column to its bare variable name,
-// so this recovers the REAL recorded value + column definition for varName.
-func resolveVarFromProbe(pool []*models.Mock, varName string) (*mysql.ColumnDefinition41, mysql.ColumnEntry, bool) {
+// column whose label equals varName, returning the REAL recorded column
+// definition, value, AND that result set's own terminator (so the caller can
+// preserve the recorded server status flags rather than fabricating them).
+//
+// The connection-setup probe ("SELECT @@... AS <var>, ...") aliases every
+// column to its bare variable name, so col.Name is normally the bare name; some
+// probe forms omit the alias and leave the raw "@@<var>" label, so both are
+// matched.
+//
+// Assumption: system variables read at connection setup (transaction_isolation,
+// transaction_read_only, sql_mode, ...) are session-invariant, so the FIRST
+// recorded result set carrying the column is authoritative. The pool is already
+// ordered per-test, then session, then connection, so the most specific probe
+// is consulted first. If a variable legitimately differed across connections
+// this would return the first recorded value; that does not occur for the
+// setup-probe variables this path serves.
+func resolveVarFromProbe(pool []*models.Mock, varName string) (*mysql.ColumnDefinition41, mysql.ColumnEntry, *mysql.GenericResponse, bool) {
 	for _, m := range pool {
 		if m == nil {
 			continue
@@ -1981,13 +2010,43 @@ func resolveVarFromProbe(pool []*models.Mock, varName string) (*mysql.ColumnDefi
 				continue
 			}
 			for ci, col := range trs.Columns {
-				if col != nil && strings.EqualFold(col.Name, varName) && ci < len(trs.Rows[0].Values) {
-					return col, trs.Rows[0].Values[ci], true
+				if col == nil || ci >= len(trs.Rows[0].Values) {
+					continue
+				}
+				if strings.EqualFold(col.Name, varName) || strings.EqualFold(col.Name, "@@"+varName) {
+					return col, trs.Rows[0].Values[ci], trs.FinalResponse, true
 				}
 			}
 		}
 	}
-	return nil, mysql.ColumnEntry{}, false
+	return nil, mysql.ColumnEntry{}, nil, false
+}
+
+// fallbackOKReplacingEOFTerminator is the deprecate-EOF result-set terminator at
+// sequence 4 used ONLY when the recorded probe carried no reusable terminator:
+// 0xFE + affected_rows(0) + last_insert_id(0) +
+// status_flags(SERVER_STATUS_AUTOCOMMIT=0x0002) + warnings(0).
+var fallbackOKReplacingEOFTerminator = []byte{0x07, 0x00, 0x00, 0x04, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}
+
+// terminatorForSingleColumn returns the result-set terminator to emit for the
+// synthesized single-column response. It PREFERS the probe's own recorded
+// OK-replacing-EOF terminator (preserving the real recorded status flags,
+// warnings and any session-state trailer), only rewriting its sequence-ID byte
+// to 4 for the single-column framing — the terminator's structure is
+// independent of column count, so this is valid. It falls back to a synthesized
+// autocommit terminator only when the probe carried none or it was not an
+// OK-replacing-EOF (e.g. a legacy plain EOF), so the status is honest when we
+// have it and deterministic when we don't.
+func terminatorForSingleColumn(probe *mysql.GenericResponse) *mysql.GenericResponse {
+	if probe != nil && mysqlutils.IsOKReplacingEOF(probe.Data) {
+		d := make([]byte, len(probe.Data))
+		copy(d, probe.Data)
+		d[3] = 0x04 // sequence ID of the terminator in a 1-column result set
+		return &mysql.GenericResponse{Type: probe.Type, Data: d}
+	}
+	d := make([]byte, len(fallbackOKReplacingEOFTerminator))
+	copy(d, fallbackOKReplacingEOFTerminator)
+	return &mysql.GenericResponse{Type: "OK", Data: d}
 }
 
 // buildSessionVarResponse builds a single-column text result set carrying the
@@ -2014,7 +2073,7 @@ func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName st
 		}
 		return nil
 	}
-	col, val, found := resolveVarFromProbe(pool, varName)
+	col, val, probeTerminator, found := resolveVarFromProbe(pool, varName)
 	if !found || col == nil {
 		return nil
 	}
@@ -2030,12 +2089,10 @@ func buildSessionVarResponse(logger *zap.Logger, pool []*models.Mock, varName st
 			Header: mysql.Header{SequenceID: 3},
 			Values: []mysql.ColumnEntry{val},
 		}},
-		// OK-replacing-EOF terminator at sequence 4 (deprecate-eof form):
-		// 0xFE + affected_rows(0) + last_insert_id(0) + status_flags(0x0002) + warnings(0).
-		FinalResponse: &mysql.GenericResponse{
-			Type: "OK",
-			Data: []byte{0x07, 0x00, 0x00, 0x04, 0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00},
-		},
+		// Result-set terminator at sequence 4. Reuses the probe's own recorded
+		// OK-replacing-EOF terminator (real status flags/warnings) when present,
+		// falling back to a synthesized autocommit terminator otherwise.
+		FinalResponse: terminatorForSingleColumn(probeTerminator),
 	}
 	if logger != nil {
 		logger.Debug("built single-column session-variable result set",

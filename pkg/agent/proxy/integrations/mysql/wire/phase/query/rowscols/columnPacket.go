@@ -120,13 +120,24 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 
 	//if more data, command was field list
 	if packet.Header.PayloadLength > uint32(pos) {
+		// COM_FIELD_LIST response carries a length-encoded default value here.
+		// Guard every read the same way the fixed-field block above is guarded:
+		// the lenenc prefix must be present, the decode must consume at least
+		// one byte, and the declared length must fit the remaining buffer. Any
+		// violation returns an error (the caller logs and resets to
+		// stateExpectCommand) instead of indexing past the slice and panicking.
+		if pos >= len(b) {
+			return nil, pos, fmt.Errorf("short column-definition packet: field-list default-value length prefix missing at pos %d, buffer len %d", pos, len(b))
+		}
 		//length of default value lenenc-int
 		defaultValueLength, _, n := utils.ReadLengthEncodedInteger(b[pos:])
+		if n <= 0 {
+			return nil, pos, fmt.Errorf("malformed column-definition packet: unreadable field-list default-value length prefix at pos %d, buffer len %d", pos, len(b))
+		}
 		pos += n
 
-		if pos+int(defaultValueLength) > len(b) {
-
-			return nil, pos, fmt.Errorf("malformed packet: %v", err)
+		if defaultValueLength > uint64(len(b)-pos) {
+			return nil, pos, fmt.Errorf("malformed column-definition packet: field-list default-value length %d overflows buffer (pos %d, buffer len %d)", defaultValueLength, pos, len(b))
 		}
 
 		//default value string[$len]

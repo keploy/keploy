@@ -162,16 +162,37 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// read nothing and the pool failed. Dropping recording bytes is exactly
 	// what corrupts mocks; we must not do it.
 	//
-	// Fast path: if the channel has space, send directly. Otherwise BLOCK until
-	// the decoder drains, applying natural backpressure up through the buff
-	// chans to the sockets (TCP flow control) — the correct trade for a
-	// recorder: fidelity over a brief throughput dip. The decoder runs on a
-	// context detached from the parent (decoderCtx), so it keeps draining even
-	// during shutdown; the ctx-guarded escape is only a deadlock backstop and,
-	// on the parent-cancel path, the drainBuffChans grace window + cleanup
-	// handle the tail. memoryguard remains the outer safety valve: under memory
-	// pressure recording pauses to pure passthrough (top of this function), so
-	// blocking here can never grow unbounded.
+	// We copy the chunk unconditionally: because we never drop, every chunk is
+	// destined for the channel, so there is no capacity check that could let us
+	// skip the allocation (unlike the previous drop-on-full code, which copied
+	// only when it had already confirmed space). The GC profile is therefore
+	// "allocate per chunk", not "allocate only when enqueuable".
+	//
+	// Send: if the channel has space, send directly (this is only a capacity
+	// HINT to skip the select overhead — the send below can still block if a
+	// concurrent producer fills the gap). Otherwise BLOCK until the decoder
+	// drains, applying natural backpressure up through the buff chans to the
+	// sockets (TCP flow control) — the correct trade for a recorder: fidelity
+	// over a brief throughput dip.
+	//
+	// BEHAVIOURAL NOTE (accepted tradeoff): because this can block the main
+	// relay loop, a pathologically slow decoder now adds latency to the live
+	// application traffic being recorded, whereas the old code shed load by
+	// dropping. memoryguard remains the outer safety valve (under memory
+	// pressure the top of this function pauses to pure passthrough, so a block
+	// here can never grow unbounded), but memoryguard trips on memory, not on
+	// decode latency. This is the deliberate cost of never truncating a mock.
+	//
+	// The escape is keyed on decodeDone (the decoder goroutine's exit signal),
+	// NOT the parent ctx. This is what makes the guarantee hold through
+	// shutdown: the decoder runs on a DETACHED context (decoderCtx via
+	// context.WithoutCancel) and keeps draining after the parent ctx cancels,
+	// so during the drainBuffChans sweep the send blocks until space frees and
+	// the chunk lands — it is never discarded just because the parent cancelled.
+	// The only time this escape fires is when the decoder has actually exited
+	// (normal close of decodeChan, or a recovered panic closing decodeDone),
+	// in which case no consumer exists and blocking would deadlock — so escaping
+	// is correct, and the lost chunk is unavoidable rather than a dropped one.
 	enqueueDecode := func(fromClient bool, buf []byte) {
 		if buf == nil {
 			return
@@ -184,13 +205,18 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		} else {
 			item = mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}
 		}
+		// Capacity hint: a buffered send with free space completes immediately
+		// regardless of the consumer, so this cannot block when len<cap holds.
 		if len(decodeChan) < cap(decodeChan) {
 			decodeChan <- item
 			return
 		}
 		select {
 		case decodeChan <- item:
-		case <-ctx.Done():
+		case <-decodeDone:
+			// Decoder has exited; nothing will ever consume this item. Escaping
+			// avoids a permanent deadlock. This is NOT the parent-cancel path
+			// (that keeps the decoder alive), so it does not drop on shutdown.
 		}
 	}
 
