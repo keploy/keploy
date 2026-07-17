@@ -458,7 +458,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
 	var correlationMap sync.Map
-	// asyncMockIDs holds tempIDs stamped MetaAsync; resolveMappingEntries uses it
+	// asyncMockIDs holds tempIDs of async mocks (Spec.Async set); resolveMappingEntries uses it
 	// to keep async-egress mocks out of the per-test mappings (see its doc).
 	var asyncMockIDs sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
@@ -590,7 +590,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			}
 			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
 			// remember it so the mapping goroutine below never per-test maps it.
-			if mock.Spec.Async != nil {
+			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)

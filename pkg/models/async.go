@@ -52,7 +52,7 @@ type AsyncLane struct {
 // derived from the lane's ROUTING identity (type + match + matchQuery) when
 // Name is empty. The derived name is stable across record and replay for the
 // same routing config, so it works as the join key stamped on mocks
-// (MetaAsyncLane) at record and looked up by the replay engine.
+// (Async.Lane) at record and looked up by the replay engine.
 //
 // volatileParams is deliberately EXCLUDED: it is replay-time tuning a user may
 // set differently between the record and replay runs, and letting it shift the

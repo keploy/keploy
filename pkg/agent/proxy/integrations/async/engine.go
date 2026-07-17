@@ -135,7 +135,7 @@ func (e *Engine) Load(mocks []*models.Mock) {
 		return
 	}
 	for _, m := range mocks {
-		if m == nil || m.Spec.Async == nil {
+		if m == nil || !m.IsAsync() {
 			continue
 		}
 		name := m.Spec.Async.Lane

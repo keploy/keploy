@@ -644,6 +644,9 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			// Restore the kind-agnostic async block off the doc envelope
 			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
+			// No in-tree kind is both mapper-registered AND async-capable today
+			// (only HTTP sets Async, and HTTP is a builtin that never takes this
+			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
 			mocks = append(mocks, &mock)
 			continue

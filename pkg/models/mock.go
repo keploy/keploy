@@ -117,6 +117,12 @@ func (m *Mock) SetResponseHydrator(fn func() (*HTTPResp, []MongoResponse, error)
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
 
+// IsAsync reports whether this mock is async-egress — i.e. it carries an
+// AsyncMeta block. Presence of the block IS the signal (see AsyncMeta); this
+// is the single predicate the record mapping, replay collection, and engine
+// load all discriminate on.
+func (m *Mock) IsAsync() bool { return m.Spec.Async != nil }
+
 // HydrateResponse loads an elided response into Spec; no-op if not spilled, so
 // serve paths can call it unconditionally before reading the response.
 func (m *Mock) HydrateResponse() error {
@@ -944,6 +950,10 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.HTTPResp != nil {
 		httpRespCopy := *m.Spec.HTTPResp
 		c.Spec.HTTPResp = &httpRespCopy
+	}
+	if m.Spec.Async != nil {
+		asyncCopy := *m.Spec.Async
+		c.Spec.Async = &asyncCopy
 	}
 	if m.Spec.GRPCReq != nil {
 		grpcReqCopy := *m.Spec.GRPCReq

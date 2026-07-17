@@ -29,7 +29,7 @@ type AsyncRecorder struct {
 }
 
 func NewAsyncRecorder(logger *zap.Logger, lanes []models.AsyncLane, parsers map[string]async.AsyncParser) *AsyncRecorder {
-	// Fill in any omitted lane names so the stamped MetaAsyncLane value is the
+	// Fill in any omitted lane names so the stamped Async.Lane value is the
 	// same deterministic key the replay engine re-derives.
 	return &AsyncRecorder{logger: logger, lanes: models.WithEffectiveNames(lanes), parsers: parsers, seq: map[string]int{}}
 }
@@ -85,18 +85,18 @@ func (r *AsyncRecorder) BeforeMockInsert(_ context.Context, info *MockContext) e
 		// Async bookkeeping goes in its own block (Spec.Async), NOT the flat
 		// parser Metadata. The mock keeps its base kind (e.g. Http); poll-ness
 		// is Async.Poll, not a distinct Kind.
-		async := &models.AsyncMeta{
+		am := &models.AsyncMeta{
 			Lane:        lane.Name,
 			Seq:         seq,
 			AnchorAfter: anchorID,
 			AnchorPos:   anchorPos,
 		}
 		if lane.IsPoll() {
-			async.Poll = true
+			am.Poll = true
 			durMs := m.Spec.ResTimestampMock.Sub(m.Spec.ReqTimestampMock).Milliseconds()
-			async.PollDurationMs = max(durMs, 0)
+			am.PollDurationMs = max(durMs, 0)
 		}
-		m.Spec.Async = async
+		m.Spec.Async = am
 		return nil
 	}
 	return nil

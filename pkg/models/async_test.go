@@ -131,3 +131,22 @@ func TestAsyncLaneIsPollAndBaseType(t *testing.T) {
 	}
 }
 
+// DeepCopy must clone Spec.Async (not alias it), matching the isolation
+// contract the other Spec pointer fields uphold — so a copied mock's async
+// block can be mutated (e.g. by a gob-write path) without racing the original.
+func TestDeepCopyIsolatesAsyncMeta(t *testing.T) {
+	orig := &Mock{Kind: HTTP, Spec: MockSpec{
+		Async: &AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 3, Poll: true, PollDurationMs: 8000},
+	}}
+	c := orig.DeepCopy()
+	if c.Spec.Async == nil || *c.Spec.Async != *orig.Spec.Async {
+		t.Fatalf("DeepCopy lost the async block: %+v", c.Spec.Async)
+	}
+	if c.Spec.Async == orig.Spec.Async {
+		t.Fatal("DeepCopy must clone Spec.Async, not share the pointer")
+	}
+	c.Spec.Async.Poll = false // mutate the copy
+	if !orig.Spec.Async.Poll {
+		t.Fatal("mutating the copy's async block leaked into the original (aliased pointer)")
+	}
+}

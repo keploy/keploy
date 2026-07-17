@@ -19,8 +19,9 @@
 #   httppoll  — the app opens a SINGLE watch poll (WATCH_ONCE) and the stub HOLDS
 #               it open for a server-timeout (POLL_HOLD_SECONDS) before answering
 #               (lane type: httpPoll, via keploy-httppoll.yml). Asserts the poll
-#               is recorded as kind:HttpPoll with a pollDurationMs, and that at
-#               replay the async engine HELD it until its resolve testcase and
+#               is recorded as an async poll (kind Http + async block poll: true
+#               with a pollDurationMs), and that at replay the async engine HELD
+#               it until its resolve testcase and
 #               then served it (held >= 1). NOTE: the >60s hang-watchdog
 #               exemption that lets a long-held poll be recorded at all is unit-
 #               tested (supervisor TestHangNotDetectedWhenSuspended); this e2e
@@ -62,8 +63,8 @@ case "$SCENARIO" in
     ;;
   httppoll)
     # One watch poll (WATCH_ONCE), held open by the stub for POLL_HOLD_SECONDS so
-    # Keploy records a single server-timeout long-poll as kind:HttpPoll. Uses the
-    # httpPoll lane config (keploy-httppoll.yml).
+    # Keploy records a single server-timeout long-poll (kind Http + an async
+    # block with poll: true). Uses the httpPoll lane config (keploy-httppoll.yml).
     APP_ENV="env WATCH_ONCE=true RULES_DELAY_MS=600"
     POLL_HOLD_SECONDS=5
     STUB_ENV="POLL_HOLD_SECONDS=${POLL_HOLD_SECONDS}"
@@ -162,15 +163,16 @@ sudo kill -INT "$KEPLOY_PID" 2>/dev/null || true
 set +e; wait "$KEPLOY_PID"; echo "Record exit: $?"; set -e
 if grep -q "WARNING: DATA RACE" record.txt; then echo "::error::Data race during record"; cat record.txt; exit 1; fi
 echo "== recorded mock kinds =="; grep -aE "^kind:" keploy/test-set-0/mocks.yaml 2>/dev/null | sort | uniq -c
-echo "== async-stamped mocks =="; grep -ac 'async: "true"' keploy/test-set-0/mocks.yaml 2>/dev/null || true
+echo "== async-stamped mocks =="; grep -acE '^async:$' keploy/test-set-0/mocks.yaml 2>/dev/null || true
 
-# httppoll: the single watch poll must be recorded as kind:HttpPoll with an
+# httppoll: the single watch poll must be recorded as an async poll — the mock
+# keeps kind Http, and its top-level async block carries poll: true plus an
 # open-duration (pollDurationMs). This is the record-side proof of the feature.
 if [[ "$SCENARIO" == "httppoll" ]]; then
-  hp=$(grep -acE '^kind: HttpPoll$' keploy/test-set-0/mocks.yaml 2>/dev/null || true)
-  [[ "${hp:-0}" -ge 1 ]] || { echo "::error::httppoll: no kind:HttpPoll mock recorded — the long-poll was not captured"; exit 1; }
-  grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded HttpPoll mock has no pollDurationMs"; exit 1; }
-  echo "httppoll: recorded ${hp} HttpPoll mock(s) with pollDurationMs."
+  hp=$(grep -acE '^ +poll: true$' keploy/test-set-0/mocks.yaml 2>/dev/null || true)
+  [[ "${hp:-0}" -ge 1 ]] || { echo "::error::httppoll: no async poll (poll: true) mock recorded — the long-poll was not captured"; exit 1; }
+  grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock has no pollDurationMs"; exit 1; }
+  echo "httppoll: recorded ${hp} async poll mock(s) with pollDurationMs."
 fi
 endsec
 
