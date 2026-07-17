@@ -90,6 +90,14 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			logger.Debug("EOF during MySQL V2 initial handshake")
 			return nil
 		}
+		// Joined mid-stream (connection opened before recording started, e.g.
+		// a pre-warmed pool): the server greeting was never captured, so the
+		// connection is un-decodable. Skip it gracefully rather than failing
+		// the capture. See wire.ErrServerGreetingNotFound.
+		if errors.Is(err, wire.ErrServerGreetingNotFound) {
+			logger.Warn("skipping MySQL connection joined mid-stream: no server greeting was captured, so it cannot be recorded. This connection was opened before recording started (e.g. a pre-warmed connection pool). To capture it, restart the application after starting the recording so its connections are re-established and captured from the greeting.")
+			return nil
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

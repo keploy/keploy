@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,7 +66,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Decode server handshake packet
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode handshake packet")
+		// A mid-stream join (first captured server packet is not the greeting)
+		// is an expected condition the caller skips gracefully — don't log it
+		// as an error. Any other decode failure is a genuine error.
+		if !errors.Is(err, wire.ErrServerGreetingNotFound) {
+			utils.LogError(logger, err, "failed to decode handshake packet")
+		}
 		return res, err
 	}
 
