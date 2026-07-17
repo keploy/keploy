@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,19 @@ const (
 	// that Start's teardown gives the group this drain runs in — overshooting that
 	// would trade a lost tail for a teardown timeout, which is no better.
 	mappingDrainGrace = 15 * time.Second
+
+	// mappingFlushBatch is how many mappings accumulate before mappings.yaml is
+	// rewritten. Each rewrite re-encodes the whole file, so writing per mapping is
+	// quadratic (368 tests: 164us for the first, 19.45ms for the last, ~2.7s of
+	// pure rewriting) — slow enough to back-pressure the agent's mapping stream,
+	// which then DROPS what it cannot hand over. Batching keeps the consumer far
+	// ahead of the stream.
+	mappingFlushBatch = 32
+
+	// mappingFlushInterval bounds how long a partial batch waits, so a long
+	// recording still persists mappings as it goes instead of holding them all in
+	// memory until the stream closes.
+	mappingFlushInterval = 2 * time.Second
 
 	// mappingIdleGrace ends the shutdown drain once the mapping stream falls idle.
 	// The agent holds the stream open for the whole session, so idleness — not EOF
@@ -56,6 +70,29 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	t.Reset(d)
 }
 
+// mergeMockEntries unions incoming entries into existing ones by mock name,
+// preserving recorded order. Mirrors the mapping store's merge: a test's mapping
+// arrives in more than one piece and the later pieces are deltas, so replacing
+// would delete mocks the earlier piece recorded.
+func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry {
+	if len(existing) == 0 {
+		return incoming
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		seen[e.Name] = struct{}{}
+	}
+	merged := existing
+	for _, e := range incoming {
+		if _, dup := seen[e.Name]; dup {
+			continue
+		}
+		seen[e.Name] = struct{}{}
+		merged = append(merged, e)
+	}
+	return merged
+}
+
 // consumeMappings correlates each test<->mock mapping the agent streams to its
 // real mock entries and persists it to mappings.yaml. It runs until mappings is
 // closed by the producer, and returns only then — ctx bounds nothing here by
@@ -72,25 +109,81 @@ func resetTimer(t *time.Timer, d time.Duration) {
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map) error {
 	persistCtx := context.WithoutCancel(ctx)
 
+	// pending batches mappings so the file is rewritten once per batch instead of
+	// once per test. flushMu guards it because the ticker below flushes too.
+	pending := make(map[string][]models.MockEntry, mappingFlushBatch)
+	var flushMu sync.Mutex
+
+	flush := func() {
+		flushMu.Lock()
+		defer flushMu.Unlock()
+		if len(pending) == 0 {
+			return
+		}
+		if err := r.mappingDb.UpsertBatch(persistCtx, testSetID, pending); err != nil {
+			// Deliberately not utils.LogError: it suppresses context.Canceled,
+			// which is exactly the class this write used to fail with, so a lost
+			// batch left no trace at all. A mapping that goes missing here is a
+			// no_mocks failure at replay — it must never be silent again.
+			names := make([]string, 0, len(pending))
+			for tn := range pending {
+				names = append(names, tn)
+			}
+			sort.Strings(names)
+			r.logger.Error("failed to save mappings",
+				zap.Strings("tests", names),
+				zap.Error(err),
+				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		}
+		clear(pending)
+	}
+
+	// A partial batch must not sit in memory until the stream closes: recording
+	// can run for hours, and an operator watching mappings.yaml should see it
+	// grow. The ticker bounds how long a mapping stays unpersisted without
+	// putting a file rewrite on the per-mapping path.
+	ticker := time.NewTicker(mappingFlushInterval)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
 	for mapping := range mappings {
 		realMockEntries := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs)
 
-		// Write to mappings.yaml
-		if len(realMockEntries) > 0 {
-			err := r.mappingDb.Upsert(persistCtx, testSetID, mapping.TestName, realMockEntries)
-			if err != nil {
-				// Deliberately not utils.LogError: it suppresses
-				// context.Canceled, which is exactly the class this write used
-				// to fail with, so the lost tail left no trace in the logs at
-				// all. A mapping that goes missing here is a no_mocks failure
-				// at replay — it must never be silent again.
-				r.logger.Error("failed to save mapping",
-					zap.String("test", mapping.TestName),
-					zap.Error(err),
-					zap.String("next_step", "this test's mocks will be missing from mappings.yaml and replay will report no_mocks for it; re-record the test set"))
-			}
+		if len(realMockEntries) == 0 {
+			continue
+		}
+
+		flushMu.Lock()
+		// Union, don't replace: the agent emits a test's mocks when its window
+		// resolves and emits more later for mocks retroactively binned into that
+		// window. Those later emissions are a DELTA — overwriting would delete the
+		// mocks already recorded for the test and replay it with a short pool.
+		pending[mapping.TestName] = mergeMockEntries(pending[mapping.TestName], realMockEntries)
+		full := len(pending) >= mappingFlushBatch
+		flushMu.Unlock()
+
+		// Flush on size only. Draining the channel is the priority: every
+		// millisecond spent rewriting mappings.yaml is a millisecond the agent
+		// cannot hand over its next mapping, and it DROPS what it cannot hand
+		// over. The ticker flushes whatever a partial batch leaves behind.
+		if full {
+			flush()
 		}
 	}
+
+	// The stream is closed: persist whatever the last partial batch holds.
+	flush()
 	return nil
 }
 

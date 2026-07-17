@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"math/rand"
 	"strings"
 	"sync"
@@ -71,9 +72,23 @@ func generateRandomString(n int) string {
 type SyncMockManager struct {
 	// mu guards buffer, firstReqSeen, memoryPause, mappingChan,
 	// recentWindows, resolvedTestCount.
-	mu           sync.Mutex
-	buffer       []*models.Mock
-	mappingChan  chan<- models.TestMockMapping
+	mu          sync.Mutex
+	buffer      []*models.Mock
+	mappingChan chan<- models.TestMockMapping
+
+	// mappingOverflow holds mappings the recorder was not ready to take. The
+	// capture path must never block, but a mapping must never be dropped either
+	// (a lost one becomes a no_mocks failure at replay), so overflow is queued
+	// here and handed over by a single drainer goroutine. Guarded by
+	// mappingOverflowMu, which is a leaf: never take m.mu while holding it.
+	mappingOverflowMu sync.Mutex
+	mappingOverflow   []models.TestMockMapping
+	mappingDraining   bool
+	mappingStreamCtx  context.Context
+	// mappingGen identifies the current stream. Bumped on every
+	// SetMappingChannel so a drainer left over from a previous stream retires
+	// instead of clearing the new stream's queue.
+	mappingGen   uint64
 	firstReqSeen bool
 	memoryPause  bool
 
@@ -337,10 +352,154 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	}
 }
 
-func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
+// mappingOverflowCap bounds the queue of mappings the recorder has not taken yet.
+// Unbounded would be worse than the drop it replaces: the agent already carries a
+// large resident footprint, and trading bounded partial loss for an OOM kill loses
+// the WHOLE recording. Sized far above any real backlog — the recorder drains in
+// batches, so reaching this means it is wedged, not merely slow.
+const mappingOverflowCap = 10000
+
+// SetMappingChannel installs the recorder's mapping stream. streamCtx must be the
+// ctx of the HTTP request serving that stream: it is the only signal that the
+// recorder has gone away, and the overflow drainer needs it to know when a
+// blocking hand-off can never complete.
+//
+// A new stream fully supersedes the old one. mappingGen is bumped so any drainer
+// still blocked on the previous stream retires instead of draining this stream's
+// queue into a channel nobody reads — and so it cannot clear a queue that is no
+// longer its own.
+func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<- models.TestMockMapping) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.mappingChan = ch
+	m.mu.Unlock()
+
+	m.mappingOverflowMu.Lock()
+	m.mappingStreamCtx = streamCtx
+	// Anything the previous stream never handed over belongs to a recording that
+	// has already ended.
+	m.mappingOverflow = nil
+	m.mappingGen++
+	// The previous drainer (if any) retires on its generation check, so this
+	// stream starts with no drainer and the next overflow spawns a fresh one.
+	m.mappingDraining = false
+	m.mappingOverflowMu.Unlock()
+}
+
+// sendMapping hands a mapping to the recorder without ever blocking the capture
+// path and without ever discarding the mapping.
+//
+// This used to be a bare non-blocking send with a `default:` that threw the
+// mapping away. That is a data-loss bug, not a backpressure policy: the recorder
+// only rewrites mappings.yaml so fast, and once its 100-slot buffer filled — which
+// a heavy concurrent recording reliably does — the dropped mappings surfaced at
+// replay as "no_mocks" for those tests, with nothing logged anywhere. Measured: a
+// recorder that stalls to write received 4 of 500 mappings.
+//
+// The capture path still must never block (ResolveRange runs from the ingress
+// hook), so the fast path stays non-blocking; anything that does not fit is queued
+// and handed over by a single drainer goroutine that CAN block. Ordering: once a
+// drainer is live every mapping queues behind it, so the fast path can never
+// overtake an entry the drainer is mid-send on.
+func (m *SyncMockManager) sendMapping(ch chan<- models.TestMockMapping, entry models.TestMockMapping) {
+	m.mappingOverflowMu.Lock()
+	if m.mappingDraining {
+		// A drainer is live — it may be mid-send with overflow momentarily empty,
+		// so gate on the drainer, not on the queue length, or this would overtake.
+		if len(m.mappingOverflow) >= mappingOverflowCap {
+			m.mappingOverflowMu.Unlock()
+			m.reportMappingOverflowFull()
+			return
+		}
+		m.mappingOverflow = append(m.mappingOverflow, entry)
+		m.mappingOverflowMu.Unlock()
+		return
+	}
+	m.mappingOverflowMu.Unlock()
+
+	select {
+	case ch <- entry:
+		return
+	default:
+	}
+
+	m.mappingOverflowMu.Lock()
+	if m.mappingDraining {
+		// Another caller started a drainer while we were trying the fast path.
+		m.mappingOverflow = append(m.mappingOverflow, entry)
+		m.mappingOverflowMu.Unlock()
+		return
+	}
+	m.mappingOverflow = append(m.mappingOverflow, entry)
+	m.mappingDraining = true
+	gen := m.mappingGen
+	streamCtx := m.mappingStreamCtx
+	m.mappingOverflowMu.Unlock()
+
+	go m.drainMappingOverflow(ch, streamCtx, gen)
+}
+
+// reportMappingOverflowFull logs the only case in which a mapping is still lost:
+// the recorder has wedged and the queue has hit its cap. Never silent.
+func (m *SyncMockManager) reportMappingOverflowFull() {
+	if logger := m.dropLogger(); logger != nil {
+		logger.Error("mapping overflow is full; dropping mappings",
+			zap.Int("cap", mappingOverflowCap),
+			zap.String("next_step", "the recorder is not draining the mapping stream; affected tests will be missing from mappings.yaml and replay will report no_mocks for them — report this with the record logs"))
+	}
+}
+
+// drainMappingOverflow hands queued mappings over one at a time, blocking until
+// each is taken. It runs on its own goroutine so the capture path never waits.
+//
+// gen pins it to the stream it was started for: if the recorder reconnects,
+// SetMappingChannel bumps the generation and this drainer retires without touching
+// the new stream's queue or its drainer slot.
+func (m *SyncMockManager) drainMappingOverflow(ch chan<- models.TestMockMapping, streamCtx context.Context, gen uint64) {
+	var done <-chan struct{}
+	if streamCtx != nil {
+		done = streamCtx.Done()
+	}
+
+	for {
+		m.mappingOverflowMu.Lock()
+		if m.mappingGen != gen {
+			// Superseded: the new stream owns mappingDraining and the queue now.
+			m.mappingOverflowMu.Unlock()
+			return
+		}
+		if len(m.mappingOverflow) == 0 {
+			m.mappingDraining = false
+			m.mappingOverflowMu.Unlock()
+			return
+		}
+		entry := m.mappingOverflow[0]
+		m.mappingOverflow = m.mappingOverflow[1:]
+		m.mappingOverflowMu.Unlock()
+
+		select {
+		case ch <- entry:
+		case <-done:
+			// The recorder's stream is gone, so this can never be delivered. That
+			// is real data loss — say so loudly; it was silent before.
+			m.mappingOverflowMu.Lock()
+			if m.mappingGen != gen {
+				// A new stream took over while we blocked; its queue is not ours
+				// to clear and its drainer slot is not ours to release.
+				m.mappingOverflowMu.Unlock()
+				return
+			}
+			lost := len(m.mappingOverflow) + 1
+			m.mappingOverflow = nil
+			m.mappingDraining = false
+			m.mappingOverflowMu.Unlock()
+			if logger := m.dropLogger(); logger != nil {
+				logger.Error("mapping stream closed with mappings still queued",
+					zap.Int("lost_mappings", lost),
+					zap.String("next_step", "these tests will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+			}
+			return
+		}
+	}
 }
 
 // SetLogger installs a zap.Logger for drop-path reporting. Callers
@@ -880,10 +1039,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			if len(ids) == 0 {
 				continue
 			}
-			select {
-			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
-			default:
-			}
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
 		}
 	}
 	// Deliver any queued deferred-orphan revokes on the same open stream. Runs
@@ -1461,24 +1617,19 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		m.sendToOutChanOwned(om.mock, om.owner)
 	}
 	if mappingEntry != nil && mappingChan != nil {
-		select {
-		case mappingChan <- *mappingEntry:
-		default:
-		}
+		m.sendMapping(mappingChan, *mappingEntry)
 	}
-	// Retroactive mapping entries for mocks late-binned into past windows.
-	// The recorder Upserts mappings by test name, so a second entry for an
-	// already-resolved test merges into its existing mapping rather than
-	// replacing it.
+	// Retroactive mapping entries for mocks late-binned into past windows. These
+	// are a DELTA for an already-resolved test, not its full set, so the recorder
+	// MUST union them into that test's existing mapping. It used to replace, which
+	// silently deleted the mocks the original resolution recorded — see
+	// mergeMockEntries in the mapping store.
 	if mappingChan != nil {
 		for tn, ids := range lateMappings {
 			if len(ids) == 0 {
 				continue
 			}
-			select {
-			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
-			default:
-			}
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
 		}
 	}
 }
@@ -1621,10 +1772,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			if len(ids) == 0 {
 				continue
 			}
-			select {
-			case mappingChan <- models.TestMockMapping{TestName: tn, MockIDs: ids}:
-			default:
-			}
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
 		}
 	}
 }
