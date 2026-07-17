@@ -245,12 +245,7 @@ jobs:
       - name: Checkout samples-java repository
         uses: actions/checkout@v4
         with:
-          # TEMP: the httppoll scenario needs the async-config-poll sample
-          # changes from keploy/samples-java#147, not yet on main. Pin the fork
-          # branch until #147 merges, then REVERT this to
-          # `repository: keploy/samples-java` (main). See keploy#4368.
-          repository: Aditya-eddy/samples-java
-          ref: async-config-poll-httppoll
+          repository: keploy/samples-java
           path: samples-java
 
       # Spring Boot 1.5 sample -> Java 8 (not the Java 17 the other jobs use);
