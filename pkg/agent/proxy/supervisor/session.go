@@ -65,6 +65,17 @@ type Session struct {
 	// Acks is the parser's receive channel for directive acknowledgements.
 	Acks <-chan directive.Ack
 
+	// PreClaimPauseBarrier, when non-nil, lets the parser install the
+	// relay's pause barrier synchronously from its own goroutine BEFORE
+	// sending a directive that also installs one. Used by parsers that
+	// need to defeat the directive-channel scheduling race when the next
+	// real-socket Read is about to deliver bytes that would corrupt the
+	// upstream protocol state (Postgres SSL preamble: C2D forwarding the
+	// client's TLS ClientHello to upstream as cleartext before the
+	// directive handler's beginPause runs). Idempotent — the matching
+	// endPause runs from the directive handler's normal path.
+	PreClaimPauseBarrier func() bool
+
 	// Mocks is the mock-sink channel. Parsers should call EmitMock
 	// rather than sending here directly so the incomplete-mock gate
 	// and the post-record hook chain run consistently.
