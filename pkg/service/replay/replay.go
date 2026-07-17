@@ -2867,11 +2867,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	// When PreserveFailedMocks is enabled (k8s-proxy autoreplay), skip pruning if any test
-	// failed or was marked obsolete so all recorded mocks remain available for UI inspection.
-	skipPruning := r.config.Test.PreserveFailedMocks && (failure > 0 || obsolete > 0)
-	if r.config.Test.RemoveUnusedMocks && r.instrument && !skipPruning {
+	// Remove the mocks no test case consumed (when no base path is provided).
+	//
+	// Pruning keeps what the tests consumed and deletes the rest, so it is only
+	// sound when a mock going unconsumed actually means the app didn't need it. A
+	// run whose app could not reach its dependencies fails every test and consumes
+	// nothing — pruning that would delete the recording's mocks because of an
+	// infrastructure fault. shouldPrune holds them; see shouldSkipPruning for the
+	// full set of reasons.
+	pruneEnabled := r.config.Test.RemoveUnusedMocks && r.instrument
+	prune := shouldPrune(r.config.Test.RemoveUnusedMocks, r.instrument, success, failure, obsolete,
+		r.config.Test.PreserveFailedMocks, testCaseResults)
+	if pruneEnabled && !prune {
+		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved",
+			zap.String("testSetID", testSetID),
+			zap.Int("passed", success),
+			zap.Int("failed", failure),
+			zap.Bool("appUnreachable", anyAppConnectionError(testCaseResults)))
+	}
+	if prune {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
 			added := retainNoisyTestCaseMocks(noisyTestCases, actualTestMockMappings, passingTotalConsumedMocks)
@@ -3754,6 +3768,85 @@ func appendCategoryUnique(cats []models.FailureCategory, c models.FailureCategor
 		}
 	}
 	return append(cats, c)
+}
+
+// anyAppConnectionError reports whether any test in the run failed because the
+// application produced no response at all (connection refused/reset/EOF). Such a
+// test says nothing about which mocks are needed — its request never reached the
+// app — so it must not be read as evidence that mocks are unused.
+//
+// Reads the TOP-LEVEL TestResult.FailureInfo, not Result.FailureInfo, for the
+// simple reason that CreateFailedTestResult only sets the category there. Both
+// survive the report store (it holds the structs in memory; ReportResults reads
+// Result.FailureInfo.Risk off the very same values), so this is about where the
+// category is written, not about what survives.
+func anyAppConnectionError(results []models.TestResult) bool {
+	for _, tr := range results {
+		for _, c := range tr.FailureInfo.Category {
+			if c == models.AppConnectionError {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pruneInputUntrustworthy reports whether a run's consumed-mock set is too weak
+// to justify deleting anything.
+//
+// Pruning keeps what the tests consumed and deletes the rest, which is only sound
+// when a test not consuming a mock actually means "the app didn't need it". Two
+// cases break that:
+//
+//   - success == 0: no test passed, so nothing vouches for any mock. The keep-set
+//     collapses to what the startup/never-executed paths contributed, and every
+//     mock a real request would have used is deleted.
+//   - any AppConnectionError: those requests never reached the app, so they
+//     consumed no mocks for want of a connection, not for want of need.
+//
+// Both mean "no information", and pruning reads that as "delete" — which is the
+// bug. Note this is NOT the same as "the run produced no signal at all": a run
+// can have passing tests AND one connection error, and it lands here because that
+// one test's mocks would be wrongly deleted. Callers must not describe it as a
+// zero-passing run.
+func pruneInputUntrustworthy(success int, results []models.TestResult) bool {
+	return success == 0 || anyAppConnectionError(results)
+}
+
+// shouldSkipPruning decides whether a completed run is allowed to delete recorded
+// mocks. Pruning is destructive and its input (the keep-set) is only trustworthy
+// when the run actually produced signal, so there are two independent reasons to
+// refuse:
+//
+//   - the keep-set is untrustworthy (pruneInputUntrustworthy): no test passed, or
+//     some request never reached the app. Mocks went unconsumed for lack of
+//     evidence, not because they are unused. This reason is deliberately
+//     INDEPENDENT of preserveFailedMocks: callers turn that flag off (k8s-proxy
+//     auto-replay sets it false), so it cannot serve as the safety net here. A
+//     crashed container must never be able to destroy mocks.
+//   - preserveFailedMocks (opt-in): a caller that wants every recorded mock kept
+//     available for inspection whenever anything failed or went obsolete.
+//
+// shouldPrune is the COMPLETE gate on the destructive prune: it must be enabled
+// (RemoveUnusedMocks), keploy must be instrumenting the run, and the run's
+// consumed-mock set must be trustworthy enough to delete against.
+//
+// It exists as one function because the data-loss bug lives in this conjunction,
+// not in shouldSkipPruning alone — a correct predicate that isn't wired into the
+// decision deletes mocks just the same. Keeping the whole condition here means a
+// unit test can pin the wiring instead of only the predicate.
+func shouldPrune(removeUnusedMocks, instrument bool, success, failure, obsolete int, preserveFailedMocks bool, results []models.TestResult) bool {
+	if !removeUnusedMocks || !instrument {
+		return false
+	}
+	return !shouldSkipPruning(success, failure, obsolete, preserveFailedMocks, results)
+}
+
+func shouldSkipPruning(success, failure, obsolete int, preserveFailedMocks bool, results []models.TestResult) bool {
+	if pruneInputUntrustworthy(success, results) {
+		return true
+	}
+	return preserveFailedMocks && (failure > 0 || obsolete > 0)
 }
 
 func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
