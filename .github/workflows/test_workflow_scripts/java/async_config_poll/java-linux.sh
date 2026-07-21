@@ -74,9 +74,28 @@ case "$SCENARIO" in
     POLL_SETTLE=$((POLL_HOLD_SECONDS + 5))   # hold + margin for the poll to resolve & be recorded
     cp keploy-httppoll.yml keploy.yml        # activate the httpPoll lane for this run
     ;;
+  boot_blocking)
+    # Record the watch on the background daemon (as httppoll), but REPLAY with the
+    # app boot-BLOCKING synchronously on the watch=true poll (BLOCK_BOOT_ON_WATCH).
+    # This is the boot-deadlock shape: the old anchor-hold engine parked the poll
+    # so the app never became ready; the value-epoch engine serves the startup
+    # epoch immediately, so the app boots and the ingress tests pass. Uses the
+    # httpPoll lane config. CI runs the build binary (= the value-epoch engine),
+    # so this cell guards the fix; the old-engine deadlock is shown out of CI.
+    APP_ENV="env WATCH_ONCE=true RULES_DELAY_MS=600"                   # record: background watch
+    REPLAY_APP_ENV="env BLOCK_BOOT_ON_WATCH=true RULES_DELAY_MS=600"   # replay: boot blocks on the watch
+    POLL_HOLD_SECONDS=5
+    STUB_ENV="POLL_HOLD_SECONDS=${POLL_HOLD_SECONDS}"
+    POLL_SETTLE=$((POLL_HOLD_SECONDS + 5))
+    cp keploy-httppoll.yml keploy.yml        # activate the httpPoll lane for this run
+    ;;
   *)
-    echo "::error::unknown SCENARIO='$SCENARIO' (expected periodic|httppoll)"; exit 1 ;;
+    echo "::error::unknown SCENARIO='$SCENARIO' (expected periodic|httppoll|boot_blocking)"; exit 1 ;;
 esac
+
+# Most scenarios drive the app identically at record and replay; boot_blocking
+# overrides only the replay env (to boot-block on the watch), so default it here.
+REPLAY_APP_ENV="${REPLAY_APP_ENV:-$APP_ENV}"
 
 wait_for_mysql() {
   section "Wait for MySQL (real networked server)"
@@ -173,12 +192,12 @@ echo "== async-stamped mocks =="; grep -acE '^async:$' keploy/test-set-0/mocks.y
 # anchorPos: (a collapsed value epoch). Under the value-epoch model there is no
 # open-duration field any more: pollDurationMs must NOT appear. This is the
 # record-side proof of the feature.
-if [[ "$SCENARIO" == "httppoll" ]]; then
+if [[ "$SCENARIO" == "httppoll" || "$SCENARIO" == "boot_blocking" ]]; then
   hp=$(grep -acE '^ +poll: true$' keploy/test-set-0/mocks.yaml 2>/dev/null || true)
-  [[ "${hp:-0}" -ge 1 ]] || { echo "::error::httppoll: no async poll (poll: true) mock recorded — the long-poll was not captured"; exit 1; }
-  grep -aq 'poll: true' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock missing 'poll: true' in its async block"; exit 1; }
-  ! grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock still carries the retired pollDurationMs field"; exit 1; }
-  echo "httppoll: recorded ${hp} async poll mock(s) as value epochs (poll: true, no pollDurationMs)."
+  [[ "${hp:-0}" -ge 1 ]] || { echo "::error::${SCENARIO}: no async poll (poll: true) mock recorded — the long-poll was not captured"; exit 1; }
+  grep -aq 'poll: true' keploy/test-set-0/mocks.yaml || { echo "::error::${SCENARIO}: recorded poll mock missing 'poll: true' in its async block"; exit 1; }
+  ! grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::${SCENARIO}: recorded poll mock still carries the retired pollDurationMs field"; exit 1; }
+  echo "${SCENARIO}: recorded ${hp} async poll mock(s) as value epochs (poll: true, no pollDurationMs)."
 fi
 endsec
 
@@ -190,7 +209,7 @@ endsec
 
 section "Replay"
 set +e
-"$REPLAY_BIN" test -c "$APP_ENV $APP_JAVA -jar $JAR" --delay 25 --api-timeout 60 2>&1 | tee test_logs.txt
+"$REPLAY_BIN" test -c "$REPLAY_APP_ENV $APP_JAVA -jar $JAR" --delay 25 --api-timeout 60 2>&1 | tee test_logs.txt
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
@@ -237,6 +256,20 @@ echo "Async-egress engine served ${served} watch poll(s) with no shape drift."
 if [[ "$SCENARIO" == "httppoll" ]]; then
   [[ "${served:-0}" -ge 1 ]] || { echo "::error::httppoll: async engine served 0 watch polls — the recorded poll value was not served on replay"; exit 1; }
   echo "httppoll: async engine served ${served} poll value(s) recorded via the async poll."
+fi
+
+# boot_blocking: the app boot-BLOCKED on the synchronous watch=true poll. The
+# value-epoch engine must have SERVED it from the startup epoch so boot could
+# proceed — the ingress tests above only PASS because the app became ready. Had
+# the engine parked it (the old anchor-hold behavior) the app would never have
+# accepted connections and those tests would have failed with connection-
+# refused. Assert the app's own "boot watch returned" log line so a regression
+# that re-introduces parking is caught even if timing masked the failures.
+if [[ "$SCENARIO" == "boot_blocking" ]]; then
+  grep -aq "BLOCK_BOOT_ON_WATCH: synchronous config watch returned" test_logs.txt \
+    || { echo "::error::boot_blocking: the app's boot-blocking config watch never returned — the poll was parked instead of served (value-epoch regression)"; exit 1; }
+  [[ "${served:-0}" -ge 1 ]] || { echo "::error::boot_blocking: async engine served 0 watch polls on replay"; exit 1; }
+  echo "boot_blocking: boot-blocking config watch served from the startup epoch; app booted and ingress PASSED."
 fi
 endsec
 
