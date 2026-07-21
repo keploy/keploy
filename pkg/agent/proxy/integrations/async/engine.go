@@ -253,7 +253,9 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 		e.mu.Unlock()
 		return e.keepAlive(p, lane)
 	}
-	e.holdThrottle(ctx, lane.ThrottleDuration()) // pace + wake-early; holds e.mu
+	if lane.IsPoll() {
+		e.holdThrottle(ctx, lane.ThrottleDuration()) // pace + wake-early; holds e.mu
+	}
 	cur := s.currentEpoch(e.completed)
 	e.mu.Unlock()
 	if cur == nil {

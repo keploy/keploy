@@ -11,7 +11,10 @@ import (
 func TestDecideHeldUpToThrottle(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0")})
-	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 80}
+	// Type must end in "Poll" (IsPoll) — the throttle hold is gated to poll
+	// lanes only; BaseType() still strips the suffix to "fake", resolving to
+	// the parser newTestEngine registered under that key.
+	lane := models.AsyncLane{Name: "L", Type: "fakePoll", ThrottleMs: 80}
 	start := time.Now()
 	rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
 	elapsed := time.Since(start)
@@ -23,11 +26,31 @@ func TestDecideHeldUpToThrottle(t *testing.T) {
 	}
 }
 
+// TestDecideNonPollLaneSkipsThrottle proves the throttle hold (Fix: gate to
+// poll lanes only) does not apply to a non-poll async lane: Type "fake" does
+// not end in "Poll" (IsPoll false), so Decide must serve its current epoch
+// immediately even with a large ThrottleMs — the hold is a poll-only pacing
+// knob, not a blanket delay on every async Decide.
+func TestDecideNonPollLaneSkipsThrottle(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0")})
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 5000} // non-poll: large throttle must be ignored
+	start := time.Now()
+	rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
+	elapsed := time.Since(start)
+	if rec == nil || rec.Spec.HTTPResp.Body != "V0" {
+		t.Fatalf("want V0, got %v", rec)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("non-poll lane must not be held by throttle, took %v (ThrottleMs=5000)", elapsed)
+	}
+}
+
 func TestDecideWakesEarlyOnAdvance(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0"), asyncMock("L", 2, 1, "V1")})
-	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 5000} // long, must be cut short
-	e.AdvanceWindow()                                                   // windowSeen, completed=0
+	lane := models.AsyncLane{Name: "L", Type: "fakePoll", ThrottleMs: 5000} // poll lane; long, must be cut short
+	e.AdvanceWindow()                                                       // windowSeen, completed=0
 	got := make(chan string, 1)
 	start := time.Now()
 	go func() {
@@ -52,7 +75,7 @@ func TestDecideWakesEarlyOnAdvance(t *testing.T) {
 func TestDecideReturnsOnCtxCancel(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0")})
-	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 5000}
+	lane := models.AsyncLane{Name: "L", Type: "fakePoll", ThrottleMs: 5000} // poll lane, so it actually holds
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
 	start := time.Now()
