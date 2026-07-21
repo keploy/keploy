@@ -30,7 +30,7 @@ func TestServesCurrentEpochByCompleted(t *testing.T) {
 		asyncMock("L", 1, 0, "V0"),
 		asyncMock("L", 2, 2, "V1"),
 	})
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
 
 	// completed=0 (boot) -> V0
 	if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
@@ -50,7 +50,7 @@ func TestServesCurrentEpochByCompleted(t *testing.T) {
 func TestEpochIsReselectableNotConsumed(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0")})
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
 	for i := 0; i < 3; i++ {
 		if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
 			t.Fatalf("poll %d: epoch must be re-selectable, got %v", i, rec)
@@ -60,8 +60,8 @@ func TestEpochIsReselectableNotConsumed(t *testing.T) {
 
 func TestKeepAliveWhenNoEpochEffective(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 5, "late")}) // first epoch at pos 5
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	e.Load([]*models.Mock{asyncMock("L", 1, 5, "late")})               // first epoch at pos 5
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}  // keep the suite fast; default is 1s
 	rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{}) // completed=0 < 5
 	if rec != nil || string(ka) != "KA" {
 		t.Fatalf("no epoch effective yet: want keep-alive, got rec=%v ka=%q", rec, ka)
@@ -70,8 +70,8 @@ func TestKeepAliveWhenNoEpochEffective(t *testing.T) {
 
 func TestGatedByAnchorPosition(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 1, "after-T1")}) // anchorPos=1
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	e.Load([]*models.Mock{asyncMock("L", 1, 1, "after-T1")})          // anchorPos=1
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
 
 	rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{}) // completed=0 -> not armed
 	if rec != nil || string(ka) != "KA" {
@@ -86,8 +86,8 @@ func TestGatedByAnchorPosition(t *testing.T) {
 
 func TestStartupArmedImmediately(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 0, "boot")}) // anchorPos=0 (startup)
-	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake"}, &models.Mock{})
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "boot")})                                                                   // anchorPos=0 (startup)
+	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}, &models.Mock{}) // small throttle: keep the suite fast
 	if rec == nil || rec.Spec.HTTPResp.Body != "boot" {
 		t.Fatalf("startup mock should be armed immediately, got %v", rec)
 	}
@@ -96,7 +96,7 @@ func TestStartupArmedImmediately(t *testing.T) {
 func TestShapeMismatchServesAndFlags(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: false, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "a")})
-	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake"}, &models.Mock{})
+	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}, &models.Mock{}) // small throttle: keep the suite fast
 	if rec == nil {
 		t.Fatal("mismatch must still serve the recorded mock")
 	}
@@ -110,7 +110,7 @@ func TestShapeMismatchServesAndFlags(t *testing.T) {
 type otherFake struct{ fakeParser }
 
 func TestPluggableSecondTransport(t *testing.T) {
-	lane := models.AsyncLane{Name: "K", Type: "other"}
+	lane := models.AsyncLane{Name: "K", Type: "other", ThrottleMs: 10} // keep the suite fast; default is 1s
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane},
 		map[string]AsyncParser{"other": &otherFake{fakeParser{matches: true, shapeOK: true, empty: []byte("EK")}}})
 	e.Load([]*models.Mock{asyncMock("K", 1, 0, "kafka-ish")})

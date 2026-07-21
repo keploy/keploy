@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -241,8 +242,10 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 
 // Decide returns the recorded response currently in effect for the lane (the
 // last epoch with effectiveFromPos <= completed), or a keep-alive when no epoch
-// is effective yet / the lane is unknown. It never blocks on an anchor.
-func (e *Engine) Decide(_ context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
+// is effective yet / the lane is unknown. It never blocks on an anchor, but it
+// does hold each poll up to lane.ThrottleDuration() (see holdThrottle) so
+// unchanged polls are paced instead of served back-to-back.
+func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
 	e.mu.Lock()
 	p := e.parsers[lane.BaseType()]
 	s := e.streams[lane.Name]
@@ -250,12 +253,37 @@ func (e *Engine) Decide(_ context.Context, lane models.AsyncLane, live *models.M
 		e.mu.Unlock()
 		return e.keepAlive(p, lane)
 	}
+	e.holdThrottle(ctx, lane.ThrottleDuration()) // pace + wake-early; holds e.mu
 	cur := s.currentEpoch(e.completed)
 	e.mu.Unlock()
 	if cur == nil {
 		return e.keepAlive(p, lane)
 	}
 	return e.decideServe(p, lane, cur.mock, live)
+}
+
+// holdThrottle blocks up to d, or until an AdvanceWindow/OnTestComplete
+// broadcast or ctx cancel, whichever comes first. Caller holds e.mu; it is
+// released while parked and re-held on return. This paces unchanged polls
+// (no busy loop) while letting a value change wake the poll early. Serving the
+// current epoch regardless on wake means a spurious wakeup is harmless.
+func (e *Engine) holdThrottle(ctx context.Context, d time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
+	timer := time.AfterFunc(d, func() {
+		e.mu.Lock()
+		e.cond.Broadcast()
+		e.mu.Unlock()
+	})
+	defer timer.Stop()
+	stop := context.AfterFunc(ctx, func() {
+		e.mu.Lock()
+		e.cond.Broadcast()
+		e.mu.Unlock()
+	})
+	defer stop()
+	e.cond.Wait() // releases e.mu; wakes on timer, broadcast, or ctx
 }
 
 // keepAlive returns the parser's "no data yet" payload for lane. Nil-safe:
@@ -269,10 +297,11 @@ func (e *Engine) keepAlive(p AsyncParser, lane models.AsyncLane) (*models.Mock, 
 	return nil, ka, err
 }
 
-// decideServe runs the shape-match/verdict for a recorded delivery that has
-// been armed (and, for polls, already released from its hold) and is about to
-// be served. ctx is accepted for symmetry with Decide/future cancellation-
-// aware matching; the match itself is synchronous today.
+// decideServe runs the shape-match/verdict for the epoch Decide selected as
+// current — after Decide's throttle hold (holdThrottle), if any, has elapsed
+// or been woken early — and is about to be served. It takes no ctx: the match
+// itself is synchronous and unlocked except for the pass/flag tally update, so
+// it never serializes unrelated lanes' Load/Report/advance.
 func (e *Engine) decideServe(p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
 	if p == nil {
 		if e.logger != nil {
