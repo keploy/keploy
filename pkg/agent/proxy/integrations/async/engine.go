@@ -338,9 +338,14 @@ func (e *Engine) Report() ReportSnapshot {
 }
 
 // LogReport emits the async verdict tally so it is visible in keploy's output
-// at end of replay: served-and-shape-matched, shape-flags (served despite
-// request drift), and armed-but-never-polled (not-exercised). Each shape flag
-// is logged at Info with a remediation hint.
+// at end of replay: served-and-shape-matched (served) and shape-flags (served
+// despite request drift). The not_exercised and held fields stay in the
+// emitted log line for output-format stability (CI greps them) but are always
+// 0 under the value-epoch model: every epoch is always serveable/re-
+// selectable, so nothing arms-but-never-gets-exercised, and Decide no longer
+// holds a lane's connection open — a poll lane is merely paced by throttle
+// (holdThrottle), served lanes serve immediately. Each shape flag is logged at
+// Info with a remediation hint.
 func (e *Engine) LogReport(logger *zap.Logger) {
 	e.logOnce.Do(func() {
 		s := e.Report()
