@@ -13,15 +13,14 @@ import (
 // its OWN block — Spec.Async in memory, a top-level `async:` block on the
 // recorded doc — rather than merged into the owning parser's flat Spec.Metadata.
 // Its PRESENCE (non-nil) marks a mock as async egress; Poll marks a held
-// long-poll delivery whose open-duration is captured in PollDurationMs. A poll
-// mock keeps its base kind (e.g. Http) — poll-ness lives here, not in the Kind.
+// long-poll delivery. A poll mock keeps its base kind (e.g. Http) — poll-ness
+// lives here, not in the Kind.
 type AsyncMeta struct {
-	Lane           string `yaml:"lane" json:"lane" bson:"lane"`                                                             // lane name (routing identity)
-	Seq            int    `yaml:"seq" json:"seq" bson:"seq"`                                                                // per-lane order counter
-	AnchorAfter    string `yaml:"anchorAfter,omitempty" json:"anchorAfter,omitempty" bson:"anchorAfter,omitempty"`          // last completed testcase Name, or "startup" (readability)
-	AnchorPos      int    `yaml:"anchorPos" json:"anchorPos" bson:"anchorPos"`                                              // number of testcases completed before this egress fired
-	Poll           bool   `yaml:"poll,omitempty" json:"poll,omitempty" bson:"poll,omitempty"`                               // held long-poll delivery
-	PollDurationMs int64  `yaml:"pollDurationMs,omitempty" json:"pollDurationMs,omitempty" bson:"pollDurationMs,omitempty"` // recorded open-duration (ms), fidelity only
+	Lane        string `yaml:"lane" json:"lane" bson:"lane"`                                                    // lane name (routing identity)
+	Seq         int    `yaml:"seq" json:"seq" bson:"seq"`                                                       // per-lane order counter
+	AnchorAfter string `yaml:"anchorAfter,omitempty" json:"anchorAfter,omitempty" bson:"anchorAfter,omitempty"` // last completed testcase Name, or "startup" (readability)
+	AnchorPos   int    `yaml:"anchorPos" json:"anchorPos" bson:"anchorPos"`                                     // epoch effective-from: testcases completed before this value took effect (0 = boot)
+	Poll        bool   `yaml:"poll,omitempty" json:"poll,omitempty" bson:"poll,omitempty"`                      // held long-poll delivery
 }
 
 // AnchorStartup is the AsyncMeta.AnchorAfter value for async mocks that fired

@@ -136,7 +136,7 @@ func TestAsyncLaneIsPollAndBaseType(t *testing.T) {
 // block can be mutated (e.g. by a gob-write path) without racing the original.
 func TestDeepCopyIsolatesAsyncMeta(t *testing.T) {
 	orig := &Mock{Kind: HTTP, Spec: MockSpec{
-		Async: &AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 3, Poll: true, PollDurationMs: 8000},
+		Async: &AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 3, Poll: true},
 	}}
 	c := orig.DeepCopy()
 	if c.Spec.Async == nil || *c.Spec.Async != *orig.Spec.Async {
