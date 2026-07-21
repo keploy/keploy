@@ -34,7 +34,8 @@ func (fakeAsyncParser) MatchesLane(_ *models.Mock, _ models.AsyncLane) bool { re
 func (fakeAsyncParser) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
-func (fakeAsyncParser) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return []byte("KA"), nil }
+func (fakeAsyncParser) EmptyResponse(_ models.AsyncLane) ([]byte, error)           { return []byte("KA"), nil }
+func (fakeAsyncParser) ResponseValueKey(_ *models.Mock, _ models.AsyncLane) string { return "" }
 
 func asyncMock(lane string, seq int, body string) *models.Mock {
 	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{

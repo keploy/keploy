@@ -22,6 +22,12 @@ type AsyncParser interface {
 	// EmptyResponse returns the parser's "no data yet" keep-alive payload for
 	// the lane, served when no async mock is armed. Always synthesizable.
 	EmptyResponse(lane models.AsyncLane) ([]byte, error)
+
+	// ResponseValueKey returns a stable fingerprint of the VALUE a recorded
+	// async response conveys, so the recorder can detect when the value changes
+	// across poll cycles (identical value => identical key). Volatile/no-signal
+	// fields (e.g. Date headers) are excluded.
+	ResponseValueKey(m *models.Mock, lane models.AsyncLane) string
 }
 
 // AsyncAware is an optional interface a parser implements so the proxy can

@@ -20,7 +20,8 @@ func (laneStub) MatchesLane(m *models.Mock, _ models.AsyncLane) bool {
 func (laneStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
-func (laneStub) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return nil, nil }
+func (laneStub) EmptyResponse(_ models.AsyncLane) ([]byte, error)           { return nil, nil }
+func (laneStub) ResponseValueKey(_ *models.Mock, _ models.AsyncLane) string { return "" }
 
 func egress(kind string, completedAt time.Time) *models.Mock {
 	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{

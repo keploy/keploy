@@ -152,7 +152,8 @@ func (holdStub) MatchesLane(*models.Mock, models.AsyncLane) bool { return true }
 func (holdStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
-func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error) { return []byte("204"), nil }
+func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error)         { return []byte("204"), nil }
+func (holdStub) ResponseValueKey(*models.Mock, models.AsyncLane) string { return "" }
 
 // A poll delivery (Async.Poll) is HELD until completed reaches its anchorPos,
 // then served — while concurrent AdvanceWindow calls never block (the hold must
