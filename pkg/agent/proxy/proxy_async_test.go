@@ -45,9 +45,11 @@ func asyncMock(lane string, seq int, body string) *models.Mock {
 }
 
 // TestLoadAsyncMocksForwardsToEngine proves Proxy.LoadAsyncMocks hands the
-// complete corpus to the async engine's run-once Load, so a subsequent Decide
-// serves the first armed async mock in seq order (and the engine's Load filter
-// ignores the interleaved non-async mock).
+// complete corpus to the async engine's run-once Load (the engine's Load
+// filter ignores the interleaved non-async mock), and that under the
+// value-epoch model two epochs recorded at the same AnchorPos resolve to the
+// newest one: both "a" (seq 1) and "b" (seq 2) are effective at completed=0,
+// so Decide serves "b" — the last value received at that position.
 func TestLoadAsyncMocksForwardsToEngine(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "fake"}
 	eng := async.NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]async.AsyncParser{"fake": fakeAsyncParser{}})
@@ -58,7 +60,7 @@ func TestLoadAsyncMocksForwardsToEngine(t *testing.T) {
 	p.LoadAsyncMocks([]*models.Mock{asyncMock("L", 1, "a"), nonAsync, asyncMock("L", 2, "b")})
 
 	rec, _, _ := eng.Decide(context.Background(), lane, &models.Mock{})
-	if rec == nil || rec.Spec.HTTPResp.Body != "a" {
-		t.Fatalf("want first async mock 'a', got %v", rec)
+	if rec == nil || rec.Spec.HTTPResp.Body != "b" {
+		t.Fatalf("want newest same-AnchorPos epoch 'b', got %v", rec)
 	}
 }
