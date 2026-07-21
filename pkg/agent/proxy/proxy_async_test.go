@@ -51,7 +51,7 @@ func asyncMock(lane string, seq int, body string) *models.Mock {
 // newest one: both "a" (seq 1) and "b" (seq 2) are effective at completed=0,
 // so Decide serves "b" — the last value received at that position.
 func TestLoadAsyncMocksForwardsToEngine(t *testing.T) {
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}
 	eng := async.NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]async.AsyncParser{"fake": fakeAsyncParser{}})
 	p := &Proxy{logger: zap.NewNop(), asyncEngine: eng}
 
