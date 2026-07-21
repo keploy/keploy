@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // AsyncMeta is the async-egress engine's per-mock bookkeeping. It is carried in
@@ -46,6 +47,10 @@ type AsyncLane struct {
 	// (watch=false) as ordinary non-async egress.
 	MatchQuery     map[string]string `json:"matchQuery,omitempty" yaml:"matchQuery,omitempty" mapstructure:"matchQuery"`
 	VolatileParams []string          `json:"volatileParams,omitempty" yaml:"volatileParams,omitempty" mapstructure:"volatileParams"`
+	// ThrottleMs bounds how often an UNCHANGED poll is answered during replay,
+	// preventing a long-poll client from busy-looping when answers are instant.
+	// It never changes which value is served — purely a resource knob. 0 => 1s.
+	ThrottleMs int `json:"throttleMs,omitempty" yaml:"throttleMs,omitempty" mapstructure:"throttleMs"`
 }
 
 // EffectiveName returns the caller-supplied Name, or a deterministic name
@@ -125,6 +130,15 @@ func writeSortedKV(w io.Writer, m map[string]string) {
 // HELD open until their resolve testcase instead of served immediately.
 func (l AsyncLane) IsPoll() bool {
 	return len(l.Type) > len("Poll") && strings.EqualFold(l.Type[len(l.Type)-len("Poll"):], "Poll")
+}
+
+// ThrottleDuration is the maximum hold before an unchanged poll is answered at
+// replay. Defaults to 1s when ThrottleMs is unset or non-positive.
+func (l AsyncLane) ThrottleDuration() time.Duration {
+	if l.ThrottleMs <= 0 {
+		return time.Second
+	}
+	return time.Duration(l.ThrottleMs) * time.Millisecond
 }
 
 // BaseType returns the parser type backing the lane: the Type with any "Poll"
