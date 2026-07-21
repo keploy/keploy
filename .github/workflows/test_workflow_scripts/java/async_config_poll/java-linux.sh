@@ -19,13 +19,16 @@
 #   httppoll  — the app opens a SINGLE watch poll (WATCH_ONCE) and the stub HOLDS
 #               it open for a server-timeout (POLL_HOLD_SECONDS) before answering
 #               (lane type: httpPoll, via keploy-httppoll.yml). Asserts the poll
-#               is recorded as an async poll (kind Http + async block poll: true
-#               with a pollDurationMs), and that at replay the async engine HELD
-#               it until its resolve testcase and
-#               then served it (held >= 1). NOTE: the >60s hang-watchdog
-#               exemption that lets a long-held poll be recorded at all is unit-
-#               tested (supervisor TestHangNotDetectedWhenSuspended); this e2e
-#               uses a short hold so CI stays fast.
+#               is recorded as an async poll (kind Http + async block poll: true,
+#               a collapsed value epoch — no pollDurationMs), and that at replay
+#               the async engine SERVED the recorded poll value (served >= 1).
+#               Under the value-epoch model the engine no longer "holds" a poll
+#               connection open pending an anchor; it serves the current epoch
+#               and merely paces an unchanged poll by throttle (see
+#               async.Engine.Decide / holdThrottle). NOTE: the >60s hang-
+#               watchdog exemption that lets a long-held poll be recorded at all
+#               is unit-tested (supervisor TestHangNotDetectedWhenSuspended);
+#               this e2e uses a short hold so CI stays fast.
 #
 # NOTE: this sample is deliberately Spring Boot 1.5 / Java 8, so this script does
 # NOT source update-java.sh (which pins Java 17). The calling workflow sets up
@@ -166,13 +169,16 @@ echo "== recorded mock kinds =="; grep -aE "^kind:" keploy/test-set-0/mocks.yaml
 echo "== async-stamped mocks =="; grep -acE '^async:$' keploy/test-set-0/mocks.yaml 2>/dev/null || true
 
 # httppoll: the single watch poll must be recorded as an async poll — the mock
-# keeps kind Http, and its top-level async block carries poll: true plus an
-# open-duration (pollDurationMs). This is the record-side proof of the feature.
+# keeps kind Http, and its top-level async block carries poll: true and
+# anchorPos: (a collapsed value epoch). Under the value-epoch model there is no
+# open-duration field any more: pollDurationMs must NOT appear. This is the
+# record-side proof of the feature.
 if [[ "$SCENARIO" == "httppoll" ]]; then
   hp=$(grep -acE '^ +poll: true$' keploy/test-set-0/mocks.yaml 2>/dev/null || true)
   [[ "${hp:-0}" -ge 1 ]] || { echo "::error::httppoll: no async poll (poll: true) mock recorded — the long-poll was not captured"; exit 1; }
-  grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock has no pollDurationMs"; exit 1; }
-  echo "httppoll: recorded ${hp} async poll mock(s) with pollDurationMs."
+  grep -aq 'poll: true' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock missing 'poll: true' in its async block"; exit 1; }
+  ! grep -aq 'pollDurationMs:' keploy/test-set-0/mocks.yaml || { echo "::error::httppoll: recorded poll mock still carries the retired pollDurationMs field"; exit 1; }
+  echo "httppoll: recorded ${hp} async poll mock(s) as value epochs (poll: true, no pollDurationMs)."
 fi
 endsec
 
@@ -222,12 +228,15 @@ if [[ "$flags" -ne 0 ]]; then
 fi
 echo "Async-egress engine served ${served} watch poll(s) with no shape drift."
 
-# httppoll: the poll must have been HELD until its resolve testcase (not served
-# on arrival). held >= 1 is the replay-side proof of the feature.
+# httppoll: the recorded poll value must have been served on replay. Under the
+# value-epoch model the engine no longer "holds" a poll connection open (held
+# is always 0 — retained in the log line only for output-format stability, see
+# LogReport); served >= 1 (parsed from the same "async egress verdict" line
+# checked generically above) is the replay-side proof of the feature for this
+# scenario's single long-poll mock.
 if [[ "$SCENARIO" == "httppoll" ]]; then
-  held=$(grep -aoE '"held": [0-9]+' test_logs.txt | tail -n1 | grep -oE '[0-9]+' || true)
-  [[ "${held:-0}" -ge 1 ]] || { echo "::error::httppoll: async engine held 0 polls — the poll was not held until its resolve testcase"; exit 1; }
-  echo "httppoll: async engine held ${held} poll(s) until their resolve testcase."
+  [[ "${served:-0}" -ge 1 ]] || { echo "::error::httppoll: async engine served 0 watch polls — the recorded poll value was not served on replay"; exit 1; }
+  echo "httppoll: async engine served ${served} poll value(s) recorded via the async poll."
 fi
 endsec
 
