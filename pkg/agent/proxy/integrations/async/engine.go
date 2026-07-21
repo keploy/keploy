@@ -240,11 +240,21 @@ func (e *Engine) LaneFor(m *models.Mock) (models.AsyncLane, bool) {
 	return models.AsyncLane{}, false
 }
 
-// Decide returns the recorded response currently in effect for the lane (the
-// last epoch with effectiveFromPos <= completed), or a keep-alive when no epoch
-// is effective yet / the lane is unknown. It never blocks on an anchor, but it
-// does hold each poll up to lane.ThrottleDuration() (see holdThrottle) so
-// unchanged polls are paced instead of served back-to-back.
+// Decide returns the recorded response currently in effect for the lane — the
+// last epoch with effectiveFromPos (Spec.Async.AnchorPos on disk) <= completed,
+// re-selectable — or a keep-alive when no epoch is effective yet / the lane is
+// unknown. It never blocks on an anchor.
+//
+// Scope note: this current-epoch SELECTION applies to EVERY async lane — poll
+// AND non-poll — not only poll lanes. It replaces the old consume-once cursor
+// (which served each recorded entry once, then keep-alived on drain). A non-poll
+// lane therefore now re-serves its last-effective epoch on every request rather
+// than walking a one-shot ordered sequence; sequential one-shot non-poll
+// delivery is intentionally no longer supported. The only async lane that exists
+// today (config-watch) is a value the client re-reads, for which current-epoch
+// is the correct model — TestNonPollServesReselectableCurrentEpoch pins this so a
+// future change can't regress it silently. Only the throttle hold below is gated
+// to poll lanes; unchanged in scope from the pre-value-epoch engine is nothing.
 func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models.Mock) (*models.Mock, []byte, error) {
 	e.mu.Lock()
 	p := e.parsers[lane.BaseType()]
@@ -266,9 +276,18 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 
 // holdThrottle blocks up to d, or until an AdvanceWindow/OnTestComplete
 // broadcast or ctx cancel, whichever comes first. Caller holds e.mu; it is
-// released while parked and re-held on return. This paces unchanged polls
-// (no busy loop) while letting a value change wake the poll early. Serving the
-// current epoch regardless on wake means a spurious wakeup is harmless.
+// released while parked and re-held on return.
+//
+// It paces EVERY poll — including the boot poll and a poll whose epoch already
+// advanced — so the guarantee is "answered within at most d", NOT "spaced d
+// apart". e.cond is shared across lanes and this is a single (non-looping) Wait,
+// so any lane's timer or any AdvanceWindow/OnTestComplete wakes every parked
+// poll; with several concurrent watch connections the per-poll pacing lower
+// bound collapses (fine — one poll per connection is in flight). A spurious or
+// early wake is harmless: Decide re-reads and serves the current epoch
+// regardless. Wake-early-on-change only shortens the wait when an AdvanceWindow
+// races the hold; a change that already happened before this poll arrived is
+// still served on this poll within d.
 func (e *Engine) holdThrottle(ctx context.Context, d time.Duration) {
 	if ctx.Err() != nil {
 		return

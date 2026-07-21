@@ -165,3 +165,36 @@ func TestLaneForResolvesByBaseType(t *testing.T) {
 		t.Fatalf("want LaneFor to resolve httpPoll lane via base type %q, got ok=%v lane=%+v", "http", ok, got)
 	}
 }
+
+// TestNonPollServesReselectableCurrentEpoch pins the intended NON-poll lane
+// behavior after the value-epoch change (see Decide's scope note): a non-poll
+// lane (IsPoll() == false) serves the current epoch — last with AnchorPos <=
+// completed — RE-SELECTABLY, so repeated requests re-serve it rather than
+// consuming each entry once and keep-aliving on drain (the old cursor model).
+// This guards Decide's all-lanes selection scope so a later change can't
+// silently revert non-poll lanes to one-shot ordered delivery.
+func TestNonPollServesReselectableCurrentEpoch(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	lane := models.AsyncLane{Name: "L", Type: "fake"} // non-poll: IsPoll() == false
+	e.Load([]*models.Mock{
+		asyncMock("L", 1, 0, "A"), // epoch effective from pos 0
+		asyncMock("L", 2, 1, "B"), // epoch effective from pos 1
+	})
+	// completed=0: current epoch is A, served on EVERY request (re-selectable,
+	// never consumed, never keep-alived on "drain").
+	for i := 0; i < 3; i++ {
+		rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{})
+		if rec == nil || rec.Spec.HTTPResp.Body != "A" {
+			t.Fatalf("req %d @completed=0: want re-selectable A, got rec=%v ka=%q", i, rec, ka)
+		}
+	}
+	// advance to completed=1: current epoch becomes B, also re-selectable.
+	e.AdvanceWindow() // windowSeen; completed stays 0
+	e.AdvanceWindow() // completed=1
+	for i := 0; i < 3; i++ {
+		rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
+		if rec == nil || rec.Spec.HTTPResp.Body != "B" {
+			t.Fatalf("req %d @completed=1: want re-selectable B, got %v", i, rec)
+		}
+	}
+}

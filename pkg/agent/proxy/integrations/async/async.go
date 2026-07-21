@@ -27,6 +27,19 @@ type AsyncParser interface {
 	// async response conveys, so the recorder can detect when the value changes
 	// across poll cycles (identical value => identical key). Volatile/no-signal
 	// fields (e.g. Date headers) are excluded.
+	//
+	// The HTTP implementation fingerprints status + body only: a value signal
+	// carried ONLY in a non-volatile response header (e.g. an ETag or version
+	// header alongside an unchanged body) is out of scope and would be treated
+	// as unchanged (collapsed). That matches the body-carries-the-version
+	// contract of the config-watch lane this engine targets.
+	//
+	// NOTE: this is a REQUIRED addition to the exported interface — any
+	// out-of-tree AsyncParser implementer must add it. Verified: the only
+	// in-tree implementer is *http.HTTP (plus test fakes), and the sibling repos
+	// that consume this module (keploy-enterprise, k8s-proxy) implement no
+	// AsyncParser (they only declare AsyncLane config + use the env-var wire
+	// contract), so this bump breaks no known consumer.
 	ResponseValueKey(m *models.Mock, lane models.AsyncLane) string
 }
 

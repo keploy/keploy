@@ -11,15 +11,21 @@ import (
 // Mocks exactly as the recorder emits them for a config-watch lane: epoch-0 at
 // boot (NOT_MODIFIED) and a change received after test-2 (AnchorPos=2).
 func TestBootAnsweredThenChangeAtAnchor(t *testing.T) {
-	lane := models.AsyncLane{Name: "cfg", Type: "fake", ThrottleMs: 10}
+	// Type "fakePoll" so IsPoll() is true and Decide exercises the poll
+	// holdThrottle path (BaseType still resolves to the registered "fake"
+	// parser) — the boot poll below then genuinely covers the path that used to
+	// park on the old cond.Wait hold.
+	lane := models.AsyncLane{Name: "cfg", Type: "fakePoll", ThrottleMs: 10}
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")}, "cfg")
 	e.Load([]*models.Mock{
 		asyncMock("cfg", 1, 0, "V0"), // initial, boot
 		asyncMock("cfg", 2, 2, "V1"), // change received after test-2
 	})
 
-	// Boot: no test has run (completed=0). The poll MUST be answered (this is the
-	// deadlock that used to hang the app), with the initial value.
+	// Boot: no test has run (completed=0). On the old anchor-hold engine a poll
+	// whose delivery anchored past the reachable window parked on cond.Wait here
+	// (the boot deadlock); the value-epoch engine MUST answer it now with the
+	// startup epoch (V0).
 	ctx := context.Background()
 	if rec, _, _ := e.Decide(ctx, lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
 		t.Fatalf("boot poll must be answered with V0, got %v", rec)
@@ -42,7 +48,11 @@ func TestBootAnsweredThenChangeAtAnchor(t *testing.T) {
 // A lane with only NOT_MODIFIED (single epoch-0) — the no-change case — always
 // answers immediately and never blocks, at any completed.
 func TestStableConfigNeverBlocks(t *testing.T) {
-	lane := models.AsyncLane{Name: "cfg", Type: "fake", ThrottleMs: 10}
+	// Type "fakePoll" so IsPoll() is true and Decide exercises the poll
+	// holdThrottle path (BaseType still resolves to the registered "fake"
+	// parser) — the boot poll below then genuinely covers the path that used to
+	// park on the old cond.Wait hold.
+	lane := models.AsyncLane{Name: "cfg", Type: "fakePoll", ThrottleMs: 10}
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")}, "cfg")
 	e.Load([]*models.Mock{asyncMock("cfg", 1, 0, "NOT_MODIFIED")})
 	for i := 0; i < 5; i++ {
