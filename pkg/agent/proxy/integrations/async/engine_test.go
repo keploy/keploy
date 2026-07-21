@@ -18,8 +18,12 @@ func asyncMock(lane string, seq, anchorPos int, respBody string) *models.Mock {
 	}
 }
 
-func newTestEngine(p AsyncParser) *Engine {
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+func newTestEngine(p AsyncParser, laneName ...string) *Engine {
+	name := "L"
+	if len(laneName) > 0 {
+		name = laneName[0]
+	}
+	lane := models.AsyncLane{Name: name, Type: "fake"}
 	return NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"fake": p})
 }
 
