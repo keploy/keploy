@@ -221,12 +221,17 @@ jobs:
           - job: record_build_replay_build
             record_src: build-no-race
             replay_src: build-no-race
-        # periodic: fast poller, stub answers immediately, lane type http ->
+        # periodic:      fast poller, stub answers immediately, lane type http ->
         #   asserts the async engine SERVED the polls (served >= 1).
-        # httppoll: one held long-poll (server timeout), lane type httpPoll ->
-        #   asserts kind:HttpPoll + pollDurationMs recorded and the engine HELD
-        #   it until its resolve testcase at replay (held >= 1).
-        scenario: [periodic, httppoll]
+        # httppoll:      one held long-poll (server timeout), lane type httpPoll ->
+        #   asserts it is recorded as a collapsed value epoch (kind Http, async
+        #   poll: true, no pollDurationMs) and SERVED on replay (served >= 1).
+        # boot_blocking: record as httppoll, but replay with the app boot-blocking
+        #   synchronously on the watch (BLOCK_BOOT_ON_WATCH) -> asserts the value-
+        #   epoch engine serves the startup epoch so the app boots and ingress
+        #   PASSES (the old anchor-hold engine would park it -> boot deadlock).
+        #   Needs keploy/samples-java#148 (the BLOCK_BOOT_ON_WATCH app support).
+        scenario: [periodic, httppoll, boot_blocking]
     name: async-config-poll (${{ matrix.scenario }} / ${{ matrix.config.job }})
     steps:
       - name: Checkout repository

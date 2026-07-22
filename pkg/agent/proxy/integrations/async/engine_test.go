@@ -2,9 +2,7 @@ package async
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -20,29 +18,64 @@ func asyncMock(lane string, seq, anchorPos int, respBody string) *models.Mock {
 	}
 }
 
-func newTestEngine(p AsyncParser) *Engine {
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+func newTestEngine(p AsyncParser, laneName ...string) *Engine {
+	name := "L"
+	if len(laneName) > 0 {
+		name = laneName[0]
+	}
+	lane := models.AsyncLane{Name: name, Type: "fake"}
 	return NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"fake": p})
 }
 
-func TestServesInSeqOrderWhenArmed(t *testing.T) {
+func TestServesCurrentEpochByCompleted(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	// epoch V0 at pos 0 (boot), epoch V1 at pos 2 (received after test-2).
 	e.Load([]*models.Mock{
-		asyncMock("L", 2, 0, "b"),
-		asyncMock("L", 1, 0, "a"), // out of order on purpose
+		asyncMock("L", 1, 0, "V0"),
+		asyncMock("L", 2, 2, "V1"),
 	})
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
-	got1, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
-	got2, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
-	if got1.Spec.HTTPResp.Body != "a" || got2.Spec.HTTPResp.Body != "b" {
-		t.Fatalf("want a then b, got %q then %q", got1.Spec.HTTPResp.Body, got2.Spec.HTTPResp.Body)
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
+
+	// completed=0 (boot) -> V0
+	if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
+		t.Fatalf("boot: want V0, got %v", rec)
+	}
+	e.AdvanceWindow() // windowSeen, completed=0
+	e.AdvanceWindow() // completed=1 (after test-1)
+	if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
+		t.Fatalf("after test-1: want V0 (change not received), got %v", rec)
+	}
+	e.AdvanceWindow() // completed=2 (after test-2)
+	if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V1" {
+		t.Fatalf("after test-2: want V1, got %v", rec)
+	}
+}
+
+func TestEpochIsReselectableNotConsumed(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "V0")})
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
+	for i := 0; i < 3; i++ {
+		if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "V0" {
+			t.Fatalf("poll %d: epoch must be re-selectable, got %v", i, rec)
+		}
+	}
+}
+
+func TestKeepAliveWhenNoEpochEffective(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	e.Load([]*models.Mock{asyncMock("L", 1, 5, "late")})               // first epoch at pos 5
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}  // keep the suite fast; default is 1s
+	rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{}) // completed=0 < 5
+	if rec != nil || string(ka) != "KA" {
+		t.Fatalf("no epoch effective yet: want keep-alive, got rec=%v ka=%q", rec, ka)
 	}
 }
 
 func TestGatedByAnchorPosition(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 1, "after-T1")}) // anchorPos=1
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
+	e.Load([]*models.Mock{asyncMock("L", 1, 1, "after-T1")})          // anchorPos=1
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10} // keep the suite fast; default is 1s
 
 	rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{}) // completed=0 -> not armed
 	if rec != nil || string(ka) != "KA" {
@@ -57,28 +90,17 @@ func TestGatedByAnchorPosition(t *testing.T) {
 
 func TestStartupArmedImmediately(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 0, "boot")}) // anchorPos=0 (startup)
-	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake"}, &models.Mock{})
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "boot")})                                                                   // anchorPos=0 (startup)
+	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}, &models.Mock{}) // small throttle: keep the suite fast
 	if rec == nil || rec.Spec.HTTPResp.Body != "boot" {
 		t.Fatalf("startup mock should be armed immediately, got %v", rec)
-	}
-}
-
-func TestKeepAliveWhenDrained(t *testing.T) {
-	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	e.Load([]*models.Mock{asyncMock("L", 1, 0, "a")})
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
-	_, _, _ = e.Decide(context.Background(), lane, &models.Mock{}) // consume the only mock
-	rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{})
-	if rec != nil || string(ka) != "KA" {
-		t.Fatalf("drained lane should keep-alive, got rec=%v ka=%q", rec, ka)
 	}
 }
 
 func TestShapeMismatchServesAndFlags(t *testing.T) {
 	e := newTestEngine(&fakeParser{matches: true, shapeOK: false, empty: []byte("KA")})
 	e.Load([]*models.Mock{asyncMock("L", 1, 0, "a")})
-	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake"}, &models.Mock{})
+	rec, _, _ := e.Decide(context.Background(), models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}, &models.Mock{}) // small throttle: keep the suite fast
 	if rec == nil {
 		t.Fatal("mismatch must still serve the recorded mock")
 	}
@@ -92,7 +114,7 @@ func TestShapeMismatchServesAndFlags(t *testing.T) {
 type otherFake struct{ fakeParser }
 
 func TestPluggableSecondTransport(t *testing.T) {
-	lane := models.AsyncLane{Name: "K", Type: "other"}
+	lane := models.AsyncLane{Name: "K", Type: "other", ThrottleMs: 10} // keep the suite fast; default is 1s
 	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane},
 		map[string]AsyncParser{"other": &otherFake{fakeParser{matches: true, shapeOK: true, empty: []byte("EK")}}})
 	e.Load([]*models.Mock{asyncMock("K", 1, 0, "kafka-ish")})
@@ -121,184 +143,14 @@ func TestLaneForFirstDeclaredWins(t *testing.T) {
 	}
 }
 
-// TestLoadIsIdempotent proves a second Load call with the same mocks is a
-// no-op once Decide has already advanced a stream's cursor: it must not
-// re-sort/re-serve an already-consumed mock.
-func TestLoadIsIdempotent(t *testing.T) {
-	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
-	mocks := []*models.Mock{
-		asyncMock("L", 1, 0, "a"),
-		asyncMock("L", 2, 0, "b"),
-	}
-	lane := models.AsyncLane{Name: "L", Type: "fake"}
-
-	e.Load(mocks)
-	got1, _, _ := e.Decide(context.Background(), lane, &models.Mock{}) // consumes "a", cursor -> 1
-	if got1 == nil || got1.Spec.HTTPResp.Body != "a" {
-		t.Fatalf("first Decide: want %q, got %v", "a", got1)
-	}
-
-	e.Load(mocks) // re-Load same mocks; must be a no-op
-
-	got2, _, _ := e.Decide(context.Background(), lane, &models.Mock{}) // should serve "b", not re-serve "a"
-	if got2 == nil || got2.Spec.HTTPResp.Body != "b" {
-		t.Fatalf("second Decide after re-Load: want %q, got %v", "b", got2)
-	}
-}
-
 type holdStub struct{}
 
 func (holdStub) MatchesLane(*models.Mock, models.AsyncLane) bool { return true }
 func (holdStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
-func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error) { return []byte("204"), nil }
-
-// A poll delivery (Async.Poll) is HELD until completed reaches its anchorPos,
-// then served — while concurrent AdvanceWindow calls never block (the hold must
-// not sit on the lock). A non-poll delivery returns a keep-alive immediately.
-func TestDecideHoldsPollUntilAnchor(t *testing.T) {
-	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
-	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	pollMock := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
-		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 2, Poll: true},
-	}}
-	e.Load([]*models.Mock{pollMock})
-
-	done := make(chan *models.Mock, 1)
-	go func() {
-		rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
-		done <- rec
-	}()
-	select {
-	case <-done:
-		t.Fatal("Decide returned before anchor reached; poll should be held")
-	case <-time.After(50 * time.Millisecond):
-	}
-	e.AdvanceWindow() // windowSeen=true, completed stays 0
-	e.AdvanceWindow() // completed=1
-	e.AdvanceWindow() // completed=2 -> arms
-	select {
-	case rec := <-done:
-		if rec != pollMock {
-			t.Fatalf("held poll served wrong mock: %+v", rec)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("held poll never released after anchor reached")
-	}
-}
-
-func TestDecidePollReleasesOnCtxCancel(t *testing.T) {
-	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
-	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	e.Load([]*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
-		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 5, Poll: true},
-	}}})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan []byte, 1)
-	go func() { _, ka, _ := e.Decide(ctx, lane, &models.Mock{}); done <- ka }()
-	cancel()
-	select {
-	case ka := <-done:
-		if ka == nil {
-			t.Fatal("ctx-cancelled poll must release with a keep-alive")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("ctx-cancel did not release the held poll")
-	}
-}
-
-// Plug-and-play: the hold is keyed on Async.Poll, NOT the HTTP kind. A
-// non-HTTP kind carrying Async.Poll is held the same way.
-func TestDecideHoldsNonHTTPPollKind(t *testing.T) {
-	lane := models.AsyncLane{Name: "L", Type: "mongoPoll"}
-	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"mongo": holdStub{}})
-	e.Load([]*models.Mock{{Kind: models.Mongo, Spec: models.MockSpec{
-		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 1, Poll: true},
-	}}})
-	done := make(chan *models.Mock, 1)
-	go func() { rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); done <- rec }()
-	select {
-	case <-done:
-		t.Fatal("non-HTTP poll returned before anchor; must be held on Async.Poll")
-	case <-time.After(50 * time.Millisecond):
-	}
-	e.AdvanceWindow() // windowSeen
-	e.AdvanceWindow() // completed=1 -> arms
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("non-HTTP poll never released")
-	}
-}
-
-// TestDecideConcurrentSameLaneServesInOrderByAnchor proves a parked poll's
-// wake re-peeks the CURRENT cursor entry rather than trusting the entry it
-// captured before parking. Two concurrent same-lane Decide calls both park on
-// mock1 (anchorPos 1, cursor 0). When completed reaches 1, only ONE of them
-// may serve mock1 and advance the cursor to mock2 (anchorPos 2) — the other
-// must re-check the (now-advanced) cursor's own anchor and stay parked, NOT
-// serve mock2 early just because it woke up. Without the re-peek loop, the
-// second caller trusts its stale pre-wait entry, whose anchorPos (1) is
-// already satisfied, and serves the not-yet-armed mock2 immediately.
-func TestDecideConcurrentSameLaneServesInOrderByAnchor(t *testing.T) {
-	lane := models.AsyncLane{Name: "L", Type: "httpPoll"}
-	e := NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]AsyncParser{"http": holdStub{}})
-	mock1 := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
-		Async: &models.AsyncMeta{Lane: "L", Seq: 1, AnchorPos: 1, Poll: true},
-	}}
-	mock2 := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
-		Async: &models.AsyncMeta{Lane: "L", Seq: 2, AnchorPos: 2, Poll: true},
-	}}
-	e.Load([]*models.Mock{mock1, mock2})
-
-	done := make(chan *models.Mock, 2)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	for i := 0; i < 2; i++ {
-		go func() {
-			defer wg.Done()
-			rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
-			done <- rec
-		}()
-	}
-
-	// Let both goroutines reach cond.Wait before advancing anything.
-	time.Sleep(50 * time.Millisecond)
-
-	e.AdvanceWindow() // windowSeen = true, completed stays 0
-	e.AdvanceWindow() // completed = 1: only mock1 (anchorPos 1) may resolve
-
-	select {
-	case rec := <-done:
-		if rec != mock1 {
-			t.Fatalf("completed=1: want mock1 (anchorPos 1) served, got %+v", rec)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no Decide resolved after completed=1; mock1 should have armed")
-	}
-
-	// The other Decide must still be parked: mock2's anchorPos (2) is not yet
-	// reached. If it resolves here, it served a not-yet-armed delivery.
-	select {
-	case rec := <-done:
-		t.Fatalf("second Decide resolved before its anchor (completed=1); got %+v — served mock2 too early", rec)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	e.AdvanceWindow() // completed = 2: mock2 now armed
-
-	select {
-	case rec := <-done:
-		if rec != mock2 {
-			t.Fatalf("completed=2: want mock2 (anchorPos 2) served, got %+v", rec)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("second Decide never resolved after completed=2")
-	}
-
-	wg.Wait()
-}
+func (holdStub) EmptyResponse(models.AsyncLane) ([]byte, error)         { return []byte("204"), nil }
+func (holdStub) ResponseValueKey(*models.Mock, models.AsyncLane) string { return "" }
 
 // TestLaneForResolvesByBaseType proves LaneFor routes a "httpPoll" lane's live
 // request to the parser registered under its base type "http" — without a
@@ -311,5 +163,38 @@ func TestLaneForResolvesByBaseType(t *testing.T) {
 	got, ok := e.LaneFor(&models.Mock{})
 	if !ok || got.Name != "L" {
 		t.Fatalf("want LaneFor to resolve httpPoll lane via base type %q, got ok=%v lane=%+v", "http", ok, got)
+	}
+}
+
+// TestNonPollServesReselectableCurrentEpoch pins the intended NON-poll lane
+// behavior after the value-epoch change (see Decide's scope note): a non-poll
+// lane (IsPoll() == false) serves the current epoch — last with AnchorPos <=
+// completed — RE-SELECTABLY, so repeated requests re-serve it rather than
+// consuming each entry once and keep-aliving on drain (the old cursor model).
+// This guards Decide's all-lanes selection scope so a later change can't
+// silently revert non-poll lanes to one-shot ordered delivery.
+func TestNonPollServesReselectableCurrentEpoch(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	lane := models.AsyncLane{Name: "L", Type: "fake"} // non-poll: IsPoll() == false
+	e.Load([]*models.Mock{
+		asyncMock("L", 1, 0, "A"), // epoch effective from pos 0
+		asyncMock("L", 2, 1, "B"), // epoch effective from pos 1
+	})
+	// completed=0: current epoch is A, served on EVERY request (re-selectable,
+	// never consumed, never keep-alived on "drain").
+	for i := 0; i < 3; i++ {
+		rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{})
+		if rec == nil || rec.Spec.HTTPResp.Body != "A" {
+			t.Fatalf("req %d @completed=0: want re-selectable A, got rec=%v ka=%q", i, rec, ka)
+		}
+	}
+	// advance to completed=1: current epoch becomes B, also re-selectable.
+	e.AdvanceWindow() // windowSeen; completed stays 0
+	e.AdvanceWindow() // completed=1
+	for i := 0; i < 3; i++ {
+		rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
+		if rec == nil || rec.Spec.HTTPResp.Body != "B" {
+			t.Fatalf("req %d @completed=1: want re-selectable B, got %v", i, rec)
+		}
 	}
 }

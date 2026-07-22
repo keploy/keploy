@@ -114,6 +114,16 @@ func (h *HTTP) EmptyResponse(_ models.AsyncLane) ([]byte, error) {
 	return []byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"), nil
 }
 
+// ResponseValueKey fingerprints the value the client consumes: response status
+// + body. Volatile response headers (Date, etc.) are not part of the value; the
+// body carries the config version/data, so a real change materially alters it.
+func (h *HTTP) ResponseValueKey(m *models.Mock, _ models.AsyncLane) string {
+	if m == nil || m.Spec.HTTPResp == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d\n%s", m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body)
+}
+
 func hostAndPath(r *models.HTTPReq) (host, p string) {
 	if r.Header != nil && r.Header["Host"] != "" {
 		host = r.Header["Host"]

@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,17 @@ func (laneStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, 
 	return true, ""
 }
 func (laneStub) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return nil, nil }
+
+// ResponseValueKey fingerprints status+body, mirroring the real HTTP parser
+// (pkg/agent/proxy/integrations/http/async.go) — a nil guard plus
+// status-code+body, so the recorder's diff/collapse tests exercise a real
+// value-change signal instead of a constant no-op key.
+func (laneStub) ResponseValueKey(m *models.Mock, _ models.AsyncLane) string {
+	if m == nil || m.Spec.HTTPResp == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d\n%s", m.Spec.HTTPResp.StatusCode, m.Spec.HTTPResp.Body)
+}
 
 func egress(kind string, completedAt time.Time) *models.Mock {
 	return &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
@@ -147,8 +159,10 @@ func TestNonLaneEgressUntouched(t *testing.T) {
 	}
 }
 
-// A poll lane (Type ends in "Poll") sets Async.Poll + PollDurationMs and leaves
-// the mock's base kind (Http) unchanged — poll-ness is Async.Poll, not a Kind.
+// A poll lane (Type ends in "Poll") sets Async.Poll and leaves the mock's base
+// kind (Http) unchanged — poll-ness is Async.Poll, not a Kind. This is the
+// first (and only) BeforeMockInsert call for the lane on a fresh recorder, so
+// it takes the "first value" branch (epoch-0) regardless of timestamps.
 func TestPollLaneStampsPollMeta(t *testing.T) {
 	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
 	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
@@ -156,42 +170,14 @@ func TestPollLaneStampsPollMeta(t *testing.T) {
 
 	m := egress("lane", time.Unix(1000, 0))
 	m.Kind = models.HTTP
-	m.Spec.ReqTimestampMock = time.Unix(999, 0) // open 1s before resolve
 	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
 
 	a := m.Spec.Async
 	if a == nil || !a.Poll {
 		t.Fatalf("poll lane must set Async.Poll: %+v", a)
-	}
-	if a.PollDurationMs != 1000 {
-		t.Fatalf("PollDurationMs = %d want 1000", a.PollDurationMs)
 	}
 	if m.Kind != models.HTTP {
 		t.Fatalf("poll-lane mock kind = %q want Http (poll-ness is not a kind)", m.Kind)
-	}
-}
-
-// TestPollLaneClampsNegativePollDurationToZero pins the clamp at
-// asynchook.go ~lines 97-100: a poll mock whose ResTimestampMock lands BEFORE
-// its ReqTimestampMock (clock skew / test fixture oddity) must record
-// pollDurationMs as "0", never a negative number.
-func TestPollLaneClampsNegativePollDurationToZero(t *testing.T) {
-	lane := models.AsyncLane{Type: "httpPoll", Match: map[string]string{"x": "y"}}
-	r := NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{lane},
-		map[string]async.AsyncParser{"http": laneStub{}}) // keyed by BaseType
-
-	m := egress("lane", time.Unix(1000, 0)) // ResTimestampMock = 1000
-	m.Kind = models.HTTP
-	m.Spec.ReqTimestampMock = time.Unix(1001, 0) // opens AFTER resolve -> negative raw duration
-	_ = r.BeforeMockInsert(context.Background(), &MockContext{Mock: m})
-
-	a := m.Spec.Async
-	if a == nil || !a.Poll {
-		t.Fatalf("poll lane must set Async.Poll: %+v", a)
-	}
-	if a.PollDurationMs != 0 {
-		t.Fatalf("PollDurationMs = %d want clamped 0 (ResTimestampMock before ReqTimestampMock)",
-			a.PollDurationMs)
 	}
 }
 
@@ -244,5 +230,117 @@ func TestAsyncPollMockExcludedFromPerTestMapping(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Name != syncMockName {
 		t.Fatalf("expected only the sync mock in the per-test mapping, got: %+v", got)
+	}
+}
+
+// --- poll value-epoch test helpers -----------------------------------------
+//
+// pollLane is the single httpPoll lane shared by the tests below. Its
+// Match/MatchQuery mirror a realistic config-watch long-poll endpoint; the
+// actual matching in this file is still driven by laneStub.MatchesLane
+// (Spec.Metadata["kind"] == "lane"), so these fields document intent for
+// readers rather than drive test mechanics.
+var pollLane = models.AsyncLane{
+	Name:       "config-watch",
+	Type:       "httpPoll",
+	Match:      map[string]string{"pathRegex": "^/v1/buckets/feature_flags$"},
+	MatchQuery: map[string]string{"watch": "true"},
+}
+
+// newPollRecorderForTest builds an AsyncRecorder wired to the single
+// pollLane above, backed by laneStub — mirroring the recorder construction
+// used by TestAsyncPollMockExcludedFromPerTestMapping.
+func newPollRecorderForTest(t *testing.T) *AsyncRecorder {
+	t.Helper()
+	return NewAsyncRecorder(zap.NewNop(), []models.AsyncLane{pollLane},
+		map[string]async.AsyncParser{"http": laneStub{}})
+}
+
+// pollRespMock builds a poll-lane egress mock whose Spec.HTTPReq matches the
+// lane (path /v1/buckets/feature_flags, query watch=true) and whose
+// Spec.HTTPResp carries the given status/body — the VALUE laneStub's
+// ResponseValueKey fingerprints for change detection.
+func pollRespMock(t *testing.T, status int, body string) *models.Mock {
+	t.Helper()
+	return pollRespMockAt(t, status, body, 0)
+}
+
+// pollRespMockAt is pollRespMock plus an explicit Spec.ResTimestampMock (unix
+// seconds), letting a test place a response's completion time relative to
+// recorded testcase windows (see anchorLocked).
+func pollRespMockAt(t *testing.T, status int, body string, resTsUnixSec int64) *models.Mock {
+	t.Helper()
+	return &models.Mock{
+		Kind: models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"kind": "lane"},
+			HTTPReq: &models.HTTPReq{
+				Method:    "GET",
+				URL:       "http://svc/v1/buckets/feature_flags?watch=true",
+				URLParams: map[string]string{"watch": "true"},
+			},
+			HTTPResp:         &models.HTTPResp{StatusCode: status, Body: body},
+			ResTimestampMock: time.Unix(resTsUnixSec, 0),
+		},
+	}
+}
+
+// testCtxAt builds a TestCaseContext whose TestCase.HTTPReq.Timestamp is set
+// to the given unix-seconds value, for feeding AfterTestCaseInsert so
+// anchorLocked can resolve a position against it.
+func testCtxAt(t *testing.T, name string, tsUnixSec int64) *TestCaseContext {
+	t.Helper()
+	return &TestCaseContext{
+		TestCase: &models.TestCase{Name: name, HTTPReq: models.HTTPReq{Timestamp: time.Unix(tsUnixSec, 0)}},
+	}
+}
+
+// The first poll response ever seen for a lane is never collapsed: it seeds
+// the epoch timeline at AnchorPos=0 (effective from boot), regardless of any
+// testcase windows recorded so far.
+func TestPollFirstResponseIsEpochZero(t *testing.T) {
+	rec := newPollRecorderForTest(t)
+	m := pollRespMock(t, 200, `{"type":"NOT_MODIFIED"}`)
+	info := &MockContext{Mock: m}
+	_ = rec.BeforeMockInsert(context.Background(), info)
+	if info.Skip {
+		t.Fatal("first poll response must not be skipped")
+	}
+	if a := m.Spec.Async; a == nil || a.AnchorPos != 0 || !a.Poll {
+		t.Fatalf("first response: want epoch-0 poll, got %+v", a)
+	}
+}
+
+// A poll cycle whose response VALUE is unchanged from the last emitted one
+// must be collapsed (Skip=true) rather than stamped as a new epoch.
+func TestPollUnchangedIsCollapsed(t *testing.T) {
+	rec := newPollRecorderForTest(t)
+	first := pollRespMock(t, 200, `{"type":"NOT_MODIFIED"}`)
+	_ = rec.BeforeMockInsert(context.Background(), &MockContext{Mock: first})
+	dup := pollRespMock(t, 200, `{"type":"NOT_MODIFIED"}`)
+	info := &MockContext{Mock: dup}
+	_ = rec.BeforeMockInsert(context.Background(), info)
+	if !info.Skip {
+		t.Fatal("unchanged poll cycle must be collapsed (Skip=true)")
+	}
+}
+
+// A poll response whose value CHANGED from the last emitted one must be
+// emitted (never collapsed) as a new epoch anchored where it was received.
+func TestPollChangeIsNewEpochAtResponsePos(t *testing.T) {
+	rec := newPollRecorderForTest(t)
+	// record two test windows so anchorLocked can resolve a position.
+	_ = rec.AfterTestCaseInsert(context.Background(), testCtxAt(t, "test-1", 100))
+	_ = rec.AfterTestCaseInsert(context.Background(), testCtxAt(t, "test-2", 200))
+	first := pollRespMock(t, 200, `{"type":"NOT_MODIFIED"}`)
+	_ = rec.BeforeMockInsert(context.Background(), &MockContext{Mock: first})
+	changed := pollRespMockAt(t, 200, `{"version":39}`, 250) // resTs after both windows
+	info := &MockContext{Mock: changed}
+	_ = rec.BeforeMockInsert(context.Background(), info)
+	if info.Skip {
+		t.Fatal("a changed poll response must be emitted, not collapsed")
+	}
+	if a := changed.Spec.Async; a == nil || a.AnchorPos != 2 {
+		t.Fatalf("change received after test-2: want AnchorPos=2, got %+v", a)
 	}
 }

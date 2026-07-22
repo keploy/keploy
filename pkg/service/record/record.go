@@ -579,14 +579,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
-			if hookErr := r.hooks.BeforeMockInsert(ctx, &MockContext{
-				Mock: mock, TestSetID: newTestSetID,
-			}); hookErr != nil {
+			mockCtx := &MockContext{Mock: mock, TestSetID: newTestSetID}
+			if hookErr := r.hooks.BeforeMockInsert(ctx, mockCtx); hookErr != nil {
 				r.logger.Error("BeforeMockInsert hook failed; recording will continue but hook side-effects may be missing. Check your RecordHooks implementation.",
 					zap.Error(hookErr),
 					zap.String("testSetID", newTestSetID),
 					zap.String("mockName", mock.Name),
 					zap.String("mockKind", mock.GetKind()))
+			}
+			if mockCtx.Skip {
+				// A hook asked to drop this mock (collapsed async poll no-change
+				// cycle). Do not persist, map, or correlate it.
+				continue
 			}
 			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
 			// remember it so the mapping goroutine below never per-test maps it.
