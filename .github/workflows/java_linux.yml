@@ -251,10 +251,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-java
-          # TEMPORARY: pinned to the branch adding BLOCK_BOOT_ON_WATCH, which the
-          # boot_blocking scenario needs. Repoint to the default branch once
-          # keploy/samples-java#148 merges.
-          ref: async-boot-blocking-watch
           path: samples-java
 
       # Spring Boot 1.5 sample -> Java 8 (not the Java 17 the other jobs use);
