@@ -57,7 +57,7 @@ test:
   skipCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
-  mongoPassword: "default@123"
+  mongoPassword: ""
   language: ""
   removeUnusedMocks: false
   fallBackOnMiss: false
