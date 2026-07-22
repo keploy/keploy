@@ -258,6 +258,29 @@ type SyncMockManager struct {
 	// intervals and slowing every overlap scan.
 	pressureRanges []pressureRange
 
+	// orphanRanges records [start,end] intervals over which a mock could NOT be
+	// framed for a reason OTHER than the memory-guard pause — currently a mongo/v2
+	// reassembly resync hole: a dropped chunk desyncs the framer, so a message
+	// delivered during the hole is DELIVERED (not dropped) yet never turned into a
+	// mock. Like pressureRanges it feeds a suppressor query — WasMockOrphanedInWindow,
+	// which record.go checks alongside WasPressureActiveInWindow — so record.go
+	// suppresses every TC whose window overlaps the hole rather than shipping it
+	// mock-less (replay would report match_phase=no_mocks). Kept SEPARATE from
+	// pressureRanges — whose open/close state machine (SetMemoryPressure) assumes
+	// the last element is the still-open interval — so appending a CLOSED orphan
+	// interval here can't corrupt that invariant. Recorded via RecordOrphanWindow
+	// by the enterprise mongo parser (integrations orphanWindowRecorder); intervals
+	// are always closed. Count-capped at maxPressureRanges like its sibling.
+	//
+	// NOTE: the count cap and the zero/inverted-input guards bound the NUMBER of
+	// intervals and neutralize degenerate ones (zero start dropped, inverted
+	// end clamped to a point), but they do NOT bound an interval's
+	// WIDTH. A suppression is session-global for every TC whose window overlaps a
+	// hole, so keeping the hole narrow (last-good frame → resync point, not the
+	// whole connection lifetime) is the recorder's responsibility, not enforced
+	// here — same inherent trade-off as interval-based pressure suppression.
+	orphanRanges []pressureRange
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
@@ -1098,7 +1121,10 @@ func (m *SyncMockManager) GetDropStats() (pressureActive bool, pressureDropped i
 //
 // Called by the TC-send path in routes/record.go right before forwarding a
 // TC to the CLI: if it returns true, the TC is suppressed and never reaches
-// disk, so replay cannot encounter a missing-mock EOF for it.
+// disk, so replay cannot encounter a missing-mock EOF for it. record.go
+// queries WasMockOrphanedInWindow alongside this so a TC stranded by EITHER
+// cause is suppressed; the two are kept as separate methods so each scans only
+// its own slice and diagnostics attribute a suppression to its real cause.
 //
 // Why this is race-free unlike a per-mock-drop ledger:
 //   - memoryguard calls SetMemoryPressure(true) and the range is appended
@@ -1138,6 +1164,64 @@ func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool,
 		}
 	}
 	return count > 0, count
+}
+
+// WasMockOrphanedInWindow returns (true, overlapCount) if any recorded
+// resync-hole orphan window (see RecordOrphanWindow) overlaps [start, end]. It
+// is the orphan-window twin of WasPressureActiveInWindow: routes/record.go
+// queries BOTH before forwarding a TC and suppresses it if EITHER overlaps, so
+// a TC stranded by a mongo/v2 reassembly resync hole — a delivered-but-
+// unframable op that was never turned into a mock — is never shipped mock-less
+// (replay would report match_phase=no_mocks).
+//
+// Kept as a SEPARATE method rather than folded into WasPressureActiveInWindow
+// so each scans only its own slice, the two suppression causes stay distinct in
+// diagnostics, and the enterprise mongo parser's orphanWindowChecker probe
+// (WasMockOrphanedInWindow) resolves against it. orphanRanges are always CLOSED
+// [start,end] (RecordOrphanWindow supplies both bounds), so no open-interval
+// (end==zero → now) handling is needed. Same degenerate-input guard as its twin.
+func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, int) {
+	if m == nil || start.IsZero() || end.IsZero() {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, r := range m.orphanRanges {
+		if !r.start.After(end) && !r.end.Before(start) {
+			count++
+		}
+	}
+	return count > 0, count
+}
+
+// RecordOrphanWindow records a [start,end] interval during which a mock could
+// not be framed for a NON-pressure reason (currently a mongo/v2 reassembly
+// resync hole). It feeds WasMockOrphanedInWindow so record.go suppresses every
+// TC whose window overlaps the hole — the same coverage-for-stability tradeoff
+// the memory-pressure suppressor makes — instead of shipping that TC mock-less
+// (replay would then report match_phase=no_mocks). This satisfies the enterprise
+// mongo parser's OPTIONAL orphanWindowRecorder capability (integrations
+// pkg/mongo/v2): older keploy pins that lack this method degrade the parser's
+// resync-orphan suppression to a no-op rather than failing to compile. A zero
+// start is dropped (no wire ts to attribute); an end before start is clamped.
+func (m *SyncMockManager) RecordOrphanWindow(start, end time.Time) {
+	if m == nil || start.IsZero() {
+		return
+	}
+	if end.Before(start) {
+		end = start
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.orphanRanges = append(m.orphanRanges, pressureRange{start: start, end: end})
+	// Count-cap like pressureRanges: evict the oldest, copy down so the backing
+	// array isn't retained.
+	if n := len(m.orphanRanges); n > maxPressureRanges {
+		trimmed := make([]pressureRange, maxPressureRanges)
+		copy(trimmed, m.orphanRanges[n-maxPressureRanges:])
+		m.orphanRanges = trimmed
+	}
 }
 
 // pressureActiveAtLocked reports whether instant t fell inside any recorded
