@@ -16,11 +16,24 @@ const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const defaultMockBufferCapacity = 100
 
 // maxRecentWindows bounds the recently-resolved-window ring (see
-// SyncMockManager.recentWindows). The ring is also time-pruned to the
-// 7 s staleness horizon, so this cap only matters under a burst of very
-// short test windows; 256 covers far more than the ~7 s of history the
-// staleness cutoff keeps reachable, while staying O(1) memory.
-const maxRecentWindows = 256
+// SyncMockManager.recentWindows) by COUNT — the ring is deliberately NOT
+// age-pruned (ResolveRange's retro-bin rescues in-window mocks from windows far
+// older than the 7 s stale-cutoff; see that function and
+// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan). The cap must
+// therefore hold far more than the windows that can resolve while a test's
+// LATE-decoded mock (e.g. a large async Mongo aggregate response) is still in
+// flight — otherwise the owning window is evicted before the mock lands,
+// ownerWindow() misses, and the mock is orphaned from its test's mapping →
+// replay match_phase=no_mocks for that query. The previous 256 was far too
+// small: heavy-load recordings burst well past 1000 resolved windows within a
+// single 7 s span (go-memory-load-mongo: ~1000 windows/7 s peak), so a slow
+// aggregate's window was evicted long before it could be retro-binned. The
+// window only has to survive the mock's decode-lag plus one FlushOwnedWindows
+// tick (~1 s) — retro-bin fires on the NEXT ResolveRange or that periodic tick,
+// not at test end — so at the ~143 windows/s peak, 8192 (≈57 s of history) is a
+// ~50x margin. It matches maxPressureRanges, which guards the SAME consumer-lag
+// class of bug, and stays O(1) memory (~64 B/window).
+const maxRecentWindows = 8192
 
 // maxPressureRanges bounds SyncMockManager.pressureRanges by COUNT, not by
 // wall-clock age. An earlier version time-pruned closed ranges 7 s after they
@@ -104,7 +117,7 @@ type SyncMockManager struct {
 	// firstReqSeen's lifecycle (set forward-only within a record session).
 	resolvedTestCount int
 
-	// recentWindows is a bounded, time-pruned ring of the most recently
+	// recentWindows is a COUNT-bounded ring of the most recently
 	// RESOLVED per-test windows. It exists to close the async-emit vs
 	// window-bin race: a parser decodes/emits a mock a few ms after the
 	// real wire event (the presaved ReqTimestampMock is correct, but the
@@ -119,8 +132,14 @@ type SyncMockManager struct {
 	// such late arrivals into the window that actually owns them, so the
 	// recorder persists them with their (correct, in-window) timestamps
 	// and replay's timestamp filter picks them up for the right test.
-	// Pruned to the same staleness horizon as the buffer cutoff so it
-	// can't reattach ancient mocks or grow without bound.
+	// Bounded by COUNT (maxRecentWindows), NOT by age: it must retain
+	// windows far older than the 7 s buffer stale-cutoff, because a late
+	// mock legitimately belongs to a long-past window (a large async
+	// response can decode tens of seconds after its window closed, and a
+	// long-running test — the ~56 s mongo fuzzer /run — spans that horizon
+	// by itself). Age-pruning would strand those mocks (see
+	// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan); the count
+	// cap bounds memory instead.
 	recentWindows []resolvedWindow
 
 	// outChanMu guards outChan and outChanClosed together. Senders
@@ -1337,17 +1356,18 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	//      window before SetOutputChannel.
 	cutoffTime := time.Now().Add(-7 * time.Second)
 
-	// Prune the recently-resolved-window ring to the same staleness
-	// horizon as the buffer cutoff, so retroactive binning below can't
-	// reattach a mock to an ancient window (which would defeat the
-	// stale-cutoff's buffer-bound guarantee).
-	if len(m.recentWindows) > 0 {
-		kept := m.recentWindows[:0]
-		for _, w := range m.recentWindows {
-			kept = append(kept, w)
-		}
-		m.recentWindows = kept
-	}
+	// The recentWindows ring is intentionally NOT age-pruned. The retro-bin below
+	// deliberately rescues an in-window mock whose owning window is FAR older than
+	// the 7 s stale-cutoff: a long-running test (e.g. the mongo fuzzer's ~56 s
+	// /run) emits per-test mocks across its whole window, and a large async Mongo
+	// response can finish decoding tens of seconds after that window closed —
+	// time-pruning would strand those mocks (see
+	// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan). Retention is
+	// therefore bounded by COUNT (maxRecentWindows) only, mirroring
+	// maxPressureRanges, which guards the very same consumer-lag class of bug. The
+	// eviction happens at the append-and-cap below; keeping the count high enough
+	// (8192, was 256) is what stops a burst from evicting a window while its test's
+	// late aggregate mock is still decoding — the go-memory-load-mongo no_mocks bug.
 	// ownerWindow returns the recently-resolved window whose [start,end]
 	// contains t (inclusive, matching the current-window test below).
 	// Windows are non-overlapping FIFO request windows, so at most one
@@ -1568,7 +1588,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// AFTER the match loop, so the current window's own mocks went through
 	// the direct [start,end] path above, never the ring. Skipped for the
 	// no-keep / unbound cases is unnecessary — an empty-but-recorded
-	// window is harmless and pruned by age.
+	// window is harmless and aged out by the count cap below.
 	m.recentWindows = append(m.recentWindows, resolvedWindow{
 		start:    start,
 		end:      end,
