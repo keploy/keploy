@@ -743,7 +743,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Decompress if needed
 	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
 			return nil, err
@@ -3632,12 +3632,35 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+// MaxDecompressedSize caps Decompress on paths with no downstream size limit
+// (replay, mock decode, SimulateHTTP) so a decompression bomb errors instead
+// of OOMing. The capture path passes the tighter conn.MaxTestCaseSize, since
+// larger testcases are dropped anyway. See #3867.
+const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
+
+// readAllCapped reads r up to limit bytes, erroring instead of allocating
+// unbounded memory if the stream exceeds it.
+func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("decompressed size exceeds limit of %d bytes (possible decompression bomb)", limit)
+	}
+	return data, nil
+}
+
+// Decompress inflates data per the given Content-Encoding, reading at most
+// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing.
+// The encoding is matched case-insensitively after trimming; an unsupported
+// non-empty encoding is returned undecompressed with a warning.
+func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read the brotli compressed data")
 			return nil, err
@@ -3651,14 +3674,20 @@ func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read the gzip compressed data")
 			return nil, err
 		}
 		return decodedData, nil
+	case "":
+		// No Content-Encoding: body is already uncompressed.
+		return data, nil
+	default:
+		logger.Warn("unsupported Content-Encoding; storing body without decompression",
+			zap.String("encoding", encoding))
+		return data, nil
 	}
-	return data, nil
 }
 
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {

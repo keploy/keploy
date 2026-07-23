@@ -957,7 +957,7 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "gzip", originalData)
 		require.NoError(t, err)
 		assert.NotEqual(t, originalData, compressedData)
-		decompressedData, err := Decompress(logger, "gzip", compressedData)
+		decompressedData, err := Decompress(logger, "gzip", compressedData, MaxDecompressedSize)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
@@ -967,7 +967,7 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "br", originalData)
 		require.NoError(t, err)
 		assert.NotEqual(t, originalData, compressedData)
-		decompressedData, err := Decompress(logger, "br", compressedData)
+		decompressedData, err := Decompress(logger, "br", compressedData, MaxDecompressedSize)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
@@ -977,19 +977,51 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "unknown", originalData)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, compressedData)
-		decompressedData, err := Decompress(logger, "unknown", originalData)
+		decompressedData, err := Decompress(logger, "unknown", originalData, MaxDecompressedSize)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
 
 	t.Run("DecompressError", func(t *testing.T) {
 		invalidGzipData := []byte("not gzip")
-		_, err := Decompress(logger, "gzip", invalidGzipData)
+		_, err := Decompress(logger, "gzip", invalidGzipData, MaxDecompressedSize)
 		require.Error(t, err)
 
 		invalidBrotliData := []byte{0xce, 0xb2, 0xcf, 0x81}
-		_, err = Decompress(logger, "br", invalidBrotliData)
+		_, err = Decompress(logger, "br", invalidBrotliData, MaxDecompressedSize)
 		require.Error(t, err)
+	})
+
+	// Content-Encoding is matched case-insensitively after trimming.
+	t.Run("EncodingNormalized", func(t *testing.T) {
+		originalData := []byte("normalize me")
+		compressedData, err := Compress(logger, "gzip", originalData)
+		require.NoError(t, err)
+		for _, enc := range []string{"GZIP", " gzip", "gzip "} {
+			decompressedData, err := Decompress(logger, enc, compressedData, MaxDecompressedSize)
+			require.NoError(t, err, "encoding %q", enc)
+			assert.Equal(t, originalData, decompressedData, "encoding %q", enc)
+		}
+	})
+
+	// A payload inflating past the caller's limit must error, not OOM (#3867).
+	// Uses real gzip/brotli through the public API so it fails if the
+	// LimitReader wiring is ever reverted.
+	t.Run("DecompressionBomb", func(t *testing.T) {
+		const limit = 1024
+		bomb := make([]byte, 8*1024) // 8 KiB of zeros: tiny compressed, inflates past limit
+
+		gzipBomb, err := Compress(logger, "gzip", bomb)
+		require.NoError(t, err)
+		_, err = Decompress(logger, "gzip", gzipBomb, limit)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decompression bomb")
+
+		brBomb, err := Compress(logger, "br", bomb)
+		require.NoError(t, err)
+		_, err = Decompress(logger, "br", brBomb, limit)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decompression bomb")
 	})
 }
 
