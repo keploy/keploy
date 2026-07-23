@@ -2998,15 +2998,35 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	// filterByMapping partitions the config pool by per-test mapping-name
+	// membership and tags each mock's IsFiltered flag for consumption
+	// tracking — but its partition boundary MUST NOT dictate serving ORDER.
+	// The config pool is served to the matcher in SortOrder (treedb), which is
+	// restamped from this slice's order (MockManager.SetUnFilteredMocks). A
+	// stateful, cursor-based matcher replays a recorded revision SEQUENCE in
+	// that order — e.g. the Couchbase GET_CLUSTER_CONFIG / cluster-config poll
+	// (couchbase match.go pick). Concatenating [in-mapping] ++ [not-in-mapping]
+	// splits that sequence across the mapping boundary (a revision consumed
+	// inside one test's window sorts before an earlier bootstrap revision that
+	// no test mapped), so the cursor walks the revisions out of recorded order,
+	// the topology appears to go backwards, and gocb's WaitUntilReady never
+	// converges (108x WAIT_FOR_CONFIG, ~6m45s degraded bootstrap) — even though
+	// the identical recording replays fine under timestamp-based filtering.
+	//
+	// Sort the WHOLE pool by ReqTimestampMock so mapping-mode config ORDERING
+	// matches the timestamp branch (FilterConfigMocksTierAware, which puts every
+	// session/config mock in one chronological slice). Only ORDERING is unified
+	// here — membership still differs slightly from that branch (it additionally
+	// drops res<req mocks); ordering is the property the cursor-based matcher
+	// depends on. The IsFiltered
+	// flags set above are preserved on each mock; only the order changes. This
+	// keeps per-test data-tier scoping untouched (that is FilterTcsMocksMapping)
+	// while restoring recorded-order replay for order-sensitive config mocks.
+	all := append(filteredMocks, unfilteredMocks...)
+	sort.SliceStable(all, func(i, j int) bool {
+		return all[i].Spec.ReqTimestampMock.Before(all[j].Spec.ReqTimestampMock)
 	})
-
-	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
-		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
-	})
-
-	return append(filteredMocks, unfilteredMocks...)
+	return all
 }
 
 // strictWindowEnvOverride holds the result of one-time env-var parsing
