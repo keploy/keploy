@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,168 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+const (
+	// mappingDrainGrace hard-caps how long recording shutdown waits for the agent
+	// to flush the test<->mock mappings it has already resolved. Bounded so a
+	// wedged agent cannot hang exit, and kept under the 30s DrainErrGroup budget
+	// that Start's teardown gives the group this drain runs in — overshooting that
+	// would trade a lost tail for a teardown timeout, which is no better.
+	mappingDrainGrace = 15 * time.Second
+
+	// mappingFlushBatch is how many mappings accumulate before mappings.yaml is
+	// rewritten. Each rewrite re-encodes the whole file, so writing per mapping is
+	// quadratic (368 tests: 164us for the first, 19.45ms for the last, ~2.7s of
+	// pure rewriting) — slow enough to back-pressure the agent's mapping stream,
+	// which then DROPS what it cannot hand over. Batching keeps the consumer far
+	// ahead of the stream.
+	mappingFlushBatch = 32
+
+	// mappingFlushInterval bounds how long a partial batch waits, so a long
+	// recording still persists mappings as it goes instead of holding them all in
+	// memory until the stream closes.
+	mappingFlushInterval = 2 * time.Second
+
+	// mappingIdleGrace ends the shutdown drain once the mapping stream falls idle.
+	// The agent holds the stream open for the whole session, so idleness — not EOF
+	// — is what signals the tail is through. Sized well above the agent's
+	// per-mapping flush latency so a slow flush is not mistaken for completion.
+	mappingIdleGrace = 3 * time.Second
+)
+
+// stopTimer disarms t, draining its channel if it had already fired, so a later
+// Reset starts from a clean state.
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// resetTimer re-arms t for d, safely draining any pending fire first.
+func resetTimer(t *time.Timer, d time.Duration) {
+	stopTimer(t)
+	t.Reset(d)
+}
+
+// mergeMockEntries unions incoming entries into existing ones by mock name,
+// preserving recorded order. Mirrors the mapping store's merge: a test's mapping
+// arrives in more than one piece and the later pieces are deltas, so replacing
+// would delete mocks the earlier piece recorded.
+func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry {
+	if len(existing) == 0 {
+		return incoming
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		seen[e.Name] = struct{}{}
+	}
+	merged := existing
+	for _, e := range incoming {
+		if _, dup := seen[e.Name]; dup {
+			continue
+		}
+		seen[e.Name] = struct{}{}
+		merged = append(merged, e)
+	}
+	return merged
+}
+
+// consumeMappings correlates each test<->mock mapping the agent streams to its
+// real mock entries and persists it to mappings.yaml. It runs until mappings is
+// closed by the producer, and returns only then — ctx bounds nothing here by
+// design.
+//
+// Mappings are the last artifact a recorded test produces (the agent resolves a
+// test's mock range only once that test is done), so the tail of every endpoint
+// arrives while recording is already shutting down. Writes therefore run on a
+// context detached from ctx: on a cancelled one the yaml store refuses every
+// write and those tests vanish from mappings.yaml, which replay then reports as
+// no_mocks. Detaching here rather than relying on the caller keeps that
+// guarantee local to the loop that depends on it — see the persistCtx note in
+// Start for the same requirement on the test-case and mock stores.
+func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map) error {
+	persistCtx := context.WithoutCancel(ctx)
+
+	// pending batches mappings so the file is rewritten once per batch instead of
+	// once per test. flushMu guards it because the ticker below flushes too.
+	pending := make(map[string][]models.MockEntry, mappingFlushBatch)
+	var flushMu sync.Mutex
+
+	flush := func() {
+		flushMu.Lock()
+		defer flushMu.Unlock()
+		if len(pending) == 0 {
+			return
+		}
+		if err := r.mappingDb.UpsertBatch(persistCtx, testSetID, pending); err != nil {
+			// Deliberately not utils.LogError: it suppresses context.Canceled,
+			// which is exactly the class this write used to fail with, so a lost
+			// batch left no trace at all. A mapping that goes missing here is a
+			// no_mocks failure at replay — it must never be silent again.
+			names := make([]string, 0, len(pending))
+			for tn := range pending {
+				names = append(names, tn)
+			}
+			sort.Strings(names)
+			r.logger.Error("failed to save mappings",
+				zap.Strings("tests", names),
+				zap.Error(err),
+				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		}
+		clear(pending)
+	}
+
+	// A partial batch must not sit in memory until the stream closes: recording
+	// can run for hours, and an operator watching mappings.yaml should see it
+	// grow. The ticker bounds how long a mapping stays unpersisted without
+	// putting a file rewrite on the per-mapping path.
+	ticker := time.NewTicker(mappingFlushInterval)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
+	for mapping := range mappings {
+		realMockEntries := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs)
+
+		if len(realMockEntries) == 0 {
+			continue
+		}
+
+		flushMu.Lock()
+		// Union, don't replace: the agent emits a test's mocks when its window
+		// resolves and emits more later for mocks retroactively binned into that
+		// window. Those later emissions are a DELTA — overwriting would delete the
+		// mocks already recorded for the test and replay it with a short pool.
+		pending[mapping.TestName] = mergeMockEntries(pending[mapping.TestName], realMockEntries)
+		full := len(pending) >= mappingFlushBatch
+		flushMu.Unlock()
+
+		// Flush on size only. Draining the channel is the priority: every
+		// millisecond spent rewriting mappings.yaml is a millisecond the agent
+		// cannot hand over its next mapping, and it DROPS what it cannot hand
+		// over. The ticker flushes whatever a partial batch leaves behind.
+		if full {
+			flush()
+		}
+	}
+
+	// The stream is closed: persist whatever the last partial batch holds.
+	flush()
+	return nil
+}
 
 type Recorder struct {
 	logger          *zap.Logger
@@ -168,6 +331,34 @@ func (r *Recorder) Start(ctx context.Context) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
+	// persistCtx is the context the test-case and mock stores are written on,
+	// detached from ctx on purpose. (consumeMappings makes the same guarantee for
+	// mappings.yaml itself.)
+	//
+	// Capture and persistence are driven by different contexts, and the gap
+	// between them is where recorded data used to disappear. The agent streams on
+	// reqCtx (see below), which is WithoutCancel'd and so survives SIGINT — it
+	// stops only at reqCtxCancel() in teardown, AFTER the user app has been
+	// stopped and drained. The consumer goroutines below, however, are children of
+	// ctx, which cancels the instant SIGINT lands. So for the whole teardown
+	// window (a NotifyGracefulShutdown of up to 10s, then an app drain of up to
+	// 30s) the agent kept handing us test cases, mocks and mappings while every
+	// store refused to write them: the yaml path returns ctx.Err() on a cancelled
+	// ctx, and the callers below treated that as "shutting down, skip" — silently.
+	//
+	// The damage was worst for mappings, which are emitted LAST (the agent can
+	// only resolve a test's mock range once that test is done), so the tail of
+	// every endpoint landed squarely in that window: mappings.yaml lost those
+	// tests and replay reported "no_mocks" (candidates: 0) for exactly them. A
+	// dropped mock insert compounded it by also skipping its correlationMap entry,
+	// stranding the mapping that referenced it even when the mapping did arrive.
+	//
+	// Writes must therefore outlive cancellation. This does NOT risk a hung
+	// teardown: the consumers are `range` loops that end when the agent closes its
+	// streams (at reqCtxCancel), each write is a local file op, and Start's
+	// teardown still bounds the whole group with DrainErrGroup.
+	persistCtx := context.WithoutCancel(ctx)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
 	runAppCtx := context.WithoutCancel(ctx)
@@ -529,9 +720,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 					zap.String("testSetID", newTestSetID),
 					zap.String("testCaseName", testCase.Name))
 			}
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				if ctx.Err() != nil {
+					// Once shutdown has begun nothing reads insertTestErrChan —
+					// Start's select has returned and the channel is closed on
+					// Start's way out — so reporting through it is unsafe. Log
+					// instead of dropping the error on the floor: with persistCtx
+					// the write no longer fails merely because we are shutting
+					// down, so an error here is real and the operator needs it.
+					utils.LogError(r.logger, err, "failed to record test case during shutdown",
+						zap.String("testCaseName", testCase.Name),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertTestErrChan <- err
@@ -597,9 +797,17 @@ func (r *Recorder) Start(ctx context.Context) error {
 			if mock.IsAsync() {
 				asyncMockIDs.Store(tempID, struct{}{})
 			}
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			err := r.mockDB.InsertMock(persistCtx, mock, newTestSetID)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				if ctx.Err() != nil {
+					// See the sibling note on the test-case insert: insertMockErrChan
+					// is no longer safe to report through once teardown has begun. A
+					// skipped mock also skips its correlationMap entry below, which
+					// strands the mapping that references it — so this must be loud.
+					utils.LogError(r.logger, err, "failed to record mock during shutdown",
+						zap.String("mockName", mock.Name),
+						zap.String("mockKind", mock.GetKind()),
+						zap.String("testSetID", newTestSetID))
 					continue
 				}
 				insertMockErrChan <- err
@@ -632,18 +840,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 
 	errGrp.Go(func() error {
-		for mapping := range frames.Mappings {
-			realMockEntries := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs)
-
-			// Write to mappings.yaml
-			if len(realMockEntries) > 0 {
-				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockEntries)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to save mapping")
-				}
-			}
-		}
-		return nil
+		return r.consumeMappings(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs)
 	})
 
 	if r.config.CommandType != string(utils.DockerCompose) {
@@ -832,11 +1029,48 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	g.Go(func() error {
 		defer close(mappingChan)
 
-		// Create context that cancels with parent
+		// A mapping is the LAST artifact a recorded test produces: it is derived,
+		// and the agent can only emit it once that test's mock range has resolved.
+		// So when recording stops, a burst for the most recently recorded tests is
+		// still queued inside the agent. Tearing the stream down the instant ctx was
+		// done dropped that burst SILENTLY — the entries never reach the consumer, so
+		// not even a write error is logged. mappings.yaml then omitted the tail of
+		// every endpoint, and replay reported "no_mocks" (candidates: 0) for exactly
+		// those tests, because resolveMockSets picks mapping-based selection per test
+		// SET and has no per-test fallback for a test that is missing.
+		//
+		// It is tempting to assume the tail has already been flushed by now because
+		// teardown stops the app first. That is only true for the NATIVE path: under
+		// docker-compose keploy never runs the app at all (see the CommandType check
+		// above), runAppErrGrp is empty, its drain returns instantly, and reqCtxCancel
+		// therefore fires within milliseconds of SIGINT — with the agent's queue still
+		// full. Docker-compose is what most e2e lanes and many users run, and it is
+		// where this bug was measured: 27 of 342 tests lost, all tails.
+		//
+		// So on shutdown keep the stream open and keep draining. Stop as soon as the
+		// tail is through — the agent closing the stream, or the stream falling idle —
+		// and hard-cap the total wait so a wedged agent cannot hang exit.
 		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
+
+		drained := make(chan struct{})
+		defer close(drained)
 		go func() {
-			<-ctx.Done()
+			select {
+			case <-drained:
+				return // finished before shutdown — nothing to wait for
+			case <-ctx.Done():
+			}
+			select {
+			case <-drained: // tail fully drained
+			case <-time.After(mappingDrainGrace):
+				// Hitting the cap means the agent never finished flushing, so the
+				// tail is truncated here — the same damage this drain prevents.
+				// Say so: silence is what made the original bug so hard to find.
+				r.logger.Warn("timed out draining test-mock mappings on shutdown",
+					zap.Duration("waited", mappingDrainGrace),
+					zap.String("next_step", "mappings.yaml may be missing the last recorded tests and replay can report no_mocks for them; re-record the test set and report this if it recurs"))
+			}
 			cancel()
 		}()
 
@@ -849,16 +1083,52 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			return fmt.Errorf("failed to get mappings: %w", err)
 		}
 
+		// idle is armed only once shutdown has begun. While recording is live, gaps
+		// between mappings are normal and must never end the stream; once shutdown
+		// starts, a gap long enough means the agent has nothing left to flush (it
+		// holds the stream open for the whole session, so it will not close it).
+		idle := time.NewTimer(mappingIdleGrace)
+		defer idle.Stop()
+		stopTimer(idle)
+
 		for {
+			// While recording is live, wake on ctx.Done(); once draining, wait on the
+			// idle timer instead. Arming both would let an already-closed ctx.Done()
+			// spin the loop.
+			var idleC <-chan time.Time
+			var shutdownC <-chan struct{}
+			if ctx.Err() != nil {
+				resetTimer(idle, mappingIdleGrace)
+				idleC = idle.C
+			} else {
+				shutdownC = ctx.Done()
+			}
+
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-shutdownC:
+				// Shutdown began: re-loop to arm the idle timer and start draining.
+				continue
+			case <-mapCtx.Done():
+				// Hard cap reached, or the stream was torn down.
+				return nil
+			case <-idleC:
+				// Draining and nothing for mappingIdleGrace: the tail is through.
+				return nil
 			case m, ok := <-ch:
 				if !ok {
 					return nil
 				}
 				select {
-				case <-ctx.Done():
+				case <-mapCtx.Done():
+					// Hand off the mapping we already took off the stream before
+					// unwinding — cancellation is not a licence to drop data we are
+					// holding. Both cases are ready once mapCtx is done, so the
+					// runtime picks at random and this would otherwise lose the last
+					// in-flight mapping about half the time. The consumer is still
+					// ranging (it stops only when this goroutine closes the channel
+					// on return), so the send completes. Mirrors the outgoing
+					// producer above.
+					mappingChan <- m
 					return ctx.Err()
 				case mappingChan <- m:
 				}

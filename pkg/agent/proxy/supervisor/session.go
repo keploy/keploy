@@ -234,6 +234,37 @@ func (s *Session) IsMockIncomplete() bool {
 	return s.mockIncomplete.Load()
 }
 
+// RecordOrphanWindow marks a [start,end] interval during which a mock could not
+// be framed for a NON-pressure reason (currently a mongo/v2 reassembly resync
+// hole — a dropped chunk desyncs the framer, so a message delivered during the
+// hole is never turned into a mock). It routes to the session's
+// SyncMockManager (the per-app s.Mgr, or the package singleton) — matching how
+// EmitMock resolves the manager — so record.go's TC-suppression treats the hole
+// like a memory-pressure interval and suppresses every TC whose window overlaps
+// it, instead of shipping that TC mock-less (replay would then report
+// match_phase=no_mocks). This is the keploy side of the enterprise mongo
+// parser's OPTIONAL orphanWindowRecorder capability (integrations pkg/mongo/v2):
+// the parser probes for this method via an interface assertion, so pins without
+// it simply degrade resync-orphan suppression to a no-op. RecordOrphanWindow
+// itself no-ops on a zero start and a nil manager.
+//
+// Reader/writer symmetry: the suppressor (routes/record.go) must query
+// WasMockOrphanedInWindow on the SAME manager this writes to. In OSS that always
+// holds — nothing calls syncMock.NewContext, so s.Mgr is always nil and both the
+// write here and the read there resolve to syncMock.Get(). A multi-app composer
+// that sets a per-app s.Mgr must likewise give its suppressor a per-app reader;
+// there is no global fan-out for orphan windows (unlike memory pressure).
+func (s *Session) RecordOrphanWindow(start, end time.Time) {
+	if s == nil {
+		return
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	mgr.RecordOrphanWindow(start, end)
+}
+
 // EmitMock sends m to the mocks channel. If the session's active mock
 // is marked incomplete, EmitMock returns nil without sending (the mock
 // is dropped on the floor and the incomplete flag is cleared, matching
