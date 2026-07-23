@@ -4116,24 +4116,66 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 	return nil
 }
 
-// maxResetResends bounds how many times a transport-reset test request is
-// re-sent. The reset is docker's userland-proxy resetting freshly-accepted
-// host-port conns in bursts under load; under heavy CI contention that burst
-// outlasts a couple of back-to-back attempts, so re-send work-slow — more
-// attempts, spread by resetResendBackoff, to ride the burst out. Each attempt is
-// gated on no-mock-consumed + port readiness, and a non-reset failure (genuinely
-// broken app) still stops immediately, so the extra attempts only ever add
-// latency on the reset path.
-const maxResetResends = 6
+// The reset is docker's userland-proxy resetting freshly-accepted host-port
+// conns in bursts under load: `-p 8080:8080` makes docker-proxy accept() on the
+// host port the instant `docker run` starts, long before the containerized app
+// is listen()ing, so the port-readiness gate and the first requests race a
+// still-booting app. Under heavy CI contention that boot outlasts a slow app for
+// far longer than a couple of back-to-back attempts. A FIXED attempt count (the
+// old maxResetResends=6, ~10s of wall clock) was exhausted a few seconds before
+// a contended app finished booting — failing only the FIRST test with
+// status_code=0 while every later test passed. So the re-send is now bounded by
+// a DEADLINE (resetResendMaxWait) rather than a count: keep re-sending the real
+// request until the app answers or the readiness budget runs out. Each attempt
+// is still gated on no-mock-consumed + port readiness, and a non-reset failure
+// (genuinely broken app) still stops immediately, so the extra attempts only
+// ever add latency on the reset path.
 
-// resetResendBackoff grows the pause between reset re-sends (attempt*backoff) so
-// the bounded attempts spread across the docker-proxy reset window instead of
-// hammering it back-to-back.
+// resetResendBackoff grows the pause between reset re-sends (attempt*backoff, up
+// to resetResendBackoffCap) so the attempts spread across the docker-proxy reset
+// window instead of hammering it back-to-back.
 const resetResendBackoff = 300 * time.Millisecond
+
+// resetResendBackoffCap bounds the growing per-attempt backoff so the longer
+// deadline window doesn't turn the tail attempts into multi-second sleeps.
+const resetResendBackoffCap = 2 * time.Second
 
 // resetResendReadyTimeout caps the per-attempt app-port readiness re-poll done
 // before re-sending. It only ever adds latency on the (rare) reset path.
 const resetResendReadyTimeout = 5 * time.Second
+
+// resetResendFloor is the default re-send budget when the user set no
+// HealthPollTimeout — enough headroom for a contended docker app to finish
+// booting past docker-proxy's premature accept. A genuinely-dead app on this
+// default path therefore fails ~this long after the first reset (vs the old
+// ~10s fixed budget), an acceptable trade for not false-failing a slow boot.
+const resetResendFloor = 30 * time.Second
+
+// resetResendCeiling caps the re-send budget even when HealthPollTimeout is set
+// very large, so the narrow "docker-proxy resets forever while the app never
+// binds" mode (a crash-looping container — ECONNRESET is retryable, unlike the
+// ECONNREFUSED of nothing-listening which still fails fast) cannot hang a single
+// test case for many minutes.
+const resetResendCeiling = 2 * time.Minute
+
+// resetResendMaxWait is the TOTAL wall-clock budget for re-sending a reset test
+// request while the app boots. A reset means the request was never processed (0
+// mocks consumed — enforced each iteration by resetResendUnsafe), so re-sending
+// within this budget is always safe: it only ever converts a transient
+// docker-proxy reset into the real response, and a genuinely-dead app still
+// fails, just after the budget. When the user set a HealthPollTimeout (their own
+// app-readiness ceiling) the budget scales up with it, clamped to
+// resetResendCeiling; otherwise it defaults to resetResendFloor.
+func (r *Replayer) resetResendMaxWait() time.Duration {
+	if r.config != nil && r.config.Test.HealthPollTimeout > 0 {
+		wait := r.config.Test.HealthPollTimeout
+		if wait > resetResendCeiling {
+			wait = resetResendCeiling
+		}
+		return wait
+	}
+	return resetResendFloor
+}
 
 // retryResetOnce re-sends a test request that failed with a transport-level
 // connection reset / unexpected EOF (origErr), but ONLY when doing so is
@@ -4175,7 +4217,8 @@ const resetResendReadyTimeout = 5 * time.Second
 // successful re-send's consumption is still accounted by the subsequent per-test
 // GetConsumedMocks in RunTestSet (loopErr becomes nil, so that block runs).
 func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase, testSetID string, origErr error) (interface{}, bool, []models.MockState) {
-	for attempt := 1; attempt <= maxResetResends; attempt++ {
+	deadline := time.Now().Add(r.resetResendMaxWait())
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
 		if ctx.Err() != nil {
 			return nil, false, nil
 		}
@@ -4199,7 +4242,7 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 
 		r.logger.Warn("test request reset by app/proxy before any mock was consumed; re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt),
-			zap.Int("maxRetries", maxResetResends),
+			zap.Duration("budgetRemaining", time.Until(deadline)),
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCase.Name),
 			zap.Error(origErr))
@@ -4218,12 +4261,16 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 			return nil, false, nil
 		}
 		origErr = err
-		// Back off (growing) before the next re-send so the bounded attempts
+		// Back off (growing, capped) before the next re-send so the attempts
 		// spread across the docker-proxy reset burst rather than hammering it.
+		backoff := time.Duration(attempt) * resetResendBackoff
+		if backoff > resetResendBackoffCap {
+			backoff = resetResendBackoffCap
+		}
 		select {
 		case <-ctx.Done():
 			return nil, false, nil
-		case <-time.After(time.Duration(attempt) * resetResendBackoff):
+		case <-time.After(backoff):
 		}
 	}
 	return nil, false, nil
