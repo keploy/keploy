@@ -84,7 +84,17 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	var clientKeyNetConn net.Conn = clientKey
 	decodeCtx.LastOp.Store(clientKeyNetConn, wire.RESET)
 
-	handshake, err := handleInitialHandshakeV2(ctx, logger, sess, decodeCtx, &clientKeyNetConn)
+	// PostTLSMode marks the decrypted (SSL/GoTLS/JSSE uprobe) half of a TLS
+	// connection: the pre-TLS server greeting arrived on a different, observe-
+	// only stream and was stashed in TLSHandshakeStore. In that mode the greeting
+	// is popped from the store instead of read from DestStream, and no relay TLS
+	// upgrade is attempted (observe-only capture has no upstream socket).
+	postTLS := false
+	if v, ok := ctx.Value(models.PostTLSModeKey).(bool); ok && v {
+		postTLS = true
+	}
+
+	handshake, err := handleInitialHandshakeV2(ctx, logger, sess, decodeCtx, &clientKeyNetConn, postTLS)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			logger.Debug("EOF during MySQL V2 initial handshake")
@@ -138,7 +148,7 @@ type v2HandshakeResult struct {
 // optional TLS upgrade via directive → re-sent HandshakeResponse41 →
 // auth exchange. Returns the accumulated request/response bundles plus
 // request/response timestamps sampled from chunk ReadAt times.
-func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKeyPtr *net.Conn) (v2HandshakeResult, error) {
+func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, clientKeyPtr *net.Conn, postTLS bool) (v2HandshakeResult, error) {
 	res := v2HandshakeResult{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
@@ -146,19 +156,34 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 
 	clientKey := *clientKeyPtr
 
-	// Read HandshakeV10 from DestStream.
-	handshake, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
-	if err != nil {
-		return res, fmt.Errorf("read server greeting: %w", err)
+	// Server greeting (HandshakeV10). Pre-TLS: it arrives on DestStream. Post-TLS
+	// (decrypted SSL/GoTLS/JSSE uprobe stream): it was exchanged pre-TLS on a
+	// different, observe-only stream and stashed in TLSHandshakeStore, so it is
+	// popped from there. This is the V2 analogue of the legacy handlePostTLSRecord
+	// reconstruction. Either way `handshake` ends up holding the raw greeting.
+	var handshake []byte
+	var stashedSSLReq []byte
+	if postTLS {
+		g, sslReq, perr := popStoredGreetingV2(ctx, logger, sess)
+		if perr != nil {
+			return res, perr
+		}
+		handshake = g
+		stashedSSLReq = sslReq
+		// No DestStream read happened; stamp from wall clock (the greeting's
+		// original arrival time is preserved on the pre-TLS config-mock shell).
+		res.reqTimestamp = time.Now()
+	} else {
+		g, rerr := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		if rerr != nil {
+			return res, fmt.Errorf("read server greeting: %w", rerr)
+		}
+		handshake = g
+		// The request timestamp of the config mock is the time the server
+		// greeting arrived. Must be chunk-derived: LastReadTime is non-zero
+		// because ReadPacketBuffer above succeeded (>=1 chunk consumed).
+		res.reqTimestamp = sess.DestStream.LastReadTime()
 	}
-
-	// The request timestamp of the config mock is the time the server
-	// greeting arrived — matches the semantic the legacy recorder used
-	// (it stamped reqTimestamp right after the handshake read, before
-	// writing it to the client). Must be chunk-derived: LastReadTime
-	// is non-zero because ReadPacketBuffer above succeeded, which
-	// guarantees at least one chunk was consumed from the FakeConn.
-	res.reqTimestamp = sess.DestStream.LastReadTime()
 
 	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientKey, decodeCtx)
 	if err != nil {
@@ -177,6 +202,21 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 
 	res.resp = append(res.resp, mysql.Response{PacketBundle: *handshakePkt})
 
+	// Post-TLS: prepend the pre-TLS client SSLRequest (stashed by the observe
+	// stream) so the config mock's requests are [SSLRequest, HandshakeResponse41]
+	// — the exact shape the replayer's SSL-mock selection requires
+	// (simulateInitialHandshake collects mocks whose requests[0] is an
+	// SSLRequest, then matches HandshakeResponse41 at requests[1]). It MUST be
+	// decoded BEFORE the post-TLS HandshakeResponse41 so decodeCtx.LastOp stays
+	// HandshakeV10 for it. Mirrors legacy handlePostTLSRecord.
+	if postTLS && len(stashedSSLReq) > 0 {
+		if sslReqPkt, sErr := wire.DecodePayload(ctx, logger, stashedSSLReq, clientKey, decodeCtx); sErr == nil {
+			res.req = append(res.req, mysql.Request{PacketBundle: *sslReqPkt})
+		} else {
+			logger.Debug("post-TLS: failed to decode stashed SSLRequest; config mock will lack the SSL-selected shape", zap.Error(sErr))
+		}
+	}
+
 	// Read the client's first response: HandshakeResponse41 OR
 	// SSLRequest (short form).
 	clientFirst, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
@@ -191,45 +231,66 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	res.req = append(res.req, mysql.Request{PacketBundle: *clientFirstPkt})
 
 	if decodeCtx.UseSSL {
-		// Before the TLS upgrade we could record an incomplete mock
-		// shape mirroring the legacy SkipTLSMITM branch; on the V2
-		// path, however, we must ALWAYS attempt the upgrade via the
-		// directive channel. SkipTLSMITM is a legacy concept tied to
-		// uprobe coordination that does not exist in V2.
+		switch {
+		case !postTLS && sess.Opts.SkipTLSMITM:
+			// Observe-only proxyless TLS (TLS terminated in-JVM / by an
+			// SSL/GoTLS/JSSE uprobe, not by us): there is NO upstream socket to
+			// relay a live TLS upgrade onto, so performTLSUpgradeV2 cannot
+			// succeed here. Instead stash the pre-TLS server greeting + client
+			// SSLRequest in TLSHandshakeStore; the POST-TLS decrypted stream
+			// (routed here with PostTLSMode) pops them and records the full
+			// handshake + command phase. The pre-TLS config-mock shell (greeting
+			// + SSLRequest, already in res) is returned so it is emitted here.
+			// This is the V2 analogue of the legacy conn.go SkipTLSMITM branch.
+			if err := stashPreTLSHandshakeV2(ctx, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
+				return res, err
+			}
+			// Do NOT emit a config mock from the pre-TLS observe stream: it would
+			// be an incomplete [SSLRequest]-only mock that the replayer selects as
+			// SSL-eligible but then can't match the HandshakeResponse41 against
+			// ("no mysql mocks matched the HandshakeResponse41 within SSL-selected
+			// mocks"). The POST-TLS decrypted stream emits the authoritative
+			// combined [SSLRequest, HandshakeResponse41] config mock instead.
+			res.skipConfigMock = true
+			return res, nil
 
-		if err := performTLSUpgradeV2(ctx, logger, sess); err != nil {
-			sess.MarkMockIncomplete("tls upgrade failed")
-			return res, err
-		}
+		case postTLS:
+			// The client packet just read (clientFirst) IS the post-TLS
+			// HandshakeResponse41 with credentials, delivered in plaintext by the
+			// uprobe over the already-established TLS channel. There is no upgrade
+			// to perform — fall through to the auth read below. The greeting was
+			// already restored from the stash above, so decodeCtx is initialised.
 
-		// After TLS upgrade, the relay is writing plaintext into our
-		// FakeConns. The client will re-send HandshakeResponse41 with
-		// credentials. Reset the decode LastOp so the next decode
-		// treats the new HandshakeResponse41 as a fresh handshake.
-		//
-		// We also swap the clientKey pointer to a fresh sentinel so
-		// legacy-stored decode-state under the old key does not bleed
-		// in. The existing maps (LastOp, ServerGreetings) are keyed by
-		// net.Conn pointer; we store under the new sentinel.
-		newKey := newSentinelConn()
-		decodeCtx.LastOp.Store(newKey, mysql.HandshakeV10)
-		if sg, ok := decodeCtx.ServerGreetings.Load(clientKey); ok {
-			decodeCtx.ServerGreetings.Store(newKey, sg)
-		}
-		*clientKeyPtr = newKey
-		clientKey = newKey
+		default:
+			// Proxy mode (keploy terminates TLS): perform the relay TLS upgrade.
+			if err := performTLSUpgradeV2(ctx, logger, sess); err != nil {
+				sess.MarkMockIncomplete("tls upgrade failed")
+				return res, err
+			}
+			// After TLS upgrade, the relay is writing plaintext into our
+			// FakeConns. The client will re-send HandshakeResponse41 with
+			// credentials. Swap the clientKey to a fresh sentinel so legacy
+			// decode-state under the old key does not bleed in.
+			newKey := newSentinelConn()
+			decodeCtx.LastOp.Store(newKey, mysql.HandshakeV10)
+			if sg, ok := decodeCtx.ServerGreetings.Load(clientKey); ok {
+				decodeCtx.ServerGreetings.Store(newKey, sg)
+			}
+			*clientKeyPtr = newKey
+			clientKey = newKey
 
-		// Read post-TLS HandshakeResponse41.
-		hr41Buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
-		if err != nil {
-			return res, fmt.Errorf("read post-TLS handshake response: %w", err)
+			// Read post-TLS HandshakeResponse41.
+			hr41Buf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+			if err != nil {
+				return res, fmt.Errorf("read post-TLS handshake response: %w", err)
+			}
+			hr41Pkt, err := wire.DecodePayload(ctx, logger, hr41Buf, clientKey, decodeCtx)
+			if err != nil {
+				return res, fmt.Errorf("decode post-TLS handshake response: %w", err)
+			}
+			decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
+			res.req = append(res.req, mysql.Request{PacketBundle: *hr41Pkt})
 		}
-		hr41Pkt, err := wire.DecodePayload(ctx, logger, hr41Buf, clientKey, decodeCtx)
-		if err != nil {
-			return res, fmt.Errorf("decode post-TLS handshake response: %w", err)
-		}
-		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
-		res.req = append(res.req, mysql.Request{PacketBundle: *hr41Pkt})
 	}
 
 	// Auth decider: AuthSwitchRequest / AuthMoreData / OK / ERR.
@@ -477,6 +538,66 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	res.resp = append(res.resp, mysql.Response{PacketBundle: *finalPkt})
 	res.responseOperation = finalPkt.Header.Type
 	return res, nil
+}
+
+// stashPreTLSHandshakeV2 pushes the raw pre-TLS server greeting + client
+// SSLRequest into the shared TLSHandshakeStore so the POST-TLS decrypted stream
+// (routed here with PostTLSMode) can pop them and reconstruct the handshake.
+// V2 analogue of the SkipTLSMITM branch in the legacy conn.go
+// handleInitialHandshake. Pushes under BOTH the connection-specific key and the
+// port-only fallback: the pre-TLS observe stream and the post-TLS decrypted
+// stream are different TCP connections (different ConnKeys), so the port key is
+// what bridges them.
+func stashPreTLSHandshakeV2(ctx context.Context, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time) error {
+	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if !ok || hsStore == nil {
+		return fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
+	}
+	dstPort := uint16(0)
+	if sess.Opts.DstCfg != nil {
+		dstPort = uint16(sess.Opts.DstCfg.Port)
+	}
+	entry := models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{greeting},
+		ReqPackets:   [][]byte{sslRequest},
+		ReqTimestamp: reqTimestamp,
+	}
+	hsStore.Push(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), entry)
+	hsStore.Push(models.HandshakeStoreKey("", dstPort), entry)
+	return nil
+}
+
+// popStoredGreetingV2 pops the pre-TLS server greeting (and client SSLRequest)
+// stashed by stashPreTLSHandshakeV2. Tries the connection-specific key first,
+// then the port-only fallback (which is what actually matches across the two
+// distinct streams). Waits briefly because the decrypted stream can reach here
+// before the pre-TLS stream has finished stashing. Returns
+// wire.ErrServerGreetingNotFound when nothing is available, so the caller skips
+// the connection gracefully (same as a genuine mid-stream join).
+func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (greeting []byte, sslRequest []byte, err error) {
+	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if !ok || hsStore == nil {
+		return nil, nil, wire.ErrServerGreetingNotFound
+	}
+	dstPort := uint16(0)
+	if sess.Opts.DstCfg != nil {
+		dstPort = uint16(sess.Opts.DstCfg.Port)
+	}
+	entry, found := hsStore.PopWait(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), 5*time.Second)
+	if !found {
+		entry, found = hsStore.PopWait(models.HandshakeStoreKey("", dstPort), 3*time.Second)
+	}
+	if !found || len(entry.RespPackets) == 0 {
+		if logger != nil {
+			logger.Debug("post-TLS MySQL: no stashed server greeting available", zap.Uint16("dstPort", dstPort))
+		}
+		return nil, nil, wire.ErrServerGreetingNotFound
+	}
+	greeting = entry.RespPackets[0]
+	if len(entry.ReqPackets) > 0 {
+		sslRequest = entry.ReqPackets[0]
+	}
+	return greeting, sslRequest, nil
 }
 
 // performTLSUpgradeV2 builds TLS configs from the session options and
