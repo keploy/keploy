@@ -9,7 +9,7 @@ require (
 	github.com/cilium/ebpf v0.21.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/docker/go-connections v0.4.0 // indirect
+	github.com/docker/go-connections v0.4.0
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.18.0
 	github.com/k0kubun/pp/v3 v3.2.0
@@ -139,7 +139,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/containerd/errdefs v0.3.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
+	github.com/distribution/reference v0.6.0
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/fatih/semgroup v1.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
