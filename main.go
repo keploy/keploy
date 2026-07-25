@@ -77,13 +77,21 @@ func start(ctx context.Context) {
 		}()
 	}
 
-	// Start pprof HTTP server for live profiling if PPROF_PORT is set
-	if pprofPort := os.Getenv("PPROF_PORT"); pprofPort != "" {
+	// Start pprof HTTP server for live profiling. PPROF_AGENT_PORT takes
+	// precedence over PPROF_PORT so the agent can bind a port distinct from
+	// the instrumented app, which also honors PPROF_PORT and would otherwise
+	// win the bind in a shared network namespace (making the agent's profiler
+	// unreachable).
+	pprofPort := os.Getenv("PPROF_AGENT_PORT")
+	if pprofPort == "" {
+		pprofPort = os.Getenv("PPROF_PORT")
+	}
+	if pprofPort != "" {
 		go func() {
 			addr := "localhost:" + pprofPort
 			logger.Info("pprof server starting", zap.String("addr", addr))
 			if err := http.ListenAndServe(addr, nil); err != nil {
-				logger.Error("pprof server failed; check that PPROF_PORT is a valid port and not already in use, or unset the env var to disable",
+				logger.Error("pprof server failed; check that the pprof port is valid and not already in use, or unset PPROF_AGENT_PORT/PPROF_PORT to disable",
 					zap.String("port", pprofPort), zap.Error(err))
 			}
 		}()
