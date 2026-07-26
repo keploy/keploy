@@ -329,7 +329,7 @@ func RemoveDoubleQuotes(tempMap map[string]interface{}) {
 	}
 }
 
-func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
