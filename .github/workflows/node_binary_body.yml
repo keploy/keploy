@@ -1,0 +1,57 @@
+name: Node Binary Body
+# Exercises keploy's record/replay with HTTP responses that carry non-UTF-8
+# bytes (application/zip, application/octet-stream). Guards against
+# keploy/enterprise#1902 where such bodies used to crash the recorder with
+# "yaml: cannot marshal invalid UTF-8 data as !!str".
+on:
+  workflow_call:
+jobs:
+  node_binary_body:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout binary-body sample
+        uses: actions/checkout@v4
+        with:
+          repository: ayush3160/keploy-binary-body-sample
+          path: keploy-binary-body-sample
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Record and replay binary-body sample
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd keploy-binary-body-sample
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/node/binary_body/node-linux.sh
