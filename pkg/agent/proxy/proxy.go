@@ -936,6 +936,30 @@ func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 	})
 }
 
+func (p *Proxy) replayTargetHasHTTP1Mock(sniHost string, port uint32) bool {
+	m := p.getMockManager()
+	if m == nil {
+		return false
+	}
+	return m.HasMocksByKind(models.HTTP, func(mk *models.Mock) bool {
+		if mk.Spec.HTTPReq == nil {
+			return false
+		}
+		host := ""
+		for k, v := range mk.Spec.HTTPReq.Header {
+			if strings.EqualFold(k, "Host") {
+				host = v
+				break
+			}
+		}
+		if host == "" {
+			host = mk.Spec.HTTPReq.URL
+		}
+		h, pt := hostPortFromAuthority(host, "")
+		return http2DestMatches(strings.ToLower(h), pt, sniHost, port)
+	})
+}
+
 // http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
 // aHost lower-cased) matches the connection destination sniHost:port. A
 // discriminator unknown on either side (missing port, missing SNI/host) is not
@@ -2085,7 +2109,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			preferH2 := rule.OutgoingOptions.PreferH2
 			if !preferH2 {
-				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
+				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port) &&
+					!p.replayTargetHasHTTP1Mock(sniHost, destInfo.Port)
 			}
 			if preferH2 {
 				hsCtx = pTls.WithPreferH2(ctx)
