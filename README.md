@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.keploy%2Fmcp.svg)](https://mcptoplist.com/server/io.github.keploy%2Fmcp)
+
 <p align="center">
   <img src="https://docs.keploy.io/img/keploy-logo-dark.svg?s=200&v=4" height="80" alt="Keploy Logo" />
 </p>
