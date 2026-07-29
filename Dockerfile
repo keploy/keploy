@@ -53,20 +53,20 @@ FROM debian:trixie-slim
 ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
-RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
-    apt-get clean && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        sudo && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 
-# windows comapatibility
-RUN sed -i 's/\r$//' /app/entrypoint.sh
-
-# Make the entrypoint.sh file executable
-RUN chmod +x /app/entrypoint.sh
+# windows comapatibility and make the entrypoint.sh file executable
+RUN sed -i 's/\r$//' /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh
 
 # Set the entrypoint
 ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker"]
