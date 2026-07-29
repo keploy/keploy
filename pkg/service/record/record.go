@@ -978,6 +978,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		CapturePackets:            r.config.Record.CapturePackets,
 		OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept,
 		MysqlPorts:                r.config.MysqlPorts,
+		DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 		// Advertise that this CLI understands the reserved Kind=RevokedTests
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it
