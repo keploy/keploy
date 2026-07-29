@@ -648,10 +648,14 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // the just-replayed interval, which the caller has already uploaded to object
 // storage. Unlike UpdateMocks (which keys only on the raw "config" tag) the keep
 // set is derived via Mock.DeriveLifetime, so connection-tagged and MySQL-reusable
-// session mocks are preserved rather than dropped. Takes the SAME striped file
-// lock as InsertMock/UpdateMocks, so it is race-safe against a concurrent
-// recorder append. Best-effort at the call site: an error here must not fail the
-// replay run.
+// session mocks are preserved rather than dropped. The derivation is snapshotted
+// and restored around the keep check so it is never written back to disk:
+// DeriveLifetime mutates TestModeInfo (Lifetime + LifetimeDerived), and the gob
+// path encodes those fields (gob ignores the json:"-" tags), so persisting them
+// would pin a mode-specific classification and defeat fresh re-derivation on the
+// next load. Takes the SAME striped file lock as InsertMock/UpdateMocks, so it is
+// race-safe against a concurrent recorder append. Best-effort at the call site:
+// an error here must not fail the replay run.
 func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, pruneBefore, startupCutoffTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
@@ -666,8 +670,11 @@ func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, p
 		if mock.Spec.Metadata["type"] == "config" {
 			return true
 		}
+		savedTestModeInfo := mock.TestModeInfo
 		mock.DeriveLifetime()
-		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+		lt := mock.TestModeInfo.Lifetime
+		mock.TestModeInfo = savedTestModeInfo
+		if lt == models.LifetimeSession || lt == models.LifetimeConnection {
 			return true
 		}
 		if !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
