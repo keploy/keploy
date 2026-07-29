@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"sort"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -89,6 +90,40 @@ const (
 // N, so it lives here as the single source of truth. Fixed in code rather than
 // exposed as a flag — change here to retune.
 const StartupMockTestCaseWindow = 5
+
+// StartupMockCutoff returns the request-timestamp boundary below which a mock
+// is a startup mock that must be kept even when unconsumed: the timestamp of
+// the (StartupMockTestCaseWindow+1)-th test case ordered by request time. When
+// the set has <= StartupMockTestCaseWindow test cases the whole recording is
+// startup, so keepAll (the replay start time / pruneBefore) is returned. Returns
+// the zero time when no test case carries a usable timestamp, which disables the
+// exemption. Single source of truth shared by replay-side pruning and the
+// k8s-proxy post-replay drain so both agree on the startup window.
+func StartupMockCutoff(testCases []*TestCase, keepAll time.Time) time.Time {
+	tcTimes := make([]time.Time, 0, len(testCases))
+	for _, tc := range testCases {
+		var candidate time.Time
+		if !tc.HTTPReq.Timestamp.IsZero() {
+			candidate = tc.HTTPReq.Timestamp
+		} else if !tc.GrpcReq.Timestamp.IsZero() {
+			candidate = tc.GrpcReq.Timestamp
+		} else if tc.Created > 0 {
+			candidate = time.Unix(tc.Created, 0)
+		}
+		if !candidate.IsZero() {
+			tcTimes = append(tcTimes, candidate)
+		}
+	}
+	sort.Slice(tcTimes, func(i, j int) bool { return tcTimes[i].Before(tcTimes[j]) })
+
+	if len(tcTimes) > StartupMockTestCaseWindow {
+		return tcTimes[StartupMockTestCaseWindow]
+	}
+	if len(tcTimes) > 0 {
+		return keepAll
+	}
+	return time.Time{}
+}
 
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`

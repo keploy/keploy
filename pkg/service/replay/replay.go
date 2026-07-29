@@ -52,33 +52,7 @@ const applicationFailedToRunLogMessage = "application failed to run; check the a
 // carries a usable timestamp, which disables the exemption (matching the prior
 // behaviour for timestamp-less sets).
 func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Time {
-	tcTimes := make([]time.Time, 0, len(testCases))
-	for _, tc := range testCases {
-		var candidate time.Time
-
-		// Prefer high-precision request timestamps when available.
-		if !tc.HTTPReq.Timestamp.IsZero() {
-			candidate = tc.HTTPReq.Timestamp
-		} else if !tc.GrpcReq.Timestamp.IsZero() {
-			candidate = tc.GrpcReq.Timestamp
-		} else if tc.Created > 0 {
-			// Fallback to the coarser Created timestamp.
-			candidate = time.Unix(tc.Created, 0)
-		}
-
-		if !candidate.IsZero() {
-			tcTimes = append(tcTimes, candidate)
-		}
-	}
-	sort.Slice(tcTimes, func(i, j int) bool { return tcTimes[i].Before(tcTimes[j]) })
-
-	if len(tcTimes) > models.StartupMockTestCaseWindow {
-		return tcTimes[models.StartupMockTestCaseWindow]
-	}
-	if len(tcTimes) > 0 {
-		return keepAll
-	}
-	return time.Time{}
+	return models.StartupMockCutoff(testCases, keepAll)
 }
 
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
