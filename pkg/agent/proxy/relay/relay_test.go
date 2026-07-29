@@ -283,17 +283,19 @@ func TestTeeDropOnPerConnCap(t *testing.T) {
 	}
 }
 
-func TestTeeDropOnChannelFull(t *testing.T) {
+func TestTeeSpillsOnChannelFull(t *testing.T) {
 	t.Parallel()
 	drops := newDropSink()
 
 	h := newHarness(t, Config{
 		TeeChanBuf:           1,
-		PerConnCap:           1 << 30, // large, so only channel full triggers
+		PerConnCap:           1 << 30, // large → spill absorbs the burst, no drop
 		OnMarkMockIncomplete: drops.record,
 	})
 
-	// Send many small chunks while NOT draining FakeConn.
+	// Send many small chunks while NOT draining the FakeConn — this used to
+	// force a channel_full drop (and the boot "no_mocks" loss). The overflow
+	// spill must now absorb the burst without dropping.
 	for i := 0; i < 32; i++ {
 		go h.writeClient([]byte("x"))
 		_ = h.readDest(1)
@@ -302,8 +304,8 @@ func TestTeeDropOnChannelFull(t *testing.T) {
 	// Give goroutines a moment.
 	time.Sleep(100 * time.Millisecond)
 
-	if drops.count(DropChannelFull) == 0 {
-		t.Fatalf("expected channel_full drop, got %v", drops.snapshot())
+	if drops.count(DropChannelFull) != 0 {
+		t.Fatalf("channel_full drop should no longer occur with the spill: %v", drops.snapshot())
 	}
 }
 

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -109,22 +110,146 @@ func TestTee_DropOnPerConnCap(t *testing.T) {
 	}
 }
 
-func TestTee_DropOnChannelFull(t *testing.T) {
+// TestTee_SpillsInsteadOfDroppingOnChannelFull pins the core of the
+// boot-capture fix: a full staging channel no longer forces a drop. buf=1
+// with no receiver means every push after the first would previously drop
+// on channel_full — losing response chunks and stranding their mock. With
+// the overflow spill each push instead succeeds (buffered up to the
+// per-conn cap), so no chunk is dropped.
+func TestTee_SpillsInsteadOfDroppingOnChannelFull(t *testing.T) {
 	t.Parallel()
-	// Large cap but channel buf=1; drain goroutine starts but we
-	// never receive on readCh, so staging fills.
+	// Large cap so the spill has headroom; buf=1 so staging fills at once.
 	tt, _, rec := newTestTee(t, 1<<30, 1, nil)
 
-	// Push enough that at least one drop occurs. The drain goroutine
-	// buffers one chunk in `out` too, so we need >2 pushes to be sure
-	// we see a drop.
-	for i := 0; i < 10; i++ {
-		tt.push(mkChunk("x"))
+	for i := 0; i < 64; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d dropped despite spill headroom (drops=%v)", i, rec.snapshot())
+		}
 	}
-	// Give the drain goroutine time to settle its buffer.
-	time.Sleep(20 * time.Millisecond)
-	if rec.count(DropChannelFull) == 0 {
-		t.Fatalf("expected at least one channel_full drop, got %v", rec.snapshot())
+	if rec.count(DropChannelFull) != 0 {
+		t.Fatalf("channel_full drop must not happen with the spill: %v", rec.snapshot())
+	}
+}
+
+// TestTee_SpillPreservesOrderNoLoss proves the spill is lossless AND
+// order-preserving end to end: push a burst that overruns the drain, then
+// drain everything (including the teardown-flushed overflow tail) and
+// assert the exact sequence is delivered.
+func TestTee_SpillPreservesOrderNoLoss(t *testing.T) {
+	t.Parallel()
+	tt, _, rec := newTestTee(t, 1<<30, 1, nil)
+
+	recvd := make(chan []string, 1)
+	go func() {
+		var got []string
+		for c := range tt.readCh() {
+			got = append(got, string(c.Bytes))
+		}
+		recvd <- got
+	}()
+
+	const N = 300
+	for i := 0; i < N; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d dropped unexpectedly (drops=%v)", i, rec.snapshot())
+		}
+	}
+	tt.close()
+	tt.waitDone()
+	got := <-recvd
+
+	if len(got) != N {
+		t.Fatalf("LOST chunks: got %d, want %d (drops=%v)", len(got), N, rec.snapshot())
+	}
+	for i, s := range got {
+		if want := fmt.Sprintf("c%03d", i); s != want {
+			t.Fatalf("out of wire order at index %d: got %q want %q", i, s, want)
+		}
+	}
+	if d := rec.count(DropChannelFull) + rec.count(DropPerConnCap); d != 0 {
+		t.Fatalf("unexpected drops despite spill + cap headroom: %v", rec.snapshot())
+	}
+}
+
+// TestTee_CloseRacingSpillBacklog_Conserves pins the subtle teardown
+// guarantee flagged by review: when close() races an overflow backlog, every
+// accepted chunk is either delivered exactly once or counted as a drop —
+// never silently lost, duplicated, or reordered. Correctness depends on
+// push's len(overflow)==0 fast-path re-checking `closed`; a refactor that
+// broke that ordering would reintroduce stranding, and this test would catch
+// it. Run under -race, it also stresses the push/close/drain interleaving.
+func TestTee_CloseRacingSpillBacklog_Conserves(t *testing.T) {
+	t.Parallel()
+	for iter := 0; iter < 100; iter++ {
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, nil, rec.record, nil) // buf=1 forces spill
+
+		recvd := make(chan []int, 1)
+		go func() {
+			var got []int
+			for c := range tt.readCh() {
+				var n int
+				_, _ = fmt.Sscanf(string(c.Bytes), "%d", &n)
+				got = append(got, n)
+			}
+			recvd <- got
+		}()
+
+		const N = 50
+		accepted := 0
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < N; i++ {
+				if tt.push(mkChunk(fmt.Sprintf("%d", i))) {
+					accepted++ // single writer; read after wg.Wait()
+				}
+			}
+		}()
+		wg.Wait()
+		tt.close()
+		tt.waitDone()
+		got := <-recvd
+
+		seen := make(map[int]bool, len(got))
+		for i, n := range got {
+			if seen[n] {
+				t.Fatalf("iter %d: duplicate delivery of %d: %v", iter, n, got)
+			}
+			seen[n] = true
+			if i > 0 && n <= got[i-1] {
+				t.Fatalf("iter %d: out of wire order: %v", iter, got)
+			}
+		}
+		if delivered, drops := len(got), int(tt.dropCount()); delivered+drops != accepted {
+			t.Fatalf("iter %d: conservation violated: delivered=%d + drops=%d != accepted=%d",
+				iter, delivered, drops, accepted)
+		}
+	}
+}
+
+// TestTee_DropsWhenOverflowExceedsCap confirms the spill is bounded: the
+// per-conn cap still governs total buffered bytes (staging + overflow), so
+// a runaway that exceeds it drops (per_conn_cap) rather than growing
+// without limit — preserving the OOM-safety contract.
+func TestTee_DropsWhenOverflowExceedsCap(t *testing.T) {
+	t.Parallel()
+	// cap=10 bytes, buf=1, no receiver. Each chunk is 4 bytes.
+	tt, _, rec := newTestTee(t, 10, 1, nil)
+	// "aaaa" (staging) + "bbbb" (overflow, total 8) fit; "cccc" (total 12
+	// > 10) must drop on per_conn_cap.
+	if !tt.push(mkChunk("aaaa")) {
+		t.Fatal("first push should fit")
+	}
+	if !tt.push(mkChunk("bbbb")) {
+		t.Fatal("second push should spill within cap")
+	}
+	if tt.push(mkChunk("cccc")) {
+		t.Fatal("third push should drop (staging+overflow would exceed cap)")
+	}
+	if rec.count(DropPerConnCap) == 0 {
+		t.Fatalf("want a per_conn_cap drop, got %v", rec.snapshot())
 	}
 }
 
