@@ -7,8 +7,8 @@ import (
 	"io"
 	"reflect"
 	"strings"
-	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
@@ -22,7 +22,42 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
-var querySigCache sync.Map // map[string]string
+// querySigCacheSize bounds querySigCache.
+//
+// The cache is keyed by the RAW SQL text, and that key space is NOT finite:
+// a client that inlines literals (`... WHERE id = 91827`) mints a brand new
+// key for every request, so a sync.Map here grows for as long as the agent
+// runs. The value, by contrast, is a pure memo — getQueryStructure builds a
+// fresh parser, parses, and joins the AST node type names, with no package or
+// closure state — so evicting an entry only costs one re-parse and can never
+// change a match verdict.
+//
+// Entry cost, measured against the pinned vitess: the signature runs 3-13x the
+// length of the SQL text (it is the joined reflect type name of every AST
+// node), so a realistic entry is 0.5-1.8 KB and this cap is a few MB. Multi-KB
+// ORM statements cost proportionally more; the cap is on entries, not bytes.
+const querySigCacheSize = 2048
+
+var querySigCache = newQuerySigCache()
+
+// newQuerySigCache builds the memo as a 2Q cache rather than a plain LRU.
+// matchCommand rescans the entire candidate mock pool for every live command
+// and looks up the live query's signature once per candidate, so a pool with
+// more distinct SQL texts than the cap would evict the live query between
+// candidates under plain-LRU recency and re-parse it N times per command —
+// strictly worse than the unbounded map this replaces. 2Q keeps the
+// repeatedly-touched live query in its frequent list while the once-touched
+// candidates churn through the smaller recent list.
+func newQuerySigCache() *lru.TwoQueueCache[string, string] {
+	c, err := lru.New2Q[string, string](querySigCacheSize)
+	if err != nil {
+		// New2Q only errors on a non-positive size and querySigCacheSize is a
+		// const > 0, so this is unreachable — but fail loudly rather than
+		// leave a nil cache that panics on the first match.
+		panic(fmt.Sprintf("mysql replayer: invalid querySigCacheSize %d: %v", querySigCacheSize, err))
+	}
+	return c
+}
 
 // recorded PREP registry per recorded connection
 type prepEntry struct { // minimal, enough for lookup
@@ -51,12 +86,12 @@ func hasPrefixFold(s, p string) bool {
 }
 
 func getQueryStructureCached(sql string) (string, error) {
-	if v, ok := querySigCache.Load(sql); ok {
-		return v.(string), nil
+	if v, ok := querySigCache.Get(sql); ok {
+		return v, nil
 	}
 	sig, err := getQueryStructure(sql)
 	if err == nil {
-		querySigCache.Store(sql, sig)
+		querySigCache.Add(sql, sig)
 	}
 	return sig, err
 }

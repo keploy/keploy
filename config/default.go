@@ -110,6 +110,19 @@ async:
     lanes: []
 configPath: ""
 bypassRules: []
+# MySQL is detected automatically on any port: at record time keploy
+# reads the server's handshake to identify it, and at replay time it
+# recalls the port from the recorded mocks. You normally do not need to
+# configure anything here.
+#
+# mysqlPorts pins extra ports to the MySQL parser, skipping detection
+# for them (the built-in list is 3306 and 4000). Useful only to avoid
+# the ~250ms probe on the first connection to a port, or alongside
+# disableMysqlAutoDetect.
+mysqlPorts: []
+# Set to true to turn detection off and go back to matching mysqlPorts
+# strictly. MySQL on any other port will then hang its handshake.
+disableMysqlAutoDetect: false
 disableMapping: false
 contract:
   driven: "consumer"
