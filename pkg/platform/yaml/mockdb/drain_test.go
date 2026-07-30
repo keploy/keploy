@@ -45,11 +45,37 @@ func httpMock(name string, meta map[string]string, ts time.Time) *models.Mock {
 	}
 }
 
-func TestDrainToStartupMocks(t *testing.T) {
-	if !strictModeEnabled() {
-		t.Skip("per-test lifetime derivation requires KEPLOY_STRICT_MOCK_WINDOW=1 (the auto-replay mode)")
+// grpcMock is encodable by the OSS yaml mapper and its Kind (GRPC_EXPORT) is NOT
+// in kindsWithImplicitSessionLifetime, so an untagged/non-canonical-tagged grpc
+// mock derives to LifetimePerTest under BOTH lax and strict mode. That lets the
+// drop assertions run in CI without depending on KEPLOY_STRICT_MOCK_WINDOW (which
+// is snapshotted at package init and so cannot be set from a test).
+func grpcMock(name string, meta map[string]string, ts time.Time) *models.Mock {
+	meta["name"] = name
+	return &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Kind:    models.GRPC_EXPORT,
+		Name:    name,
+		Spec: models.MockSpec{
+			Metadata: meta,
+			GRPCReq: &models.GrpcReq{
+				Headers: models.GrpcHeaders{
+					PseudoHeaders:   map[string]string{":path": "/svc/M", ":method": "POST"},
+					OrdinaryHeaders: map[string]string{"content-type": "application/grpc"},
+				},
+				Body: models.GrpcLengthPrefixedMessage{CompressionFlag: 0, MessageLength: 2, DecodedData: "hi"},
+			},
+			GRPCResp: &models.GrpcResp{
+				Headers:  models.GrpcHeaders{PseudoHeaders: map[string]string{":status": "200"}, OrdinaryHeaders: map[string]string{}},
+				Body:     models.GrpcLengthPrefixedMessage{CompressionFlag: 0, MessageLength: 2, DecodedData: "ok"},
+				Trailers: models.GrpcHeaders{PseudoHeaders: map[string]string{}, OrdinaryHeaders: map[string]string{"grpc-status": "0"}},
+			},
+			ReqTimestampMock: ts,
+		},
 	}
+}
 
+func TestDrainToStartupMocks(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := base                      // < startupCutoff -> startup-init -> keep
 	t3 := base.Add(2 * time.Minute) // in-window       -> drop (per-test)
@@ -61,11 +87,11 @@ func TestDrainToStartupMocks(t *testing.T) {
 	ys := New(zap.NewNop(), dir, "mocks")
 
 	mocks := []*models.Mock{
-		httpMock("cfg", map[string]string{"type": "config"}, t3),                      // Session -> keep
-		httpMock("conn", map[string]string{"type": "connection", "connID": "c1"}, t3), // Connection -> keep
-		httpMock("startup", map[string]string{"type": models.HTTPClient}, t1),         // PerTest, pre-cutoff -> keep
-		httpMock("pertest", map[string]string{"type": models.HTTPClient}, t3),         // PerTest, in-window -> DROP
-		httpMock("inflight", map[string]string{"type": models.HTTPClient}, t5),        // PerTest, post-pruneBefore -> keep
+		grpcMock("cfg", map[string]string{"type": "config"}, t3),                      // Session -> keep
+		grpcMock("conn", map[string]string{"type": "connection", "connID": "c1"}, t3), // Connection -> keep
+		grpcMock("startup", map[string]string{"type": "mocks"}, t1),                   // PerTest, pre-cutoff -> keep
+		grpcMock("pertest", map[string]string{"type": "mocks"}, t3),                   // PerTest, in-window -> DROP
+		grpcMock("inflight", map[string]string{"type": "mocks"}, t5),                  // PerTest, post-pruneBefore -> keep
 	}
 	for _, m := range mocks {
 		if err := ys.InsertMock(context.Background(), m, "set-0"); err != nil {
@@ -102,10 +128,6 @@ func TestDrainToStartupMocks(t *testing.T) {
 // cutoff is still dropped. Without the anchor, growth stays linear (a bug caught
 // in review): each interval keeps its own first few cases' per-test mocks forever.
 func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
-	if !strictModeEnabled() {
-		t.Skip("per-test lifetime derivation requires KEPLOY_STRICT_MOCK_WINDOW=1 (the auto-replay mode)")
-	}
-
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	boot := base.Add(5 * time.Minute)       // < anchored cutoff -> boot -> keep both intervals
 	c1 := base.Add(10 * time.Minute)        // interval-1 startup cutoff (the anchor)
@@ -117,7 +139,7 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "mocks")
 
-	if err := ys.InsertMock(context.Background(), httpMock("boot", map[string]string{"type": models.HTTPClient}, boot), "set-0"); err != nil {
+	if err := ys.InsertMock(context.Background(), grpcMock("boot", map[string]string{"type": "mocks"}, boot), "set-0"); err != nil {
 		t.Fatalf("InsertMock boot: %v", err)
 	}
 	// Interval 1 drain: anchors the cutoff at c1 and persists it.
@@ -127,7 +149,7 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 
 	// Interval 2 records a per-test mock at interval2, then drains with a later
 	// (drifted) cutoff c2. interval2 is Before(c2) but After(the anchor c1).
-	if err := ys.InsertMock(context.Background(), httpMock("interval2", map[string]string{"type": models.HTTPClient}, interval2), "set-0"); err != nil {
+	if err := ys.InsertMock(context.Background(), grpcMock("interval2", map[string]string{"type": "mocks"}, interval2), "set-0"); err != nil {
 		t.Fatalf("InsertMock interval2: %v", err)
 	}
 	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune2, c2, base); err != nil {
@@ -153,10 +175,6 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 // the stale cutoff) and silently break the next replay's boot. The marker must be
 // rejected (its cutoff predates the current sessionStart) and recomputed.
 func TestDrainStaleAnchorFromPriorSessionDiscarded(t *testing.T) {
-	if !strictModeEnabled() {
-		t.Skip("per-test lifetime derivation requires KEPLOY_STRICT_MOCK_WINDOW=1 (the auto-replay mode)")
-	}
-
 	staleCutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // prior session
 	sessionStart := staleCutoff.Add(1 * time.Hour)             // this session started much later
 	boot := sessionStart.Add(1 * time.Minute)                  // new session's boot mock (after staleCutoff)
@@ -166,10 +184,10 @@ func TestDrainStaleAnchorFromPriorSessionDiscarded(t *testing.T) {
 
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "mocks")
-	if err := ys.InsertMock(context.Background(), httpMock("newboot", map[string]string{"type": models.HTTPClient}, boot), "set-0"); err != nil {
+	if err := ys.InsertMock(context.Background(), grpcMock("newboot", map[string]string{"type": "mocks"}, boot), "set-0"); err != nil {
 		t.Fatalf("InsertMock newboot: %v", err)
 	}
-	if err := ys.InsertMock(context.Background(), httpMock("newpertest", map[string]string{"type": models.HTTPClient}, pertest), "set-0"); err != nil {
+	if err := ys.InsertMock(context.Background(), grpcMock("newpertest", map[string]string{"type": "mocks"}, pertest), "set-0"); err != nil {
 		t.Fatalf("InsertMock newpertest: %v", err)
 	}
 	if err := ys.Close(); err != nil {
