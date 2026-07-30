@@ -2,12 +2,14 @@ package relay
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.uber.org/zap"
 )
 
 // newTestTee constructs a tee with reasonable defaults for tests.
@@ -608,5 +610,129 @@ func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
 		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
 			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
 			"and discards deliverable data", delivered, n)
+	}
+}
+
+// TestDrainingAChunkReturnsCapacity pins the queue's core accounting invariant.
+//
+// qBytes must fall when a chunk leaves the queue. Without that, PerConnCap
+// stops being an INSTANTANEOUS bound and silently becomes a CUMULATIVE one:
+// once a connection has carried its cap worth of bytes in total, every further
+// push is refused with per_conn_cap and the connection records nothing for the
+// rest of its life — however little is actually queued.
+func TestDrainingAChunkReturnsCapacity(t *testing.T) {
+	t.Parallel()
+	const chunk = "0123456789" // 10 bytes
+	// Room for ~3 chunks at once, but far less than the total we will push.
+	tt, rec, _ := newTestTeeWithConsumer(t, 3*int64(len(chunk)), 64)
+
+	// Drain continuously so the queue never accumulates.
+	drained := make(chan int, 1)
+	go func() {
+		n := 0
+		for range tt.readCh() {
+			n++
+		}
+		drained <- n
+	}()
+
+	const total = 200 // 2000 bytes through a 30-byte cap
+	sent := 0
+	for i := 0; i < total; i++ {
+		if tt.push(mkChunk(chunk)) {
+			sent++
+		}
+		time.Sleep(time.Millisecond) // let the drain keep up
+	}
+	tt.close()
+	got := <-drained
+
+	if sent < total/2 {
+		t.Errorf("only %d of %d pushes were admitted through a %d-byte cap (drops=%v): capacity is "+
+			"not being returned when a chunk drains, so the cap has become cumulative rather than "+
+			"instantaneous and the connection stops recording", sent, total, 3*len(chunk), rec.snapshot())
+	}
+	if got != sent {
+		t.Errorf("delivered %d but admitted %d", got, sent)
+	}
+}
+
+// TestConfigSuppliesTheStallGrace pins the plumbing from Config to the tee.
+//
+// No production caller sets ConsumerStallGrace, so withDefaults' clause is the
+// ONLY thing keeping it non-zero. A zero grace makes the teardown wait expire
+// instantly: a parser that resumes reading a moment later has already had its
+// remaining chunks abandoned — the boot "no mocks" loss this change exists to
+// remove, reintroduced by deleting one line.
+func TestConfigSuppliesTheStallGrace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero resolves to the default", func(t *testing.T) {
+		got := Config{}.withDefaults()
+		if got.ConsumerStallGrace != DefaultConsumerStallGrace {
+			t.Errorf("ConsumerStallGrace = %v, want %v: without this the tee runs with a zero "+
+				"grace and abandons a briefly-stalled parser's chunks immediately",
+				got.ConsumerStallGrace, DefaultConsumerStallGrace)
+		}
+	})
+
+	t.Run("an explicit value is preserved", func(t *testing.T) {
+		want := 1234 * time.Millisecond
+		if got := (Config{ConsumerStallGrace: want}).withDefaults(); got.ConsumerStallGrace != want {
+			t.Errorf("ConsumerStallGrace = %v, want %v (caller's value must win)", got.ConsumerStallGrace, want)
+		}
+	})
+
+	t.Run("a zero grace loses a briefly-stalled parser's chunks", func(t *testing.T) {
+		// Demonstrates WHY the clause above matters, so the guard reads as a
+		// consequence rather than a style rule.
+		rec := &dropRecorder{}
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, 0 /* zero grace */, nil, rec.record, nil)
+		tt.start(make(chan struct{}))
+		for i := 0; i < 50; i++ {
+			tt.push(mkChunk("x"))
+		}
+		tt.close()
+		tt.waitDone()
+		if tt.dropCount() == 0 {
+			t.Skip("zero grace did not abandon here; timing-dependent, nothing to assert")
+		}
+		// With a real grace the same shape loses nothing — see
+		// TestTee_SlowConsumerLosesNothing.
+		t.Logf("zero grace abandoned %d chunks; the withDefaults clause is what prevents this", tt.dropCount())
+	})
+}
+
+// TestNewWiresTheStallGraceIntoBothTees closes the last link in the chain.
+//
+// TestConfigSuppliesTheStallGrace proves Config resolves the value; this proves
+// New actually hands it to the tees. Both halves are needed: passing 0 here
+// while withDefaults is correct still yields a zero grace at the only place it
+// is read, and no behavioural test notices because every tee test constructs
+// newTee directly with an explicit grace.
+func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
+	t.Parallel()
+	const want = 4321 * time.Millisecond
+
+	c1, c2 := net.Pipe()
+	d1, d2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close(); _ = d1.Close(); _ = d2.Close() })
+
+	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, d1)
+	t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() })
+
+	if got := r.teeC2D.stallGrace; got != want {
+		t.Errorf("client→dest tee stallGrace = %v, want %v: Config's value is not reaching the tee, "+
+			"so the teardown wait runs at whatever New passed instead", got, want)
+	}
+	if got := r.teeD2C.stallGrace; got != want {
+		t.Errorf("dest→client tee stallGrace = %v, want %v", got, want)
+	}
+
+	// And the zero-config path must land on the default, not on zero.
+	r2 := New(Config{Logger: zap.NewNop()}, c2, d2)
+	t.Cleanup(func() { r2.teeC2D.close(); r2.teeD2C.close() })
+	if got := r2.teeC2D.stallGrace; got != DefaultConsumerStallGrace {
+		t.Errorf("zero-config stallGrace = %v, want %v", got, DefaultConsumerStallGrace)
 	}
 }

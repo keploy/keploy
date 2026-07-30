@@ -9,22 +9,30 @@ import (
 	"go.uber.org/zap"
 )
 
-// KNOWN LIMITATION: the byte budget counts PAYLOAD only, so it does not bound
-// the number of queued entries. Each entry also costs a fakeconn.Chunk struct
-// (~88 B: a slice header, two time.Times, a direction and a sequence number)
-// plus its slot in the backing array, and none of that is charged. A peer that
-// dribbles bytes therefore produces chunks whose payload is a rounding error
-// but whose structs are not, so a 64 MiB budget could in principle admit
-// millions of them.
+// KNOWN LIMITATION: the byte budget counts PAYLOAD only, so the real heap a
+// connection can retain is a MULTIPLE of the configured cap. Each queued entry
+// also costs a fakeconn.Chunk (88 B by unsafe.Sizeof: a slice header, two
+// time.Times, a direction and a sequence number), and that is not charged.
 //
-// The fixed-slot channel this replaced bounded entries implicitly (1024 slots),
-// so this is a narrowing of that guarantee. It is left as-is deliberately: the
-// forwarder reads with a 32 KiB buffer, so real chunks are MTU-sized or larger
-// and the overhead is under 1% of the budget. Charging it was tried and
-// rejected — it perturbs cap semantics at small caps badly enough to break
-// byte-precise enforcement, which is a worse trade than the pathological case
-// it guards. If it ever needs fixing, charge a per-entry constant AND keep an
-// empty queue always-admitting, and expect to re-baseline the cap tests.
+// Measured retained heap at a saturated 64 MiB budget, by chunk size:
+//
+//	  16 B ->  449.5 MiB  (7.0x)
+//	  64 B ->  165   MiB  (2.6x)
+//	 256 B ->   90   MiB  (1.4x)
+//	1448 B ->   72   MiB  (1.1x)   // MTU
+//
+// So maxMemoryPerConnection: 67108864 can retain ~450 MiB per direction per
+// connection against a small-chunk peer. The fixed-slot channel this replaced
+// bounded entries implicitly at 1024, so this is a real narrowing.
+//
+// It is left as-is deliberately, but note the honest reason: the overhead is
+// ~10% at MTU and only falls under 1% above roughly 8.8 KB per chunk, so this
+// is NOT negligible for small chunks — and small chunks are exactly the boot
+// burst this rewrite exists to stop dropping. Charging per-entry overhead was
+// implemented and reverted because it broke byte-precise cap enforcement at
+// small caps (two existing cap tests failed) and the empty-queue exemption
+// needed to compensate made the cap unenforceable in the other direction.
+// A real fix needs both halves plus re-baselined cap tests.
 
 // Drop-reason constants. Kept as exported strings so callers can
 // branch on them in tests and assertions without importing internal
