@@ -639,6 +639,33 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	return nil
 }
 
+// startupCutoffMarkerName holds the anchored startup-window boundary for a test
+// set. It lives in the test-set dir alongside the mocks file, so it is discarded
+// with that dir when a new recording session starts fresh.
+const startupCutoffMarkerName = ".keploy-startup-cutoff"
+
+// anchoredStartupCutoff stabilises the startup-window boundary across auto-replay
+// intervals. StartupMockCutoff is recomputed each interval from the test cases
+// still on disk, and executed test cases are deleted after every interval, so a
+// fresh computation drifts later each cycle and would re-keep each interval's
+// first few test cases' per-test mocks forever (linear growth, not bounded). The
+// first real boundary — a candidate earlier than pruneBefore, i.e. an actual
+// boot window rather than the whole-batch keep-all a set of <= the window size
+// yields — is persisted next to the mocks file and reused thereafter. Callers
+// hold the striped file lock, so the read/write here is already serialised.
+func (ys *MockYaml) anchoredStartupCutoff(path string, candidate, pruneBefore time.Time) time.Time {
+	markerPath := filepath.Join(path, startupCutoffMarkerName)
+	if data, err := os.ReadFile(markerPath); err == nil {
+		if anchored, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); perr == nil {
+			return anchored
+		}
+	}
+	if candidate.Before(pruneBefore) {
+		_ = os.WriteFile(markerPath, []byte(candidate.UTC().Format(time.RFC3339Nano)), 0644)
+	}
+	return candidate
+}
+
 // DrainToStartupMocks rewrites a test set's mocks file to keep ONLY the mocks a
 // future auto-replay pod needs to restart — Session/Connection-lifetime mocks
 // (the config/connection/session boot pool, including MySQL session-reusable
@@ -656,6 +683,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // next load. Takes the SAME striped file lock as InsertMock/UpdateMocks, so it is
 // race-safe against a concurrent recorder append. Best-effort at the call site:
 // an error here must not fail the replay run.
+//
+// startupCutoffTime is anchored to the first value seen for this test set (see
+// anchoredStartupCutoff) rather than used verbatim, so the startup window does
+// not re-arm every interval and disk stays bounded across a long session.
 func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, pruneBefore, startupCutoffTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
@@ -665,6 +696,8 @@ func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, p
 	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
 	lock.Lock()
 	defer lock.Unlock()
+
+	startupCutoffTime = ys.anchoredStartupCutoff(path, startupCutoffTime, pruneBefore)
 
 	keep := func(mock *models.Mock) bool {
 		if mock.Spec.Metadata["type"] == "config" {

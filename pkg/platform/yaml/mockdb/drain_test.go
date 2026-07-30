@@ -96,6 +96,57 @@ func TestDrainToStartupMocks(t *testing.T) {
 	}
 }
 
+// TestDrainStartupCutoffAnchoredAcrossIntervals proves the startup window does
+// not re-arm each interval. The cutoff is anchored at the first drain and reused,
+// so a later interval's per-test mock that would fall inside a freshly-drifted
+// cutoff is still dropped. Without the anchor, growth stays linear (a bug caught
+// in review): each interval keeps its own first few cases' per-test mocks forever.
+func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
+	if !strictModeEnabled() {
+		t.Skip("per-test lifetime derivation requires KEPLOY_STRICT_MOCK_WINDOW=1 (the auto-replay mode)")
+	}
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	boot := base.Add(5 * time.Minute)       // < anchored cutoff -> boot -> keep both intervals
+	c1 := base.Add(10 * time.Minute)        // interval-1 startup cutoff (the anchor)
+	prune1 := base.Add(20 * time.Minute)    // interval-1 replay start
+	interval2 := base.Add(25 * time.Minute) // per-test mock recorded during interval 2
+	c2 := base.Add(30 * time.Minute)        // interval-2 DRIFTED cutoff (later)
+	prune2 := base.Add(40 * time.Minute)    // interval-2 replay start
+
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+
+	if err := ys.InsertMock(context.Background(), httpMock("boot", map[string]string{"type": models.HTTPClient}, boot), "set-0"); err != nil {
+		t.Fatalf("InsertMock boot: %v", err)
+	}
+	// Interval 1 drain: anchors the cutoff at c1 and persists it.
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune1, c1); err != nil {
+		t.Fatalf("drain interval 1: %v", err)
+	}
+
+	// Interval 2 records a per-test mock at interval2, then drains with a later
+	// (drifted) cutoff c2. interval2 is Before(c2) but After(the anchor c1).
+	if err := ys.InsertMock(context.Background(), httpMock("interval2", map[string]string{"type": models.HTTPClient}, interval2), "set-0"); err != nil {
+		t.Fatalf("InsertMock interval2: %v", err)
+	}
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune2, c2); err != nil {
+		t.Fatalf("drain interval 2: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "set-0", "mocks.yaml"))
+	if err != nil {
+		t.Fatalf("read mocks.yaml: %v", err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "name: boot") {
+		t.Errorf("expected boot mock retained across both intervals, but it was drained")
+	}
+	if strings.Contains(content, "name: interval2") {
+		t.Errorf("startup window drifted: interval-2 per-test mock was kept because the cutoff re-armed to c2; expected it dropped against the anchored c1")
+	}
+}
+
 // TestDrainGobDoesNotPersistDerivedLifetime guards the gob round-trip: the keep
 // predicate calls DeriveLifetime (which mutates TestModeInfo.Lifetime and sets
 // LifetimeDerived=true), and the gob encoder — unlike yaml/json — does persist
