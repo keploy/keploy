@@ -126,6 +126,12 @@ type Proxy struct {
 	integrationsPriority []ParserPriority
 	errChannel           chan error
 
+	// mysqlPorts holds destination ports known to speak the MySQL wire
+	// protocol beyond the configured/default list — learned from a real
+	// handshake during record, and derived from the loaded mocks'
+	// destAddr metadata during replay. See mysql_detect.go.
+	mysqlPorts *mysqlPortRegistry
+
 	// activeTestErrors accumulates mock-not-found errors during active test
 	// execution. The continuous drain goroutine routes errors here when non-nil.
 	// When nil (no window), mock-not-found errors fall to pendingMockErrors and
@@ -193,7 +199,13 @@ type Proxy struct {
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
 	// IPv4-only cluster service yields an AAAA NODATA here, so an un-deduped
 	// Info line would run on almost every resolution. See resolveUncachedDNSResponse.
-	nodataRelayLogged sync.Map // map[string]struct{} keyed by generateCacheKey
+	//
+	// Bounded + TTL-expiring (not a sync.Map): the key is app-controlled, so a
+	// client that resolves per-request hostnames — or a k8s search-domain setup
+	// fanning one lookup into many qualified names — would otherwise grow this
+	// forever in a long-lived agent. Allocated once in New and purged, never
+	// replaced, by ResetRecordedDNSMocks.
+	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
 	//to store the nsswitch.conf file data
 	nsSwitchMutex             sync.Mutex
@@ -684,6 +696,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		caJavaHome:                opts.Agent.CAJavaHome,
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
+		nodataRelayLogged:         newNodataRelayLogCache(),
+		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
 		// against CoreDNS (~500 ms default) while keeping app-side lookup
@@ -851,12 +865,27 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 	return result
 }
 
-// ResetRecordedDNSMocks clears the DNS mock deduplication tracker.
-// This should be called when starting a new recording session to ensure
-// DNS mocks are recorded fresh for the new session.
+// ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
+// This should be called when starting a new recording session so DNS mocks are
+// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
+// re-surfaced for the new session instead of being suppressed by state left
+// over from the previous one.
+//
+// Purges in place rather than reallocating. expirable.NewLRU with a non-zero
+// TTL starts a janitor goroutine whose done channel is never closed (see the
+// note in hashicorp/golang-lru v2's expirable_lru.go), and that goroutine
+// captures the cache — so every replacement cache would strand a goroutine
+// AND pin the discarded entries beyond the reach of the GC. Purge keeps both
+// trackers at one allocation for the process lifetime, and avoids swapping a
+// pointer that the DNS handler goroutines read concurrently.
 func (p *Proxy) ResetRecordedDNSMocks() {
-	p.recordedDNSMocks = newRecordedDNSMocksCache()
-	p.logger.Debug("DNS mock deduplication tracker reset")
+	if p.recordedDNSMocks != nil {
+		p.recordedDNSMocks.Purge()
+	}
+	if p.nodataRelayLogged != nil {
+		p.nodataRelayLogged.Purge()
+	}
+	p.logger.Debug("DNS deduplication trackers reset")
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -1733,15 +1762,45 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	// MySQL wire-protocol ports (MySQL, TiDB, MariaDB, custom proxies).
-	// Configurable via outgoingOpts.MysqlPorts (Config.MysqlPorts in
-	// keploy.yml); defaults to [3306, 4000] when unset.
-	if isMysqlPort(uint32(destInfo.Port), outgoingOpts.MysqlPorts) {
+	// Decide whether this connection speaks MySQL. Historically this was
+	// a pure port check against outgoingOpts.MysqlPorts (defaults
+	// [3306, 4000]); probeMysql keeps that as its zero-cost fast path
+	// and adds automatic detection for every other port — by reading the
+	// upstream's handshake during record, and by recalling ports from
+	// the recorded mocks during replay. See mysql_detect.go for why the
+	// two modes need different mechanisms.
+	//
+	// The probe may consume bytes off either socket and may dial
+	// upstream, so its connections are adopted unconditionally — both
+	// on the MySQL path and on the fall-through to generic dispatch.
+	probe, err := p.probeMysql(parserCtx, srcConn, dstAddr, uint32(destInfo.Port), rule.Mode, outgoingOpts, p.logger)
+	if probe != nil {
+		if probe.SrcConn != nil {
+			srcConn = probe.SrcConn
+		}
+		if probe.DstConn != nil {
+			dstConn = probe.DstConn
+		}
+	}
+	if err != nil {
+		utils.LogError(p.logger, err, "failed to dial the conn to destination server while probing for MySQL", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+		return err
+	}
+	p.logger.Debug("mysql probe result",
+		zap.Bool("isMySQL", probe.IsMySQL),
+		zap.String("reason", probe.Reason),
+		zap.Uint32("destPort", destInfo.Port))
+
+	if probe.IsMySQL {
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
-				return err
+			// probeMysql already dialed when it had to read the
+			// upstream greeting; dstConn then replays those bytes.
+			if dstConn == nil {
+				dstConn, err = net.Dial("tcp", dstAddr)
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+					return err
+				}
 			}
 			dstCfg := &models.ConditionalDstCfg{
 				Addr: dstAddr,
@@ -2838,6 +2897,12 @@ func (p *Proxy) LoadAsyncMocks(mocks []*models.Mock) {
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	// Replay cannot detect MySQL from content — no upstream exists to
+	// send a handshake — so the port set is recovered here, from the
+	// destAddr every MySQL mock records. Must happen before the mocks
+	// are published, so a connection that wakes on SetFilteredMocks
+	// already sees the derived ports.
+	p.deriveMysqlPorts(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetFilteredMocks(filtered)
 		m.SetUnFilteredMocks(unFiltered)
@@ -2857,6 +2922,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
 func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()

@@ -100,7 +100,17 @@ type OutgoingOptions struct {
 	// protocol; the generic dispatch path waits to peek client bytes
 	// before dialing and deadlocks otherwise. When nil/empty, the
 	// proxy falls back to the built-in defaults [3306, 4000].
+	//
+	// Since automatic detection landed this list is an optimisation and
+	// an escape hatch rather than a requirement: a port listed here
+	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
+	// restoring the strict "MysqlPorts or nothing" behaviour. With
+	// detection on (the default), a MySQL server on any port is
+	// identified from its handshake at record time and recalled from
+	// the recorded mocks' destAddr at replay time.
+	DisableMysqlAutoDetect bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
