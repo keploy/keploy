@@ -138,17 +138,26 @@ type Record struct {
 
 	// RecordBuffer tunes the per-connection record buffer. Defaults
 	// suit ~99% of workloads; only touch these if you see "mock
-	// incomplete" warnings with reason "per_conn_cap" or "channel_full"
-	// in the agent logs.
+	// incomplete" warnings with reason "per_conn_cap" in the agent logs.
 	RecordBuffer RecordBuffer `json:"recordBuffer" yaml:"recordBuffer" mapstructure:"recordBuffer"`
 }
 
 // RecordBuffer tunes the per-connection recording queue used by the
-// agent's relay. The two knobs guard the same in-flight queue but in
-// different units: MaxMemoryPerConnection is a byte budget,
-// QueueSize is a slot count. Whichever fills first triggers a drop
-// and marks the in-flight mock incomplete (the forward path is
-// unaffected — user traffic always succeeds).
+// agent's relay.
+//
+// MaxMemoryPerConnection is the one that bounds recording: the queue is
+// bounded by BYTES, and exceeding that budget is the only condition under
+// which a chunk is refused (reason "per_conn_cap"), marking the in-flight
+// mock incomplete. The forward path is unaffected — user traffic always
+// succeeds.
+//
+// QueueSize sizes the hand-off channel between the recorder and the parser.
+// It no longer bounds the recording queue itself, so it is not the knob to
+// reach for when mocks come back incomplete; raising MaxMemoryPerConnection
+// is. It was previously a slot count on an internal staging channel, and
+// running out of slots produced a "channel_full" drop — that failure mode no
+// longer exists, because bounding by slots discarded bursts of many small
+// chunks that used almost no memory (the boot-time "no mocks" loss).
 //
 // Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
 // override the yaml/flag values when set.
@@ -161,12 +170,14 @@ type RecordBuffer struct {
 	// than the default budget (e.g. >10 MB query results).
 	MaxMemoryPerConnection uint64 `json:"maxMemoryPerConnection" yaml:"maxMemoryPerConnection" mapstructure:"maxMemoryPerConnection"`
 
-	// QueueSize is the number of chunk slots in the recording queue.
-	// Each slot holds one ~32 KiB chunk. Maps to
-	// relay.Config.TeeChanBuf. Zero resolves to the relay's built-in
-	// default (1024). Increase if you see drops with reason
-	// "channel_full" — usually means bursty traffic (many small
-	// messages back-to-back) that the parser can't keep up with.
+	// QueueSize is the number of chunk slots in the hand-off channel
+	// between the recorder and the parser. Each slot holds one ~32 KiB
+	// chunk. Maps to relay.Config.TeeChanBuf. Zero resolves to the
+	// relay's built-in default (1024).
+	//
+	// This does NOT bound how much the recorder may buffer — that is
+	// MaxMemoryPerConnection — so raising it will not stop
+	// "per_conn_cap" drops.
 	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
 }
 
