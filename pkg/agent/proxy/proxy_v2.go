@@ -174,9 +174,10 @@ func (p *Proxy) recordViaSupervisor(
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
 		// withDefaults() — preserving the zero-config path.
-		PerConnCap:       p.recordBufferCap,
-		TeeChanBuf:       p.recordBufferQueueSize,
-		PreDispatchPause: preDispatchPause,
+		PerConnCap:         p.recordBufferCap,
+		TeeChanBuf:         p.recordBufferQueueSize,
+		ConsumerStallGrace: p.recordBufferStallGrace,
+		PreDispatchPause:   preDispatchPause,
 	}, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()

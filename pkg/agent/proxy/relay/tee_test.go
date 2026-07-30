@@ -659,11 +659,16 @@ func TestDrainingAChunkReturnsCapacity(t *testing.T) {
 
 // TestConfigSuppliesTheStallGrace pins the plumbing from Config to the tee.
 //
-// No production caller sets ConsumerStallGrace, so withDefaults' clause is the
-// ONLY thing keeping it non-zero. A zero grace makes the teardown wait expire
-// instantly: a parser that resumes reading a moment later has already had its
-// remaining chunks abandoned — the boot "no mocks" loss this change exists to
-// remove, reintroduced by deleting one line.
+// The production caller (proxy.New) passes the CLAMPED
+// config.Record.RecordBuffer.ConsumerStallGrace, and keploy.yml ships an
+// explicit 2s, so the common path no longer relies on this clause — but the
+// zero path is still reachable and still
+// load-bearing: an operator who writes 0s, a programmatically built Config, and
+// any enterprise SetDefaultConfig string that omits the key all arrive here as
+// zero. A zero grace makes the teardown wait expire instantly: a parser that
+// resumes reading a moment later has already had its remaining chunks
+// abandoned — the boot "no mocks" loss this change exists to remove,
+// reintroduced by deleting one line.
 func TestConfigSuppliesTheStallGrace(t *testing.T) {
 	t.Parallel()
 

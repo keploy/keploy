@@ -105,14 +105,19 @@ type Config struct {
 	// resolves to [DefaultConsumerStallGrace]. See that constant for why the
 	// bound is on stalled time rather than total teardown time.
 	//
-	// No production caller overrides it today, and that is deliberate rather
-	// than an oversight: the bound is only consulted AFTER close(), on a
-	// connection whose parser has stopped draining a full out channel, so
-	// waiting longer cannot recover anything — the parser is not coming back.
-	// It exists as a field, not a package constant, so the owner can shorten
-	// it (tests do) and so a future caller that knows better has somewhere to
-	// say so, in the spirit of net/http's Server.Shutdown taking its deadline
-	// from the caller.
+	// The default suits every workload we have measured: the bound is only
+	// consulted AFTER close(), on a connection whose parser has stopped
+	// draining a full out channel, so waiting longer rarely recovers
+	// anything — the parser is usually not coming back. It is a field
+	// rather than a package constant so the owner picks the policy, in the
+	// spirit of net/http's Server.Shutdown taking its deadline from the
+	// caller: tests shorten it, and operators can override it through
+	// config.Record.RecordBuffer.ConsumerStallGrace (keploy.yml), the
+	// hidden --consumer-stall-grace flag, or
+	// KEPLOY_RECORD_CONSUMER_STALL_GRACE. Values GREATER THAN ZERO are
+	// clamped to a safe range by clampConsumerStallGrace in
+	// pkg/agent/proxy/proxy.go; zero and negative are passed through
+	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
 
 	// ForwardBuf is the size of the per-iteration scratch buffer

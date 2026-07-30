@@ -95,8 +95,8 @@ record:
   testCaseNaming: descriptive
   # recordBuffer tunes the per-connection recording queue. Touch only
   # if you see "mock incomplete" warnings (reason: per_conn_cap) in
-  # the agent logs. Env vars
-  # KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
+  # the agent logs. Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN,
+  # KEPLOY_RECORD_QUEUE_SIZE and KEPLOY_RECORD_CONSUMER_STALL_GRACE
   # override these values.
   recordBuffer:
     # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in
@@ -108,6 +108,12 @@ record:
     # This does not bound how much the recorder buffers, so raising it
     # will not stop per_conn_cap drops — raise maxMemoryPerConnection.
     queueSize: 1024
+    # How long a closing connection waits on a parser that has stopped
+    # draining before abandoning the chunks still queued for it. Bounds
+    # stalled time, not elapsed time, and is only consulted after close —
+    # a healthy connection never pays it. Zero falls through to the
+    # built-in default (2s).
+    consumerStallGrace: 2s
 async:
     lanes: []
 configPath: ""

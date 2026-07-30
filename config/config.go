@@ -171,8 +171,12 @@ type Record struct {
 // longer exists, because bounding by slots discarded bursts of many small
 // chunks that used almost no memory (the boot-time "no mocks" loss).
 //
-// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
-// override the yaml/flag values when set.
+// ConsumerStallGrace bounds teardown, not steady state: it is how long a
+// closing connection waits on a parser that has stopped draining before
+// giving up on the chunks still queued for it.
+//
+// Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN, KEPLOY_RECORD_QUEUE_SIZE and
+// KEPLOY_RECORD_CONSUMER_STALL_GRACE override the yaml/flag values when set.
 type RecordBuffer struct {
 	// MaxMemoryPerConnection caps the bytes the recorder may hold
 	// in the per-connection queue while the parser catches up.
@@ -191,6 +195,21 @@ type RecordBuffer struct {
 	// MaxMemoryPerConnection — so raising it will not stop
 	// "per_conn_cap" drops.
 	QueueSize int `json:"queueSize" yaml:"queueSize" mapstructure:"queueSize"`
+
+	// ConsumerStallGrace bounds how long the recorder waits on a parser
+	// that has stopped draining before abandoning the chunks still queued
+	// for it. Maps to relay.Config.ConsumerStallGrace. Zero resolves to
+	// the relay's built-in default (2s).
+	//
+	// It bounds STALLED time, not elapsed time: the wait ends the moment
+	// the parser takes anything at all, so a merely slow parser still
+	// receives every chunk. The bound is consulted only after the
+	// connection closes, so it costs nothing on a healthy connection.
+	//
+	// Raise it if a teardown-time parser is slow enough to look dead and
+	// you see drops with reason "consumer_gone"; lower it to cap how long
+	// a connection with a genuinely dead parser lingers at teardown.
+	ConsumerStallGrace time.Duration `json:"consumerStallGrace" yaml:"consumerStallGrace" mapstructure:"consumerStallGrace"`
 }
 
 type Contract struct {
