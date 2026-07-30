@@ -199,7 +199,13 @@ type Proxy struct {
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
 	// IPv4-only cluster service yields an AAAA NODATA here, so an un-deduped
 	// Info line would run on almost every resolution. See resolveUncachedDNSResponse.
-	nodataRelayLogged sync.Map // map[string]struct{} keyed by generateCacheKey
+	//
+	// Bounded + TTL-expiring (not a sync.Map): the key is app-controlled, so a
+	// client that resolves per-request hostnames — or a k8s search-domain setup
+	// fanning one lookup into many qualified names — would otherwise grow this
+	// forever in a long-lived agent. Allocated once in New and purged, never
+	// replaced, by ResetRecordedDNSMocks.
+	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
 
 	//to store the nsswitch.conf file data
 	nsSwitchMutex             sync.Mutex
@@ -690,6 +696,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		caJavaHome:                opts.Agent.CAJavaHome,
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
+		nodataRelayLogged:         newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
@@ -858,12 +865,27 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 	return result
 }
 
-// ResetRecordedDNSMocks clears the DNS mock deduplication tracker.
-// This should be called when starting a new recording session to ensure
-// DNS mocks are recorded fresh for the new session.
+// ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
+// This should be called when starting a new recording session so DNS mocks are
+// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
+// re-surfaced for the new session instead of being suppressed by state left
+// over from the previous one.
+//
+// Purges in place rather than reallocating. expirable.NewLRU with a non-zero
+// TTL starts a janitor goroutine whose done channel is never closed (see the
+// note in hashicorp/golang-lru v2's expirable_lru.go), and that goroutine
+// captures the cache — so every replacement cache would strand a goroutine
+// AND pin the discarded entries beyond the reach of the GC. Purge keeps both
+// trackers at one allocation for the process lifetime, and avoids swapping a
+// pointer that the DNS handler goroutines read concurrently.
 func (p *Proxy) ResetRecordedDNSMocks() {
-	p.recordedDNSMocks = newRecordedDNSMocksCache()
-	p.logger.Debug("DNS mock deduplication tracker reset")
+	if p.recordedDNSMocks != nil {
+		p.recordedDNSMocks.Purge()
+	}
+	if p.nodataRelayLogged != nil {
+		p.nodataRelayLogged.Purge()
+	}
+	p.logger.Debug("DNS deduplication trackers reset")
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
