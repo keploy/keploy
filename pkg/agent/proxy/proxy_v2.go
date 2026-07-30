@@ -264,6 +264,22 @@ func (p *Proxy) recordViaSupervisor(
 	}
 
 	// Non-fallthrough path: parser returned normally or with an error.
+	//
+	// The parser has EXITED, so nothing will ever read these streams again.
+	// Say so, rather than leaving the relay to infer it: closing the
+	// FakeConns fires their Done() channels, which is what releases a tee
+	// drain still holding chunks for a full out channel. Without this the
+	// drain has no way to distinguish "parser is slow" from "parser is gone"
+	// and has to wait out ConsumerStallGrace — on a path where the answer is
+	// already known for certain. This is the same guarantee tokio gets for
+	// free when a Receiver is dropped; Go has no goroutine-death event, so
+	// the owner of the goroutine has to publish it.
+	//
+	// Ordering matters: this must precede <-relayDone, which is where the
+	// relay waits for the drains.
+	_ = r.ClientStream().Close()
+	_ = r.DestStream().Close()
+
 	// Cancel the relay and drain.
 	relayCancel()
 	relayErr := <-relayDone

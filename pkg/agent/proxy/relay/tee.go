@@ -9,14 +9,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// teardownFlushGrace bounds how long the drain will block delivering a
-// single overflow-tail chunk to out at teardown before abandoning it. out
-// is still open and the per-connection decoder normally drains it, so the
-// non-blocking fast path usually delivers immediately; this grace only
-// applies if the consumer momentarily lags, and the cap prevents an
-// exited-early consumer from hanging the drain goroutine forever.
-const teardownFlushGrace = 2 * time.Second
-
 // Drop-reason constants. Kept as exported strings so callers can
 // branch on them in tests and assertions without importing internal
 // types. Also forwarded verbatim into OnMarkMockIncomplete.
@@ -26,23 +18,37 @@ const (
 	DropMemoryPressure = "memory_pressure"
 
 	// DropPerConnCap — the per-connection byte cap would be exceeded
-	// by admitting this chunk.
+	// by admitting this chunk. This is the only backpressure drop the
+	// tee reports: the queue is bounded by bytes, not by slot count.
 	DropPerConnCap = "per_conn_cap"
 
-	// DropChannelFull — the internal staging channel was full.
+	// DropChannelFull is no longer emitted. The tee used to stage chunks
+	// in a fixed-slot channel and drop when it filled, which lost response
+	// chunks during a boot burst and stranded their mocks. The queue is now
+	// bounded solely by the per-connection byte cap, so a burst that fits
+	// the cap is never dropped and one that does not is reported as
+	// [DropPerConnCap]. Retained so existing callers and dashboards that
+	// reference the string still compile.
+	//
+	// Deprecated: no longer produced; see [DropPerConnCap].
 	DropChannelFull = "channel_full"
 
 	// DropPaused — the direction was paused via KindPauseDir or a
 	// TLS upgrade was in flight.
 	DropPaused = "paused"
+
+	// DropConsumerGone — the parser stopped reading its FakeConn, so
+	// chunks already recorded could not be handed over. Reported once per
+	// connection with the whole undelivered remainder, rather than silently,
+	// so a lost tail is visible the way a BPF ring buffer's lost-sample
+	// count is.
+	DropConsumerGone = "consumer_gone"
 )
 
-// tee is the accounting wrapper around the internal staging channel
-// between the forwarder goroutines and the FakeConn. For each direction
-// the forwarder calls push(c); that either enqueues the chunk onto an
-// internal channel (non-blocking) or drops it. A drain goroutine pulls
-// from the internal channel, decrements the byte counter, and forwards
-// to the FakeConn-facing channel.
+// tee is the accounting buffer between the forwarder goroutines and the
+// FakeConn. For each direction the forwarder calls push(c), which appends
+// to an in-memory queue and returns immediately; a drain goroutine pops
+// from that queue and delivers to the FakeConn-facing channel.
 //
 // The indirection exists because fakeconn.FakeConn is the sole consumer
 // of its read channel and we cannot instrument its Read path from here;
@@ -50,8 +56,24 @@ const (
 // moved out of relay-owned memory and into the FakeConn's internal
 // buffer.
 //
-// Lifetime: created by [newTee] and stopped by [tee.close]. close is
-// idempotent; callers typically defer it in Run.
+// # Why a queue and not a channel
+//
+// A buffered channel bounds by SLOT COUNT, but the resource that actually
+// needs bounding is BYTES, and the two disagree badly: a boot burst of many
+// small handshake chunks exhausts slots while using almost no memory, and a
+// single large response does the reverse. When slots ran out the tee had no
+// choice but to drop, and a dropped RESPONSE chunk strands its request so the
+// mock is never emitted — the non-deterministic boot "no_mocks" loss.
+//
+// A single byte-bounded queue removes that failure mode outright rather than
+// absorbing it in a second buffer: there is one FIFO, so wire order holds by
+// construction; one counter, so the cap is exact rather than approximate; and
+// one reason a chunk can ever be refused (the cap). push still never blocks,
+// which is the load-bearing invariant for I1 — the forwarder must be free to
+// return to Read immediately, since real traffic must never wait on recording.
+//
+// Lifetime: created by [newTee], started by [tee.start], stopped by
+// [tee.close]. close is idempotent; callers typically defer it in Run.
 type tee struct {
 	dir      fakeconn.Direction
 	logger   *zap.Logger
@@ -59,18 +81,41 @@ type tee struct {
 	memCheck func() bool
 	onDrop   func(reason string)
 
-	// staging is the internal buffered channel. Forwarders push into
-	// it; the drain goroutine pulls out.
-	staging chan fakeconn.Chunk
+	// mu guards q, qBytes and closed. It is never held across a send on
+	// out, so a stalled consumer cannot block push.
+	mu sync.Mutex
+	// q is the pending-chunk FIFO. Order is the order push saw, which is
+	// wire order.
+	q []fakeconn.Chunk
+	// qBytes is the exact number of bytes queued. Compared against cap
+	// under mu, so unlike a lazily-updated counter the cap is a hard limit
+	// rather than one that can be overshot by a chunk.
+	qBytes int64
+	// closed is set by close(); push refuses afterwards and drain exits
+	// once q is empty.
+	closed bool
+
+	// wake is a capacity-1 doorbell. push signals it non-blockingly after
+	// appending; drain waits on it when q is empty. A signal can be
+	// coalesced or arrive spuriously — drain always re-reads q under mu,
+	// so neither loses a chunk.
+	wake chan struct{}
 
 	// out is the FakeConn-facing channel. The drain goroutine sends
 	// into it; the FakeConn reads from it.
 	out chan fakeconn.Chunk
 
-	// bytes is the running count of bytes sitting in staging (read
-	// from the socket, not yet consumed by the parser). Updated with
-	// atomic ops: add on successful push, subtract on drain.
-	bytes atomic.Int64
+	// stallGrace bounds how long drain waits on a FULL out channel before
+	// concluding the consumer is gone. Supplied by the caller via
+	// [Config.ConsumerStallGrace]; see DefaultConsumerStallGrace for why it
+	// bounds stalled time rather than total teardown time.
+	stallGrace time.Duration
+
+	// consumerGone is the FakeConn's close signal, supplied to [tee.start].
+	// It fires only when the parser itself abandons the connection, which
+	// is the sole condition under which a fully recorded chunk may be
+	// thrown away.
+	consumerGone <-chan struct{}
 
 	// paused is set by the directive processor to suspend tee delivery
 	// while still forwarding real bytes.
@@ -80,60 +125,48 @@ type tee struct {
 	// [tee.dropCount] for diagnostics and tests.
 	drops atomic.Uint64
 
-	// overflow is an order-preserving spill buffer used when the staging
-	// channel is momentarily full (the parser is behind, e.g. during a
-	// concurrent boot burst — many small createIndexes/handshake chunks
-	// arriving faster than the mongo decoder drains, or a large response
-	// exceeding the 1024-chunk channel). Without it a full staging channel
-	// forces push to DROP the chunk (DropChannelFull); a dropped RESPONSE
-	// chunk then strands its request and the mock is never emitted — the
-	// non-deterministic boot "no_mocks" loss. Spilling here instead keeps
-	// push non-blocking (invariant I1: the forwarder returns to Read
-	// immediately) AND lossless up to the per-conn cap. push flushes
-	// overflow → staging opportunistically and drain flushes any remaining
-	// tail at teardown, both preserving wire order (overflow chunks always
-	// follow the chunks already in staging). overflowMu guards overflow +
-	// overflowBytes; it is only ever taken by push and by drain's teardown
-	// flush, never held across a blocking op.
-	overflowMu    sync.Mutex
-	overflow      []fakeconn.Chunk
-	overflowBytes int64
-
-	// closeMu is held in read mode during a push's channel send and
-	// in write mode by close. This ensures no in-flight send is racing
-	// the channel-close step, eliminating "send on closed channel"
-	// panics without requiring the forwarder to block on a Mutex.
-	closeMu sync.RWMutex
-	// closeOnce guards the single close of staging.
+	// closedFlag mirrors closed for a lock-free fast path in push.
+	closedFlag atomic.Bool
+	// closeOnce guards the single shutdown.
 	closeOnce sync.Once
-	// closed is set by close so concurrent push callers short-circuit
-	// before touching the channel.
-	closed atomic.Bool
-	// done is closed once the drain goroutine has exited so tests can
-	// wait for it deterministically.
+	// done is closed once the drain goroutine has exited so tests and the
+	// relay can wait for it deterministically.
 	done chan struct{}
-	// shutdown is closed by close() to unblock a drain goroutine
-	// stuck sending to a FakeConn that has stopped reading.
+	// shutdown is closed by close() to wake a drain goroutine parked on an
+	// empty queue. It is deliberately NOT consulted when delivering a
+	// chunk: it is closed at teardown, so selecting on it there would pick
+	// at random between delivering and discarding an already-recorded
+	// chunk.
 	shutdown chan struct{}
 }
 
-// newTee wires a staging channel, an out channel, and a drain
-// goroutine that moves chunks from staging to out while maintaining
-// the bytes counter.
-func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
-	t := &tee{
-		dir:      dir,
-		logger:   logger,
-		cap:      capBytes,
-		memCheck: memCheck,
-		onDrop:   onDrop,
-		staging:  make(chan fakeconn.Chunk, chanBuf),
-		out:      make(chan fakeconn.Chunk, chanBuf),
-		done:     make(chan struct{}),
-		shutdown: make(chan struct{}),
+// newTee builds a tee. The drain goroutine does not run until [tee.start]
+// is called with the consumer's close signal — the FakeConn that consumes
+// readCh cannot be constructed until this tee exists, so binding the two
+// is necessarily a second step.
+func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
+	return &tee{
+		dir:        dir,
+		logger:     logger,
+		cap:        capBytes,
+		stallGrace: stallGrace,
+		memCheck:   memCheck,
+		onDrop:     onDrop,
+		out:        make(chan fakeconn.Chunk, chanBuf),
+		wake:       make(chan struct{}, 1),
+		done:       make(chan struct{}),
+		shutdown:   make(chan struct{}),
 	}
+}
+
+// start launches the drain goroutine. consumerGone must be the close
+// signal of the FakeConn reading [tee.readCh] (see fakeconn.FakeConn.Done);
+// it is the only thing that permits drain to abandon a queued chunk, so a
+// nil value means "deliver unconditionally" and a stopped consumer would
+// then park the drain goroutine until close. Call exactly once.
+func (t *tee) start(consumerGone <-chan struct{}) {
+	t.consumerGone = consumerGone
 	go t.drain()
-	return t
 }
 
 // readCh returns the FakeConn-facing receive channel. Exposed so the
@@ -148,19 +181,26 @@ func (t *tee) dropCount() uint64 { return t.drops.Load() }
 // reason [DropPaused] without consuming capacity.
 func (t *tee) setPaused(p bool) { t.paused.Store(p) }
 
-// push admits a chunk into staging. Returns true on success, false on
-// drop. A drop invokes onDrop with the reason string and does not
-// alter the byte counter.
+// push queues a chunk. Returns true on success, false on drop. A drop
+// invokes onDrop with the reason string and does not alter the byte
+// counter.
 //
-// push never blocks: channel-full and cap-exceeded cases are reported
-// as drops. This is the load-bearing invariant for I1 — the caller
-// (forwarder goroutine) must be free to return to Read immediately.
+// push never blocks. It takes mu only to append, and mu is never held
+// across a send on out, so a parser that has stopped reading cannot stall
+// the forwarder — it can only fill the queue until the per-connection cap
+// refuses further chunks.
 //
 // Once the tee has been closed push silently returns false without
 // invoking onDrop: the mock is already abandoned at that point, so
-// additional "drop" notifications would just add noise.
+// additional "drop" notifications would just add noise. The same applies
+// after [tee.abandon] has given up on the connection — it reports the loss
+// once, with the total, and marks the tee closed so later pushes are
+// refused rather than accepted into a queue no drain is left to serve.
+// Returning false (not true) is what matters there: the caller uses it to
+// decide whether the chunk was teed, and a false "yes" would both lose the
+// chunk silently and keep re-arming the supervisor's pending-work watchdog.
 func (t *tee) push(c fakeconn.Chunk) bool {
-	if t.closed.Load() {
+	if t.closedFlag.Load() {
 		return false
 	}
 	if t.paused.Load() {
@@ -173,87 +213,27 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	}
 	n := int64(len(c.Bytes))
 
-	// overflowMu serialises the staging/overflow decision so wire order is
-	// preserved: a concurrent pair of pushes cannot interleave one onto
-	// staging and the other onto overflow out of order.
-	t.overflowMu.Lock()
-	// Check the per-conn byte cap. It now bounds staging + overflow
-	// TOGETHER, so the spill below can never let one connection exceed the
-	// cap. The accounting is lazy: t.bytes is incremented after a staging
-	// send succeeds and overflowBytes after a spill; both are decremented
-	// as the chunk drains, so there is nothing to "undo" on the drop path.
-	if t.bytes.Load()+t.overflowBytes+n > t.cap {
-		t.overflowMu.Unlock()
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return false
+	}
+	if t.qBytes+n > t.cap {
+		t.mu.Unlock()
 		t.drop(DropPerConnCap)
 		return false
 	}
-	// Drain any existing backlog into staging first, so the incoming chunk
-	// is only ever ordered AFTER chunks already buffered.
-	t.flushOverflowLocked()
-	if len(t.overflow) == 0 {
-		// No backlog — try the fast path straight onto staging. Hold the
-		// read lock only around the send: close takes the write lock
-		// before closing staging, keeping send and close mutually
-		// exclusive. Re-check closed under the lock; close may have fired.
-		t.closeMu.RLock()
-		if t.closed.Load() {
-			t.closeMu.RUnlock()
-			t.overflowMu.Unlock()
-			return false
-		}
-		select {
-		case t.staging <- c:
-			t.bytes.Add(n)
-			t.closeMu.RUnlock()
-			t.overflowMu.Unlock()
-			return true
-		default:
-			// staging channel full — fall through to spill.
-			t.closeMu.RUnlock()
-		}
-	}
-	// staging is full (or a backlog already exists): SPILL onto overflow
-	// instead of dropping. This is the fix for the boot "no_mocks" loss — a
-	// dropped response chunk strands its request and the mock is never
-	// emitted. push stays non-blocking (invariant I1) and the per-conn cap
-	// checked above bounds the memory, so this cannot grow unbounded.
-	t.overflow = append(t.overflow, c)
-	t.overflowBytes += n
-	t.flushOverflowLocked() // opportunistically push some through now
-	t.overflowMu.Unlock()
-	return true
-}
+	t.q = append(t.q, c)
+	t.qBytes += n
+	t.mu.Unlock()
 
-// flushOverflowLocked moves as many buffered overflow chunks as will fit
-// onto the staging channel, oldest first — preserving wire order. The
-// caller MUST hold overflowMu. It is non-blocking: it stops at the first
-// send that would block on a full staging channel, and short-circuits if
-// the tee has been closed (the drain teardown then delivers the tail).
-func (t *tee) flushOverflowLocked() {
-	for len(t.overflow) > 0 {
-		c := t.overflow[0]
-		t.closeMu.RLock()
-		if t.closed.Load() {
-			t.closeMu.RUnlock()
-			return
-		}
-		select {
-		case t.staging <- c:
-			t.closeMu.RUnlock()
-			n := int64(len(c.Bytes))
-			t.bytes.Add(n)
-			t.overflowBytes -= n
-			t.overflow[0] = fakeconn.Chunk{} // release the reference
-			t.overflow = t.overflow[1:]
-		default:
-			t.closeMu.RUnlock()
-			return
-		}
+	// Doorbell. Non-blocking: a pending token already tells drain there is
+	// work, and drain re-checks the queue under mu, so coalescing is safe.
+	select {
+	case t.wake <- struct{}{}:
+	default:
 	}
-	// Overflow fully drained: release the backing array so a long-lived
-	// connection that spilled once doesn't pin it forever.
-	t.overflow = nil
-	t.overflowBytes = 0
+	return true
 }
 
 // drop bumps counters and notifies. Kept small so push stays inlineable.
@@ -282,112 +262,203 @@ func (t *tee) drop(reason string) {
 	}
 }
 
-// drain moves chunks from staging to the FakeConn-facing channel,
-// decrementing the byte counter as it goes. When staging is closed —
-// either because the relay is shutting down or because close was
-// called explicitly — drain forwards any remaining buffered chunks
-// non-blockingly, then closes out and signals done.
+// drain moves chunks from the queue to the FakeConn-facing channel in FIFO
+// order, then closes out and signals done.
 //
-// The FakeConn reader is the only receiver on out; under normal
-// operation it drains at roughly parser speed and sends complete
-// quickly. If the parser stops consuming, staging fills and push()
-// starts reporting DropChannelFull — real traffic is never blocked.
-// The chunk currently held by drain is accounted for in bytes until
-// it is delivered or discarded, so the counter will over-count by at
-// most one chunk during normal operation.
+// Delivery is a blocking send. That is the point: a parser that is merely
+// slow — the boot burst this path exists for, or a node under load — must
+// not cost a recorded chunk, and no deadline can tell "slow" apart from
+// "gone".
 //
-// Correctness under teardown: the staging send in push is guarded by
-// closeMu, so after close() returns no new values can be enqueued.
-// drain's send to out selects on shutdown to avoid a deadlock when
-// the FakeConn consumer has already stopped reading.
+// There are exactly two escapes, and they differ by phase:
+//
+//   - consumerGone, always. It fires when the parser closes its FakeConn,
+//     i.e. when it has genuinely stopped reading, so delivery is pointless.
+//     This is the precise signal and the only one available mid-connection.
+//   - the stall timer, ONLY after close(). Mid-connection there is no bound
+//     at all: the parser is alive, the relay keeps forwarding real bytes
+//     regardless, and backpressure is already expressed by the byte cap.
+//     Bounding a live connection would throw its recording away and close
+//     out under a reader that is still going, handing it a premature EOF.
+//     After close() something must terminate the drain, because relay
+//     teardown waits on waitDone — hence the bound, and hence its scope.
+//
+// Either escape is a verdict about the CONNECTION, not the chunk in hand, so
+// both go through abandon: it drops the whole remaining queue, reports the
+// loss once with the total, and marks the tee closed so no later push is
+// accepted into a queue that no drain is left to serve.
 func (t *tee) drain() {
 	defer close(t.done)
 	defer close(t.out)
-	for c := range t.staging {
-		t.bytes.Add(-int64(len(c.Bytes)))
-		// Prefer delivery. A non-blocking send always succeeds while
-		// out has buffer room, which it does for every chunk that was
-		// admitted to staging: out and staging share the same capacity
-		// and close() stops further pushes, so the bounded tail left in
-		// staging at teardown fits in out. This matters for teardown
-		// correctness: when close() fires shutdown, a plain
-		// `select { case out<-c: case <-shutdown: drop }` would pick
-		// randomly between delivering and dropping a fully-recorded
-		// chunk — that coin flip is the "server closed before response"
-		// mock-drop race for Connection: close traffic (e.g. the boot
-		// startup mock). Only fall back to the shutdown escape when out
-		// is genuinely full and the consumer has stopped reading, which
-		// is the deadlock-avoidance case the escape was built for.
+	for {
+		t.mu.Lock()
+		if len(t.q) == 0 {
+			if t.closed {
+				t.mu.Unlock()
+				return
+			}
+			t.mu.Unlock()
+			select {
+			case <-t.wake:
+			case <-t.shutdown:
+			}
+			continue
+		}
+		c := t.q[0]
+		t.q[0] = fakeconn.Chunk{} // release the reference for GC
+		t.q = t.q[1:]
+		t.qBytes -= int64(len(c.Bytes))
+		if len(t.q) == 0 {
+			// Drop the backing array so a connection that burst once does
+			// not pin its high-water-mark allocation for its whole life.
+			t.q = nil
+		}
+		t.mu.Unlock()
+
+		// Fast path: deliver without blocking whenever out has room. This
+		// is the overwhelmingly common case, and doing it first means the
+		// escapes below are only ever reached when out is genuinely full —
+		// so a chunk we could have delivered is never abandoned in a race
+		// against a teardown signal.
 		select {
 		case t.out <- c:
 			continue
 		default:
 		}
-		select {
-		case t.out <- c:
-		case <-t.shutdown:
-			// Consumer stopped reading and out is full before we could
-			// deliver; drop the chunk. The mock is being abandoned
-			// either way (close implies teardown), so suppress the usual
-			// onDrop notification to avoid double-counting.
-			t.drops.Add(1)
-		}
-	}
 
-	// staging is closed and fully drained. Deliver any tail still buffered
-	// in overflow — chunks that never made it into staging (e.g. the final
-	// bytes of a boot response on a connection that spilled and then closed
-	// before push could flush them). Nothing is stranded past this snapshot:
-	// a push only appends to overflow when overflow is non-empty AFTER its
-	// flush (tee.go's append path); if overflow is empty it takes the fast
-	// path, which re-checks closed under closeMu and returns without
-	// appending once close() has fired. A non-empty overflow and this
-	// snapshot are therefore mutually exclusive under overflowMu, so any push
-	// that appends does so BEFORE the snapshot and is captured in tail; after
-	// the snapshot nils overflow, the next push sees len==0 → the closed
-	// re-check → returns. Order is preserved: overflow chunks always follow
-	// every chunk that passed through staging.
-	t.overflowMu.Lock()
-	tail := t.overflow
-	t.overflow = nil
-	t.overflowBytes = 0
-	t.overflowMu.Unlock()
-	// out is still open here (close(t.out) is deferred and runs after this
-	// loop) and the per-connection decoder keeps draining it until it
-	// closes, so these blocking sends normally complete at once. Do NOT
-	// select on t.shutdown: it is already closed by teardown, so it would
-	// fire at random and drop deliverable chunks. Instead a single deadline
-	// bounds the WHOLE flush: a live consumer receives every chunk well
-	// within it; a stopped consumer (out stays full) trips the deadline once
-	// and the residual is abandoned, so a gone consumer cannot wedge the
-	// drain goroutine — and we never pay the grace per chunk.
-	deadline := time.NewTimer(teardownFlushGrace)
-	defer deadline.Stop()
-	for i, c := range tail {
-		select {
-		case t.out <- c:
-		case <-deadline.C:
-			t.drops.Add(uint64(len(tail) - i)) // abandon the rest
-			return
+		// out is full, so the consumer is behind. Wait for it.
+		//
+		// The bound here is a STALL bound, not a flush budget: the timer is
+		// per chunk, and the send completes the moment the consumer frees a
+		// single slot. So a consumer that is merely slow — the boot burst
+		// this path exists for, or a loaded node — always gets every chunk
+		// no matter how long the connection's teardown takes in total; only
+		// one that frees NO slot for the whole window is abandoned. Bounding
+		// the whole flush instead, as a single deadline across all remaining
+		// chunks would, is what makes a timeout fire under stress and drop
+		// exactly the data this path exists to keep.
+		//
+		// consumerGone is the precise signal and is preferred whenever it is
+		// available: a parser that closed its FakeConn is released instantly
+		// rather than after a stall window. The timer only covers the case
+		// consumerGone cannot — a parser that stopped reading WITHOUT
+		// closing, where the relay is already blocked in waitDone and will
+		// not reach its own stream Close. Without it that is a deadlock.
+		// Mid-connection, blocking here is the CORRECT answer and the only
+		// safe one. The parser is alive, just behind; the relay keeps
+		// forwarding real bytes regardless, and backpressure is already
+		// expressed by the byte cap — push keeps queueing until PerConnCap
+		// and then refuses with DropPerConnCap. Abandoning here instead would
+		// throw away a live connection's recording AND close out underneath a
+		// parser that is still reading, handing it a premature io.EOF.
+		//
+		// So the stall bound applies ONLY once close() has been called, where
+		// something must eventually terminate the drain or relay teardown
+		// (which waits on waitDone) would hang.
+	deliver:
+		for {
+			var stallT *time.Timer
+			var stallC <-chan time.Time
+			var closing <-chan struct{}
+			if t.closedFlag.Load() {
+				stallT = time.NewTimer(t.stallGrace)
+				stallC = stallT.C
+			} else {
+				// Still open, so no bound — but a drain parked here must still
+				// learn that close() happened, or it would block forever and
+				// hang the relay teardown that waits on waitDone.
+				closing = t.shutdown
+			}
+
+			select {
+			case t.out <- c:
+				if stallT != nil {
+					stallT.Stop()
+				}
+				break deliver
+
+			case <-t.consumerGone:
+				// The parser closed its FakeConn: nothing will read this, and
+				// the verdict covers the whole connection, not just the chunk
+				// in hand.
+				if stallT != nil {
+					stallT.Stop()
+				}
+				t.abandon(c)
+				return
+
+			case <-stallC:
+				// Frozen with out full for a whole window after close().
+				// Conclude once and act on it — re-deciding per chunk would pay
+				// the window N times over and turn teardown into minutes, which
+				// is what made bounding the whole flush tempting in the first
+				// place. Deciding once gets both: a progressing consumer never
+				// trips the timer, a stopped one costs one window total.
+				t.abandon(c)
+				return
+
+			case <-closing:
+				// close() fired while we were parked. Loop once to re-arm with
+				// the stall bound now that one is required. At most two
+				// iterations (open -> closed), so this cannot spin.
+			}
 		}
 	}
 }
 
-// close stops the tee. After close returns, push is a no-op (returns
-// false) and the drain goroutine will finish once staging is drained.
+// abandon gives up on a chunk that could not be delivered plus everything
+// still queued behind it, and reports the loss.
+//
+// Loss must be visible: the kernel's BPF ring buffer exports a lost-sample
+// count for exactly this reason, and a capture pipeline that discards
+// silently is indistinguishable from one that recorded nothing. So this
+// reports through onDrop — once, with the total — rather than only bumping
+// an internal counter.
+func (t *tee) abandon(held fakeconn.Chunk) {
+	_ = held // counted below along with the queue; named for the reader
+
+	t.mu.Lock()
+	lost := len(t.q) + 1
+	// Dropping the slice releases the whole backing array; zeroing each entry
+	// first would only add an O(n) pass under the same mutex push contends on.
+	t.q = nil
+	t.qBytes = 0
+	// Mark the tee dead. drain is about to return, so from here on NOTHING
+	// will deliver a queued chunk — a push that kept succeeding would append
+	// to a queue with no consumer and report success for a chunk that is
+	// already lost, which is worse than the leak this whole path fixes. It
+	// would also keep arming the supervisor's pending-work watchdog, whose
+	// eventual hang verdict abandons the connection's recording wholesale.
+	t.closed = true
+	t.mu.Unlock()
+	t.closedFlag.Store(true)
+
+	t.drops.Add(uint64(lost))
+	if t.onDrop != nil {
+		t.onDrop(DropConsumerGone)
+	}
+	if t.logger != nil {
+		t.logger.Debug("relay: tee abandoned undelivered chunks",
+			zap.String("dir", t.dir.String()),
+			zap.Int("chunks", lost),
+		)
+	}
+}
+
+// close stops the tee. After close returns push is a no-op (returns
+// false) and the drain goroutine finishes once the queue is empty.
 // close is idempotent.
 func (t *tee) close() {
 	t.closeOnce.Do(func() {
-		// Write-lock fences any in-flight push send; setting closed
-		// first plus the fence means "new sends see closed=true,
-		// ongoing sends have finished".
-		t.closeMu.Lock()
-		t.closed.Store(true)
-		close(t.staging)
+		t.mu.Lock()
+		t.closed = true
+		t.mu.Unlock()
+		t.closedFlag.Store(true)
+		// Wake a drain parked on an empty queue so it can observe closed.
 		close(t.shutdown)
-		t.closeMu.Unlock()
 	})
 }
 
-// waitDone blocks until the drain goroutine has exited. Used by tests.
+// waitDone blocks until the drain goroutine has exited. Used by the relay
+// teardown and by tests.
 func (t *tee) waitDone() { <-t.done }

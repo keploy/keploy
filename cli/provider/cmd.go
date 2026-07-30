@@ -336,10 +336,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// — the host's keploy.yml is not bind-mounted into the agent
 		// container, so argv is the only propagation channel here.
 		// Hidden: only relevant when the operator already knows they
-		// need to bump these (saw drops with reason per_conn_cap /
-		// channel_full). See pkg/agent/proxy/relay/config.go.
+		// need to bump these (saw drops with reason per_conn_cap).
+		// See pkg/agent/proxy/relay/config.go.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024).")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024).")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 
@@ -364,11 +364,11 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
 		// when the operator already knows they need to bump these (saw
-		// per_conn_cap / channel_full drops in agent logs). Env vars
+		// per_conn_cap drops in agent logs). Env vars
 		// KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
 		// override these flags.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024). Bump if you see channel_full drops.")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024). Does not bound recording; raise max-memory-per-conn for per_conn_cap drops.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
 	case "test":

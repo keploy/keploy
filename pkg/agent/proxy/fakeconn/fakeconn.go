@@ -377,6 +377,13 @@ func (f *FakeConn) Close() error {
 	return nil
 }
 
+// Done returns a channel closed when this FakeConn is closed — i.e. when
+// the parser has stopped reading it. The relay's tee selects on this while
+// delivering: a consumer that is merely slow must never cost a recorded
+// chunk, so delivery blocks, and this is the only signal that says the
+// consumer is genuinely gone rather than behind.
+func (f *FakeConn) Done() <-chan struct{} { return f.closeCh }
+
 // LocalAddr returns the address configured at construction, or a
 // placeholder with network "fakeconn" if none was supplied.
 func (f *FakeConn) LocalAddr() net.Addr { return f.local }

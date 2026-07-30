@@ -94,8 +94,8 @@ record:
   memoryLimit: 0
   testCaseNaming: descriptive
   # recordBuffer tunes the per-connection recording queue. Touch only
-  # if you see "mock incomplete" warnings (reason: per_conn_cap or
-  # channel_full) in the agent logs. Env vars
+  # if you see "mock incomplete" warnings (reason: per_conn_cap) in
+  # the agent logs. Env vars
   # KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
   # override these values.
   recordBuffer:
@@ -103,8 +103,10 @@ record:
     # default. Bump for workloads with large responses (e.g. >10 MB
     # query results).
     maxMemoryPerConnection: 67108864
-    # Number of chunk slots (~32 KiB each). Zero falls through to
-    # the built-in default. Bump for bursty traffic.
+    # Number of chunk slots (~32 KiB each) in the recorder-to-parser
+    # hand-off channel. Zero falls through to the built-in default.
+    # This does not bound how much the recorder buffers, so raising it
+    # will not stop per_conn_cap drops — raise maxMemoryPerConnection.
     queueSize: 1024
 async:
     lanes: []

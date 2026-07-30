@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.uber.org/zap"
@@ -38,6 +39,21 @@ const (
 	// large-result-set response without dropping. PerConnCap remains
 	// the byte-budget enforcer for memory bounds.
 	DefaultTeeChanBuf = 1024
+
+	// DefaultConsumerStallGrace is how long the tee waits for a parser that
+	// has stopped draining before giving up on the chunks it still holds.
+	//
+	// It bounds STALLED time, not elapsed time: the wait ends the moment the
+	// parser takes anything at all, so an arbitrarily slow parser still
+	// receives every chunk. It only elapses when the parser frees nothing at
+	// all for this long, which is taken as "gone" — the whole remaining
+	// queue is then abandoned at once and reported, rather than the wait
+	// being re-entered per chunk.
+	//
+	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
+	// the owner picks the policy, the way net/http's Server.Shutdown takes
+	// its deadline from the caller's context.
+	DefaultConsumerStallGrace = 2 * time.Second
 
 	// DefaultForwardBuf is the size of the per-iteration Read/Write
 	// scratch buffer used by the forwarder goroutines.
@@ -83,6 +99,21 @@ type Config struct {
 	// the channel is full the tee is dropped with reason
 	// "channel_full". Zero resolves to DefaultTeeChanBuf.
 	TeeChanBuf int
+
+	// ConsumerStallGrace bounds how long the tee waits on a parser that has
+	// stopped draining before abandoning the chunks it still holds. Zero
+	// resolves to [DefaultConsumerStallGrace]. See that constant for why the
+	// bound is on stalled time rather than total teardown time.
+	//
+	// No production caller overrides it today, and that is deliberate rather
+	// than an oversight: the bound is only consulted AFTER close(), on a
+	// connection whose parser has stopped draining a full out channel, so
+	// waiting longer cannot recover anything — the parser is not coming back.
+	// It exists as a field, not a package constant, so the owner can shorten
+	// it (tests do) and so a future caller that knows better has somewhere to
+	// say so, in the spirit of net/http's Server.Shutdown taking its deadline
+	// from the caller.
+	ConsumerStallGrace time.Duration
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
@@ -185,6 +216,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.ForwardBuf <= 0 {
 		out.ForwardBuf = DefaultForwardBuf
+	}
+	if out.ConsumerStallGrace <= 0 {
+		out.ConsumerStallGrace = DefaultConsumerStallGrace
 	}
 	if out.MemoryGuardCheck == nil {
 		out.MemoryGuardCheck = memoryguard.IsRecordingPaused

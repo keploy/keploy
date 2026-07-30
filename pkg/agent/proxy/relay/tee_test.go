@@ -12,15 +12,38 @@ import (
 
 // newTestTee constructs a tee with reasonable defaults for tests.
 // cap is expressed in bytes; buf is the channel capacity.
+const testStallGrace = 150 * time.Millisecond
+
 func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*tee, func(reason string), *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, memCheck, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, memCheck, rec.record, nil)
+	// A consumer that never goes away: these tests exercise queueing and
+	// delivery, so drain must never take the abandon branch. Tests that
+	// simulate a departed parser build their own signal (see
+	// newTestTeeWithConsumer).
+	t2.start(make(chan struct{}))
 	t.Cleanup(func() {
 		t2.close()
 		t2.waitDone()
 	})
 	return t2, rec.record, rec
+}
+
+// newTestTeeWithConsumer is newTestTee plus control over the consumer's
+// liveness: closing the returned channel is what a parser abandoning its
+// FakeConn looks like to the tee.
+func newTestTeeWithConsumer(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder, chan struct{}) {
+	t.Helper()
+	rec := &dropRecorder{}
+	gone := make(chan struct{})
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, rec.record, nil)
+	t2.start(gone)
+	t.Cleanup(func() {
+		t2.close()
+		t2.waitDone()
+	})
+	return t2, rec, gone
 }
 
 // dropRecorder collects drop reasons for assertion.
@@ -182,7 +205,8 @@ func TestTee_CloseRacingSpillBacklog_Conserves(t *testing.T) {
 	t.Parallel()
 	for iter := 0; iter < 100; iter++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 1, nil, rec.record, nil) // buf=1 forces spill
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, testStallGrace, nil, rec.record, nil) // buf=1 forces spill
+		tt.start(make(chan struct{}))                                                     // consumer stays alive for this test
 
 		recvd := make(chan []int, 1)
 		go func() {
@@ -273,7 +297,8 @@ func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 
 func TestTee_ClosePreventsSendPanic(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+	tt.start(make(chan struct{})) // consumer stays alive for this test
 
 	// Spawn pushers racing with close; no panic expected.
 	var wg sync.WaitGroup
@@ -294,7 +319,8 @@ func TestTee_ClosePreventsSendPanic(t *testing.T) {
 
 func TestTee_CloseIsIdempotent(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+	tt.start(make(chan struct{})) // consumer stays alive for this test
 	tt.close()
 	tt.close() // must not panic
 	tt.waitDone()
@@ -320,7 +346,8 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 	const iters = 200
 	for i := 0; i < iters; i++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 4, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<30, 4, testStallGrace, nil, rec.record, nil)
+		tt.start(make(chan struct{})) // consumer stays alive for this test
 
 		// Admit a chunk into staging, then immediately tear the tee
 		// down — mirroring the forwarder pushing the final response
@@ -347,5 +374,239 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 		if d := rec.count(DropChannelFull) + rec.count(DropMemoryPressure) + rec.count(DropPerConnCap); d != 0 {
 			t.Fatalf("iter %d: unexpected push-side drops: %v", i, rec.snapshot())
 		}
+	}
+}
+
+// TestTee_SlowConsumerLosesNothing is the stress property.
+//
+// A parser that is merely behind — a boot burst, a big decode, a loaded
+// node — must receive every chunk no matter how long the whole drain takes.
+// The delivery wait is therefore bounded by STALLED time, not elapsed time:
+// each time the consumer takes anything the wait restarts. A consumer that
+// crawls for many multiples of the grace still loses nothing.
+func TestTee_SlowConsumerLosesNothing(t *testing.T) {
+	t.Parallel()
+	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // buf=1 → every send waits
+
+	const n = 40
+	for i := 0; i < n; i++ {
+		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
+			t.Fatalf("push %d refused", i)
+		}
+	}
+	tt.close()
+
+	// Drain slower than the grace on purpose: total time far exceeds one
+	// window, but no single gap does.
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for c := range tt.readCh() {
+			got = append(got, string(c.Bytes))
+			time.Sleep(testStallGrace / 3)
+		}
+	}()
+	<-done
+
+	if len(got) != n {
+		t.Fatalf("slow consumer lost data: got %d chunks, want %d (drops=%v)", len(got), n, rec.snapshot())
+	}
+	for i, s := range got {
+		if want := fmt.Sprintf("c%03d", i); s != want {
+			t.Fatalf("out of order at %d: got %q want %q", i, s, want)
+		}
+	}
+	if d := tt.dropCount(); d != 0 {
+		t.Errorf("dropCount = %d, want 0 for a consumer that kept progressing", d)
+	}
+}
+
+// TestTee_GoneConsumerIsAbandonedAtOnce pins the two halves of the "gone"
+// verdict: it is reached without waiting out the grace, and it applies to
+// the whole connection rather than being re-decided per chunk.
+func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
+	t.Parallel()
+	tt, rec, gone := newTestTeeWithConsumer(t, 1<<30, 1)
+
+	for i := 0; i < 200; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	start := time.Now()
+	close(gone) // the parser closed its FakeConn
+	tt.close()
+	tt.waitDone()
+	elapsed := time.Since(start)
+
+	if elapsed > testStallGrace {
+		t.Errorf("took %v to release a departed consumer; the close signal should not wait out the grace (%v)",
+			elapsed, testStallGrace)
+	}
+	// One report for the connection, not one per abandoned chunk.
+	if n := rec.count(DropConsumerGone); n != 1 {
+		t.Errorf("consumer_gone reported %d times, want exactly 1 for the whole remainder", n)
+	}
+	if d := tt.dropCount(); d == 0 {
+		t.Error("abandoned chunks were not counted; loss must be visible, not silent")
+	}
+}
+
+// TestTee_StalledConsumerCostsOneGraceNotOnePerChunk is the regression guard
+// for the teardown-latency trap.
+//
+// Arming the wait per chunk is what keeps a slow-but-progressing consumer
+// whole, but if the verdict is re-decided per chunk then a consumer that has
+// actually stopped costs grace × queue-depth — hundreds of queued chunks turn
+// teardown into minutes, which is exactly why bounding the whole flush was
+// tempting. Deciding once and abandoning the remainder gets both: this must
+// finish in about ONE grace regardless of how much is queued.
+func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
+	t.Parallel()
+	const queued = 200
+	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // consumer never reads
+
+	for i := 0; i < queued; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	start := time.Now()
+	tt.close()
+	tt.waitDone()
+	elapsed := time.Since(start)
+
+	// Per-chunk re-decision would be ~queued × grace; allow generous slack
+	// for scheduling while still failing that shape by orders of magnitude.
+	if limit := 4 * testStallGrace; elapsed > limit {
+		t.Errorf("teardown took %v with %d chunks queued (limit %v): the stall verdict is being "+
+			"re-taken per chunk instead of once for the connection", elapsed, queued, limit)
+	}
+	if n := rec.count(DropConsumerGone); n != 1 {
+		t.Errorf("consumer_gone reported %d times, want exactly 1", n)
+	}
+	// Conservation: every chunk is either delivered or counted as lost, and
+	// the tally is the ONLY way that loss becomes visible. os/exec makes the
+	// same point the hard way — when WaitDelay fires it returns ErrWaitDelay
+	// even for a process that exited 0, because a capture that may be
+	// incomplete must never be reported as clean. A tally of 1 when 199 were
+	// abandoned is a silent truncation, and a silently truncated recording
+	// yields an unreplayable mock.
+	delivered := 0
+	for range tt.readCh() { // out is closed by now; this drains its buffer
+		delivered++
+	}
+	if got := delivered + int(tt.dropCount()); got != queued {
+		t.Errorf("chunk accounting does not balance: %d delivered + %d dropped = %d, want %d — "+
+			"undelivered chunks are going unreported", delivered, tt.dropCount(), got, queued)
+	}
+}
+
+// TestTee_PushRefusedAfterAbandon is the C1 regression guard.
+//
+// abandon() ends the drain, so from that moment nothing will ever deliver a
+// queued chunk. If push kept succeeding it would append to a queue with no
+// consumer and report TRUE for a chunk that is already lost — worse than the
+// leak this path exists to fix, because the caller uses that return to decide
+// the chunk was teed and to arm the supervisor's pending-work watchdog, whose
+// eventual hang verdict abandons the connection's recording wholesale.
+func TestTee_PushRefusedAfterAbandon(t *testing.T) {
+	t.Parallel()
+	tt, _, gone := newTestTeeWithConsumer(t, 1<<30, 1)
+
+	for i := 0; i < 20; i++ {
+		tt.push(mkChunk("x"))
+	}
+	close(gone) // parser departed → drain abandons and returns
+	tt.waitDone()
+
+	before := tt.dropCount()
+	accepted := 0
+	for i := 0; i < 10; i++ {
+		if tt.push(mkChunk("after")) {
+			accepted++
+		}
+	}
+	if accepted != 0 {
+		t.Errorf("push accepted %d chunks after the connection was abandoned; "+
+			"they are queued behind a drain that has already returned, so each one is "+
+			"silently lost while the caller is told it was recorded", accepted)
+	}
+	if got := tt.dropCount(); got != before {
+		t.Errorf("dropCount moved %d -> %d: refused pushes should not be counted twice, "+
+			"the abandonment was already reported once with its total", before, got)
+	}
+}
+
+// TestTee_LiveConnectionIsNotAbandonedOnStall is the H1 regression guard.
+//
+// The stall bound exists only so relay teardown (which waits on waitDone)
+// cannot hang. Applying it MID-connection would throw away a live recording
+// and close out under a parser that is still reading, handing it a premature
+// io.EOF — a net-new loss path that the fixed-slot design never had. A parser
+// that is simply behind for longer than the grace must lose nothing.
+func TestTee_LiveConnectionIsNotAbandonedOnStall(t *testing.T) {
+	t.Parallel()
+	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // buf=1: the send blocks
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+
+	// Stall well past the grace WITHOUT closing the tee: the parser is alive,
+	// just busy.
+	time.Sleep(3 * testStallGrace)
+
+	if d := tt.dropCount(); d != 0 {
+		t.Fatalf("dropCount = %d after a mid-connection stall: a live connection was "+
+			"abandoned (reasons=%v)", d, rec.snapshot())
+	}
+
+	// The parser comes back and must still receive everything.
+	got := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range tt.readCh() {
+			got++
+		}
+	}()
+	tt.close()
+	<-done
+
+	if got != n {
+		t.Errorf("slow-but-alive parser received %d of %d chunks; the stall bound must not "+
+			"apply mid-connection", got, n)
+	}
+}
+
+// TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone pins drain's non-blocking
+// pre-try.
+//
+// Once consumerGone is closed, a plain select between "send to out" and "give
+// up" picks at RANDOM whenever both are ready — so roughly half of the chunks
+// out still had room for would be abandoned. The pre-try is what makes
+// delivery win whenever it is possible at all; without it this test loses
+// about half its data.
+func TestTee_DeliversWhenOutHasRoomEvenIfConsumerGone(t *testing.T) {
+	t.Parallel()
+	const n = 200
+	tt, _, gone := newTestTeeWithConsumer(t, 1<<30, n*4) // out has ample room
+
+	close(gone) // consumer "gone", but out can still accept everything
+	for i := 0; i < n; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
+	}
+	tt.close()
+	tt.waitDone()
+
+	delivered := 0
+	for range tt.readCh() {
+		delivered++
+	}
+	if delivered != n {
+		t.Errorf("delivered %d of %d chunks that out had room for; without the "+
+			"non-blocking pre-try the select coin-flips against a closed consumerGone "+
+			"and discards deliverable data", delivered, n)
 	}
 }
