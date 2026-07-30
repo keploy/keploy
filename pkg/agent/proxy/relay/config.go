@@ -160,6 +160,25 @@ type Config struct {
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
 
+	// OnCaptureDesync is invoked at most once per direction, the first time
+	// a chunk is dropped on that tee. Nil is safe.
+	//
+	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and is
+	// cleared by Session.MarkMockComplete after each cycle; this one reports
+	// that the connection's byte stream now has a hole, which no later mock
+	// recovers from. Downstream parsers frame by length prefix, so after a
+	// hole the next header is read mid-body and every subsequent frame on
+	// the connection is garbage — the connection keeps carrying user traffic
+	// perfectly while producing zero further mocks, and the test cases
+	// recorded against it replay as match_phase=no_mocks.
+	//
+	// The expected implementation is to record the start of the hole and,
+	// when the connection ends, mark that whole span so the test cases
+	// overlapping it are suppressed instead of shipped mock-less. That is
+	// the half that closes the failure by construction; retirement (below)
+	// is the best-effort half that gets capture going again.
+	OnCaptureDesync func(reason string)
+
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
 	// this to the supervisor's MarkPendingWork so the activity

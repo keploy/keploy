@@ -106,6 +106,23 @@ type tee struct {
 	memCheck func() bool
 	onDrop   func(reason string)
 
+	// onDesync fires exactly once per tee, on the first dropped chunk.
+	// Set by [New] from [Config.OnCaptureDesync]; nil is safe.
+	//
+	// A drop is not a lost mock, it is a lost STREAM POSITION. The parsers
+	// downstream frame a byte stream (mongo, mysql, postgres all read a
+	// length header and then that many bytes), so a hole does not cost one
+	// message — the next header is read from the middle of a body and every
+	// subsequent frame on that connection is garbage. onDrop's per-mock
+	// [Session.MarkMockIncomplete] is therefore not enough: it is cleared by
+	// MarkMockComplete after each cycle, while the damage is permanent and
+	// connection-scoped. This hook exists so the owner can mark the span and
+	// suppress the test cases recorded in it, instead of shipping them
+	// mock-less for replay to fail on.
+	onDesync func(reason string)
+	// desynced makes onDesync and its log fire once, not once per chunk.
+	desynced atomic.Bool
+
 	// mu guards q, qBytes and closed. It is never held across a send on
 	// out, so a stalled consumer cannot block push.
 	mu sync.Mutex
@@ -272,10 +289,50 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // "incomplete mock" enable --debug to see them, normal runs stay
 // quiet. Subsequent drops still increment drops_total and fire onDrop
 // unchanged — only the log emission is rate-limited.
+// isDesyncingDrop reports whether losing a chunk for this reason leaves the
+// downstream parser stranded mid-frame.
+//
+// The test is "did the capture pipeline lose bytes the parser was going to
+// need", not "was a mock affected". [DropPerConnCap] and
+// [DropMemoryPressure] are both unilateral: the parser is mid-stream and
+// simply never receives those bytes. [DropPaused] is not — see the caller.
+func isDesyncingDrop(reason string) bool {
+	return reason == DropPerConnCap || reason == DropMemoryPressure
+}
+
 func (t *tee) drop(reason string) {
 	n := t.drops.Add(1)
 	if t.onDrop != nil {
 		t.onDrop(reason)
+	}
+	// The first UNINTENDED drop desyncs this connection's capture
+	// permanently — see the onDesync field comment. Report it ONCE at Warn,
+	// not Debug: from here on, every mock this connection would have
+	// produced is silently absent, and a test case recorded against it
+	// replays as match_phase=no_mocks. That is the one thing this package
+	// promises never to do quietly.
+	//
+	// DropPaused is excluded deliberately. A pause is requested by the
+	// parser (to suspend capture while still forwarding) and by
+	// SessionOnAbort, which pauses precisely so teardown chunks take the
+	// cheap drop path — the parser either knows about the gap or the
+	// connection is already ending. Treating that as a desync would fire
+	// this warning on every normal abort and cancel a relay that is already
+	// shutting down.
+	if isDesyncingDrop(reason) && !t.desynced.Swap(true) {
+		if t.logger != nil {
+			next := "a dropped chunk leaves the parser mid-frame, so no further mock can be framed on this connection; test cases recorded against it are suppressed rather than shipped mock-less. If reason=per_conn_cap, raise record.recordBuffer.maxMemoryPerConnection"
+			t.logger.Warn("relay: capture desynced; this connection can no longer be recorded",
+				zap.String("dir", t.dir.String()),
+				zap.String("reason", reason),
+				zap.String("next_step", next),
+			)
+		}
+		// Report the hole so the owner can suppress the test cases that
+		// overlap it, instead of shipping them mock-less.
+		if t.onDesync != nil {
+			t.onDesync(reason)
+		}
 	}
 	if t.logger != nil && n&(n-1) == 0 {
 		// n is a power of two (1, 2, 4, 8, ...) — log this drop.

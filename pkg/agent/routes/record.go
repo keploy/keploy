@@ -40,6 +40,15 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// massSuppressionPercent is the share of a session's test cases that must be
+// suppressed before the completion summary is raised from Info to Warn.
+//
+// Not a threshold that changes behaviour — nothing is suppressed differently —
+// only one that decides whether the operator is told loudly. Set well above the
+// handful of test cases a brief memory-pressure blip costs, and well below the
+// point where the recording has quietly become unrepresentative.
+const massSuppressionPercent = 25
+
 // firstCARefusalLog ensures we emit exactly one Info-level line the
 // first time /agent/ready is called before the CA bundle is written.
 // This is the observability signal operators rely on — subsequent
@@ -352,10 +361,27 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				// Channel closed = recording session over.
 				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				a.logger.Info("agent: recording complete",
+				orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+				// Suppression protects replay from test cases whose mocks
+				// were never captured, but it is coarse: the windows are
+				// timestamp-based and session-wide, so a connection that
+				// stays busy while un-capturable can take a large share of
+				// the run with it — including test cases that other,
+				// healthy connections served completely. At a few percent
+				// that is the intended trade; at a third of the session the
+				// operator has a materially thinner recording than they
+				// think, and must be told at a level they actually see.
+				logRecordingComplete := a.logger.Info
+				if total := tcsSentSoFar + tcsSuppressedSoFar; total > 0 &&
+					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
+					logRecordingComplete = a.logger.Warn
+				}
+				logRecordingComplete("agent: recording complete",
 					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
 					zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
 					zap.Int("pressure_ranges_total", syncmgr.Get().PressureRangeCount()),
+					zap.Int("orphan_ranges_total", orphanClosed),
+					zap.Int("orphan_ranges_still_open", orphanOpen),
 					zap.Int64("mocks_dropped_by_pressure", finalDropped),
 					zap.Int64("mocks_added_successfully", finalAdded),
 					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),

@@ -172,6 +172,11 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.Logger,
 	)
 
+	// Assigned after construction rather than threaded through newTee's
+	// positional signature, which is already at seven arguments.
+	r.teeC2D.onDesync = cfg.OnCaptureDesync
+	r.teeD2C.onDesync = cfg.OnCaptureDesync
+
 	var localAddr, remoteAddr net.Addr
 	if src != nil {
 		localAddr = src.LocalAddr()
