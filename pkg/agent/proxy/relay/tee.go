@@ -9,6 +9,23 @@ import (
 	"go.uber.org/zap"
 )
 
+// KNOWN LIMITATION: the byte budget counts PAYLOAD only, so it does not bound
+// the number of queued entries. Each entry also costs a fakeconn.Chunk struct
+// (~88 B: a slice header, two time.Times, a direction and a sequence number)
+// plus its slot in the backing array, and none of that is charged. A peer that
+// dribbles bytes therefore produces chunks whose payload is a rounding error
+// but whose structs are not, so a 64 MiB budget could in principle admit
+// millions of them.
+//
+// The fixed-slot channel this replaced bounded entries implicitly (1024 slots),
+// so this is a narrowing of that guarantee. It is left as-is deliberately: the
+// forwarder reads with a 32 KiB buffer, so real chunks are MTU-sized or larger
+// and the overhead is under 1% of the budget. Charging it was tried and
+// rejected — it perturbs cap semantics at small caps badly enough to break
+// byte-precise enforcement, which is a worse trade than the pathological case
+// it guards. If it ever needs fixing, charge a per-entry constant AND keep an
+// empty queue always-admitting, and expect to re-baseline the cap tests.
+
 // Drop-reason constants. Kept as exported strings so callers can
 // branch on them in tests and assertions without importing internal
 // types. Also forwarded verbatim into OnMarkMockIncomplete.
