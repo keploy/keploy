@@ -76,7 +76,7 @@ func TestDrainToStartupMocks(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := ys.DrainToStartupMocks(context.Background(), "set-0", pruneBefore, startupCutoff); err != nil {
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", pruneBefore, startupCutoff, base); err != nil {
 		t.Fatalf("DrainToStartupMocks: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 		t.Fatalf("InsertMock boot: %v", err)
 	}
 	// Interval 1 drain: anchors the cutoff at c1 and persists it.
-	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune1, c1); err != nil {
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune1, c1, base); err != nil {
 		t.Fatalf("drain interval 1: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 	if err := ys.InsertMock(context.Background(), httpMock("interval2", map[string]string{"type": models.HTTPClient}, interval2), "set-0"); err != nil {
 		t.Fatalf("InsertMock interval2: %v", err)
 	}
-	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune2, c2); err != nil {
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", prune2, c2, base); err != nil {
 		t.Fatalf("drain interval 2: %v", err)
 	}
 
@@ -144,6 +144,59 @@ func TestDrainStartupCutoffAnchoredAcrossIntervals(t *testing.T) {
 	}
 	if strings.Contains(content, "name: interval2") {
 		t.Errorf("startup window drifted: interval-2 per-test mock was kept because the cutoff re-armed to c2; expected it dropped against the anchored c1")
+	}
+}
+
+// TestDrainStaleAnchorFromPriorSessionDiscarded guards the failure mode where a
+// test-set directory is reused across recording sessions: a marker left by the
+// prior session would over-drop THIS session's boot mocks (they all fall after
+// the stale cutoff) and silently break the next replay's boot. The marker must be
+// rejected (its cutoff predates the current sessionStart) and recomputed.
+func TestDrainStaleAnchorFromPriorSessionDiscarded(t *testing.T) {
+	if !strictModeEnabled() {
+		t.Skip("per-test lifetime derivation requires KEPLOY_STRICT_MOCK_WINDOW=1 (the auto-replay mode)")
+	}
+
+	staleCutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // prior session
+	sessionStart := staleCutoff.Add(1 * time.Hour)             // this session started much later
+	boot := sessionStart.Add(1 * time.Minute)                  // new session's boot mock (after staleCutoff)
+	pertest := sessionStart.Add(8 * time.Minute)               // in-window per-test -> drop
+	candidate := sessionStart.Add(5 * time.Minute)             // this session's real boot window
+	pruneBefore := sessionStart.Add(20 * time.Minute)
+
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	if err := ys.InsertMock(context.Background(), httpMock("newboot", map[string]string{"type": models.HTTPClient}, boot), "set-0"); err != nil {
+		t.Fatalf("InsertMock newboot: %v", err)
+	}
+	if err := ys.InsertMock(context.Background(), httpMock("newpertest", map[string]string{"type": models.HTTPClient}, pertest), "set-0"); err != nil {
+		t.Fatalf("InsertMock newpertest: %v", err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	markerPath := filepath.Join(dir, "set-0", ".keploy-startup-cutoff")
+	if err := os.WriteFile(markerPath, []byte(staleCutoff.UTC().Format(time.RFC3339Nano)), 0644); err != nil {
+		t.Fatalf("plant stale marker: %v", err)
+	}
+
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", pruneBefore, candidate, sessionStart); err != nil {
+		t.Fatalf("DrainToStartupMocks: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "set-0", "mocks.yaml"))
+	if err != nil {
+		t.Fatalf("read mocks.yaml: %v", err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "name: newboot") {
+		t.Errorf("stale prior-session anchor was honoured: the new session's boot mock was dropped (would break the next replay's boot)")
+	}
+	if strings.Contains(content, "name: newpertest") {
+		t.Errorf("expected in-window per-test mock dropped, but it is still on disk")
+	}
+	if m, _ := os.ReadFile(markerPath); strings.TrimSpace(string(m)) == staleCutoff.UTC().Format(time.RFC3339Nano) {
+		t.Errorf("stale marker was not refreshed to the current session's cutoff")
 	}
 }
 
@@ -180,7 +233,7 @@ func TestDrainGobDoesNotPersistDerivedLifetime(t *testing.T) {
 	}
 
 	ys := New(zap.NewNop(), dir, "mocks")
-	if err := ys.DrainToStartupMocks(context.Background(), "set-0", pruneBefore, startupCutoff); err != nil {
+	if err := ys.DrainToStartupMocks(context.Background(), "set-0", pruneBefore, startupCutoff, base); err != nil {
 		t.Fatalf("DrainToStartupMocks: %v", err)
 	}
 

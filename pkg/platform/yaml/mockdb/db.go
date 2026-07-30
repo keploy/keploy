@@ -651,17 +651,34 @@ const startupCutoffMarkerName = ".keploy-startup-cutoff"
 // first few test cases' per-test mocks forever (linear growth, not bounded). The
 // first real boundary — a candidate earlier than pruneBefore, i.e. an actual
 // boot window rather than the whole-batch keep-all a set of <= the window size
-// yields — is persisted next to the mocks file and reused thereafter. Callers
-// hold the striped file lock, so the read/write here is already serialised.
-func (ys *MockYaml) anchoredStartupCutoff(path string, candidate, pruneBefore time.Time) time.Time {
+// yields — is persisted next to the mocks file and reused thereafter.
+//
+// A marker whose cutoff predates sessionStart (the recording's start) is stale:
+// it was left by an EARLIER recording session that happened to reuse this
+// test-set directory. Honouring it would over-drop the NEW session's tagged
+// per-test boot mocks — they all fall after the stale cutoff — and silently
+// break the next replay's boot while the kept/dropped counts look normal. Such a
+// marker is discarded and recomputed. When sessionStart is zero the check is
+// skipped (cannot validate). A failed persist is logged, not swallowed: without
+// the marker the cutoff re-arms next interval and linear growth resumes, and the
+// write fails exactly on the full-disk condition this drain exists to avoid.
+// Callers hold the striped file lock, so the read/write here is already serialised.
+func (ys *MockYaml) anchoredStartupCutoff(path string, candidate, pruneBefore, sessionStart time.Time) time.Time {
 	markerPath := filepath.Join(path, startupCutoffMarkerName)
 	if data, err := os.ReadFile(markerPath); err == nil {
 		if anchored, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); perr == nil {
-			return anchored
+			if sessionStart.IsZero() || !anchored.Before(sessionStart) {
+				return anchored
+			}
+			ys.Logger.Debug("drain: discarding stale startup-cutoff marker from a prior session",
+				zap.String("path", path), zap.Time("staleAnchor", anchored), zap.Time("sessionStart", sessionStart))
 		}
 	}
 	if candidate.Before(pruneBefore) {
-		_ = os.WriteFile(markerPath, []byte(candidate.UTC().Format(time.RFC3339Nano)), 0644)
+		if werr := os.WriteFile(markerPath, []byte(candidate.UTC().Format(time.RFC3339Nano)), 0644); werr != nil {
+			ys.Logger.Warn("drain: failed to persist startup-cutoff anchor; the window will re-arm and growth may resume until this succeeds",
+				zap.String("path", markerPath), zap.Error(werr))
+		}
 	}
 	return candidate
 }
@@ -687,7 +704,9 @@ func (ys *MockYaml) anchoredStartupCutoff(path string, candidate, pruneBefore ti
 // startupCutoffTime is anchored to the first value seen for this test set (see
 // anchoredStartupCutoff) rather than used verbatim, so the startup window does
 // not re-arm every interval and disk stays bounded across a long session.
-func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, pruneBefore, startupCutoffTime time.Time) error {
+// sessionStart (the recording's start time) is used only to reject a stale
+// anchor left by a prior session that reused this directory.
+func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, pruneBefore, startupCutoffTime, sessionStart time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -697,7 +716,7 @@ func (ys *MockYaml) DrainToStartupMocks(ctx context.Context, testSetID string, p
 	lock.Lock()
 	defer lock.Unlock()
 
-	startupCutoffTime = ys.anchoredStartupCutoff(path, startupCutoffTime, pruneBefore)
+	startupCutoffTime = ys.anchoredStartupCutoff(path, startupCutoffTime, pruneBefore, sessionStart)
 
 	keep := func(mock *models.Mock) bool {
 		if mock.Spec.Metadata["type"] == "config" {
