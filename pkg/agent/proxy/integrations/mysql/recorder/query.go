@@ -524,8 +524,26 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 	state := stateExpectCommand
 
-	// Current command being processed.
+	// maxPipelinedCommands bounds the FIFO below. Real clients pipeline a
+	// short burst — Connector/J's streamed-BLOB sequence is two
+	// response-bearing commands (RESET then EXECUTE) — so this is generous
+	// for legitimate traffic while still bounding a connection whose
+	// responses have stopped arriving.
+	const maxPipelinedCommands = 32
+
+	type queuedCommand struct {
+		bundle       *mysql.PacketBundle
+		reqTimestamp time.Time
+		op           byte
+	}
+
+	// Response-bearing commands wait here until the server replies. MySQL
+	// clients may pipeline commands before reading responses (notably
+	// Connector/J's RESET -> SEND_LONG_DATA -> EXECUTE sequence), so a single
+	// pendingCommand slot is insufficient. No-response commands are recorded
+	// immediately and never enter this queue.
 	var (
+		commandQueue      []queuedCommand
 		pendingCommand    *mysql.PacketBundle
 		reqTimestamp      time.Time
 		resTimestamp      time.Time
@@ -542,13 +560,54 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		stmtPrepareOk   *mysql.StmtPrepareOkPacket
 	)
 
+	resetActiveExchange := func() {
+		pendingCommand = nil
+		pendingRespBundle = nil
+		textResultSet = nil
+		binaryResultSet = nil
+		stmtPrepareOk = nil
+		remainingCols = 0
+		remainingParams = 0
+		state = stateExpectCommand
+	}
+
+	activateNextCommand := func() bool {
+		if pendingCommand != nil {
+			return true
+		}
+		if len(commandQueue) == 0 {
+			return false
+		}
+
+		next := commandQueue[0]
+		commandQueue[0] = queuedCommand{}
+		commandQueue = commandQueue[1:]
+
+		pendingCommand = next.bundle
+		reqTimestamp = next.reqTimestamp
+		lastOp = next.op
+		pendingRespBundle = nil
+		textResultSet = nil
+		binaryResultSet = nil
+		stmtPrepareOk = nil
+		remainingCols = 0
+		remainingParams = 0
+		state = stateExpectResponse
+
+		// DecodePayload consults LastOp to decide how to decode the response.
+		// Client-side decoding may already have advanced LastOp to a later
+		// pipelined command, so restore the operation at the head of the FIFO.
+		decodeCtx.LastOp.Store(clientConn, lastOp)
+		return true
+	}
+
 	flushMock := func() {
 		if pendingCommand == nil || pendingRespBundle == nil {
 			return
 		}
-		// If the recorder is force-flushing mid-result-set (i.e., the
-		// next client command arrived before we observed the trailing
-		// EOF / OK_with_EOF terminator from the server), the encoded
+		// If the recorder is force-flushing mid-result-set (i.e., a new client
+		// command arrived, or the connection closed, before we observed the
+		// trailing EOF / OK_with_EOF terminator from the server), the encoded
 		// mock would otherwise have FinalResponse == nil and the replay
 		// encoder would emit no terminator. Drivers that strictly
 		// require the terminator — most notably Connector/J on Java 8 —
@@ -598,9 +657,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		}
 		// (res>=req order is clamped centrally in recordMock for every mysql mock.)
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
-		pendingCommand = nil
-		pendingRespBundle = nil
-		state = stateExpectCommand
+		resetActiveExchange()
 	}
 
 	// heldResp buffers a response that reached the decoder BEFORE its command.
@@ -640,22 +697,54 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					break
 				}
 
-				// If we had an incomplete exchange, flush it.
-				if state != stateExpectCommand && pendingCommand != nil {
-					flushMock()
+				// A partially-read result set does not end on its own: if the
+				// trailing EOF/OK terminator is lost, or DeprecateEOF was
+				// mis-negotiated so IsResultSetTerminator never fires, the
+				// decoder parks in a column/row state forever. activateNextCommand
+				// is only reachable from the stateExpectCommand guard, so nothing
+				// would ever recover it — every later command would queue and
+				// every later RESPONSE would be appended as a row of the stuck
+				// result set.
+				//
+				// A new client command is the signal the server is done. This is
+				// deliberately NOT the pre-FIFO "flush any incomplete exchange":
+				// that also fired in stateExpectResponse, where no response byte
+				// has arrived yet, and silently discarded the command — which is
+				// the pipelining bug (#4262) this change exists to fix. Here we
+				// hold a genuine partial response, and
+				// closeIncompleteResultSetForFlush synthesizes the terminator so
+				// the mock is still replayable.
+				if pendingCommand != nil {
+					switch state {
+					case stateExpectColumns, stateExpectEOFAfterColumns, stateExpectRows:
+						logger.Debug("MySQL result set never terminated; flushing it before the next command",
+							zap.String("nextCommand", "pending"))
+						resTimestamp = item.ts
+						flushMock()
+					}
 				}
 
-				reqTimestamp = item.ts
+				// wire.DecodePayload dispatches on LastOp: with COM_QUERY or
+				// COM_STMT_EXECUTE still set it decodes the packet as that
+				// command's RESPONSE. Fine when commands and responses alternate,
+				// wrong the moment a client pipelines — the second command comes
+				// back a TextResultSet/BinaryProtocolResultSet, is neither a
+				// no-response command nor a 0x unknown, and is queued as a phantom
+				// command that eats a real response slot.
+				//
+				// A client packet is never a response, and LastOp no longer has to
+				// survive the client path: activateNextCommand restores the right
+				// op per exchange before the response is decoded.
+				if op, ok := decodeCtx.LastOp.Load(clientConn); ok &&
+					(op == mysql.COM_QUERY || op == mysql.COM_STMT_EXECUTE) {
+					decodeCtx.LastOp.Store(clientConn, wire.RESET)
+				}
 
 				commandPkt, err := wire.DecodePayload(ctx, logger, pkt, clientConn, decodeCtx)
 				if err != nil {
 					logger.Debug("failed to decode MySQL command in async decoder", zap.Error(err))
-					state = stateExpectCommand
-					pendingCommand = nil
 					continue
 				}
-
-				pendingCommand = commandPkt
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.
@@ -665,11 +754,8 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				// response time on this keep-alive connection and put
 				// ResTimestampMock before ReqTimestampMock.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
-					pendingCommand = nil
-					pendingRespBundle = nil
-					state = stateExpectCommand
+					requests := []mysql.Request{{PacketBundle: *commandPkt}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
 					continue
 				}
 
@@ -678,21 +764,47 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				if strings.HasPrefix(commandPkt.Header.Type, "0x") {
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
-					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
-					pendingCommand = nil
-					pendingRespBundle = nil
-					state = stateExpectCommand
+					requests := []mysql.Request{{PacketBundle: *commandPkt}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
 					continue
 				}
 
-				// Determine the command type for response handling.
-				op, opOk := decodeCtx.LastOp.Load(clientConn)
-				if opOk {
+				// Determine the command type for response handling. A miss
+				// here is not a reason to drop the command: the old code
+				// carried the previous op forward, and losing the mock
+				// entirely is worse than decoding its response with a stale
+				// hint — the mock is what replay needs to exist at all.
+				if op, ok := decodeCtx.LastOp.Load(clientConn); ok {
 					lastOp = op
+				} else {
+					logger.Debug("MySQL command decoded without an operation; carrying the previous one forward",
+						zap.String("type", commandPkt.Header.Type))
 				}
 
-				state = stateExpectResponse
+				// Bounded, like the heldResp guard below it. The queue only
+				// holds commands the server has not answered yet, so in
+				// healthy operation it is a handful deep at most; growth past
+				// this means responses have stopped arriving and the oldest
+				// entries are never going to be paired. Dropping the oldest
+				// keeps a long-lived pooled connection from accumulating them
+				// for the life of the process.
+				if len(commandQueue) >= maxPipelinedCommands {
+					// Clear it rather than dropping the head. Dropping one entry
+					// shifts the FIFO by exactly one, so every response from here
+					// on pairs with the wrong command — silently, and for the life
+					// of the connection. Overflow already means the pairing is
+					// lost, so lose these mocks loudly instead of emitting that
+					// many mis-paired ones.
+					logger.Warn("MySQL pipelined command queue overflowed; dropping unanswered commands",
+						zap.Int("dropped", len(commandQueue)),
+						zap.Int("limit", maxPipelinedCommands))
+					commandQueue = commandQueue[:0]
+				}
+				commandQueue = append(commandQueue, queuedCommand{
+					bundle:       commandPkt,
+					reqTimestamp: item.ts,
+					op:           lastOp,
+				})
 
 				// If this command's response raced ahead and was held, replay it
 				// now — before any further decodeChan items — so it pairs with this
@@ -710,7 +822,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 			// it when the command arrives, instead of dropping it below at
 			// "received MySQL response with no pending command" — which silently
 			// lost the query mock for fast connection-pool-validation exchanges.
-			if state == stateExpectCommand && pendingCommand == nil {
+			// len(commandQueue) matters as much as pendingCommand: a pipelined
+			// burst leaves commands queued with none active, and those responses
+			// belong to the head of that queue. Holding them here instead would
+			// strand every response after the first in a pipelined exchange.
+			if state == stateExpectCommand && pendingCommand == nil && len(commandQueue) == 0 {
 				heldResp = append(heldResp, item)
 				if len(heldResp) > 128 { // bound: a genuine orphan can't grow unboundedly
 					heldResp = heldResp[1:]
@@ -730,9 +846,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				if state == stateExpectCommand {
-					// Unexpected server data without a pending command.
-					logger.Debug("received MySQL response with no pending command")
-					continue
+					if !activateNextCommand() {
+						// Unexpected server data without a pending command.
+						logger.Debug("received MySQL response with no pending command")
+						continue
+					}
 				}
 
 				switch state {
@@ -742,14 +860,28 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 						&remainingCols, &remainingParams)
 					if state == stateExpectCommand {
 						resTimestamp = item.ts
-						flushMock()
+						if pendingRespBundle == nil {
+							// The response failed to decode. flushMock would
+							// early-return on the nil bundle and leave
+							// pendingCommand set with state back at
+							// stateExpectCommand — a pair that activateNextCommand
+							// reports as "already active" without ever setting
+							// stateExpectResponse, so the switch below matches
+							// nothing and every later packet on this connection is
+							// silently dropped. Drop this one exchange instead and
+							// resync on the queue, which is what the pre-FIFO code
+							// achieved by reassigning pendingCommand per command.
+							resetActiveExchange()
+						} else {
+							flushMock()
+						}
 					}
 
 				case stateExpectColumns:
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
 					if err != nil {
 						logger.Debug("failed to decode column definition in async decoder", zap.Error(err))
-						state = stateExpectCommand
+						resetActiveExchange()
 						continue
 					}
 					if textResultSet != nil {
@@ -831,7 +963,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
 					if err != nil {
 						logger.Debug("failed to decode param definition in async decoder", zap.Error(err))
-						state = stateExpectCommand
+						resetActiveExchange()
 						continue
 					}
 					if stmtPrepareOk != nil {
@@ -870,7 +1002,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
 					if err != nil {
 						logger.Debug("failed to decode stmt column definition in async decoder", zap.Error(err))
-						state = stateExpectCommand
+						resetActiveExchange()
 						continue
 					}
 					if stmtPrepareOk != nil {
