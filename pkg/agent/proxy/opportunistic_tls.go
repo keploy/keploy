@@ -88,7 +88,10 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 		// setting an already-expired deadline. Without this, a goroutine
 		// blocked in from.Read() can't observe ctx cancellation until the
 		// opportunisticPeekChunkTimeout (5 s) fires — adding a 5 s stall
-		// to every TLS connection before hijackAndMITM can start.
+		// to every TLS connection before hijackAndMITM can start. Safe to
+		// force here: once we've decided to hijack, any bytes the peer
+		// was mid-read on are discarded anyway (MITM starts fresh), so
+		// there's no in-flight progress to lose by cutting it off instantly.
 		_ = srcConn.SetReadDeadline(time.Now())
 		_ = dstConn.SetReadDeadline(time.Now())
 		wg.Wait()
@@ -120,8 +123,28 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// Drain the OTHER side too so both goroutines exit; then
 			// either fall through to a pure relay (budget-exhaustion
 			// case) or close on the error path.
-			otherErr := waitForOther(ctx, sniffCh, &wg)
+			//
+			// cancelRelay runs BEFORE waitForOther, not after: waitForOther
+			// blocks until the peer's sniffAndRelayLoop goroutine exits,
+			// and that goroutine only checks ctx.Done() between reads —
+			// on every ordinary read timeout it just continues. If we
+			// waited first and cancelled after, a peer with nothing left
+			// to send would never be told to stop and waitForOther would
+			// hang forever (#4398).
+			//
+			// Deliberately NOT forcing an expired read deadline here (as
+			// cleanup() does for the isTLS path): the peer may be mid-Read
+			// on a connection that's genuinely still relaying real bytes
+			// toward its own budget completion, not idle. Forcing an
+			// instant cutoff would abort that in-flight progress and turn
+			// a legitimate pass-through into a spurious timeout error.
+			// Cancelling relayCtx alone still bounds the wait to at most
+			// one opportunisticPeekChunkTimeout (5 s, the same per-read
+			// cap sniffAndRelayLoop already uses) instead of forever, while
+			// letting an actively-progressing peer finish naturally if it
+			// completes before that.
 			cancelRelay()
+			otherErr := waitForOther(ctx, sniffCh, &wg)
 
 			if res.err == nil && otherErr == nil {
 				// Budget hit on both sides without TLS — the
