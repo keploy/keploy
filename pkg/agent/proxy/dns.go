@@ -82,6 +82,18 @@ const (
 	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
 	// Recording sessions typically don't last longer than this.
 	recordedDNSMocksTTL = 30 * time.Minute
+
+	// nodataRelayLogMaxSize / nodataRelayLogTTL bound the "relayed NODATA"
+	// log-dedupe tracker. Deliberately the same shape and numbers as
+	// recordedDNSMocks: identical key space (the generateCacheKey
+	// (name, qtype) pair, which is app-controlled and therefore unbounded —
+	// per-request hostnames and search-domain permutations mint a fresh key
+	// every time) and identical lifetime expectations. Re-logging a line
+	// after eviction or expiry is harmless — this tracker only suppresses
+	// duplicate log output, it carries no replay state — so the bound has
+	// no correctness cost.
+	nodataRelayLogMaxSize = 1024
+	nodataRelayLogTTL     = 30 * time.Minute
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
@@ -119,6 +131,35 @@ func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
 // newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
 func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
+}
+
+// newNodataRelayLogCache creates the bounded, TTL-expiring tracker that dedupes
+// the "relayed NODATA" Info log to once per (name, qtype).
+func newNodataRelayLogCache() *expirable.LRU[string, bool] {
+	return expirable.NewLRU[string, bool](nodataRelayLogMaxSize, nil, nodataRelayLogTTL)
+}
+
+// shouldLogNodataRelay reports whether the "relayed NODATA" Info line has not
+// yet been emitted for this (name, qtype), recording it as emitted when it
+// returns true.
+//
+// Non-atomic Get-then-Add on purpose: this is a log-dedupe, so the worst a
+// concurrent race can do is print the same line twice. It mirrors the
+// recordedDNSMocks dedupe a few hundred lines below.
+//
+// Nil-tolerant because the tracker is one optional field on a large struct: a
+// construction path that forgets it should lose deduplication, not take the
+// DNS server down mid-resolution. (It also keeps the bare &Proxy{} literals in
+// this package's tests exercising the surrounding DNS logic.)
+func (p *Proxy) shouldLogNodataRelay(key string) bool {
+	if p.nodataRelayLogged == nil {
+		return true
+	}
+	if _, dup := p.nodataRelayLogged.Get(key); dup {
+		return false
+	}
+	p.nodataRelayLogged.Add(key, true)
+	return true
 }
 
 func generateCacheKey(name string, qtype uint16) string {
@@ -292,7 +333,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				//     record of this type also relays empty here) but dedupe to
 				//     once per (name,qtype) so the signal survives without the spam.
 				if mockingEnabled {
-					if _, dup := p.nodataRelayLogged.LoadOrStore(generateCacheKey(question.Name, question.Qtype), struct{}{}); !dup {
+					if p.shouldLogNodataRelay(generateCacheKey(question.Name, question.Qtype)) {
 						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 							zap.String("query", question.Name),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))

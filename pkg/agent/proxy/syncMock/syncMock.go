@@ -281,6 +281,24 @@ type SyncMockManager struct {
 	// here — same inherent trade-off as interval-based pressure suppression.
 	orphanRanges []pressureRange
 
+	// orphanOpen holds orphan intervals whose end is not yet known: a
+	// connection that is CURRENTLY un-capturable and may stay that way for
+	// the rest of the session.
+	//
+	// It exists because [RecordOrphanWindow] can only be called once the
+	// hole's width is known, and by then the test cases inside it have
+	// already been streamed to the CLI and written to disk — the suppressor
+	// in routes/record.go reads these ranges as each TC is streamed, not
+	// afterwards. A parser that resyncs (mongo/v2) knows its hole's end
+	// immediately and keeps using RecordOrphanWindow; a connection that
+	// fell through to raw passthrough does not, because it stays broken
+	// until it closes, which for a pooled connection means until shutdown.
+	//
+	// Held as POINTERS so the closer returned by [OpenOrphanWindow] can set
+	// the end later without depending on a slice index, which the overflow
+	// trim below would invalidate.
+	orphanOpen []*pressureRange
+
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
 	// on the (sampled, cold) Error path, so contention is negligible.
@@ -1192,7 +1210,61 @@ func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, i
 			count++
 		}
 	}
+	// Still-open holes extend to now, matching WasPressureActiveInWindow's
+	// treatment of an open pressure interval. Without this a connection that
+	// is un-capturable RIGHT NOW would suppress nothing, which is precisely
+	// the window whose test cases must not be shipped mock-less.
+	now := time.Now()
+	for _, r := range m.orphanOpen {
+		rEnd := r.end
+		if rEnd.IsZero() {
+			rEnd = now
+		}
+		if !r.start.After(end) && !rEnd.Before(start) {
+			count++
+		}
+	}
 	return count > 0, count
+}
+
+// OpenOrphanWindow marks the start of a hole whose end is not yet known and
+// returns the closer that ends it. The returned func is idempotent and safe to
+// call from any goroutine; not calling it leaves the hole open, which is the
+// correct reading for a connection that stays un-capturable until shutdown.
+//
+// Use this when capture for a connection has failed in a way it cannot recover
+// from — the parser has been retired and the relay is raw-forwarding — as
+// opposed to [RecordOrphanWindow], which suits a parser that has already
+// resynced and therefore knows the hole's width.
+//
+// A zero start is ignored and yields a no-op closer, mirroring
+// RecordOrphanWindow's refusal to make a claim on a degenerate input.
+func (m *SyncMockManager) OpenOrphanWindow(start time.Time) func() {
+	if m == nil || start.IsZero() {
+		return func() {}
+	}
+	r := &pressureRange{start: start}
+
+	m.mu.Lock()
+	m.orphanOpen = append(m.orphanOpen, r)
+	// Count-cap as for orphanRanges. Dropping the OLDEST open hole is the
+	// conservative choice available: it under-suppresses rather than
+	// retaining unbounded per-connection state on a long recording.
+	if n := len(m.orphanOpen); n > maxPressureRanges {
+		trimmed := make([]*pressureRange, maxPressureRanges)
+		copy(trimmed, m.orphanOpen[n-maxPressureRanges:])
+		m.orphanOpen = trimmed
+	}
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			r.end = time.Now()
+			m.mu.Unlock()
+		})
+	}
 }
 
 // RecordOrphanWindow records a [start,end] interval during which a mock could
@@ -1240,6 +1312,36 @@ func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
 		}
 	}
 	return false
+}
+
+// OrphanRangeCount returns how many orphan intervals have been recorded, split
+// into closed and still-open. Exposed for the session-summary log in
+// routes/record.go so a run with a high tcs_suppressed_total says WHICH
+// suppressor fired: memory pressure (pressure_ranges_total) or a connection
+// that could no longer be captured (this). Without the split, an operator
+// seeing most of their tests suppressed has no way to tell the two apart, and
+// a still-open interval is the one that keeps suppressing to the end of the
+// session — worth surfacing separately.
+func (m *SyncMockManager) OrphanRangeCount() (closed, open int) {
+	if m == nil {
+		return 0, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// orphanOpen holds windows that have been closed too: the closer stamps
+	// r.end in place rather than removing the entry, so the slice is not the
+	// open count. Reporting len() for both would tell an operator whose
+	// windows all closed cleanly that suppression ran to end of session —
+	// the exact wrong diagnosis, in the field added to prevent one.
+	closed = len(m.orphanRanges)
+	for _, r := range m.orphanOpen {
+		if r.end.IsZero() {
+			open++
+		} else {
+			closed++
+		}
+	}
+	return closed, open
 }
 
 // PressureRangeCount returns the total number of pressure intervals recorded

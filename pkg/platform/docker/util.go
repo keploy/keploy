@@ -116,6 +116,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if opts.RecordBufferQueueSize > 0 {
 		recordBufferFlags += " --queue-size " + strconv.Itoa(opts.RecordBufferQueueSize)
 	}
+	if opts.RecordBufferConsumerStallGrace > 0 {
+		recordBufferFlags += " --consumer-stall-grace " + opts.RecordBufferConsumerStallGrace.String()
+	}
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {

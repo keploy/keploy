@@ -100,7 +100,17 @@ type OutgoingOptions struct {
 	// protocol; the generic dispatch path waits to peek client bytes
 	// before dialing and deadlocks otherwise. When nil/empty, the
 	// proxy falls back to the built-in defaults [3306, 4000].
+	//
+	// Since automatic detection landed this list is an optimisation and
+	// an escape hatch rather than a requirement: a port listed here
+	// skips the detection probe entirely. See DisableMysqlAutoDetect.
 	MysqlPorts []uint32
+	// DisableMysqlAutoDetect turns off automatic MySQL port detection,
+	// restoring the strict "MysqlPorts or nothing" behaviour. With
+	// detection on (the default), a MySQL server on any port is
+	// identified from its handshake at record time and recalled from
+	// the recorded mocks' destAddr at replay time.
+	DisableMysqlAutoDetect bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
@@ -165,8 +175,12 @@ type SetupOptions struct {
 	// RecordBufferQueueSize mirrors config.Record.RecordBuffer.QueueSize.
 	// See RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferQueueSize int
-	ExtraArgs             []string
-	EnableSampling        int
+	// RecordBufferConsumerStallGrace mirrors
+	// config.Record.RecordBuffer.ConsumerStallGrace. See
+	// RecordBufferMaxMemoryPerConn for the propagation rationale.
+	RecordBufferConsumerStallGrace time.Duration
+	ExtraArgs                      []string
+	EnableSampling                 int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
