@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -23,6 +25,79 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+const (
+	// orphanIdleGrace is how long a retired connection must carry no bytes
+	// before its suppression window is closed. Longer than any plausible
+	// gap WITHIN one app request (the window must never close mid-request
+	// and let a half-covered test case through), short enough that a
+	// connection idling between bursts stops suppressing quickly.
+	orphanIdleGrace = 1 * time.Second
+
+	// orphanIdleCheck is how often idleness is re-evaluated. The window can
+	// therefore over-cover by up to orphanIdleCheck past the true idle
+	// point, which errs toward suppressing — the safe direction.
+	orphanIdleCheck = 250 * time.Millisecond
+)
+
+// orphanWindowOpener is the slice of supervisor.Session that trackOrphanWhileActive
+// needs, so the loop can be tested without a live connection.
+type orphanWindowOpener interface {
+	OpenOrphanWindow(start time.Time) func()
+}
+
+// trackOrphanWhileActive keeps a suppression window open only while a retired
+// connection is actually carrying bytes, and closes it whenever the connection
+// falls idle.
+//
+// A retired connection can no longer be captured, but that only costs a test
+// case if the app USED it while serving that test case. A single window held
+// from the fallthrough to end-of-session says "everything after this point is
+// unreliable", which for a connection that then sat idle for ten minutes
+// throws away ten minutes of perfectly good recording — and on a fallthrough
+// early in a run, the entire run. Following activity instead suppresses the
+// spans that can really have lost a mock and nothing else.
+//
+// It always returns with its window closed. stop must be closed by the caller
+// once the connection has ended.
+// idleGrace and checkEvery are parameters rather than the package constants
+// so the loop is testable in milliseconds; production passes
+// orphanIdleGrace / orphanIdleCheck.
+func trackOrphanWhileActive(stop <-chan struct{}, sess orphanWindowOpener, lastForwardNanos *atomic.Int64, idleGrace, checkEvery time.Duration) {
+	closeWindow := sess.OpenOrphanWindow(time.Now())
+	defer func() {
+		if closeWindow != nil {
+			closeWindow()
+		}
+	}()
+
+	ticker := time.NewTicker(checkEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-ticker.C:
+			idle := now.Sub(time.Unix(0, lastForwardNanos.Load())) > idleGrace
+			switch {
+			case idle && closeWindow != nil:
+				closeWindow()
+				closeWindow = nil
+			case !idle && closeWindow == nil:
+				// Traffic resumed on a connection that still cannot be
+				// captured. Reopen from the RESUME instant, not from now:
+				// the tick only tells us traffic happened at some point in
+				// the last checkEvery, and bytes moved from
+				// lastForwardNanos onwards. Opening at `now` would leave up
+				// to checkEvery of live traffic uncovered, and a request
+				// served entirely inside that hole is exactly the
+				// mock-less test case this exists to catch.
+				closeWindow = sess.OpenOrphanWindow(time.Unix(0, lastForwardNanos.Load()))
+			}
+		}
+	}
+}
 
 // newRelayDisabled reports whether the new supervisor+relay architecture
 // is disabled via environment. Set KEPLOY_NEW_RELAY to 0/false/off/no to
@@ -163,13 +238,61 @@ func (p *Proxy) recordViaSupervisor(
 		realCertHook = p.cbshim.RegisterReal
 	}
 
+	// lastForwardNanos is when this connection last moved a byte in either
+	// direction, stamped by the wrapped BumpActivity below. Read by the
+	// activity-scoped suppression loop.
+	var lastForwardNanos atomic.Int64
+	lastForwardNanos.Store(time.Now().UnixNano())
+
+	// ONE suppression tracker per connection, started by whichever cause
+	// fires first and stopped when the connection ends.
+	//
+	// Both causes — a tee desync and a retired parser — leave the connection
+	// in the same state: it can no longer be captured. So they share one
+	// activity-scoped window rather than opening two. They are also not
+	// independent: the incident's chain was memory-pressure drop → parser
+	// starves mid-frame → hang watchdog → passthrough fallthrough, so the
+	// DESYNC fires first. Giving it a plain open-ended window of its own
+	// would subsume the fallthrough's scoped one (WasMockOrphanedInWindow
+	// ORs the ranges) and silently restore the whole-session suppression
+	// this design exists to avoid.
+	var (
+		trackerOnce sync.Once
+		trackerStop = make(chan struct{})
+	)
+	startOrphanTracking := func() {
+		trackerOnce.Do(func() {
+			go trackOrphanWhileActive(trackerStop, svSess, &lastForwardNanos, orphanIdleGrace, orphanIdleCheck)
+		})
+	}
+	// Safe whether or not the tracker ever started — closing a channel with
+	// no reader is a no-op — and it guarantees the goroutine cannot outlive
+	// the connection.
+	defer close(trackerStop)
+
 	r := relay.New(relay.Config{
-		Logger:               logger,
-		TLSUpgradeFn:         newProxyTLSUpgradeFn(logger),
-		BumpActivity:         sv.BumpActivity,
+		Logger:       logger,
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger),
+		// Wrapped to also stamp when this connection last carried bytes.
+		// After a parser is retired the relay keeps forwarding, so this is
+		// the signal that says WHEN the dead connection was actually in
+		// use — which is what bounds the suppression window below to the
+		// periods that can really have cost a mock.
+		BumpActivity: func() {
+			sv.BumpActivity()
+			lastForwardNanos.Store(time.Now().UnixNano())
+		},
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
+		// A hole in this connection's capture. Remember when it opened so
+		// the teardown below can mark the whole span: from here on the
+		// parser frames from the wrong offset and emits nothing, so every
+		// test case overlapping the span must be suppressed rather than
+		// shipped mock-less (replay would report match_phase=no_mocks).
+		// Suppression is what closes the failure by construction —
+		// retirement below only restores capture for what follows.
+		OnCaptureDesync: func(string) { startOrphanTracking() },
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -243,11 +366,47 @@ func (p *Proxy) recordViaSupervisor(
 	}, svSess)
 
 	if result.FallthroughToPassthrough {
+		// A cancel that lands after the supervisor's grace period is the
+		// NORMAL way a `keploy record` stop ends a live V2 connection —
+		// the parser is blocked in FakeConn.Read, which observes only
+		// Close and read deadlines, so it cannot return inside the grace.
+		// There is no "rest of the connection" left to lose, so neither
+		// the warning nor the suppression window applies: emitting them
+		// would tell the user their recording is broken at the exact
+		// moment they are reading the logs, on every clean stop.
+		shuttingDown := result.Status == supervisor.StatusCanceled && ctx.Err() != nil
+
+		if !shuttingDown {
+			// Warn, not Debug. This is permanent, silent capture loss for
+			// the rest of a connection's life, and several of the exits
+			// that land here (StatusError, StatusMemCap) log nothing of
+			// their own — so at Debug a whole recording could come back
+			// unreplayable without a single line above Debug to explain
+			// it. Bounded: one line per connection, only on a retired
+			// parser.
+			//
+			// result.Err is deliberately NOT attached here. For
+			// StatusPanicked it reads "supervisor: parser panic: ..."
+			// (wrapPanic), and the memory-load lane scripts grep record.txt
+			// for /panic:|fatal error:/ under `set -Eeuo pipefail` to catch
+			// a CRASHED keploy. A recovered, structured, handled panic is
+			// not a crash, but the token is the token: putting it in an
+			// Info-level line would convert "some tests failed" into "Fatal
+			// error detected in record.txt" and kill the lane before it
+			// reaches its report. Status names the mechanism; the full
+			// error follows at Debug.
+			logger.Warn("parser retired; this connection can no longer be recorded and its test cases will be suppressed",
+				zap.String("parser", string(parserType)),
+				zap.String("status", result.Status.String()),
+				zap.String("clientConnID", svSess.ClientConnID),
+				zap.String("next_step", "user traffic is unaffected — the relay keeps forwarding raw bytes — but no further mock can be captured on this connection, so tests recorded against it are dropped rather than shipped unreplayable. Re-run with --debug for the underlying error. If this repeats, set KEPLOY_NEW_RELAY=off to force the legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
+			)
+		}
 		logger.Debug("parser supervisor triggered passthrough fallback; relay continues raw forwarding until peer close",
 			zap.String("parser", string(parserType)),
 			zap.String("status", result.Status.String()),
+			zap.Bool("shutting_down", shuttingDown),
 			zap.Error(result.Err),
-			zap.String("next_step", "set KEPLOY_NEW_RELAY=off to force legacy path for this parser, or KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely"),
 		)
 		// Crucial invariant (I1): the relay keeps forwarding client↔dest
 		// bytes end-to-end during the fallback. We do NOT cancel it here
@@ -260,6 +419,34 @@ func (p *Proxy) recordViaSupervisor(
 		// relay's forwarder goroutines continue draining srcConn/dstConn
 		// until either peer closes the connection, which triggers a
 		// normal Run exit.
+		//
+		// That is correct for USER TRAFFIC and wrong for RECORDING, and
+		// until now nothing said so. From this instant the connection
+		// emits no further mock — there is no path anywhere that puts a
+		// parser back on a live connection — while the app keeps issuing
+		// requests over it perfectly happily. On a pooled client the peer
+		// never closes, so "until peer close" means "until shutdown": every
+		// test case recorded from here on is streamed with no mocks behind
+		// it and fails replay with match_phase=no_mocks. Left silent, that
+		// is indistinguishable from a healthy recording until replay.
+		//
+		// So mark the span un-capturable for as long as it lasts. The TC
+		// suppressor in pkg/agent/routes/record.go drops every test case
+		// whose window overlaps it, which is the same coverage-for-honesty
+		// trade the memory-pressure and resync-hole suppressors already
+		// make: a smaller recording in which every test replays, instead of
+		// a larger one that lies.
+		// The tracker goroutine owns its window and closes it on the way
+		// out; `defer close(trackerStop)` at the top of this function is
+		// what stops it, so the close survives a panic here rather than
+		// only the happy path. An orphan window that never closes would
+		// suppress every test case for the REST OF THE SESSION.
+		if !shuttingDown {
+			// Shared with the desync path — see startOrphanTracking. If a
+			// tee already desynced this connection the tracker is running,
+			// and this is a no-op rather than a second window.
+			startOrphanTracking()
+		}
 		<-relayDone
 		return nil
 	}

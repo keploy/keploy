@@ -741,3 +741,88 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 		t.Errorf("zero-config stallGrace = %v, want %v", got, DefaultConsumerStallGrace)
 	}
 }
+
+// TestAnUnintendedDropReportsCaptureDesync pins the signal that a connection's
+// capture is finished.
+//
+// This is the guard for a proven production data-loss bug: under memory
+// pressure the agent dropped egress chunks while continuing to record test
+// cases, so a recording ended with test cases that had no mocks at all and
+// replayed as match_phase=no_mocks. The drop was reported only through the
+// per-mock MarkMockIncomplete (cleared after every cycle) and a sampled Debug
+// line, so a whole failing run contained zero errors. What makes it permanent
+// is framing: the parsers read a length prefix and then that many bytes, so a
+// hole means every later frame on the connection is read from the wrong offset.
+// Hence exactly once, on the first unintended drop, and never for a pause.
+func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
+	t.Parallel()
+
+	t.Run("memory pressure mid-capture desyncs the connection", func(t *testing.T) {
+		t.Parallel()
+		var desyncs []string
+		pressure := false
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, func() bool { return pressure }, nil, nil)
+		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		t.Cleanup(tt.close)
+
+		// Capture is underway: this is the connection a reconnect can rescue.
+		if !tt.push(fakeconn.Chunk{Bytes: []byte("framed")}) {
+			t.Fatal("first push should have been teed")
+		}
+		pressure = true
+		if tt.push(fakeconn.Chunk{Bytes: []byte("abc")}) {
+			t.Fatal("push should have dropped under memory pressure")
+		}
+		if len(desyncs) != 1 || desyncs[0] != DropMemoryPressure {
+			t.Fatalf("onDesync calls = %v, want exactly [%s]: a lost chunk leaves the parser "+
+				"mid-frame, and nothing else reports that the connection is now uncapturable",
+				desyncs, DropMemoryPressure)
+		}
+
+		// Sustained pressure must not re-report: one connection, one event.
+		for i := 0; i < 5; i++ {
+			tt.push(fakeconn.Chunk{Bytes: []byte("more")})
+		}
+		if len(desyncs) != 1 {
+			t.Errorf("onDesync fired %d times, want 1 — it is per-connection, not per-chunk", len(desyncs))
+		}
+	})
+
+	t.Run("exceeding the per-connection cap desyncs the connection", func(t *testing.T) {
+		t.Parallel()
+		var desyncs []string
+		// Cap admits the first chunk and refuses the second.
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil, nil)
+		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		t.Cleanup(tt.close)
+
+		if !tt.push(fakeconn.Chunk{Bytes: []byte("abcd")}) {
+			t.Fatal("first push should have fit under the cap")
+		}
+		if tt.push(fakeconn.Chunk{Bytes: []byte("too long for the cap")}) {
+			t.Fatal("push should have refused a chunk over the cap")
+		}
+		if len(desyncs) != 1 || desyncs[0] != DropPerConnCap {
+			t.Fatalf("onDesync calls = %v, want exactly [%s]: a capped-out chunk is lost to the "+
+				"parser just as surely as a pressure-dropped one", desyncs, DropPerConnCap)
+		}
+	})
+
+	t.Run("a deliberate pause does NOT desync the connection", func(t *testing.T) {
+		t.Parallel()
+		var desyncs []string
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		t.Cleanup(tt.close)
+
+		tt.setPaused(true)
+		if tt.push(fakeconn.Chunk{Bytes: []byte("abc")}) {
+			t.Fatal("push should have dropped while paused")
+		}
+		if len(desyncs) != 0 {
+			t.Fatalf("onDesync fired %v on a pause; a pause is requested by the parser or by "+
+				"SessionOnAbort at teardown, so treating it as a desync would warn on every "+
+				"normal abort and cancel a relay that is already shutting down", desyncs)
+		}
+	})
+}
