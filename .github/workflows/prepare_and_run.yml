@@ -1036,6 +1036,18 @@ jobs:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows, run_golang_native_windows]
+    # The only self-hosted job in the repo that had no cap, so it inherited
+    # GitHub's 360-minute default. Because it is `if: always()` and the final
+    # `gate_windows` needs it, a Windows fleet that is busy or offline parks it
+    # in the queue and the ENTIRE run stays in_progress behind it for six
+    # hours — the PR shows no verdict and `gh run rerun --failed` refuses,
+    # because that requires a completed run. Observed on run 30620482988: 60+
+    # minutes queued with zero steps executed while every other job had long
+    # finished. 10 minutes matches its macOS twin `clean_up_docker_macos`; the
+    # work itself is `docker rm -f` and a lock-file delete. Losing a cleanup
+    # pass is cheap and self-correcting — the next push schedules a fresh one,
+    # as the concurrency comment at the top of this file already notes.
+    timeout-minutes: 10
     steps:
       - name: Pre-checkout git isolation
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
