@@ -375,8 +375,19 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 	state := stateExpectCommand
 
-	// Current command being processed.
+	type queuedCommand struct {
+		bundle       *mysql.PacketBundle
+		reqTimestamp time.Time
+		op           byte
+	}
+
+	// Response-bearing commands wait here until the server replies. MySQL
+	// clients may pipeline commands before reading responses (notably
+	// Connector/J's RESET -> SEND_LONG_DATA -> EXECUTE sequence), so a single
+	// pendingCommand slot is insufficient. No-response commands are recorded
+	// immediately and never enter this queue.
 	var (
+		commandQueue      []queuedCommand
 		pendingCommand    *mysql.PacketBundle
 		reqTimestamp      time.Time
 		resTimestamp      time.Time
@@ -392,6 +403,47 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		binaryResultSet *mysql.BinaryProtocolResultSet
 		stmtPrepareOk   *mysql.StmtPrepareOkPacket
 	)
+
+	resetActiveExchange := func() {
+		pendingCommand = nil
+		pendingRespBundle = nil
+		textResultSet = nil
+		binaryResultSet = nil
+		stmtPrepareOk = nil
+		remainingCols = 0
+		remainingParams = 0
+		state = stateExpectCommand
+	}
+
+	activateNextCommand := func() bool {
+		if pendingCommand != nil {
+			return true
+		}
+		if len(commandQueue) == 0 {
+			return false
+		}
+
+		next := commandQueue[0]
+		commandQueue[0] = queuedCommand{}
+		commandQueue = commandQueue[1:]
+
+		pendingCommand = next.bundle
+		reqTimestamp = next.reqTimestamp
+		lastOp = next.op
+		pendingRespBundle = nil
+		textResultSet = nil
+		binaryResultSet = nil
+		stmtPrepareOk = nil
+		remainingCols = 0
+		remainingParams = 0
+		state = stateExpectResponse
+
+		// DecodePayload consults LastOp to decide how to decode the response.
+		// Client-side decoding may already have advanced LastOp to a later
+		// pipelined command, so restore the operation at the head of the FIFO.
+		decodeCtx.LastOp.Store(clientConn, lastOp)
+		return true
+	}
 
 	flushMock := func() {
 		if pendingCommand == nil || pendingRespBundle == nil {
@@ -448,9 +500,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 			mockType = "connection"
 		}
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
-		pendingCommand = nil
-		pendingRespBundle = nil
-		state = stateExpectCommand
+		resetActiveExchange()
 	}
 
 	for item := range decodeChan {
@@ -468,22 +518,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					break
 				}
 
-				// If we had an incomplete exchange, flush it.
-				if state != stateExpectCommand && pendingCommand != nil {
-					flushMock()
-				}
-
-				reqTimestamp = item.ts
-
 				commandPkt, err := wire.DecodePayload(ctx, logger, pkt, clientConn, decodeCtx)
 				if err != nil {
 					logger.Debug("failed to decode MySQL command in async decoder", zap.Error(err))
-					state = stateExpectCommand
-					pendingCommand = nil
 					continue
 				}
-
-				pendingCommand = commandPkt
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.
@@ -493,11 +532,8 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				// response time on this keep-alive connection and put
 				// ResTimestampMock before ReqTimestampMock.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
-					pendingCommand = nil
-					pendingRespBundle = nil
-					state = stateExpectCommand
+					requests := []mysql.Request{{PacketBundle: *commandPkt}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
 					continue
 				}
 
@@ -506,21 +542,23 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				if strings.HasPrefix(commandPkt.Header.Type, "0x") {
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
-					requests := []mysql.Request{{PacketBundle: *pendingCommand}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", pendingCommand.Header.Type, "NO Response Packet", mocks, reqTimestamp, reqTimestamp, opts)
-					pendingCommand = nil
-					pendingRespBundle = nil
-					state = stateExpectCommand
+					requests := []mysql.Request{{PacketBundle: *commandPkt}}
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
 					continue
 				}
 
 				// Determine the command type for response handling.
-				op, opOk := decodeCtx.LastOp.Load(clientConn)
-				if opOk {
-					lastOp = op
+				op, ok := decodeCtx.LastOp.Load(clientConn)
+				if !ok {
+					logger.Debug("MySQL command decoded without an operation",
+						zap.String("type", commandPkt.Header.Type))
+					continue
 				}
-
-				state = stateExpectResponse
+				commandQueue = append(commandQueue, queuedCommand{
+					bundle:       commandPkt,
+					reqTimestamp: item.ts,
+					op:           op,
+				})
 			}
 
 		} else {
@@ -538,9 +576,11 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				if state == stateExpectCommand {
-					// Unexpected server data without a pending command.
-					logger.Debug("received MySQL response with no pending command")
-					continue
+					if !activateNextCommand() {
+						// Unexpected server data without a pending command.
+						logger.Debug("received MySQL response with no pending command")
+						continue
+					}
 				}
 
 				switch state {
