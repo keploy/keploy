@@ -1053,6 +1053,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.RecordBufferQueueSize > 0 {
 		args = append(args, "--queue-size", strconv.Itoa(opts.RecordBufferQueueSize))
 	}
+	if opts.RecordBufferConsumerStallGrace > 0 {
+		args = append(args, "--consumer-stall-grace", opts.RecordBufferConsumerStallGrace.String())
+	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
