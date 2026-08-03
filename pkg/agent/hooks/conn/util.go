@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -80,6 +81,15 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		return
 	}
 
+	// Registered before any early return below (e.g. a decompression
+	// failure on the request body) so resp.Body never leaks.
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close the http response body")
+		}
+	}()
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -91,18 +101,20 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody, MaxTestCaseSize)
 			if err != nil {
+				if errors.Is(err, pkg.ErrDecompressedTooLarge) {
+					// Oversized, not corrupt: same condition as the post-
+					// decompression MaxTestCaseSize check further down, hit
+					// earlier — log it the same way, not as a decode failure.
+					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
+						zap.String("url", req.URL.String()),
+						zap.String("method", req.Method))
+					return
+				}
 				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
 				return
 			}
 		}
 	}
-
-	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the http response body")
-		}
-	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -134,6 +146,12 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	if resp.Header.Get("Content-Encoding") != "" {
 		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody, MaxTestCaseSize)
 		if err != nil {
+			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
+				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
+					zap.String("url", req.URL.String()),
+					zap.String("method", req.Method))
+				return
+			}
 			utils.LogError(logger, err, "failed to decompress the response body")
 			return
 		}
