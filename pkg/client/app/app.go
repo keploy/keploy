@@ -278,7 +278,8 @@ func (a *App) setupComposeInMemory(extraArgs []string) error {
 	a.composeContent = content
 
 	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
-	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService)
+	preferFailureAbort := strings.Contains(string(a.composeContent), "service_completed_successfully")
+	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService, preferFailureAbort)
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
 		zap.String("cmd", a.cmd))
