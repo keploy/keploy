@@ -822,9 +822,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			return nil, gzErr
 		}
-		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+		// Cap decompressed output so a bomb fails the test instead of
+		// OOMing while CompareHTTPStream accumulates the body (#3867).
+		streamReader = NewCappedReadCloser(&gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}, MaxDecompressedSize)
 	case "br":
-		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+		streamReader = NewCappedReadCloser(&brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}, MaxDecompressedSize)
 	case "":
 		// no-op, use httpResp.Body directly
 	default:
@@ -3644,6 +3646,53 @@ const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
 // different handling (e.g. capture drops oversized bodies with the regular
 // size-limit message instead of a scary bomb error).
 var ErrDecompressedTooLarge = errors.New("decompressed size exceeds limit")
+
+// NewCappedReader wraps r so cumulative reads past limit fail with an error
+// wrapping ErrDecompressedTooLarge instead of streaming unbounded data. It
+// bounds streaming decompression (replay streams, mock downloads, archive
+// extraction) where readAllCapped's materialize-everything shape doesn't
+// fit. A stream of exactly limit bytes still reaches its natural EOF; the
+// error surfaces only when the stream holds at least one byte more.
+func NewCappedReader(r io.Reader, limit int64) io.Reader {
+	return &cappedReader{r: r, limit: limit}
+}
+
+type cappedReader struct {
+	r     io.Reader
+	read  int64
+	limit int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	// Budget reads to limit+1: an exactly-limit stream hits its natural
+	// EOF, while a single extra byte reveals an oversized stream.
+	if max := c.limit + 1 - c.read; int64(len(p)) > max {
+		p = p[:max]
+	}
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	return n, err
+}
+
+// NewCappedReadCloser applies NewCappedReader to a ReadCloser, preserving
+// Close so consumers can still release the underlying resource (e.g. an
+// HTTP response body) after a capped read.
+func NewCappedReadCloser(rc io.ReadCloser, limit int64) io.ReadCloser {
+	return &cappedReadCloser{Reader: NewCappedReader(rc, limit), closer: rc}
+}
+
+type cappedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (c *cappedReadCloser) Close() error { return c.closer.Close() }
 
 // readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
 // the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is

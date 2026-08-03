@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -1116,6 +1118,118 @@ func TestReadAllCapped_556(t *testing.T) {
 		_, err := readAllCapped(rand.Reader, limit)
 		require.ErrorIs(t, err, ErrDecompressedTooLarge)
 	})
+}
+
+// TestNewCappedReader_557 covers the streaming counterpart of readAllCapped:
+// exact-limit streams reach EOF, one extra byte errors, and the error is
+// sticky across subsequent reads.
+func TestNewCappedReader_557(t *testing.T) {
+	t.Run("ExactLimitReachesEOF", func(t *testing.T) {
+		r := NewCappedReader(bytes.NewReader(make([]byte, 1024)), 1024)
+		data, err := io.ReadAll(r)
+		require.NoError(t, err)
+		assert.Len(t, data, 1024)
+	})
+
+	t.Run("OverLimitErrorsAndSticks", func(t *testing.T) {
+		r := NewCappedReader(bytes.NewReader(make([]byte, 1025)), 1024)
+		_, err := io.Copy(io.Discard, r)
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
+		// Error must persist on further reads — a consumer retrying the
+		// stream must not see a clean EOF.
+		_, err = r.Read(make([]byte, 1))
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
+	})
+
+	t.Run("SmallChunkedReads", func(t *testing.T) {
+		r := NewCappedReader(bytes.NewReader(make([]byte, 100)), 1024)
+		var total int
+		buf := make([]byte, 7)
+		for {
+			n, err := r.Read(buf)
+			total += n
+			if err == io.EOF {
+				break
+			}
+			require.NoError(t, err)
+		}
+		assert.Equal(t, 100, total)
+	})
+
+	t.Run("UnboundedStreamStops", func(t *testing.T) {
+		_, err := io.Copy(io.Discard, NewCappedReader(rand.Reader, 64*1024))
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
+	})
+}
+
+// zeroReader yields an endless stream of zero bytes (compresses extremely
+// well — the shape of a decompression bomb).
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+// TestSimulateHTTPStreaming_DecompressionBomb_558 pins the streaming replay
+// wiring (#3867): a response inflating past MaxDecompressedSize must fail
+// the stream read with ErrDecompressedTooLarge instead of OOMing while the
+// body accumulates.
+func TestSimulateHTTPStreaming_DecompressionBomb_558(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+	const bombSize = MaxDecompressedSize + 64*1024
+
+	makeBomb := func(t *testing.T, encoding string) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		var w io.WriteCloser
+		switch encoding {
+		case "gzip":
+			w, _ = gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+		case "br":
+			w = brotli.NewWriterLevel(&buf, brotli.BestSpeed)
+		}
+		_, err := io.CopyN(w, zeroReader{}, bombSize)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		return buf.Bytes()
+	}
+
+	for _, encoding := range []string{"gzip", "br"} {
+		t.Run(encoding, func(t *testing.T) {
+			bomb := makeBomb(t, encoding)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Encoding", encoding)
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write(bomb)
+			}))
+			defer server.Close()
+
+			tc := &models.TestCase{
+				Name: "decompression-bomb-" + encoding,
+				HTTPReq: models.HTTPReq{
+					Method: "GET",
+					URL:    server.URL,
+					// Explicit Accept-Encoding disables the transport's
+					// transparent decompression, so the body arrives
+					// compressed with Content-Encoding intact — the same
+					// shape SimulateHTTPStreaming handles in production.
+					Header: map[string]string{"Accept-Encoding": encoding},
+				},
+			}
+
+			streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
+			require.NoError(t, err)
+			require.NotNil(t, streamResp)
+			defer streamResp.Reader.Close()
+
+			_, err = io.Copy(io.Discard, streamResp.Reader)
+			require.ErrorIs(t, err, ErrDecompressedTooLarge)
+		})
+	}
 }
 
 // TestFilterMocks_678 validates the filtering and sorting of mocks in Test and Config modes.
