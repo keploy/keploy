@@ -222,11 +222,13 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// we stop after storing (preTLSStored) rather than continuing into
 		// the command phase.
 		//
-		// RecordV2 is only ever reached from the proxyless observe-only
-		// recordEgressV2 path (the sockmap relay pipeline routes MySQL
-		// through the legacy recorder), so SkipTLSMITM here unambiguously
-		// means "no relay to upgrade with". A relay-backed V2 path, if one
-		// is ever added, keeps the directive-based upgrade below.
+		// SkipTLSMITM here means "observe-only capture: there is no MITM
+		// relay to drive the TLS upgrade with". In that mode the greeting +
+		// SSLRequest arrived in plaintext on this raw stream and the post-TLS
+		// phase is lifted separately by the uprobe (tls-*) stream, so we
+		// stash the handshake and stop. When a relay IS present (SkipTLSMITM
+		// is false) control falls through to the directive-based upgrade
+		// below instead.
 		if sess.Opts.SkipTLSMITM {
 			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
 				return res, err
