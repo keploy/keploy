@@ -511,6 +511,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 }
 
 func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
+	// hookErr is the class marker callers match on; every return below wraps
+	// the underlying cause into it rather than replacing it. Erasing the cause
+	// here made two things impossible upstream: telling a shutdown
+	// (context.Canceled, which must exit 0) from a real failure, and surfacing
+	// the actual reason — e.g. the eBPF attach hint — in the agent's own error.
 	hookErr := errors.New("failed to hook into the app")
 
 	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -565,7 +570,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
-		return hookErr
+		return fmt.Errorf("%w: %w", hookErr, err)
 	}
 
 	if a.proxyStarted {
@@ -581,7 +586,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	DNSIPv4, err := utils.GetContainerIPv4()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get container IP")
-		return hookErr
+		return fmt.Errorf("%w: %w", hookErr, err)
 	}
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
@@ -603,7 +608,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		// StartProxy propagates auxiliary-hook failures (keploy#4078)
 		// rather than swallowing them.
 		proxyCtxCancel()
-		return hookErr
+		return fmt.Errorf("%w: %w", hookErr, err)
 	}
 
 	a.proxyStarted = true

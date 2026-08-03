@@ -24,6 +24,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"text/template"
 	"time"
@@ -45,7 +46,16 @@ var WarningSign = "\U000026A0"
 var TemplatizedValues = map[string]interface{}{}
 var SecretValues = map[string]interface{}{}
 
-var ErrCode = 0
+// errCode is the process exit status keploy will finish with. It is written
+// from worker goroutines (a recovered panic) and read by main, so it is atomic:
+// a plain int here would be a data race with no happens-before edge.
+var errCode atomic.Int32
+
+// SetErrCode records the exit status the process should finish with.
+func SetErrCode(code int) { errCode.Store(int32(code)) }
+
+// ErrCode returns the recorded process exit status.
+func ErrCode() int { return int(errCode.Load()) }
 
 // IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
 // This is useful for gracefully handling errors during application shutdown.
@@ -456,6 +466,10 @@ func Recover(logger *zap.Logger) {
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
 		HandleRecovery(logger, r, "Recovered from panic")
+		// A recovered panic is a failure, whatever else happens next. Without
+		// this the process still exits 0 and kubelet/docker/CI record a crash
+		// as "Reason: Completed, Exit Code: 0".
+		SetErrCode(1)
 		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
