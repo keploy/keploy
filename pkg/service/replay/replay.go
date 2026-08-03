@@ -1349,7 +1349,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// one-shot spawn was suppressed (cmdType == Empty / instrument
 		// off), serveTest will be false here and the readiness wait
 		// runs every test-set, matching the historical lifecycle.
-		if serveTest && !r.isFirstTestSet {
+		if serveTest && !r.isFirstTestSet && appReadyObserved.Load() {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 			return models.TestSetStatusUserAbort, context.Canceled
@@ -1512,7 +1512,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// effectiveKeepAlive predicate) — identical to the compose
 			// branch above — so the readiness skip arms only when the
 			// one-shot spawn actually fired.
-			if serveTest && !r.isFirstTestSet {
+			if serveTest && !r.isFirstTestSet && appReadyObserved.Load() {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config) {
 				return models.TestSetStatusUserAbort, context.Canceled
