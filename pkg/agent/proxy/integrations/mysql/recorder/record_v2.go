@@ -109,6 +109,14 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		emitMockV2(ctx, sess, handshake.req, handshake.resp, "config", handshake.requestOperation, handshake.responseOperation, handshake.reqTimestamp, handshake.resTimestamp)
 	}
 
+	// Observe-only pre-TLS handshake was stored for the decrypted stream's
+	// post-TLS stitch; the rest of THIS raw stream is encrypted TLS records
+	// (not decodable command traffic), so stop here.
+	if handshake.preTLSStored {
+		logger.Debug("V2: pre-TLS handshake stored; raw stream ends here, post-TLS capture continues on the decrypted tls-* stream")
+		return nil
+	}
+
 	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			return nil
@@ -131,6 +139,13 @@ type v2HandshakeResult struct {
 	reqTimestamp      time.Time
 	resTimestamp      time.Time
 	skipConfigMock    bool
+	// preTLSStored is set when the observe-only (SkipTLSMITM) path has
+	// pushed the pre-TLS server greeting + SSLRequest into
+	// TLSHandshakeStore and handed the post-TLS continuation off to the
+	// decrypted (tls-*) stream's handlePostTLSRecord. The caller must
+	// stop after the handshake: the remaining bytes on THIS raw stream
+	// are opaque TLS records, not decodable MySQL command traffic.
+	preTLSStored bool
 }
 
 // handleInitialHandshakeV2 walks the MySQL connection phase on the V2
@@ -191,11 +206,37 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	res.req = append(res.req, mysql.Request{PacketBundle: *clientFirstPkt})
 
 	if decodeCtx.UseSSL {
-		// Before the TLS upgrade we could record an incomplete mock
-		// shape mirroring the legacy SkipTLSMITM branch; on the V2
-		// path, however, we must ALWAYS attempt the upgrade via the
-		// directive channel. SkipTLSMITM is a legacy concept tied to
-		// uprobe coordination that does not exist in V2.
+		// Observe-only capture (proxyless / sockmap): there is no relay
+		// that can perform a real TLS handshake for us, so we cannot
+		// (and must not) send a KindUpgradeTLS directive — the
+		// observe-only supervisor would reject it ("proxyless observe-only
+		// capture cannot perform a TLS upgrade"), abort this stream, and
+		// the pre-TLS greeting would never be stored.
+		//
+		// Instead, mirror the legacy conn.go SkipTLSMITM branch: push the
+		// raw server greeting + SSLRequest into TLSHandshakeStore keyed by
+		// dest port, so the separately-captured, uprobe-decrypted tls-*
+		// stream's handlePostTLSRecord can pop it and reconstruct the
+		// decode context for the post-TLS auth + command phase. The
+		// remaining bytes on THIS raw stream are encrypted TLS records, so
+		// we stop after storing (preTLSStored) rather than continuing into
+		// the command phase.
+		//
+		// SkipTLSMITM here means "observe-only capture: there is no MITM
+		// relay to drive the TLS upgrade with". In that mode the greeting +
+		// SSLRequest arrived in plaintext on this raw stream and the post-TLS
+		// phase is lifted separately by the uprobe (tls-*) stream, so we
+		// stash the handshake and stop. When a relay IS present (SkipTLSMITM
+		// is false) control falls through to the directive-based upgrade
+		// below instead.
+		if sess.Opts.SkipTLSMITM {
+			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
+				return res, err
+			}
+			res.skipConfigMock = true
+			res.preTLSStored = true
+			return res, nil
+		}
 
 		if err := performTLSUpgradeV2(ctx, logger, sess); err != nil {
 			sess.MarkMockIncomplete("tls upgrade failed")
@@ -477,6 +518,44 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	res.resp = append(res.resp, mysql.Response{PacketBundle: *finalPkt})
 	res.responseOperation = finalPkt.Header.Type
 	return res, nil
+}
+
+// storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
+// client SSLRequest into the shared TLSHandshakeStore so the decrypted
+// (uprobe) tls-* stream's handlePostTLSRecord can recover them. It mirrors
+// the legacy conn.go SkipTLSMITM branch exactly: it stores under both the
+// conn-specific key and the port-only fallback key, because the raw
+// observe-only stream and the decrypted uprobe stream are different TCP
+// connections with different connIDs — only the port-only key (port:3306)
+// reliably bridges the two.
+func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time) error {
+	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if !ok || hsStore == nil {
+		return fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
+	}
+	dstPort := uint16(0)
+	if sess.Opts.DstCfg != nil {
+		dstPort = uint16(sess.Opts.DstCfg.Port)
+	}
+	hsEntry := models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{greeting},
+		ReqPackets:   [][]byte{sslRequest},
+		ReqTimestamp: reqTimestamp,
+	}
+	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
+	hsStore.Push(storeKey, hsEntry)
+	// Port-only fallback: the proxy/uprobe see different ephemeral ports,
+	// so conn-specific keys won't match across the two streams.
+	portKey := models.HandshakeStoreKey("", dstPort)
+	if portKey != storeKey {
+		hsStore.Push(portKey, hsEntry)
+	}
+	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
+		zap.String("key", storeKey),
+		zap.String("portKey", portKey),
+		zap.String("connKey", sess.Opts.ConnKey),
+		zap.Uint16("dstPort", dstPort))
+	return nil
 }
 
 // performTLSUpgradeV2 builds TLS configs from the session options and
