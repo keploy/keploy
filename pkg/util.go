@@ -3638,23 +3638,58 @@ func IsCSV(data []byte) bool {
 // larger testcases are dropped anyway. See #3867.
 const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
 
-// readAllCapped reads r up to limit bytes, erroring instead of allocating
-// unbounded memory if the stream exceeds it.
+// ErrDecompressedTooLarge reports that a body inflated past the caller's
+// limit during Decompress. Callers use errors.Is against it to distinguish
+// an oversized (but valid) body from a corrupt stream, which deserve
+// different handling (e.g. capture drops oversized bodies with the regular
+// size-limit message instead of a scary bomb error).
+var ErrDecompressedTooLarge = errors.New("decompressed size exceeds limit")
+
+// readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
+// the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
+// never grown past limit+1, so at most limit+1 bytes are read from r and
+// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
+// the limit near the cap).
 func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
+	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
+	startCap := int64(64 * 1024)
+	if startCap > limit+1 {
+		startCap = limit + 1
 	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("decompressed size exceeds limit of %d bytes (possible decompression bomb)", limit)
+	data := make([]byte, 0, startCap)
+	for {
+		if len(data) == cap(data) {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			newCap := int64(cap(data)) * 2
+			if newCap > limit+1 {
+				newCap = limit + 1
+			}
+			grown := make([]byte, len(data), newCap)
+			copy(grown, data)
+			data = grown
+		}
+		n, err := r.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	return data, nil
 }
 
 // Decompress inflates data per the given Content-Encoding, reading at most
-// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing.
-// The encoding is matched case-insensitively after trimming; an unsupported
-// non-empty encoding is returned undecompressed with a warning.
+// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing;
+// errors.Is(err, ErrDecompressedTooLarge) distinguishes that from a corrupt
+// stream. The encoding is matched case-insensitively after trimming —
+// Compress uses the same matching, so a recorded body round-trips at replay.
+// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
 func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
@@ -3662,7 +3697,12 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 		reader := brotli.NewReader(bytes.NewReader(data))
 		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			// Over-limit is reported by the caller (e.g. Capture logs it as
+			// the regular size-limit drop) — logging it here too would
+			// double-report every oversized body as a decode failure.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the brotli compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
@@ -3676,22 +3716,33 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 		defer reader.Close()
 		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			// See the brotli branch: over-limit is the caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the gzip compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
-	case "":
-		// No Content-Encoding: body is already uncompressed.
+	case "", "identity":
+		// No Content-Encoding, or "identity" (RFC 9110 §8.4.1): the body
+		// is already uncompressed.
 		return data, nil
 	default:
-		logger.Warn("unsupported Content-Encoding; storing body without decompression",
+		// Common on proxied traffic (zstd, deflate, ...) — debug, not warn,
+		// matching the streaming path in SimulateHTTPStreaming.
+		logger.Debug("unsupported Content-Encoding; storing body without decompression",
 			zap.String("encoding", encoding))
 		return data, nil
 	}
 }
 
+// Compress deflates data per the given Content-Encoding. The encoding is
+// matched case-insensitively after trimming — symmetric with Decompress, so
+// a body stored decompressed at record time is re-compressed at replay even
+// when the recorded header used a non-canonical spelling (e.g. "GZIP").
+// An unsupported encoding is returned uncompressed, mirroring Decompress.
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer

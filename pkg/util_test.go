@@ -1,7 +1,9 @@
 package pkg
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"mime"
@@ -18,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestSimulateHTTP_NewRequestError_303 ensures that SimulateHTTP returns an error
@@ -992,21 +995,49 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	// Content-Encoding is matched case-insensitively after trimming.
-	t.Run("EncodingNormalized", func(t *testing.T) {
+	// Content-Encoding is matched case-insensitively after trimming — on
+	// BOTH sides. Decompress-only normalization would store plaintext at
+	// record time while Compress (exact match) replays it un-compressed
+	// under a Content-Encoding header, breaking the app's client decoder.
+	t.Run("EncodingNormalizedRoundTrip", func(t *testing.T) {
 		originalData := []byte("normalize me")
-		compressedData, err := Compress(logger, "gzip", originalData)
-		require.NoError(t, err)
-		for _, enc := range []string{"GZIP", " gzip", "gzip "} {
+		for _, enc := range []string{"GZIP", " gzip", "gzip ", "BR", " br "} {
+			compressedData, err := Compress(logger, enc, originalData)
+			require.NoError(t, err, "encoding %q", enc)
+			assert.NotEqual(t, originalData, compressedData, "Compress must not pass %q through", enc)
 			decompressedData, err := Decompress(logger, enc, compressedData, MaxDecompressedSize)
 			require.NoError(t, err, "encoding %q", enc)
 			assert.Equal(t, originalData, decompressedData, "encoding %q", enc)
 		}
 	})
 
+	// "identity" (RFC 9110 §8.4.1) means no transformation — must pass
+	// through unchanged, hitting the explicit identity case rather than the
+	// unsupported-encoding fallback (observed via its log line, the only
+	// difference between the two paths).
+	t.Run("IdentityEncoding", func(t *testing.T) {
+		core, logs := observer.New(zap.DebugLevel)
+		obsLogger := zap.New(core)
+		originalData := []byte("plain body")
+		out, err := Decompress(obsLogger, "identity", originalData, MaxDecompressedSize)
+		require.NoError(t, err)
+		assert.Equal(t, originalData, out)
+		assert.Zero(t, logs.FilterMessageSnippet("unsupported Content-Encoding").Len(),
+			"identity must not hit the unsupported-encoding fallback")
+		out, err = Compress(obsLogger, "identity", originalData)
+		require.NoError(t, err)
+		assert.Equal(t, originalData, out)
+		// A genuinely unknown encoding does hit the fallback, at debug level.
+		_, err = Decompress(obsLogger, "zstd", originalData, MaxDecompressedSize)
+		require.NoError(t, err)
+		require.Equal(t, 1, logs.FilterMessageSnippet("unsupported Content-Encoding").Len())
+		assert.Equal(t, zap.DebugLevel, logs.FilterMessageSnippet("unsupported Content-Encoding").All()[0].Level)
+	})
+
 	// A payload inflating past the caller's limit must error, not OOM (#3867).
-	// Uses real gzip/brotli through the public API so it fails if the
-	// LimitReader wiring is ever reverted.
+	// Uses real gzip/brotli through the public API so it fails if the capped
+	// read wiring is ever reverted. The sentinel lets callers distinguish
+	// oversized-but-valid from corrupt streams.
 	t.Run("DecompressionBomb", func(t *testing.T) {
 		const limit = 1024
 		bomb := make([]byte, 8*1024) // 8 KiB of zeros: tiny compressed, inflates past limit
@@ -1014,14 +1045,76 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		gzipBomb, err := Compress(logger, "gzip", bomb)
 		require.NoError(t, err)
 		_, err = Decompress(logger, "gzip", gzipBomb, limit)
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
 		assert.Contains(t, err.Error(), "decompression bomb")
 
 		brBomb, err := Compress(logger, "br", bomb)
 		require.NoError(t, err)
 		_, err = Decompress(logger, "br", brBomb, limit)
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
 		assert.Contains(t, err.Error(), "decompression bomb")
+	})
+
+	// A body of exactly the limit is legal; limit+1 is not. Also pins the
+	// corrupt-stream case to NOT match the sentinel.
+	t.Run("DecompressionLimitBoundary", func(t *testing.T) {
+		const limit = 1024
+
+		atLimit, err := Compress(logger, "gzip", make([]byte, limit))
+		require.NoError(t, err)
+		out, err := Decompress(logger, "gzip", atLimit, limit)
+		require.NoError(t, err)
+		assert.Len(t, out, limit)
+
+		overByOne, err := Compress(logger, "gzip", make([]byte, limit+1))
+		require.NoError(t, err)
+		_, err = Decompress(logger, "gzip", overByOne, limit)
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
+
+		_, err = Decompress(logger, "gzip", []byte("not gzip"), limit)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrDecompressedTooLarge)
+	})
+}
+
+// TestReadAllCapped_556 exercises the capped reader directly: boundary
+// sizes, tiny limits below the initial buffer, and that buffer capacity
+// never overshoots limit+1 (the reason it replaced io.ReadAll+LimitReader).
+func TestReadAllCapped_556(t *testing.T) {
+	t.Run("Boundaries", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			size    int64
+			limit   int64
+			wantErr bool
+		}{
+			{"empty", 0, 1024, false},
+			{"under", 1023, 1024, false},
+			{"exact", 1024, 1024, false},
+			{"overByOne", 1025, 1024, true},
+			{"zeroLimitEmpty", 0, 0, false},
+			{"zeroLimitOne", 1, 0, true},
+			{"aboveInitialBuffer", 100 * 1024, 200 * 1024, false},
+			{"growthThenError", 300 * 1024, 200 * 1024, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				data, err := readAllCapped(bytes.NewReader(make([]byte, tc.size)), tc.limit)
+				if tc.wantErr {
+					require.ErrorIs(t, err, ErrDecompressedTooLarge)
+					return
+				}
+				require.NoError(t, err)
+				assert.Equal(t, tc.size, int64(len(data)))
+				assert.LessOrEqual(t, int64(cap(data)), tc.limit+1, "capacity must never overshoot limit+1")
+			})
+		}
+	})
+
+	t.Run("UnboundedStreamStops", func(t *testing.T) {
+		// An infinite reader must error at the cap, not hang or OOM.
+		const limit = 64 * 1024
+		_, err := readAllCapped(rand.Reader, limit)
+		require.ErrorIs(t, err, ErrDecompressedTooLarge)
 	})
 }
 
