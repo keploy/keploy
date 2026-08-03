@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 
 	"go.keploy.io/server/v3/config"
@@ -32,12 +33,29 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				utils.LogError(logger, err, "failed to get generate flag")
 				return err
 			}
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get force flag")
+				return err
+			}
 
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
-				if !cfg.InCi && utils.CheckFileExists(filePath) {
+				if !force && !cfg.InCi && utils.CheckFileExists(filePath) {
 					override, err := utils.AskForConfirmation(ctx, "Config file already exists. Do you want to override it?")
 					if err != nil {
+						// EOF means nothing answered the prompt — no terminal and
+						// nothing piped in. That is every scripted invocation: CI,
+						// Makefile, `docker run` without -i, systemd, cron. Failing
+						// there blames the caller for something they cannot fix, and
+						// overwriting unasked would silently discard a hand-edited
+						// config. Keep the file, say so, and point at --force.
+						if errors.Is(err, io.EOF) {
+							logger.Warn("config file already exists and nothing answered the override prompt, so it was left untouched",
+								zap.String("path", filePath),
+								zap.String("hint", "re-run with --force to overwrite it non-interactively"))
+							return nil
+						}
 						utils.LogError(logger, err, "failed to ask for confirmation")
 						return err
 					}
@@ -54,7 +72,8 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				var tools toolsSvc.Service
 				var ok bool
 				if tools, ok = svc.(toolsSvc.Service); !ok {
-					utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
+					err = errors.New("service doesn't satisfy tools service interface")
+					utils.LogError(logger, err, "failed to generate config")
 					return err
 				}
 				if err := tools.CreateConfig(ctx, filePath, ""); err != nil {
