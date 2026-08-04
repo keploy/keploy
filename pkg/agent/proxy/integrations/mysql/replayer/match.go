@@ -1286,10 +1286,24 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	// the parse early-exits after a couple of prefix comparisons for anything
 	// that is not "SELECT @@...", so it is strictly cheaper than the
 	// sqlparser.IsDML parse that already runs per candidate just below.
-	if expectedQuery != actualQuery {
-		if _, isPureVarRead := parseSingleSystemVarRead(actualQuery); isPureVarRead {
-			return false, 0
-		}
+	//
+	// The rejection is narrowed to a DIFFERENT variable rather than applied to any
+	// textual difference. matchQuery is the SHARED MySQL replay path, used by proxy
+	// (MITM) and DaemonSet recordings as well as the proxyless capture this change
+	// targets, and rejecting on text alone is subtractive: a recorded read of the
+	// SAME variable whose text differs only cosmetically (extra whitespace, a
+	// `session.` qualifier on one side, a stripped comment) previously reached the
+	// score-based fallback and matched. Hard-rejecting it would make replay depend
+	// on buildSessionVarResponse succeeding, which itself bails out when the
+	// connection did not negotiate CLIENT_DEPRECATE_EOF or when no recorded result
+	// set carries that column — i.e. it could fail an existing recording that
+	// passes today, in modes this change is not meant to touch.
+	//
+	// Comparing the parsed variable NAMES keeps the defect fixed (a different @@var
+	// is still never cross-served) while leaving same-variable candidates eligible
+	// for normal matching.
+	if rejectsCrossVariableRead(expectedQuery, actualQuery) {
+		return false, 0
 	}
 
 	// check if any of them the query is dml and other is not, then there is no match.
@@ -1963,6 +1977,48 @@ func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, act
 	return score
 }
 
+// rejectsCrossVariableRead reports whether a candidate must be excluded from
+// matching because it would serve one system variable's recorded value in answer
+// to a read of a DIFFERENT variable.
+//
+// A pure single system-variable read is identified by WHICH variable it reads, so
+// it may only be answered by a recorded read of that same variable. Without this,
+// two equal-length non-DML SELECTs score as interchangeable and
+// "SELECT @@session.transaction_isolation" gets served the recorded
+// "SELECT @@session.transaction_read_only" value, which is the defect behind
+// "Could not map transaction isolation '0'".
+//
+// It deliberately compares parsed variable NAMES rather than raw text. matchQuery
+// is the shared MySQL replay path used by proxy (MITM) and DaemonSet recordings as
+// well as proxyless capture, and rejecting on any textual difference would be
+// subtractive: a recorded read of the SAME variable differing only cosmetically (a
+// `session.` qualifier, extra whitespace, a stripped comment, a trailing
+// semicolon) previously remained eligible and could match. Rejecting those would
+// make replay depend on buildSessionVarResponse succeeding, and that bails out for
+// a connection without CLIENT_DEPRECATE_EOF or a variable absent from every
+// recorded result set, so an existing recording that passes today could start
+// failing.
+//
+// Returns false for identical text, which is the common case and costs one string
+// comparison.
+func rejectsCrossVariableRead(expectedQuery, actualQuery string) bool {
+	if expectedQuery == actualQuery {
+		return false
+	}
+	actualVar, isPureVarRead := parseSingleSystemVarRead(actualQuery)
+	if !isPureVarRead {
+		return false
+	}
+	expectedVar, expectedIsVarRead := parseSingleSystemVarRead(expectedQuery)
+	return !expectedIsVarRead || !strings.EqualFold(expectedVar, actualVar)
+}
+
+// sqlWhitespace is the single definition of "whitespace" used by the
+// system-variable parsing below. Keeping one set avoids the class of bug where the
+// keyword check accepts \r but the trimming does not, leaving it attached to the
+// parsed variable name.
+const sqlWhitespace = " \t\r\n"
+
 // stripLeadingSQLComment removes leading /* ... */ blocks (Connector/J prepends
 // a version banner and a "/* ping */" marker) plus surrounding whitespace.
 func stripLeadingSQLComment(s string) string {
@@ -1991,7 +2047,7 @@ func parseSingleSystemVarRead(query string) (string, bool) {
 	if len(s) <= len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
 		return "", false
 	}
-	if next := s[len(kw)]; next != ' ' && next != '\t' && next != '\r' && next != '\n' {
+	if !strings.ContainsRune(sqlWhitespace, rune(s[len(kw)])) {
 		return "", false
 	}
 	rest := strings.TrimSpace(s[len(kw):])
@@ -2000,7 +2056,9 @@ func parseSingleSystemVarRead(query string) (string, bool) {
 	}
 	rest = strings.TrimPrefix(rest, "@@")
 	// Single variable only: reject multi-column / AS / expressions / calls.
-	if strings.ContainsAny(rest, ", ()\t\n") {
+	// The whitespace set matches sqlWhitespace used for the SELECT keyword check
+	// above, \r included, so "SELECT @@a\r@@b" is rejected like its \n counterpart.
+	if strings.ContainsAny(rest, ",()"+sqlWhitespace) {
 		return "", false
 	}
 	if low := strings.ToLower(rest); strings.HasPrefix(low, "session.") {
@@ -2010,7 +2068,10 @@ func parseSingleSystemVarRead(query string) (string, bool) {
 	} else if strings.HasPrefix(low, "local.") {
 		rest = rest[len("local."):]
 	}
-	rest = strings.TrimRight(rest, "; ")
+	// Trim the statement terminator plus ANY trailing whitespace, using the same
+	// set as above: trimming only "; " left "\r" and "\t" attached to the returned
+	// variable name, which then failed every lookup.
+	rest = strings.TrimRight(rest, ";"+sqlWhitespace)
 	if rest == "" {
 		return "", false
 	}

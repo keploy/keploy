@@ -33,6 +33,15 @@ func TestParseSingleSystemVarRead(t *testing.T) {
 		{"leading comment", "/* mysql-connector-java */ SELECT @@transaction_isolation", "transaction_isolation", true},
 		{"lowercase select", "select @@autocommit", "autocommit", true},
 
+		// \r must be treated as whitespace everywhere, not only after the keyword.
+		// Trimming that handled "; " but not "\r" used to return the variable name
+		// with the carriage return still attached, which then failed every lookup.
+		{"trailing CR", "SELECT @@sql_mode\r", "sql_mode", true},
+		{"trailing CRLF", "SELECT @@sql_mode\r\n", "sql_mode", true},
+		{"trailing tab", "SELECT @@sql_mode\t", "sql_mode", true},
+		{"semicolon then CRLF", "SELECT @@sql_mode;\r\n", "sql_mode", true},
+		{"CR after select", "SELECT\r@@autocommit", "autocommit", true},
+
 		{"multi column", "SELECT @@a, @@b", "", false},
 		{"aliased", "SELECT @@transaction_isolation AS ti", "", false},
 		{"projects var in dml", "SELECT @@version, u.name FROM users u WHERE u.id = 1", "", false},
@@ -203,4 +212,62 @@ func TestBuildSessionVarResponse_UnknownVar_ReturnsNil(t *testing.T) {
 	pool := probeMockPool()
 	resp := buildSessionVarResponse(zap.NewNop(), pool, "nonexistent_var", deprecateEOFContext())
 	assert.Nil(t, resp)
+}
+
+// TestRejectsCrossVariableRead pins the blast radius of the pure-system-variable
+// rejection in matchQuery.
+//
+// matchQuery is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
+// run through it too, not only the proxyless capture this work targets. The
+// rejection is subtractive, so it must fire ONLY when the candidate reads a
+// DIFFERENT variable. Rejecting on any textual difference would make a recorded
+// read of the same variable depend on buildSessionVarResponse succeeding, and that
+// helper bails out when the connection did not negotiate CLIENT_DEPRECATE_EOF or
+// when no recorded result set carries the column, i.e. it could fail a recording
+// that passes today.
+func TestRejectsCrossVariableRead(t *testing.T) {
+	t.Run("different variable is rejected", func(t *testing.T) {
+		// The original defect: an unrecorded @@transaction_isolation read was
+		// cross-served the recorded @@transaction_read_only mock because both are
+		// equal-length non-DML SELECTs.
+		assert.True(t, rejectsCrossVariableRead(
+			"SELECT @@session.transaction_read_only",
+			"SELECT @@session.transaction_isolation"))
+		assert.True(t, rejectsCrossVariableRead(
+			"SELECT @@autocommit", "SELECT @@sql_mode"))
+	})
+
+	t.Run("same variable with cosmetic difference is NOT rejected", func(t *testing.T) {
+		for _, c := range []struct{ expected, actual string }{
+			{"SELECT @@transaction_isolation", "SELECT @@session.transaction_isolation"},
+			{"SELECT @@session.transaction_isolation", "SELECT @@transaction_isolation"},
+			{"SELECT @@global.transaction_isolation", "SELECT @@session.transaction_isolation"},
+			{"SELECT  @@autocommit", "SELECT @@autocommit"},
+			{"SELECT @@sql_mode", "SELECT @@sql_mode;"},
+			{"SELECT @@sql_mode", "/* mysql-connector-java */ SELECT @@sql_mode"},
+			{"SELECT @@AUTOCOMMIT", "SELECT @@autocommit"},
+			{"SELECT @@sql_mode", "SELECT @@sql_mode\r\n"},
+		} {
+			assert.False(t, rejectsCrossVariableRead(c.expected, c.actual),
+				"same variable must stay eligible: expected=%q actual=%q", c.expected, c.actual)
+		}
+	})
+
+	t.Run("a var read may not be answered by an unrelated query", func(t *testing.T) {
+		assert.True(t, rejectsCrossVariableRead(
+			"SELECT id FROM users WHERE id = 1", "SELECT @@transaction_isolation"))
+	})
+
+	t.Run("non-var actual is never rejected here", func(t *testing.T) {
+		// Ordinary DML keeps its normal fuzzy matching; this guard must not touch it.
+		assert.False(t, rejectsCrossVariableRead(
+			"SELECT id FROM users WHERE id = 1", "SELECT id FROM users WHERE id = 2"))
+		assert.False(t, rejectsCrossVariableRead(
+			"SELECT @@version, u.name FROM users u", "SELECT @@version, u.email FROM users u"))
+	})
+
+	t.Run("identical text is never rejected", func(t *testing.T) {
+		assert.False(t, rejectsCrossVariableRead(
+			"SELECT @@transaction_isolation", "SELECT @@transaction_isolation"))
+	})
 }

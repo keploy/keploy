@@ -164,15 +164,25 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	var handshake []byte
 	var stashedSSLReq []byte
 	if postTLS {
-		g, sslReq, perr := popStoredGreetingV2(ctx, logger, sess)
+		g, sslReq, stashedReqTS, perr := popStoredGreetingV2(ctx, logger, sess)
 		if perr != nil {
 			return res, perr
 		}
 		handshake = g
 		stashedSSLReq = sslReq
-		// No DestStream read happened; stamp from wall clock (the greeting's
-		// original arrival time is preserved on the pre-TLS config-mock shell).
-		res.reqTimestamp = time.Now()
+		// No DestStream read happened here, so the timestamp comes from the stash:
+		// the pre-TLS stream recorded the greeting's real chunk-derived arrival time
+		// when it pushed the entry. Falling back to wall clock would stamp this
+		// config mock with reconstruction time, which replay's per-test time
+		// freezing then reads back as the request time.
+		res.reqTimestamp = stashedReqTS
+		if res.reqTimestamp.IsZero() {
+			// Only possible if the pre-TLS side stashed a zero time. Keep the mock
+			// usable rather than emitting a zero timestamp, which downstream
+			// window filtering treats as invalid.
+			res.reqTimestamp = time.Now()
+			logger.Debug("post-TLS MySQL: stashed greeting carried no timestamp; falling back to wall clock")
+		}
 	} else {
 		g, rerr := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 		if rerr != nil {
@@ -213,7 +223,15 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if sslReqPkt, sErr := wire.DecodePayload(ctx, logger, stashedSSLReq, clientKey, decodeCtx); sErr == nil {
 			res.req = append(res.req, mysql.Request{PacketBundle: *sslReqPkt})
 		} else {
-			logger.Debug("post-TLS: failed to decode stashed SSLRequest; config mock will lack the SSL-selected shape", zap.Error(sErr))
+			// Not recoverable and not cosmetic: the replayer's SSL-mock selection
+			// requires requests[0] to be an SSLRequest, so a config mock without it
+			// can never be selected and this connection is guaranteed to fail at
+			// replay. Log at Error and mark the mock incomplete so the failure is
+			// visible NOW, at record time, rather than surfacing later as an
+			// unexplained replay mismatch.
+			utils.LogError(logger, sErr, "post-TLS MySQL: failed to decode the stashed SSLRequest; "+
+				"the config mock would lack the SSL-selected shape the replayer requires, so this connection would fail at replay")
+			sess.MarkMockIncomplete("post-TLS SSLRequest decode failed")
 		}
 	}
 
@@ -562,8 +580,20 @@ func stashPreTLSHandshakeV2(ctx context.Context, sess *supervisor.Session, greet
 		ReqPackets:   [][]byte{sslRequest},
 		ReqTimestamp: reqTimestamp,
 	}
-	hsStore.Push(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), entry)
-	hsStore.Push(models.HandshakeStoreKey("", dstPort), entry)
+	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
+	hsStore.Push(storeKey, entry)
+	// Also push under the port-only fallback key, which is what actually bridges
+	// the two halves: the pre-TLS observe stream and the post-TLS decrypted stream
+	// are different TCP connections with different ConnKeys.
+	//
+	// Guarded on inequality (as the legacy path does): when ConnKey is empty the
+	// two keys are IDENTICAL, and pushing unconditionally would queue the same
+	// entry twice under one key. The post-TLS stream pops one copy and the
+	// duplicate lingers until the TTL, where a later connection pops it and
+	// reconstructs its handshake against a stale greeting.
+	if portKey := models.HandshakeStoreKey("", dstPort); portKey != storeKey {
+		hsStore.Push(portKey, entry)
+	}
 	return nil
 }
 
@@ -574,10 +604,10 @@ func stashPreTLSHandshakeV2(ctx context.Context, sess *supervisor.Session, greet
 // before the pre-TLS stream has finished stashing. Returns
 // wire.ErrServerGreetingNotFound when nothing is available, so the caller skips
 // the connection gracefully (same as a genuine mid-stream join).
-func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (greeting []byte, sslRequest []byte, err error) {
+func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (greeting []byte, sslRequest []byte, reqTimestamp time.Time, err error) {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
-		return nil, nil, wire.ErrServerGreetingNotFound
+		return nil, nil, time.Time{}, wire.ErrServerGreetingNotFound
 	}
 	dstPort := uint16(0)
 	if sess.Opts.DstCfg != nil {
@@ -591,13 +621,18 @@ func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervis
 		if logger != nil {
 			logger.Debug("post-TLS MySQL: no stashed server greeting available", zap.Uint16("dstPort", dstPort))
 		}
-		return nil, nil, wire.ErrServerGreetingNotFound
+		return nil, nil, time.Time{}, wire.ErrServerGreetingNotFound
 	}
 	greeting = entry.RespPackets[0]
 	if len(entry.ReqPackets) > 0 {
 		sslRequest = entry.ReqPackets[0]
 	}
-	return greeting, sslRequest, nil
+	// Carry the ORIGINAL chunk-derived arrival time of the greeting back to the
+	// caller. The pre-TLS stream stamped it from FakeConn chunk ReadAt times when it
+	// stashed the entry, so it is real traffic time; substituting time.Now() here
+	// would stamp the config mock with recorder wall clock at reconstruction time,
+	// which replay's per-test time freezing then reads back as the request time.
+	return greeting, sslRequest, entry.ReqTimestamp, nil
 }
 
 // performTLSUpgradeV2 builds TLS configs from the session options and
