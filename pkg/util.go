@@ -743,7 +743,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Decompress if needed
 	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
 			return nil, err
@@ -822,9 +822,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			return nil, gzErr
 		}
-		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+		// Cap decompressed output so a bomb fails the test instead of
+		// OOMing while CompareHTTPStream accumulates the body (#3867).
+		streamReader = NewCappedReadCloser(&gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}, MaxDecompressedSize)
 	case "br":
-		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+		streamReader = NewCappedReadCloser(&brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}, MaxDecompressedSize)
 	case "":
 		// no-op, use httpResp.Body directly
 	default:
@@ -3632,14 +3634,124 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+// MaxDecompressedSize caps Decompress on paths with no downstream size limit
+// (replay, mock decode, SimulateHTTP) so a decompression bomb errors instead
+// of OOMing. The capture path passes the tighter conn.MaxTestCaseSize, since
+// larger testcases are dropped anyway. See #3867.
+const MaxDecompressedSize = 100 * 1024 * 1024 // 100 MiB
+
+// ErrDecompressedTooLarge reports that a body inflated past the caller's
+// limit during Decompress. Callers use errors.Is against it to distinguish
+// an oversized (but valid) body from a corrupt stream, which deserve
+// different handling (e.g. capture drops oversized bodies with the regular
+// size-limit message instead of a scary bomb error).
+var ErrDecompressedTooLarge = errors.New("decompressed size exceeds limit")
+
+// NewCappedReader wraps r so cumulative reads past limit fail with an error
+// wrapping ErrDecompressedTooLarge instead of streaming unbounded data. It
+// bounds streaming decompression (replay streams, mock downloads, archive
+// extraction) where readAllCapped's materialize-everything shape doesn't
+// fit. A stream of exactly limit bytes still reaches its natural EOF; the
+// error surfaces only when the stream holds at least one byte more.
+func NewCappedReader(r io.Reader, limit int64) io.Reader {
+	return &cappedReader{r: r, limit: limit}
+}
+
+type cappedReader struct {
+	r     io.Reader
+	read  int64
+	limit int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	// Budget reads to limit+1: an exactly-limit stream hits its natural
+	// EOF, while a single extra byte reveals an oversized stream.
+	if max := c.limit + 1 - c.read; int64(len(p)) > max {
+		p = p[:max]
+	}
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read > c.limit {
+		return 0, fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, c.limit)
+	}
+	return n, err
+}
+
+// NewCappedReadCloser applies NewCappedReader to a ReadCloser, preserving
+// Close so consumers can still release the underlying resource (e.g. an
+// HTTP response body) after a capped read.
+func NewCappedReadCloser(rc io.ReadCloser, limit int64) io.ReadCloser {
+	return &cappedReadCloser{Reader: NewCappedReader(rc, limit), closer: rc}
+}
+
+type cappedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (c *cappedReadCloser) Close() error { return c.closer.Close() }
+
+// readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
+// the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
+// never grown past limit+1, so at most limit+1 bytes are read from r and
+// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
+// the limit near the cap).
+func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
+	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
+	startCap := int64(64 * 1024)
+	if startCap > limit+1 {
+		startCap = limit + 1
+	}
+	data := make([]byte, 0, startCap)
+	for {
+		if len(data) == cap(data) {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			newCap := int64(cap(data)) * 2
+			if newCap > limit+1 {
+				newCap = limit + 1
+			}
+			grown := make([]byte, len(data), newCap)
+			copy(grown, data)
+			data = grown
+		}
+		n, err := r.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			if int64(len(data)) > limit {
+				return nil, errTooLarge
+			}
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Decompress inflates data per the given Content-Encoding, reading at most
+// limit bytes (see MaxDecompressedSize) so a bomb errors instead of OOMing;
+// errors.Is(err, ErrDecompressedTooLarge) distinguishes that from a corrupt
+// stream. The encoding is matched case-insensitively after trimming —
+// Compress uses the same matching, so a recorded body round-trips at replay.
+// An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
+func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			// Over-limit is reported by the caller (e.g. Capture logs it as
+			// the regular size-limit drop) — logging it here too would
+			// double-report every oversized body as a decode failure.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the brotli compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
@@ -3651,18 +3763,35 @@ func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := io.ReadAll(reader)
+		decodedData, err := readAllCapped(reader, limit)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			// See the brotli branch: over-limit is the caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) {
+				utils.LogError(logger, err, "failed to read the gzip compressed data")
+			}
 			return nil, err
 		}
 		return decodedData, nil
+	case "", "identity":
+		// No Content-Encoding, or "identity" (RFC 9110 §8.4.1): the body
+		// is already uncompressed.
+		return data, nil
+	default:
+		// Common on proxied traffic (zstd, deflate, ...) — debug, not warn,
+		// matching the streaming path in SimulateHTTPStreaming.
+		logger.Debug("unsupported Content-Encoding; storing body without decompression",
+			zap.String("encoding", encoding))
+		return data, nil
 	}
-	return data, nil
 }
 
+// Compress deflates data per the given Content-Encoding. The encoding is
+// matched case-insensitively after trimming — symmetric with Decompress, so
+// a body stored decompressed at record time is re-compressed at replay even
+// when the recorded header used a non-canonical spelling (e.g. "GZIP").
+// An unsupported encoding is returned uncompressed, mirroring Decompress.
 func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
-	switch encoding {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer
