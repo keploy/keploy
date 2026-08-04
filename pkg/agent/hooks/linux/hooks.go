@@ -180,8 +180,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// "test-set-0 / node-daemon traffic" leak. The reconciler-armed TGIDs
 	// already capture the app's ingress (no auto-detection needed), so skip the
 	// tracepoint entirely in DS mode.
-	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" {
-		h.logger.Info("daemonset mode: skipping sys_enter_socket PID auto-registration (SessionReconciler owns target_namespace_pids)")
+	// Low-latency per-container targeting (KEPLOY_TARGET_CONTAINERS set by the
+	// webhook) is the same situation as DaemonSet: the enterprise exec-barrier
+	// owns target_namespace_pids and scopes it to the TARGET container's cgroup.
+	// sys_enter_socket would auto-register EVERY process in the pod's PID ns
+	// (both target and sibling containers, keyed by host TGID), leaking sibling
+	// traffic past the cgroup targeting — the same pollution the DS skip prevents.
+	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
+		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
 	} else {
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
