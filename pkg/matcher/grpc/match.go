@@ -190,28 +190,21 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Handle noise configuration first - needed for JSON comparison
 	noise := tc.Noise
 
+	// Copy before merging: noiseConfig is the caller's long-lived global map.
 	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"] // need to handle noisy header separately (not implemented yet for grpc)
+		bodyNoise   = matcher.CloneNoiseMap(noiseConfig["body"])
+		headerNoise = matcher.CloneNoiseMap(noiseConfig["header"]) // need to handle noisy header separately (not implemented yet for grpc)
 	)
 
-	if bodyNoise == nil {
-		bodyNoise = map[string][]string{}
+	// Merge test-case-specific noise with global noise (similar to HTTP matcher).
+	// TODO: gRPC has never honoured the whole-body skip sentinel that the HTTP
+	// matcher applies, so skipBody is dropped here to preserve that behaviour.
+	tcBodyNoise, tcHeaderNoise, _ := matcher.SplitNoise(noise, logger)
+	for field, regexArr := range tcBodyNoise {
+		bodyNoise[field] = regexArr
 	}
-
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
-
-	// Merge test-case-specific noise with global noise (similar to HTTP matcher)
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
+	for field, regexArr := range tcHeaderNoise {
+		headerNoise[field] = regexArr
 	}
 
 	// Compare decoded data - use JSON comparison if both are valid JSON, otherwise use canonicalization

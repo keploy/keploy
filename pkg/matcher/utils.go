@@ -106,6 +106,148 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return nil, false
 }
 
+// CloneNoiseMap returns a copy of a noise map, so that merging a test case's
+// own noise into the shared global config cannot leak across test cases. The
+// callers hold long-lived config maps (Replayer/runner globals) that would
+// otherwise accumulate every test case's noise as the run progresses.
+func CloneNoiseMap(input map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(input))
+	for key, values := range input {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+// SplitNoise separates a test case's flat noise map into body-scoped and
+// header-scoped entries, and reports whether the body section should be
+// ignored wholesale.
+//
+// A noise key comes in one of two shapes:
+//
+//	dotted     "body.user.id": [regex...]      -> a single field path
+//	sectioned  "body": ["user.id", "total"]    -> a list of field paths
+//
+// Only a bare section key with an EMPTY list means "ignore this whole
+// section" — that is the sentinel a global `body: {"*": ["*"]}` config expands
+// to. A bare section key with a NON-empty list names the fields to ignore.
+//
+// Reading a non-empty sectioned list as the whole-section sentinel silently
+// disables the assertion for the entire body or header set, so any test case
+// carrying such an entry can never fail on its body (or on any header).
+//
+// Note this makes the sectioned values paths, not regexes. A regex there was
+// never evaluated — it only ever tripped the whole-section skip — so nothing
+// that worked stops working, but a suite that was passing because of that skip
+// will start reporting the differences it was hiding. A sectioned value that
+// looks like a regex is warned about, since the equivalent is the dotted form
+// `body.<path>: [regex]`.
+//
+// A dot-delimited path is matched against the JSON walker's own key syntax,
+// which does NOT carry array positions: every element of `items` is walked
+// under the key "items". So `items.stock` works and `items.0.stock` matches
+// nothing. Normalizing the latter is deliberately NOT done here — see
+// TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported for why.
+//
+// OSS noise auto-detection emits the dotted, index-free shape; the sectioned
+// shape reaches us from hand-written YAML and from other producers of
+// test-case files.
+//
+// Header scope has no separate skip flag: CompareHeaders already treats the
+// presence of a "header" key as "all headers are noisy", so the sentinel is
+// passed through as that key.
+func SplitNoise(noise map[string][]string, logger *zap.Logger) (bodyNoise map[string][]string, headerNoise map[string][]string, skipBody bool) {
+	bodyNoise = map[string][]string{}
+	headerNoise = map[string][]string{}
+
+	// Sectioned keys are applied first so that a dotted key naming the same
+	// path always wins. Doing both in one pass would let map iteration order
+	// decide, which makes a run flaky rather than merely wrong.
+	for field, values := range noise {
+		switch strings.ToLower(field) {
+		case "body":
+			if len(values) == 0 {
+				skipBody = true
+				continue
+			}
+			for _, path := range values {
+				warnIfRegexShaped(logger, "body", path)
+				// An empty regex list means "ignore unconditionally", which is
+				// what a listed path is asking for.
+				bodyNoise[strings.ToLower(path)] = []string{}
+			}
+		case "header":
+			if len(values) == 0 {
+				headerNoise["header"] = []string{}
+				continue
+			}
+			for _, name := range values {
+				warnIfRegexShaped(logger, "header", name)
+				headerNoise[strings.ToLower(name)] = []string{}
+			}
+		}
+	}
+
+	for field, regexArr := range noise {
+		parts := strings.Split(field, ".")
+		if len(parts) < 2 {
+			continue
+		}
+		// Copy the value slice: the destination map is a clone the caller is
+		// free to mutate, so it must not alias the test case's own noise.
+		regexes := append([]string(nil), regexArr...)
+		switch strings.ToLower(parts[0]) {
+		case "body":
+			bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = regexes
+		case "header":
+			headerNoise[strings.ToLower(parts[len(parts)-1])] = regexes
+		}
+	}
+
+	return bodyNoise, headerNoise, skipBody
+}
+
+// regexShapedTokens are substrings that cannot occur in a JSON field path but
+// are unmistakable in a regex. Single metacharacters are deliberately excluded:
+// `$` alone would flag every OpenAPI/JSON-Schema document key (`$ref`,
+// `$schema`, `$id`), and telling that user to move `$ref` into a regex position
+// is worse than saying nothing — as a regex it anchors to end-of-string and
+// matches nothing at all.
+var regexShapedTokens = []string{".*", ".+", `\d`, `\w`, `\s`, "[0-9", "[a-z", "[A-Z", "(?", "|"}
+
+// warnedRegexShaped dedupes the warning below. SplitNoise runs per test case —
+// and twice per case on the failure-assessment path — so warning unconditionally
+// would emit one line per case and bury the actual failures.
+var warnedRegexShaped sync.Map
+
+// warnIfRegexShaped flags a sectioned noise value that looks like a regex
+// rather than a field path. Such a value used to be inert — it only tripped the
+// whole-section skip — so silently reinterpreting it as a path would turn a
+// green suite red with no explanation.
+func warnIfRegexShaped(logger *zap.Logger, section, value string) {
+	if logger == nil || !looksLikeRegex(value) {
+		return
+	}
+	if _, seen := warnedRegexShaped.LoadOrStore(section+"\x00"+value, struct{}{}); seen {
+		return
+	}
+	logger.Warn("noise value looks like a regex but is read as a field path; use the dotted form to apply a regex",
+		zap.String("section", section),
+		zap.String("value", value),
+		zap.String("dotted_equivalent", section+".<path>: ["+value+"]"))
+}
+
+func looksLikeRegex(value string) bool {
+	if strings.HasPrefix(value, "^") || strings.HasSuffix(value, "$") {
+		return true
+	}
+	for _, tok := range regexShapedTokens {
+		if strings.Contains(value, tok) {
+			return true
+		}
+	}
+	return false
+}
+
 // JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
 // and Global noise (e.g. "timestamp") to be ignored everywhere.
 func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
