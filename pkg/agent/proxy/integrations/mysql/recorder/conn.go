@@ -1025,15 +1025,21 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 // (seq=0). It synthesizes a HandshakeResponse41 from the SSLRequest fields
 // and fabricates fast-auth success responses so that test mode can replay
 // the initial handshake.
-func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, greetingPkt *mysql.PacketBundle, entry models.TLSHandshakeEntry, opts models.OutgoingOptions) error {
-	// Decode the stored SSLRequest.
-	sslReqPkt, err := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
-	if err != nil {
-		return fmt.Errorf("failed to decode stored SSLRequest: %w", err)
-	}
+// buildSyntheticPostTLSConfig synthesizes the config-mock request/response
+// bundles for a post-TLS connection joined mid-stream (seq==0), where no real
+// HandshakeResponse41 / auth exchange was captured (the connection was already
+// authenticated before interception). It reconstructs a HandshakeResponse41
+// from the stored SSLRequest's fields, plus AuthMoreData(FastAuthSuccess) + OK,
+// so the config mock carries an HR41 at requests[1] — which the replayer
+// REQUIRES to match the connection at test time (see replayer/conn.go: it
+// looks for HandshakeResponse41 at requests[0] or [1] and errors otherwise).
+// sslReqPkt must already be decoded. Shared by the legacy recorder
+// (recordSyntheticConfigMock) and the V2 post-TLS handshake so both emit an
+// identical, replay-compatible seq==0 config mock.
+func buildSyntheticPostTLSConfig(ctx context.Context, logger *zap.Logger, decodeCtx *wire.DecodeContext, greetingPkt, sslReqPkt *mysql.PacketBundle) ([]mysql.Request, []mysql.Response, string, error) {
 	sslReq, ok := sslReqPkt.Message.(*mysql.SSLRequestPacket)
 	if !ok {
-		return fmt.Errorf("stored packet is not SSLRequest, got %T", sslReqPkt.Message)
+		return nil, nil, "", fmt.Errorf("stored packet is not SSLRequest, got %T", sslReqPkt.Message)
 	}
 
 	// Synthesize a HandshakeResponse41 from the SSLRequest fields.
@@ -1048,7 +1054,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	hr41Payload, err := connPhase.EncodeHandshakeResponse41(ctx, logger, syntheticHR41)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic HandshakeResponse41: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic HandshakeResponse41: %w", err)
 	}
 
 	authMorePacket := &mysql.AuthMoreDataPacket{
@@ -1057,7 +1063,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	authMorePayload, err := connPhase.EncodeAuthMoreData(ctx, authMorePacket)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic AuthMoreData: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic AuthMoreData: %w", err)
 	}
 
 	okPacket := &mysql.OKPacket{
@@ -1070,7 +1076,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 	okPayload, err := phase.EncodeOk(ctx, okPacket, serverCaps)
 	if err != nil {
-		return fmt.Errorf("failed to encode synthetic OK packet: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to encode synthetic OK packet: %w", err)
 	}
 
 	sslReqSeq := byte(1) // Default sequence for SSLRequest in the SSL handshake path.
@@ -1114,9 +1120,22 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 		{PacketBundle: authMoreBundle},
 		{PacketBundle: okBundle},
 	}
+	return requests, responses, mysql.StatusToString(mysql.OK), nil
+}
+
+func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, greetingPkt *mysql.PacketBundle, entry models.TLSHandshakeEntry, opts models.OutgoingOptions) error {
+	// Decode the stored SSLRequest, then build the synthetic HR41 + auth bundles.
+	sslReqPkt, err := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode stored SSLRequest: %w", err)
+	}
+	requests, responses, respOp, err := buildSyntheticPostTLSConfig(ctx, logger, decodeCtx, greetingPkt, sslReqPkt)
+	if err != nil {
+		return err
+	}
 
 	recordMock(ctx, requests, responses, "config",
-		sslReqPkt.Header.Type, mysql.StatusToString(mysql.OK),
+		sslReqPkt.Header.Type, respOp,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
 
 	logger.Debug("Post-TLS MySQL: recorded synthetic config mock for seq=0 path")
