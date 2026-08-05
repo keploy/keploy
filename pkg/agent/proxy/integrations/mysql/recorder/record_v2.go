@@ -390,7 +390,10 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
 	}
 	entry, ok := hsStore.PopWait(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), 5*time.Second)
-	if !ok {
+	// Port-only fallback only when the first key was conn-specific — otherwise it
+	// is the same port-only key and we'd waste another 2s on a guaranteed miss
+	// (matches the legacy handlePostTLSRecord guard).
+	if !ok && sess.Opts.ConnKey != "" {
 		entry, ok = hsStore.PopWait(models.HandshakeStoreKey("", dstPort), 2*time.Second)
 	}
 	var greetingBuf []byte
@@ -436,9 +439,11 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	//    shape (req: [SSLRequest, HandshakeResponse41, ...]). It MUST decode
 	//    before the HandshakeResponse41 below, while LastOp is still
 	//    HandshakeV10 — same ordering constraint as legacy handlePostTLSRecord.
+	var sslReqPkt *mysql.PacketBundle
 	if ok && len(entry.ReqPackets) > 0 {
-		if sslReqPkt, sErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientKey, decodeCtx); sErr == nil {
-			res.req = append(res.req, mysql.Request{PacketBundle: *sslReqPkt})
+		if pkt, sErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientKey, decodeCtx); sErr == nil {
+			sslReqPkt = pkt
+			res.req = append(res.req, mysql.Request{PacketBundle: *pkt})
 		} else {
 			logger.Debug("post-TLS V2: decode stored SSLRequest failed; config mock will omit it", zap.Error(sErr))
 		}
@@ -475,6 +480,23 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// handlePostTLSRecord seq==0 path, conn.go).
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
 		res.responseOperation = greetingPkt.Header.Type
+		// The replayer matches a connection by finding a HandshakeResponse41 in
+		// the config mock's requests[0]/[1] — but a seq==0 connection had no HR41
+		// captured. Synthesize one (+ auth) from the stored SSLRequest so this
+		// config mock is replay-matchable, mirroring the legacy seq==0 path
+		// (recordSyntheticConfigMock). Without a stored SSLRequest we fall back to
+		// the greeting-only config (best-effort; will not match at replay).
+		if sslReqPkt != nil {
+			reqs, resps, respOp, sErr := buildSyntheticPostTLSConfig(ctx, logger, decodeCtx, greetingPkt, sslReqPkt)
+			if sErr != nil {
+				logger.Debug("post-TLS V2: synthesize seq==0 config mock failed; emitting greeting-only config", zap.Error(sErr))
+			} else {
+				res.req = reqs
+				res.resp = resps
+				res.requestOperation = sslReqPkt.Header.Type
+				res.responseOperation = respOp
+			}
+		}
 		res.firstCmd = firstBuf
 		res.resTimestamp = res.reqTimestamp
 		return res, nil

@@ -502,9 +502,29 @@ func TestRecordV2_PostTLS_PooledConnSeq0(t *testing.T) {
 	if got[0].Name != "config" {
 		t.Errorf("first mock = %q, want config", got[0].Name)
 	}
+	// The seq==0 config mock MUST carry a synthesized HandshakeResponse41 at
+	// requests[0] or [1] — the replayer matches a connection on it and errors
+	// otherwise (replayer/conn.go). Without the synthesis this config mock would
+	// only have [SSLRequest] and fail replay handshake matching.
+	if !configMockHasHR41(got[0]) {
+		t.Errorf("seq==0 config mock has no HandshakeResponse41 in requests[0]/[1] — would fail replay handshake matching; reqs=%d", len(got[0].Spec.MySQLRequests))
+	}
 	// The query mock proves the seq==0 firstCmd was decoded as a COMMAND (not
 	// mis-decoded as a handshake response because LastOp stayed HandshakeV10).
 	assertQueryMock(t, got[1])
+}
+
+// configMockHasHR41 reports whether the config mock carries a
+// HandshakeResponse41 at requests[0] or [1] (the replayer's match requirement).
+func configMockHasHR41(m *models.Mock) bool {
+	r := m.Spec.MySQLRequests
+	if len(r) > 0 && r[0].Header != nil && r[0].Header.Type == mysql.HandshakeResponse41 {
+		return true
+	}
+	if len(r) > 1 && r[1].Header != nil && r[1].Header.Type == mysql.HandshakeResponse41 {
+		return true
+	}
+	return false
 }
 
 // runPostTLS drives RecordV2 with the given post-TLS ctx and collects want mocks.
