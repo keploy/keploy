@@ -317,6 +317,13 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// genuinely idle side just times out and we emit what we have — no stall).
 	// ktime 0 (non-capture conns / unit tests) ties as smallest and, with the
 	// request-first tie-break, degrades to arrival order exactly as before.
+	//
+	// mergeWait is paid at most once per *exchange*, not per packet: on the
+	// loopback the dest side fills within microseconds of a client request, so
+	// the wait almost always returns immediately with the counterpart chunk. It
+	// only reaches the full 2ms on a genuinely one-sided lull (idle connection),
+	// where emitting slightly late costs nothing — so this is not per-packet
+	// added latency.
 	const mergeWait = 2 * time.Millisecond
 	var cHead, dHead tsChunk
 	var cHas, dHas bool
