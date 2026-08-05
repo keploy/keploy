@@ -2494,7 +2494,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					streamBodyNoise := map[string][]string{}
 					if bodyNoise, ok := noiseConfig["body"]; ok {
-						streamBodyNoise = cloneNoiseMap(bodyNoise)
+						streamBodyNoise = matcherUtils.CloneNoiseMap(bodyNoise)
 					}
 					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
 
@@ -3427,31 +3427,17 @@ func normalizePassingHTTPResult(result *models.Result) {
 }
 
 func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[string]map[string][]string) map[string][]string {
-	bodyNoise := cloneNoiseMap(noiseConfig["body"])
+	bodyNoise := matcherUtils.CloneNoiseMap(noiseConfig["body"])
 
-	for field, regexArr := range testCaseNoise {
-		parts := strings.Split(field, ".")
-		if len(parts) <= 1 || parts[0] != "body" {
-			continue
-		}
-
-		bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = append([]string(nil), regexArr...)
+	// nil logger on purpose: Match already ran SplitNoise for this same test
+	// case and emitted any warning, so passing one here would only duplicate it.
+	tcBodyNoise, _, _ := matcherUtils.SplitNoise(testCaseNoise, nil)
+	for field, regexArr := range tcBodyNoise {
+		// SplitNoise already returns freshly-allocated slices.
+		bodyNoise[field] = regexArr
 	}
 
 	return bodyNoise
-}
-
-func cloneNoiseMap(input map[string][]string) map[string][]string {
-	if len(input) == 0 {
-		return map[string][]string{}
-	}
-
-	out := make(map[string][]string, len(input))
-	for key, values := range input {
-		out[key] = append([]string(nil), values...)
-	}
-
-	return out
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
