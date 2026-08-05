@@ -30,6 +30,36 @@ const (
 
 var recordingPaused atomic.Bool
 
+// fixedOverheadBytes is memory the agent allocates up-front and that pausing
+// recording cannot reclaim — chiefly the eBPF capture ring buffer in
+// low-latency mode, which is charged to the container cgroup as kernel memory.
+// The enterprise ringbuf loader sets this to the ACTUAL configured buffer size
+// (record.ringbufSizeMB), never a hardcoded constant. It is zero in proxy mode.
+// The guard discounts it from both the usage and the limit so the pressure
+// signal tracks only the growing capture buffers — the memory a pause can
+// actually free — budgeted against the room left above the fixed floor.
+var fixedOverheadBytes atomic.Int64
+
+// SetFixedOverheadMB records the fixed, non-reclaimable memory overhead (in MB)
+// the guard should discount when evaluating memory pressure. Safe to call
+// before or after Start; the running guard picks up the new value on its next
+// tick (the ring buffer is allocated after the guard has already started).
+// Callers MUST pass the actual configured buffer size (e.g. the enterprise
+// low-latency capture ring buffer's record.ringbufSizeMB), not a hardcoded
+// value. Passing 0 disables the discount (the proxy-mode default).
+func SetFixedOverheadMB(mb uint64) {
+	if mb > math.MaxInt64/(1024*1024) {
+		return // implausibly large; ignore rather than overflow
+	}
+	fixedOverheadBytes.Store(int64(mb) * 1024 * 1024)
+}
+
+// FixedOverheadBytes returns the currently configured fixed overhead in bytes.
+// Exposed for diagnostics and tests.
+func FixedOverheadBytes() int64 {
+	return fixedOverheadBytes.Load()
+}
+
 type guard struct {
 	logger            *zap.Logger
 	memoryCurrentPath string
@@ -121,6 +151,12 @@ func (g *guard) run(ctx context.Context) {
 	defer g.resetPressure()
 	defer debug.SetMemoryLimit(g.prevMemLimit)
 
+	// lastOverhead tracks the fixed-overhead value we last applied so GOMEMLIMIT
+	// is only recomputed when it actually changes. It starts at -1 (an
+	// impossible byte count) so the first tick always aligns GOMEMLIMIT with the
+	// effective budget even when the overhead is still zero.
+	lastOverhead := int64(-1)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,33 +186,52 @@ func (g *guard) run(ctx context.Context) {
 			}
 			g.readFailCount = 0
 
-			pauseThreshold := thresholdBytes(g.limitBytes, pauseThresholdRatio)
-			resumeThreshold := thresholdBytes(g.limitBytes, resumeThresholdRatio)
+			// Discount the fixed, non-reclaimable overhead (e.g. the low-latency
+			// eBPF ring buffer) from BOTH the usage and the limit. Pausing cannot
+			// free that memory, so budgeting against it would trip the guard on a
+			// fixed floor it can never relieve. We instead pause when the
+			// *reclaimable* portion (current - overhead) fills the room left above
+			// the floor (limit - overhead) — i.e. take the threshold ratio of the
+			// remainder. In proxy mode overhead is 0, so this reduces exactly to
+			// the previous working-set-vs-limit behaviour.
+			effCurrent, effLimit, overhead := effectiveUsage(currentBytes, g.limitBytes, fixedOverheadBytes.Load())
+
+			// Keep GOMEMLIMIT aligned with the Go-heap budget (the room left after
+			// the non-Go fixed overhead), recomputing only when overhead changes so
+			// we don't thrash debug.SetMemoryLimit on every tick.
+			if overhead != lastOverhead {
+				debug.SetMemoryLimit(int64(float64(effLimit) * 0.9))
+				lastOverhead = overhead
+			}
+
+			pauseThreshold := thresholdBytes(effLimit, pauseThresholdRatio)
+			resumeThreshold := thresholdBytes(effLimit, resumeThresholdRatio)
 
 			if pauseThreshold == 0 {
-				pauseThreshold = g.limitBytes
+				pauseThreshold = effLimit
 			}
 			if resumeThreshold == 0 {
-				resumeThreshold = g.limitBytes
+				resumeThreshold = effLimit
 			}
 
-			if currentBytes >= pauseThreshold {
-				g.enterPressure(currentBytes, pauseThreshold)
+			if effCurrent >= pauseThreshold {
+				g.enterPressure(effCurrent, pauseThreshold, overhead, effLimit)
 				continue
 			}
 
-			if g.underPressure && currentBytes <= resumeThreshold {
+			if g.underPressure && effCurrent <= resumeThreshold {
 				g.resetPressure()
 				g.logger.Info("Cleared keploy-agent memory pressure after memory recovered",
-					zap.Int64("memory_usage_bytes", currentBytes),
+					zap.Int64("memory_usage_bytes", effCurrent),
 					zap.Int64("resume_threshold_bytes", resumeThreshold),
-					zap.Int64("memory_limit_bytes", g.limitBytes))
+					zap.Int64("fixed_overhead_bytes", overhead),
+					zap.Int64("effective_limit_bytes", effLimit))
 			}
 		}
 	}
 }
 
-func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
+func (g *guard) enterPressure(currentBytes, pauseThreshold, overhead, effLimit int64) {
 	alreadyPaused := g.underPressure
 	g.underPressure = true
 	applyPausedState(true)
@@ -187,6 +242,8 @@ func (g *guard) enterPressure(currentBytes, pauseThreshold int64) {
 			"Consider increasing --memory-limit, enabling sampling, or reducing request concurrency",
 			zap.Int64("memory_usage_bytes", currentBytes),
 			zap.Int64("pause_threshold_bytes", pauseThreshold),
+			zap.Int64("fixed_overhead_bytes", overhead),
+			zap.Int64("effective_limit_bytes", effLimit),
 			zap.Int64("memory_limit_bytes", g.limitBytes),
 			zap.Uint64("memory_limit_mb", g.memoryLimitMB))
 	}
@@ -816,4 +873,24 @@ func thresholdBytes(limit int64, ratio float64) int64 {
 		return limit
 	}
 	return threshold
+}
+
+// effectiveUsage discounts the fixed, non-reclaimable memory overhead from both
+// the working-set usage and the limit. Pausing recording cannot reclaim that
+// overhead (e.g. the low-latency eBPF ring buffer, charged as kernel memory),
+// so the guard must budget the *reclaimable* remainder (current-overhead)
+// against the room left above the fixed floor (limit-overhead). A negative
+// overhead, or one large enough that the floor alone meets or exceeds the limit,
+// is treated as zero — the guard then falls back to raw working-set guarding
+// rather than producing a zero/negative budget. effOverhead is the sanitised
+// value actually applied. effCurrent is floored at zero.
+func effectiveUsage(currentBytes, limitBytes, overhead int64) (effCurrent, effLimit, effOverhead int64) {
+	if overhead < 0 || overhead >= limitBytes {
+		overhead = 0
+	}
+	effCurrent = currentBytes - overhead
+	if effCurrent < 0 {
+		effCurrent = 0
+	}
+	return effCurrent, limitBytes - overhead, overhead
 }

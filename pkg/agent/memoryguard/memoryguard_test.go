@@ -1,11 +1,15 @@
 package memoryguard
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// mib converts a MiB count to bytes for readable test tables.
+func mib(n int64) int64 { return n * 1024 * 1024 }
 
 func TestResolveMemoryCurrentPathFromSelfCgroup(t *testing.T) {
 	t.Parallel()
@@ -268,5 +272,128 @@ func TestBuildMountedCgroupPath(t *testing.T) {
 				t.Fatalf("expected path %q, got %q", tt.wantPath, gotPath)
 			}
 		})
+	}
+}
+
+func TestEffectiveUsage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		current      int64
+		limit        int64
+		overhead     int64
+		wantCurrent  int64
+		wantLimit    int64
+		wantOverhead int64
+	}{
+		{
+			name:         "proxy mode: zero overhead is a no-op",
+			current:      mib(400),
+			limit:        mib(1000),
+			overhead:     0,
+			wantCurrent:  mib(400),
+			wantLimit:    mib(1000),
+			wantOverhead: 0,
+		},
+		{
+			name:         "low-latency: ringbuf discounted from usage and limit",
+			current:      mib(500), // 244 real + 256 ringbuf
+			limit:        mib(1000),
+			overhead:     mib(256),
+			wantCurrent:  mib(244),
+			wantLimit:    mib(744),
+			wantOverhead: mib(256),
+		},
+		{
+			name:         "overhead at/above limit falls back to raw guarding",
+			current:      mib(500),
+			limit:        mib(200),
+			overhead:     mib(256),
+			wantCurrent:  mib(500),
+			wantLimit:    mib(200),
+			wantOverhead: 0,
+		},
+		{
+			name:         "negative overhead treated as zero",
+			current:      mib(300),
+			limit:        mib(1000),
+			overhead:     -1,
+			wantCurrent:  mib(300),
+			wantLimit:    mib(1000),
+			wantOverhead: 0,
+		},
+		{
+			name:         "effective current is floored at zero",
+			current:      mib(100),
+			limit:        mib(1000),
+			overhead:     mib(256),
+			wantCurrent:  0,
+			wantLimit:    mib(744),
+			wantOverhead: mib(256),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotCurrent, gotLimit, gotOverhead := effectiveUsage(tt.current, tt.limit, tt.overhead)
+			if gotCurrent != tt.wantCurrent {
+				t.Errorf("effCurrent: want %d, got %d", tt.wantCurrent, gotCurrent)
+			}
+			if gotLimit != tt.wantLimit {
+				t.Errorf("effLimit: want %d, got %d", tt.wantLimit, gotLimit)
+			}
+			if gotOverhead != tt.wantOverhead {
+				t.Errorf("effOverhead: want %d, got %d", tt.wantOverhead, gotOverhead)
+			}
+		})
+	}
+}
+
+// TestEffectiveUsageDrivesPauseBoundary documents the end-to-end intent: pause
+// when the reclaimable usage fills the configured ratio of the room left above
+// the fixed floor. With a 1 GiB limit and a 256 MiB ring buffer, the pause line
+// is 0.80 * (1024-256) = 614.4 MiB of reclaimable usage.
+func TestEffectiveUsageDrivesPauseBoundary(t *testing.T) {
+	t.Parallel()
+
+	limit := mib(1024)
+	overhead := mib(256)
+
+	// Just below the boundary: 600 MiB reclaimable + 256 ringbuf = 856 total.
+	effCurrent, effLimit, _ := effectiveUsage(mib(600)+overhead, limit, overhead)
+	if pause := thresholdBytes(effLimit, pauseThresholdRatio); effCurrent >= pause {
+		t.Fatalf("did not expect pause: effCurrent=%d pause=%d", effCurrent, pause)
+	}
+
+	// Just above the boundary: 700 MiB reclaimable + 256 ringbuf = 956 total.
+	effCurrent, effLimit, _ = effectiveUsage(mib(700)+overhead, limit, overhead)
+	if pause := thresholdBytes(effLimit, pauseThresholdRatio); effCurrent < pause {
+		t.Fatalf("expected pause: effCurrent=%d pause=%d", effCurrent, pause)
+	}
+}
+
+func TestSetFixedOverheadMB(t *testing.T) {
+	t.Cleanup(func() { fixedOverheadBytes.Store(0) })
+
+	SetFixedOverheadMB(256)
+	if got, want := FixedOverheadBytes(), mib(256); got != want {
+		t.Fatalf("after SetFixedOverheadMB(256): want %d, got %d", want, got)
+	}
+
+	SetFixedOverheadMB(0)
+	if got := FixedOverheadBytes(); got != 0 {
+		t.Fatalf("after SetFixedOverheadMB(0): want 0, got %d", got)
+	}
+
+	// An implausibly large value must be ignored (no overflow), leaving the
+	// previous value untouched.
+	SetFixedOverheadMB(64)
+	SetFixedOverheadMB(math.MaxUint64)
+	if got, want := FixedOverheadBytes(), mib(64); got != want {
+		t.Fatalf("overflow input should be ignored: want %d, got %d", want, got)
 	}
 }
