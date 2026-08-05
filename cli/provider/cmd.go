@@ -240,7 +240,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker-run/docker-start/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -675,6 +675,28 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// resolveCommandType determines the CommandType to use for a record/test
+// run. When the user explicitly passes --cmd-type, that value wins (after
+// validation) over auto-detection — previously it was silently discarded
+// and overwritten every time (#4399). Gated on Changed(), not on explicit
+// being non-empty: config/default.go's InternalConfig ships cmdType:
+// "native" in every generated keploy.yml, so a non-empty check would treat
+// that baked-in default as an explicit user choice and break Docker users
+// who never touched the flag.
+func resolveCommandType(cmd *cobra.Command, command, explicit string) (string, error) {
+	if cmd.Flags().Changed("cmd-type") {
+		switch utils.CmdType(explicit) {
+		case utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose:
+			return explicit, nil
+		default:
+			return "", fmt.Errorf(
+				"invalid --cmd-type value %q: allowed values are %q, %q, %q, and %q",
+				explicit, utils.Native, utils.DockerRun, utils.DockerStart, utils.DockerCompose)
+		}
+	}
+	return string(utils.FindDockerCmd(command)), nil
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
@@ -1026,7 +1048,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		// set the command type
-		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+		commandType, err := resolveCommandType(cmd, c.cfg.Command, c.cfg.CommandType)
+		if err != nil {
+			return err
+		}
+		c.cfg.CommandType = commandType
 		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
 			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
