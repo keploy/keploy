@@ -671,3 +671,123 @@ func TestCompareHeaders_RegexEnforced(t *testing.T) {
 		t.Errorf("a value outside the pattern must be reported")
 	}
 }
+
+// TestRegexNoise_UnexpectedContainerKeyIsReported pins that a pattern which
+// cannot describe a container does NOT excuse one appearing in the replay.
+// Reading "this pattern can't match an object" as "so ignore the object" would
+// let an injected subtree through unchecked.
+func TestRegexNoise_UnexpectedContainerKeyIsReported(t *testing.T) {
+	for _, injected := range []string{`{"evil":true}`, `[1]`} {
+		actual := `{"a":{"k":` + injected + `}}`
+		if diffNoise(t, `{"a":{}}`, actual, map[string][]string{"a.k": {"^zzz$"}}) {
+			t.Errorf("an injected container must be reported, got a match for %s", actual)
+		}
+		if diffNoise(t, `{"a":{}}`, actual, map[string][]string{"k": {"^zzz$"}}) {
+			t.Errorf("global entry: an injected container must be reported, got a match for %s", actual)
+		}
+		// An unconditional entry still covers it.
+		if !diffNoise(t, `{"a":{}}`, actual, map[string][]string{"a.k": {}}) {
+			t.Errorf("an unconditional entry must still cover %s", actual)
+		}
+	}
+}
+
+// TestRegexNoise_UnexpectedKeyPathForm covers the path-noise form of the
+// unexpected-key rule; the global form is covered above.
+func TestRegexNoise_UnexpectedKeyPathForm(t *testing.T) {
+	if !diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"ord-9"}}`, map[string][]string{"o.trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key matching its pattern should be excused")
+	}
+	if diffNoise(t, `{"o":{"a":1}}`, `{"o":{"a":1,"trace":"HACK"}}`, map[string][]string{"o.trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key outside its pattern must be reported")
+	}
+}
+
+// TestRegexNoise_NullReplacedByContainerIsReported keeps the null branch in step
+// with the scalar one: a retype is a schema change, not a volatile value.
+func TestRegexNoise_NullReplacedByContainerIsReported(t *testing.T) {
+	for _, pattern := range []string{".*", "^$"} {
+		if diffNoise(t, `{"o":{"m":null}}`, `{"o":{"m":{"a":1}}}`, map[string][]string{"o.m": {pattern}}) {
+			t.Errorf("null replaced by an object must be reported even under pattern %q", pattern)
+		}
+	}
+	if !diffNoise(t, `{"o":{"m":null}}`, `{"o":{"m":{"a":1}}}`, map[string][]string{"o.m": {}}) {
+		t.Errorf("an unconditional entry must still cover the retype")
+	}
+}
+
+// TestSectionedNoise_WildcardIgnoresTheSection pins that a bare "*" keeps its
+// documented "ignore everything" meaning instead of becoming a field literally
+// named "*".
+func TestSectionedNoise_WildcardIgnoresTheSection(t *testing.T) {
+	body, header, skipBody := SplitNoise(map[string][]string{"body": {"*"}}, nil)
+	if !skipBody {
+		t.Errorf(`body: ["*"] must skip the whole body`)
+	}
+	if len(body) != 0 {
+		t.Errorf("bodyNoise = %v, want no field entries", body)
+	}
+	if _, _, _ = SplitNoise(map[string][]string{"header": {"*"}}, nil); true {
+		_, h, _ := SplitNoise(map[string][]string{"header": {"*"}}, nil)
+		if _, ok := h["header"]; !ok {
+			t.Errorf(`header: ["*"] must mark the whole header section noisy, got %v`, h)
+		}
+	}
+	_ = header
+}
+
+// TestCompilePatterns_SentinelsAreNotRegexes pins that the wildcard and the
+// empty string do not produce a spurious "invalid pattern" warning; "*" is not
+// valid regex syntax, and it is a documented config value.
+func TestCompilePatterns_SentinelsAreNotRegexes(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	if got := compilePatterns([]string{"*"}, logger); got != nil {
+		t.Errorf(`compilePatterns(["*"]) = %v, want nil (unconditional)`, got)
+	}
+	if got := compilePatterns([]string{""}, logger); got != nil {
+		t.Errorf(`compilePatterns([""]) = %v, want nil (unconditional)`, got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("emitted %d warnings for sentinel values, want 0: %v", logs.Len(), logs.All())
+	}
+}
+
+// TestWarnIfIndexedPath pins the diagnostic for the one recorded shape that
+// silently stops matching: a noise path carrying an array position.
+func TestWarnIfIndexedPath(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	SplitNoise(map[string][]string{"body": {"items.0.product.stock"}}, logger)
+	if logs.Len() != 1 {
+		t.Fatalf("emitted %d warnings, want 1: %v", logs.Len(), logs.All())
+	}
+	if got := logs.All()[0].ContextMap()["suggested"]; got != "items.product.stock" {
+		t.Errorf("suggested = %v, want the index-free path", got)
+	}
+
+	// An index-free path is fine and must not warn.
+	core2, logs2 := observer.New(zapcore.WarnLevel)
+	SplitNoise(map[string][]string{"body": {"items.product.stock"}}, zap.New(core2))
+	if logs2.Len() != 0 {
+		t.Errorf("emitted %d warnings for an index-free path, want 0", logs2.Len())
+	}
+}
+
+// TestGetCompiledE_ReportsErrorOnCacheHit pins that the compile error survives
+// the regex cache, so a later caller can still warn the user.
+func TestGetCompiledE_ReportsErrorOnCacheHit(t *testing.T) {
+	pattern := `^(unclosed-cachehit`
+	if _, err := getCompiledE(pattern); err == nil {
+		t.Fatal("first call should report the compile error")
+	}
+	re, err := getCompiledE(pattern)
+	if err == nil {
+		t.Errorf("second (cached) call lost the compile error")
+	}
+	if re == nil || re.MatchString("anything") {
+		t.Errorf("cached fallback must be a non-nil never-matching regex")
+	}
+}

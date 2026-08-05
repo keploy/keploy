@@ -194,7 +194,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPReq.Body, tcs2.HTTPReq.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && bodyType1 == models.JSON {
+	if bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -224,7 +224,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
+		if tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
 			pass = false
 			bodyRes = false
 		}

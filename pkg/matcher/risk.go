@@ -265,7 +265,14 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		// entry ignores only the values it describes, so it must be evaluated
 		// against this value — otherwise a field the matcher just reported as a
 		// difference would be missing from the report explaining it.
-		if len(regs) == 0 || noisyForRegexps(regs, v) {
+		// An unconditional entry hides the whole subtree. A pattern-guarded one
+		// hides only a scalar it actually matches — the matcher keeps walking a
+		// guarded container, so dropping it here would report "nothing changed"
+		// for a test the matcher just failed.
+		if len(regs) == 0 {
+			return
+		}
+		if str, isScalar := jsonScalarToString(v); isScalar && anyRegexpMatchStr(str, regs) {
 			return
 		}
 	}
