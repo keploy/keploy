@@ -31,6 +31,27 @@ type mysqlDecodeItem struct {
 // forwarding. Raw bytes are relayed at wire speed in the main select loop.
 // All packet reassembly, decoding, and mock creation is offloaded to a
 // background goroutine via a buffered decode channel.
+// tsChunk is a relay chunk tagged with the kernel CLOCK_MONOTONIC wire time of
+// the SSL/GoTLS event it came from. handleClientQueries merges the two
+// directional relay streams by this ktime so the decoder sees packets in true
+// WIRE ORDER — the request→response→next-request order the MySQL state machine
+// requires — instead of the goroutine-arrival order a plain select races. On the
+// in-memory SimulatedConn loopback that race dropped query mocks for fast
+// connection-pool-validation exchanges (SELECT 1).
+type tsChunk struct {
+	data  []byte
+	ktime uint64
+}
+
+// ktimeConn is the optional interface a capture-backed net.Conn implements to
+// expose each read chunk's kernel wire time (enterprise SimulatedConn does).
+// When a conn doesn't implement it (unit tests, non-capture paths) the relay
+// falls back to plain Read with ktime 0 and the merge degrades to arrival order
+// — i.e. exactly the prior behavior, no regression.
+type ktimeConn interface {
+	ReadTimestamped(b []byte) (n int, ktimeNs uint64, err error)
+}
+
 func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 	// If recording is already paused, pure passthrough.
 	if memoryguard.IsRecordingPaused() {
@@ -49,8 +70,8 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	// Buffered channels for raw byte relay. Each Read() result is sent
 	// immediately — no accumulation, no "wait for short read" like ReadBytes.
-	clientBuffChan := make(chan []byte, 256)
-	destBuffChan := make(chan []byte, 256)
+	clientBuffChan := make(chan tsChunk, 256)
+	destBuffChan := make(chan tsChunk, 256)
 	errChan := make(chan error, 2)
 
 	// readRelay reads from conn in a loop and sends each chunk to ch.
@@ -65,8 +86,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Now the send is unconditional onto a buffered channel (cap 256);
 	// ctx is checked only AFTER the send so the goroutine still exits
 	// promptly without losing the chunk we already pulled off the wire.
-	readRelay := func(conn net.Conn, ch chan<- []byte) {
+	readRelay := func(conn net.Conn, ch chan<- tsChunk) {
 		defer close(ch)
+		tsc, hasTS := conn.(ktimeConn)
 		buf := make([]byte, 32*1024) // reused across reads
 		for {
 			select {
@@ -74,20 +96,28 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return
 			default:
 			}
-			n, err := conn.Read(buf)
+			var n int
+			var ktime uint64
+			var err error
+			if hasTS {
+				n, ktime, err = tsc.ReadTimestamped(buf)
+			} else {
+				n, err = conn.Read(buf)
+			}
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buf[:n])
+				chunk := tsChunk{data: data, ktime: ktime}
 				// Buffered channel send; in the rare event the buffer
 				// is full we fall back to a select that respects ctx
 				// so we don't deadlock on shutdown. The fast path
 				// avoids that select entirely so a ctx-cancel that
 				// races a successful Read can't preempt the send.
 				if len(ch) < cap(ch) {
-					ch <- data
+					ch <- chunk
 				} else {
 					select {
-					case ch <- data:
+					case ch <- chunk:
 					case <-ctx.Done():
 						return
 					}
@@ -152,18 +182,22 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// connections that started in recording mode. The entry-point check
 	// above handles new connections under pressure (passthrough); once
 	// recording started, dropping mid-connection bytes creates orphan TCs.
+	// Drain-path forwards: block on the DECODER's context (decoderCtx), not the
+	// already-cancelled parent ctx, so the last request/response chunks swept in
+	// at teardown are delivered reliably instead of dropped when decodeChan is
+	// full. decoderCtx stays live through drainBuffChans (it is cancelled only in
+	// cleanup step 4, AFTER the drain + decodeChan close), so this blocks until the
+	// decoder makes room and never hangs past decoder shutdown.
 	forwardClient := func(buf []byte) {
 		if buf == nil {
 			return
 		}
 		_, _ = destConn.Write(buf)
-		if len(decodeChan) < cap(decodeChan) {
-			cp := make([]byte, len(buf))
-			copy(cp, buf)
-			select {
-			case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
-			default:
-			}
+		cp := make([]byte, len(buf))
+		copy(cp, buf)
+		select {
+		case decodeChan <- mysqlDecodeItem{fromClient: true, data: cp, ts: models.CapturedReqTime(ctx)}:
+		case <-decoderCtx.Done():
 		}
 	}
 	forwardDest := func(buf []byte) {
@@ -171,13 +205,11 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return
 		}
 		_, _ = clientConn.Write(buf)
-		if len(decodeChan) < cap(decodeChan) {
-			cp := make([]byte, len(buf))
-			copy(cp, buf)
-			select {
-			case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
-			default:
-			}
+		cp := make([]byte, len(buf))
+		copy(cp, buf)
+		select {
+		case decodeChan <- mysqlDecodeItem{fromClient: false, data: cp, ts: models.CapturedRespTime(ctx)}:
+		case <-decoderCtx.Done():
 		}
 	}
 
@@ -205,36 +237,36 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		defer deadline.Stop()
 		for {
 			select {
-			case buf, ok := <-clientBuffChan:
+			case c, ok := <-clientBuffChan:
 				if !ok {
 					clientBuffChan = nil
 					continue
 				}
-				forwardClient(buf)
-			case buf, ok := <-destBuffChan:
+				forwardClient(c.data)
+			case c, ok := <-destBuffChan:
 				if !ok {
 					destBuffChan = nil
 					continue
 				}
-				forwardDest(buf)
+				forwardDest(c.data)
 			case <-deadline.C:
 				// Grace expired. Greedy non-blocking sweep of any
 				// final bytes the goroutines pushed in the last
 				// instant, then return.
 				for {
 					select {
-					case buf, ok := <-clientBuffChan:
+					case c, ok := <-clientBuffChan:
 						if !ok {
 							clientBuffChan = nil
 							continue
 						}
-						forwardClient(buf)
-					case buf, ok := <-destBuffChan:
+						forwardClient(c.data)
+					case c, ok := <-destBuffChan:
 						if !ok {
 							destBuffChan = nil
 							continue
 						}
-						forwardDest(buf)
+						forwardDest(c.data)
 					default:
 						return
 					}
@@ -269,83 +301,200 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		cancelDecoder()
 	}
 
-	// Main loop: forward only, send copies for async decode.
-	for {
-		select {
-		case <-ctx.Done():
-			cleanup()
-			return ctx.Err()
+	// Main loop: merge the two relay streams into WIRE ORDER by ktime, then feed
+	// the decoder. Each readRelay emits in per-stream wire order; merging by the
+	// kernel wire time restores the true request→response→next-request interleave
+	// the MySQL state machine needs. The previous plain select over the two
+	// channels raced them into goroutine-arrival order — which, on the in-memory
+	// SimulatedConn loopback (no network latency), delivered a response before its
+	// command (dropped as "no pending command") or a COM_QUIT before the prior
+	// response (premature empty flush), silently losing query mocks for fast
+	// connection-pool-validation exchanges (SELECT 1) and orphaning replay.
+	//
+	// Lookahead one chunk per side; emit the earlier ktime. When one side has a
+	// chunk and the other is open but momentarily empty, wait a bounded window for
+	// it (the loopback reorder is sub-millisecond, so this recovers order; a
+	// genuinely idle side just times out and we emit what we have — no stall).
+	// ktime 0 (non-capture conns / unit tests) ties as smallest and, with the
+	// request-first tie-break, degrades to arrival order exactly as before.
+	//
+	// mergeWait is paid at most once per *exchange*, not per packet: on the
+	// loopback the dest side fills within microseconds of a client request, so
+	// the wait almost always returns immediately with the counterpart chunk. It
+	// only reaches the full 2ms on a genuinely one-sided lull (idle connection),
+	// where emitting slightly late costs nothing — so this is not per-packet
+	// added latency.
+	const mergeWait = 2 * time.Millisecond
+	var cHead, dHead tsChunk
+	var cHas, dHas bool
+	cOpen, dOpen := true, true
 
-		case buffer, ok := <-clientBuffChan:
-			if !ok {
-				clientBuffChan = nil
-				continue
-			}
-			if buffer == nil {
-				continue
-			}
-
-			// Forward to destination immediately — critical path.
-			_, err := destConn.Write(buffer)
-			if err != nil {
+	emit := func(fromClient bool, c tsChunk) error {
+		if fromClient {
+			if _, err := destConn.Write(c.data); err != nil {
 				utils.LogError(logger, err, "failed to write command to the server")
 				cleanup()
 				return err
 			}
-
-			// Non-blocking send to async decode. Check channel capacity
-			// before copying to avoid allocation/GC churn when the decoder
-			// can't keep up (the copy would just be dropped).
-			if len(decodeChan) < cap(decodeChan) {
-				buf := make([]byte, len(buffer))
-				copy(buf, buffer)
-				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: true, data: buf, ts: models.CapturedReqTime(ctx)}:
-				default:
-				}
-			}
-
-		case buffer, ok := <-destBuffChan:
-			if !ok {
-				destBuffChan = nil
-				continue
-			}
-			if buffer == nil {
-				continue
-			}
-
-			// Forward to client immediately — critical path.
-			_, err := clientConn.Write(buffer)
-			if err != nil {
+		} else {
+			if _, err := clientConn.Write(c.data); err != nil {
 				utils.LogError(logger, err, "failed to write response to the client")
 				cleanup()
 				return err
 			}
+		}
+		// c.data is a fresh per-chunk buffer allocated in readRelay (never reused
+		// after the send), so hand it to the decoder directly — no re-copy.
+		ts := models.CapturedReqTime(ctx)
+		if !fromClient {
+			ts = models.CapturedRespTime(ctx)
+		}
+		select {
+		case decodeChan <- mysqlDecodeItem{fromClient: fromClient, data: c.data, ts: ts}:
+		case <-ctx.Done():
+		}
+		return nil
+	}
 
-			// Non-blocking send to async decode.
-			if len(decodeChan) < cap(decodeChan) {
-				buf := make([]byte, len(buffer))
-				copy(buf, buffer)
-				select {
-				case decodeChan <- mysqlDecodeItem{fromClient: false, data: buf, ts: models.CapturedRespTime(ctx)}:
-				default:
+	for {
+		// Non-blocking top-up of each empty head (also detects channel close).
+		if !cHas && cOpen {
+			select {
+			case c, ok := <-clientBuffChan:
+				if ok {
+					cHead, cHas = c, true
+				} else {
+					cOpen = false
+				}
+			default:
+			}
+		}
+		if !dHas && dOpen {
+			select {
+			case d, ok := <-destBuffChan:
+				if ok {
+					dHead, dHas = d, true
+				} else {
+					dOpen = false
+				}
+			default:
+			}
+		}
+
+		switch {
+		case cHas && dHas:
+			// Emit the earlier-wire-time chunk; tie → request first so a command
+			// always precedes its response.
+			if dHead.ktime < cHead.ktime {
+				if err := emit(false, dHead); err != nil {
+					return err
+				}
+				dHas = false
+			} else {
+				if err := emit(true, cHead); err != nil {
+					return err
+				}
+				cHas = false
+			}
+		case cHas && !dOpen:
+			if err := emit(true, cHead); err != nil {
+				return err
+			}
+			cHas = false
+		case dHas && !cOpen:
+			if err := emit(false, dHead); err != nil {
+				return err
+			}
+			dHas = false
+		case cHas && dOpen:
+			// Have a client chunk; dest is open but empty — a smaller-ktime
+			// response may be in flight. Wait bounded, then emit.
+			timer := time.NewTimer(mergeWait)
+			select {
+			case d, ok := <-destBuffChan:
+				timer.Stop()
+				if ok {
+					dHead, dHas = d, true
+				} else {
+					dOpen = false
+				}
+			case <-timer.C:
+				if err := emit(true, cHead); err != nil {
+					return err
+				}
+				cHas = false
+			case <-ctx.Done():
+				timer.Stop()
+				cleanup()
+				return ctx.Err()
+			case err, ok := <-errChan:
+				timer.Stop()
+				if ok && err != nil && !errors.Is(err, io.EOF) {
+					cleanup()
+					return err
 				}
 			}
-
-		case err, ok := <-errChan:
-			if !ok || err == nil {
+		case dHas && cOpen:
+			timer := time.NewTimer(mergeWait)
+			select {
+			case c, ok := <-clientBuffChan:
+				timer.Stop()
+				if ok {
+					cHead, cHas = c, true
+				} else {
+					cOpen = false
+				}
+			case <-timer.C:
+				if err := emit(false, dHead); err != nil {
+					return err
+				}
+				dHas = false
+			case <-ctx.Done():
+				timer.Stop()
+				cleanup()
+				return ctx.Err()
+			case err, ok := <-errChan:
+				timer.Stop()
+				if ok && err != nil && !errors.Is(err, io.EOF) {
+					cleanup()
+					return err
+				}
+			}
+		default:
+			// Both heads empty.
+			if !cOpen && !dOpen {
 				cleanup()
 				return nil
 			}
-
-			// Drain via cleanup() — it forwards in-flight bytes from
-			// the buff chans into the decoder before closing decodeChan
-			// so the last response chunk isn't lost for mock creation.
-			cleanup()
-			if errors.Is(err, io.EOF) {
-				return nil
+			var cCh, dCh chan tsChunk
+			if cOpen {
+				cCh = clientBuffChan
 			}
-			return err
+			if dOpen {
+				dCh = destBuffChan
+			}
+			select {
+			case c, ok := <-cCh:
+				if ok {
+					cHead, cHas = c, true
+				} else {
+					cOpen = false
+				}
+			case d, ok := <-dCh:
+				if ok {
+					dHead, dHas = d, true
+				} else {
+					dOpen = false
+				}
+			case <-ctx.Done():
+				cleanup()
+				return ctx.Err()
+			case err, ok := <-errChan:
+				if ok && err != nil && !errors.Is(err, io.EOF) {
+					cleanup()
+					return err
+				}
+			}
 		}
 	}
 }
@@ -447,13 +596,36 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
 			mockType = "connection"
 		}
+		// (res>=req order is clamped centrally in recordMock for every mysql mock.)
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil
 		state = stateExpectCommand
 	}
 
-	for item := range decodeChan {
+	// heldResp buffers a response that reached the decoder BEFORE its command.
+	// The two byte-relay goroutines feed decodeChan via a non-deterministic
+	// select, so on the in-memory SimulatedConn loopback a short
+	// connection-pool-validation exchange (auth → SELECT 1 → response → QUIT →
+	// close in microseconds) can deliver the response ahead of its command. The
+	// old code then hit "received MySQL response with no pending command" and
+	// DROPPED it — silently losing the query mock and orphaning replay. Instead we
+	// hold such a response and, the instant its command arrives (stateExpectResponse
+	// below), replay it via `pending` so the exchange pairs correctly.
+	var heldResp []mysqlDecodeItem
+	var pending []mysqlDecodeItem
+	for {
+		var item mysqlDecodeItem
+		if len(pending) > 0 {
+			item = pending[0]
+			pending = pending[1:]
+		} else {
+			it, ok := <-decodeChan
+			if !ok {
+				break
+			}
+			item = it
+		}
 		if item.fromClient {
 			// --- Client command chunk ---
 			clientReassembly.append(item.data)
@@ -521,10 +693,30 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				}
 
 				state = stateExpectResponse
+
+				// If this command's response raced ahead and was held, replay it
+				// now — before any further decodeChan items — so it pairs with this
+				// command instead of being dropped as "no pending command".
+				if len(heldResp) > 0 {
+					pending = append(heldResp, pending...)
+					heldResp = nil
+				}
 			}
 
 		} else {
 			// --- Server response chunk ---
+			// Reorder guard: if this response reached the decoder before its
+			// command (the loopback race described at heldResp), hold it and replay
+			// it when the command arrives, instead of dropping it below at
+			// "received MySQL response with no pending command" — which silently
+			// lost the query mock for fast connection-pool-validation exchanges.
+			if state == stateExpectCommand && pendingCommand == nil {
+				heldResp = append(heldResp, item)
+				if len(heldResp) > 128 { // bound: a genuine orphan can't grow unboundedly
+					heldResp = heldResp[1:]
+				}
+				continue
+			}
 			destReassembly.append(item.data)
 			if destReassembly.didOverflow() && !destOverflowLogged {
 				logger.Debug("MySQL dest reassembly buffer exceeded limit")
