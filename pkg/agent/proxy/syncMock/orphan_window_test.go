@@ -190,3 +190,117 @@ func TestRecordOrphanWindowDoesNotTouchPressureRanges(t *testing.T) {
 		t.Fatalf("expected the orphan window in orphanRanges (got %d), not pressureRanges", len(m.orphanRanges))
 	}
 }
+
+// TestOpenOrphanWindowSuppressesWhileStillOpen covers the hole whose end is not
+// yet known: a connection whose parser was retired, leaving the relay to raw-
+// forward the rest of its life.
+//
+// The open case is the load-bearing one. record.go queries these ranges as each
+// test case is STREAMED, so a hole that is only recorded once its width is known
+// — i.e. when the connection finally closes, which for a pooled connection means
+// at shutdown — arrives long after the mock-less test cases it should have
+// suppressed were already written to disk. This is the exact shape that made a
+// real recording ship 18 unreplayable tests.
+func TestOpenOrphanWindowSuppressesWhileStillOpen(t *testing.T) {
+	t.Parallel()
+
+	m := &SyncMockManager{}
+	// The hole opened in the past: an OPEN interval extends to now, so the
+	// span it covers is [base, now]. Timestamps must sit inside that, the way
+	// a real TC's recorded window does — a future timestamp is outside an
+	// open hole by definition.
+	base := time.Now().Add(-2 * time.Second)
+
+	// A test case recorded BEFORE the hole opens must not be suppressed.
+	before := base.Add(-1 * time.Second)
+	if orphaned, _ := m.WasMockOrphanedInWindow(before, before.Add(time.Millisecond)); orphaned {
+		t.Fatal("a TC recorded before any hole was opened must not be suppressed")
+	}
+
+	closeHole := m.OpenOrphanWindow(base)
+
+	// Still open: a TC recorded since then must be suppressed even though
+	// nothing has told the manager when the hole ends.
+	during := time.Now().Add(-1 * time.Second)
+	if orphaned, n := m.WasMockOrphanedInWindow(during, during.Add(time.Millisecond)); !orphaned || n != 1 {
+		t.Fatalf("orphaned=%v count=%d during an OPEN hole, want true/1: the connection is "+
+			"un-capturable right now, so this TC would be shipped mock-less and fail replay "+
+			"with match_phase=no_mocks", orphaned, n)
+	}
+
+	closeHole()
+
+	// The hole is bounded now: traffic after it is capturable again.
+	//
+	// The sleep is load-bearing, not padding. An OPEN hole's end is "now at
+	// query time", so a timestamp taken only microseconds after the close is
+	// still inside an open interval and this assertion would pass whether or
+	// not the closer did anything — a closer that silently did nothing was a
+	// surviving mutant until this sleep put real distance between the close
+	// instant and the timestamp under test.
+	time.Sleep(20 * time.Millisecond)
+	after := time.Now()
+	if orphaned, _ := m.WasMockOrphanedInWindow(after, after.Add(time.Millisecond)); orphaned {
+		t.Fatal("a TC recorded after the hole closed must not be suppressed — closing must " +
+			"bound the window, or one retired parser silently suppresses the rest of the session")
+	}
+	// And what happened inside it stays suppressed.
+	if orphaned, _ := m.WasMockOrphanedInWindow(during, during.Add(time.Millisecond)); !orphaned {
+		t.Fatal("a TC inside the closed hole must still be suppressed")
+	}
+
+	// Idempotent: a double close must not move the end.
+	closeHole()
+	if orphaned, _ := m.WasMockOrphanedInWindow(during, during.Add(time.Millisecond)); !orphaned {
+		t.Fatal("closing twice changed the recorded window")
+	}
+}
+
+// TestOrphanRangeCountSplitsClosedFromOpen pins the operator-facing counter.
+//
+// The closer stamps r.end in place instead of removing the entry, so counting
+// the slice lengths reports every cleanly-closed window as still open. That
+// number is the ONLY signal that this suppressor fired at all, and a
+// still-open window is the one that keeps suppressing to the end of the
+// session — so getting the split backwards actively misleads.
+func TestOrphanRangeCountSplitsClosedFromOpen(t *testing.T) {
+	t.Parallel()
+
+	m := &SyncMockManager{}
+	base := time.Now().Add(-time.Minute)
+
+	closeA := m.OpenOrphanWindow(base)
+	m.OpenOrphanWindow(base.Add(time.Second)) // deliberately left open
+	closeA()
+
+	// A conventional bounded hole (the mongo resync path) lands elsewhere and
+	// must still be counted as closed.
+	m.RecordOrphanWindow(base.Add(2*time.Second), base.Add(3*time.Second))
+
+	if closed, open := m.OrphanRangeCount(); closed != 2 || open != 1 {
+		t.Fatalf("OrphanRangeCount() = (closed=%d, open=%d), want (2, 1)", closed, open)
+	}
+}
+
+// TestOpenOrphanWindowIgnoresZeroStart pins the degenerate input, matching
+// RecordOrphanWindow's refusal to make a claim on one. Suppressing from a zero
+// start would match every TC ever recorded.
+func TestOpenOrphanWindowIgnoresZeroStart(t *testing.T) {
+	t.Parallel()
+
+	m := &SyncMockManager{}
+	closeHole := m.OpenOrphanWindow(time.Time{})
+
+	// Queried while still OPEN and against a LONG-PAST window, deliberately.
+	// A zero start means "the beginning of time", so the range it would
+	// create covers every test case ever recorded — and closing first, or
+	// probing only the present, hides that: the closed end is later than a
+	// present-day timestamp, so the overlap test says no. Probing the past
+	// with the hole still open is what actually catches an accepted zero.
+	past := time.Now().Add(-365 * 24 * time.Hour)
+	if orphaned, _ := m.WasMockOrphanedInWindow(past, past.Add(time.Millisecond)); orphaned {
+		t.Fatal("a zero-start hole must suppress nothing; it would otherwise match every TC ever recorded")
+	}
+
+	closeHole() // must not panic
+}

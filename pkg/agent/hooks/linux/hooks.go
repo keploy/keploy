@@ -75,6 +75,12 @@ type Hooks struct {
 	objects     bpfObjects
 	cgBind4     link.Link
 	cgBind6     link.Link
+	cgPostBind4 link.Link
+	cgPostBind6 link.Link
+	// kernelPortAlloc records that BOTH post_bind hooks attached, which is
+	// the precondition for telling bind4/6 to let the kernel pick the
+	// application's relocated port (structs.FlagKernelPortAlloc).
+	kernelPortAlloc bool
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
@@ -174,8 +180,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// "test-set-0 / node-daemon traffic" leak. The reconciler-armed TGIDs
 	// already capture the app's ingress (no auto-detection needed), so skip the
 	// tracepoint entirely in DS mode.
-	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" {
-		h.logger.Info("daemonset mode: skipping sys_enter_socket PID auto-registration (SessionReconciler owns target_namespace_pids)")
+	// Low-latency per-container targeting (KEPLOY_TARGET_CONTAINERS set by the
+	// webhook) is the same situation as DaemonSet: the enterprise exec-barrier
+	// owns target_namespace_pids and scopes it to the TARGET container's cgroup.
+	// sys_enter_socket would auto-register EVERY process in the pod's PID ns
+	// (both target and sibling containers, keyed by host TGID), leaking sibling
+	// traffic past the cgroup targeting — the same pollution the DS skip prevents.
+	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
+		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
 	} else {
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
@@ -250,7 +262,52 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			return err
 		}
 		h.cgBind6 = cg6
-		h.logger.Debug("Attached ingress redirection hooks.")
+
+		// post_bind4/6 are what make the kernel-allocated relocation port
+		// usable: bind4/6 set user_port = 0 so the kernel's allocator picks a
+		// port that is genuinely free (BPF cannot determine that — see
+		// find_free_port's comment in keploy/ebpf), and these hooks read the
+		// assigned port back out and publish the bind event.
+		//
+		// Non-fatal on purpose, and both-or-nothing: the flag below is only
+		// set when both attach, and without the flag bind4/6 keep their old
+		// guess-a-port behaviour. So a cgroup setup that rejects them records
+		// exactly as it did before rather than failing startup, while everyone
+		// else stops hitting "That port is already in use" on the relocated
+		// port. This covers ATTACH failure only — a program the kernel refuses
+		// to LOAD already fails LoadAndAssign above and aborts the agent, the
+		// same as every other program in this object.
+		pb4, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet4PostBind,
+			Program: objs.K_postBind4,
+		})
+		if err != nil {
+			h.logger.Warn("failed to attach the post_bind4 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+		} else {
+			pb6, err := link.AttachCgroup(link.CgroupOptions{
+				Path:    cGroupPath,
+				Attach:  ebpf.AttachCGroupInet6PostBind,
+				Program: objs.K_postBind6,
+			})
+			if err != nil {
+				// Detach the v4 half too. With the flag off it would never do
+				// any work, and leaving it attached runs a guaranteed no-op
+				// program on every AF_INET bind on the machine for the whole
+				// session.
+				if cerr := pb4.Close(); cerr != nil {
+					h.logger.Debug("failed to detach post_bind4 after post_bind6 failed", zap.Error(cerr))
+				}
+				h.logger.Warn("failed to attach the post_bind6 cgroup hook; falling back to BPF-side port selection for the application's relocated port (rare: the app may fail to start with 'address already in use')", zap.Error(err))
+			} else {
+				h.cgPostBind4 = pb4
+				h.cgPostBind6 = pb6
+				h.kernelPortAlloc = true
+			}
+		}
+
+		h.logger.Debug("Attached ingress redirection hooks.",
+			zap.Bool("kernel_port_alloc", h.kernelPortAlloc))
 	}
 
 	c4, err := link.AttachCgroup(link.CgroupOptions{
@@ -396,6 +453,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agent.AgentInfoCustomizer(&agentInfo)
 	}
 
+	// OR'd in after the customizer so a downstream build setting its own
+	// flags cannot accidentally clear it, and only when both post_bind
+	// hooks are attached — bind4/6 must not hand the port choice to the
+	// kernel unless something is listening for the kernel's answer.
+	if h.kernelPortAlloc {
+		agentInfo.Flags |= structs.FlagKernelPortAlloc
+	}
+
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
@@ -506,6 +571,16 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		if h.cgBind6 != nil {
 			if err := h.cgBind6.Close(); err != nil {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
+			}
+		}
+		if h.cgPostBind4 != nil {
+			if err := h.cgPostBind4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgPostBind4")
+			}
+		}
+		if h.cgPostBind6 != nil {
+			if err := h.cgPostBind6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgPostBind6")
 			}
 		}
 

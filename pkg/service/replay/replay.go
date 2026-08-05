@@ -1246,6 +1246,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
+			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1446,6 +1447,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			SchemaNoiseDetection:   r.config.Test.SchemaNoiseDetection,
 			SchemaNoiseStrict:      r.config.Test.SchemaNoiseStrict,
 			MysqlPorts:             r.config.MysqlPorts,
+			DisableMysqlAutoDetect: r.config.DisableMysqlAutoDetect,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {

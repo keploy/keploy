@@ -132,6 +132,83 @@ jobs:
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
 
+  # Automatic MySQL port detection: same sample, relocated to :3307 by the
+  # script so nothing in the default port list or the config covers it.
+  # The cross-version cells self-skip via a capability probe — the feature
+  # needs detection at record time AND mock-derived recall at replay time,
+  # so a mixed-version pair cannot exercise it. See the script header.
+  mysql_auto_port:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+            # Both binaries come from this commit, so the capability
+            # probe must succeed. Setting this turns a probe failure
+            # into a hard error instead of a silent skip, so this cell
+            # can never go green without asserting the behaviour.
+            require_auto_detect: "true"
+    name: mysql-auto-port (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
+
+      - name: Run mysql-dual-conn app on a non-default MySQL port
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          REQUIRE_MYSQL_AUTO_DETECT: ${{ matrix.config.require_auto_detect }}
+        run: |
+          cd samples-java/mysql-dual-conn
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_auto_port/java-linux.sh
+
+      - name: Upload mysql-auto-port recordings and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-auto-port-${{ matrix.config.job }}-recordings
+          path: |
+            samples-java/mysql-dual-conn/keploy/
+            samples-java/mysql-dual-conn/test_logs.txt
+            samples-java/mysql-dual-conn/autoPort_record.txt
+            samples-java/mysql-dual-conn/mvn_build.log
+          if-no-files-found: warn
+          retention-days: 7
+
   tidb_stmt_cache:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
