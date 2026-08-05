@@ -278,12 +278,49 @@ func (a *App) setupComposeInMemory(extraArgs []string) error {
 	a.composeContent = content
 
 	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
-	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService)
+	preferFailureAbort := composeHasCompletionDependency(&compose)
+	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService, preferFailureAbort)
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
 		zap.String("cmd", a.cmd))
 
 	return nil
+}
+
+func composeHasCompletionDependency(compose *docker.Compose) bool {
+	if compose == nil || compose.Services.Content == nil {
+		return false
+	}
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+		service := compose.Services.Content[i+1]
+		if service == nil {
+			continue
+		}
+		for j := 0; j+1 < len(service.Content); j += 2 {
+			if service.Content[j].Value == "depends_on" && dependsOnRequiresCompletion(service.Content[j+1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func dependsOnRequiresCompletion(dependsOn *yaml.Node) bool {
+	if dependsOn == nil || dependsOn.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(dependsOn.Content); i += 2 {
+		dep := dependsOn.Content[i+1]
+		if dep == nil || dep.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(dep.Content); j += 2 {
+			if dep.Content[j].Value == "condition" && dep.Content[j+1].Value == "service_completed_successfully" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *App) SetAppCommand(appCommand string) {
