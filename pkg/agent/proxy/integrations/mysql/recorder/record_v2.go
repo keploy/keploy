@@ -535,6 +535,18 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	res.resp = append(res.resp, authRes.resp...)
 	res.responseOperation = authRes.responseOperation
 	res.resTimestamp = sess.DestStream.LastReadTime()
+
+	// Clamp res>=req for the config mock. Unlike the normal V2 handshake — where
+	// req (greeting) and res (auth) are read sequentially off the SAME DestStream
+	// so res>=req always holds — this post-TLS config mock crosses two captures:
+	// req is the pre-TLS greeting time stamped on the RAW stream (entry.ReqTimestamp)
+	// while res is the post-TLS auth time on the DECRYPTED stream. Chronologically
+	// the greeting precedes the auth, but if those cross-stream timestamps ever
+	// invert, the replay-load filters (filterByTimeStamp / MockManager) would drop
+	// this LifetimeSession config mock and break connection setup at replay. Pin it.
+	if res.resTimestamp.Before(res.reqTimestamp) {
+		res.resTimestamp = res.reqTimestamp
+	}
 	return res, nil
 }
 
