@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
 )
 
@@ -325,4 +326,95 @@ func TestNewProxyTLSUpgradeFn_DestSide_AlwaysInsecureSkipVerify(t *testing.T) {
 	if caller.InsecureSkipVerify {
 		t.Fatalf("caller cfg.InsecureSkipVerify was mutated to true; expected the upgrade fn to clone before flipping the flag")
 	}
+}
+
+// TestClampConsumerStallGrace pins the validation of the operator-supplied
+// teardown grace.
+//
+// The zero cases are the load-bearing ones: zero must survive as zero so
+// relay.withDefaults() can substitute DefaultConsumerStallGrace. keploy.yml
+// ships an explicit 2s, so this is not the path most users take — but zero
+// still arrives here from an operator who writes 0s, a programmatically built
+// Config, and any enterprise SetDefaultConfig string that omits the key.
+// Clamping it up to the 100ms floor would hand those callers a twentyfold cut
+// to the window a briefly-stalled parser gets at teardown, i.e. exactly the
+// mock loss the grace exists to prevent.
+func TestClampConsumerStallGrace(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		// Literals, deliberately, not minRecordBufferStallGrace /
+		// maxRecordBufferStallGrace: the bounds ARE the safety contract, and a
+		// table that reads them back from the constants it is checking moves
+		// with any edit to them and pins nothing.
+		{"zero defers to the relay default", 0, 0},
+		{"negative defers to the relay default", -5 * time.Second, 0},
+		{"below the floor clamps up", 50 * time.Millisecond, 100 * time.Millisecond},
+		{"just below the floor clamps up", 99 * time.Millisecond, 100 * time.Millisecond},
+		{"the floor itself is kept", 100 * time.Millisecond, 100 * time.Millisecond},
+		{"an in-range value is untouched", 2 * time.Second, 2 * time.Second},
+		{"the ceiling itself is kept", 10 * time.Second, 10 * time.Second},
+		{"just above the ceiling clamps down", 10*time.Second + time.Nanosecond, 10 * time.Second},
+		{"above the ceiling clamps down", 5 * time.Minute, 10 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := clampConsumerStallGrace(logger, tc.in); got != tc.want {
+				t.Errorf("clampConsumerStallGrace(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewSnapshotsStallGrace pins that the configured grace actually reaches
+// the Proxy.
+//
+// A correct clamp is worthless if nothing calls it. Without this, deleting the
+// clampConsumerStallGrace call in New — or the ConsumerStallGrace field in
+// proxy_v2.go's relay.Config literal — turns the whole knob into a no-op with
+// every package still green, which is precisely how a config option rots into
+// decoration. This covers the config -> Proxy half; the Proxy -> relay.Config
+// half is a private field read inside recordViaSupervisor and is left to
+// relay's own TestNewWiresTheStallGraceIntoBothTees.
+func TestNewSnapshotsStallGrace(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"zero stays zero so the relay default applies", 0, 0},
+		{"an in-range value reaches the proxy", 5 * time.Second, 5 * time.Second},
+		{"an out-of-range value is clamped on the way in", 10 * time.Minute, 10 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.New()
+			cfg.Record.RecordBuffer.ConsumerStallGrace = tc.in
+			if got := New(zap.NewNop(), nil, cfg).recordBufferStallGrace; got != tc.want {
+				t.Fatalf("recordBufferStallGrace = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The value a user who never touches the knob actually gets, end to end
+	// through the real default config rather than a hand-built one.
+	t.Run("the shipped default arrives intact", func(t *testing.T) {
+		t.Parallel()
+		cfg := config.New()
+		if got, want := New(zap.NewNop(), nil, cfg).recordBufferStallGrace, 2*time.Second; got != want {
+			t.Fatalf("recordBufferStallGrace = %v, want %v", got, want)
+		}
+	})
 }

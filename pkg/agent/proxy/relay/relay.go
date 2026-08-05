@@ -157,6 +157,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		fakeconn.FromClient,
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
+		cfg.ConsumerStallGrace,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
@@ -165,10 +166,16 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		fakeconn.FromDest,
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
+		cfg.ConsumerStallGrace,
 		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
+
+	// Assigned after construction rather than threaded through newTee's
+	// positional signature, which is already at seven arguments.
+	r.teeC2D.onDesync = cfg.OnCaptureDesync
+	r.teeD2C.onDesync = cfg.OnCaptureDesync
 
 	var localAddr, remoteAddr net.Addr
 	if src != nil {
@@ -176,12 +183,16 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		remoteAddr = src.RemoteAddr()
 	}
 	r.clientStream = fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
+	// The tee may only abandon a queued chunk once this stream is closed,
+	// so its drain cannot start until the stream exists.
+	r.teeC2D.start(r.clientStream.Done())
 	var destLocal, destRemote net.Addr
 	if dst != nil {
 		destLocal = dst.LocalAddr()
 		destRemote = dst.RemoteAddr()
 	}
 	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
+	r.teeD2C.start(r.destStream.Done())
 
 	return r
 }

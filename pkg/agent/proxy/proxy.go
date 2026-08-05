@@ -299,6 +299,12 @@ type Proxy struct {
 	recordBufferCap       int64
 	recordBufferQueueSize int
 
+	// recordBufferStallGrace mirrors
+	// config.Record.RecordBuffer.ConsumerStallGrace, snapshotted for the
+	// same reason as the two above. Zero falls through to the relay
+	// package's DefaultConsumerStallGrace via withDefaults().
+	recordBufferStallGrace time.Duration
+
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
 	// pairs into its BPF map so SCRAM-SHA-256-PLUS auth succeeds across
@@ -343,6 +349,23 @@ const (
 	maxRecordBufferCap   int64 = 2 << 30 // 2 GiB
 	minRecordBufferQueue       = 64
 	maxRecordBufferQueue       = 1 << 16 // 65536
+
+	// Safe range for ConsumerStallGrace. The floor keeps the grace long
+	// enough that an ordinarily-scheduled parser is never mistaken for a
+	// dead one on a loaded box. As above, zero is NOT clamped — it defers
+	// to the relay.
+	//
+	// The ceiling is deliberately close to the 2s default rather than
+	// generous. The wait this feeds (relay/tee.go, the deliver select) has
+	// no ctx.Done() case: its only exits are the parser taking a chunk, the
+	// consumer being reported gone, and this grace expiring. So the value
+	// set here is an UNINTERRUPTIBLE upper bound on how long one tee can sit
+	// at teardown against a parser that is never coming back — neither
+	// Ctrl-C nor relay cancellation shortens it. 10s is already 5x the
+	// default and far past any real parser's catch-up time, while staying
+	// short enough that hitting it reads as a pause and not a hang.
+	minRecordBufferStallGrace = 100 * time.Millisecond
+	maxRecordBufferStallGrace = 10 * time.Second
 )
 
 // clampRecordBuffer validates user-supplied record-buffer values
@@ -403,6 +426,41 @@ func clampRecordBuffer(logger *zap.Logger, capBytes uint64, queue int) (int64, i
 	}
 
 	return outCap, outQueue
+}
+
+// clampConsumerStallGrace validates the operator-supplied teardown grace
+// against the safe range, warning and clamping rather than failing. Kept
+// separate from clampRecordBuffer instead of widening that function's
+// signature: the two are read at the same call site but are otherwise
+// unrelated knobs, and a (int64, int, time.Duration) return is harder to
+// read at the call site than two named calls.
+//
+// Zero is passed through untouched — it is the "defer to the relay's
+// default" signal, not a value to validate. A negative value is treated
+// the same way rather than clamped up: relay.withDefaults() maps <= 0 to
+// DefaultConsumerStallGrace, so deferring keeps one definition of the
+// default instead of duplicating it here.
+func clampConsumerStallGrace(logger *zap.Logger, grace time.Duration) time.Duration {
+	switch {
+	case grace <= 0:
+		return 0
+	case grace > maxRecordBufferStallGrace:
+		logger.Debug("record-buffer consumerStallGrace above safe maximum; clamping",
+			zap.Duration("requested", grace),
+			zap.Duration("clamped", maxRecordBufferStallGrace),
+			zap.Duration("max", maxRecordBufferStallGrace),
+		)
+		return maxRecordBufferStallGrace
+	case grace < minRecordBufferStallGrace:
+		logger.Debug("record-buffer consumerStallGrace below safe minimum; clamping",
+			zap.Duration("requested", grace),
+			zap.Duration("clamped", minRecordBufferStallGrace),
+			zap.Duration("min", minRecordBufferStallGrace),
+		)
+		return minRecordBufferStallGrace
+	default:
+		return grace
+	}
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -721,6 +779,10 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger,
 		opts.Record.RecordBuffer.MaxMemoryPerConnection,
 		opts.Record.RecordBuffer.QueueSize,
+	)
+	proxy.recordBufferStallGrace = clampConsumerStallGrace(
+		logger,
+		opts.Record.RecordBuffer.ConsumerStallGrace,
 	)
 
 	if len(opts.Async.Lanes) > 0 {

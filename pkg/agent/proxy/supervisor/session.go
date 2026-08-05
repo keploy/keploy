@@ -265,6 +265,25 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	mgr.RecordOrphanWindow(start, end)
 }
 
+// OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
+// whose end is not yet known. It resolves the manager the same way and returns
+// the closer; see SyncMockManager.OpenOrphanWindow.
+//
+// The caller is the V2 dispatcher on a passthrough fallthrough: once a parser
+// is retired the relay raw-forwards the rest of that connection, so it emits no
+// further mock and every test case recorded against it would otherwise ship
+// mock-less and replay as match_phase=no_mocks.
+func (s *Session) OpenOrphanWindow(start time.Time) func() {
+	if s == nil {
+		return func() {}
+	}
+	mgr := s.Mgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	return mgr.OpenOrphanWindow(start)
+}
+
 // EmitMock sends m to the mocks channel. If the session's active mock
 // is marked incomplete, EmitMock returns nil without sending (the mock
 // is dropped on the floor and the incomplete flag is cleared, matching

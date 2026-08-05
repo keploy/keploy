@@ -119,6 +119,14 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		emitMockV2(ctx, sess, handshake.req, handshake.resp, "config", handshake.requestOperation, handshake.responseOperation, handshake.reqTimestamp, handshake.resTimestamp)
 	}
 
+	// Observe-only pre-TLS handshake was stored for the decrypted stream's
+	// post-TLS stitch; the rest of THIS raw stream is encrypted TLS records
+	// (not decodable command traffic), so stop here.
+	if handshake.preTLSStored {
+		logger.Debug("V2: pre-TLS handshake stored; raw stream ends here, post-TLS capture continues on the decrypted tls-* stream")
+		return nil
+	}
+
 	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			return nil
@@ -141,6 +149,13 @@ type v2HandshakeResult struct {
 	reqTimestamp      time.Time
 	resTimestamp      time.Time
 	skipConfigMock    bool
+	// preTLSStored is set when the observe-only (SkipTLSMITM) path has
+	// pushed the pre-TLS server greeting + SSLRequest into
+	// TLSHandshakeStore and handed the post-TLS continuation off to the
+	// decrypted (tls-*) stream's handlePostTLSRecord. The caller must
+	// stop after the handshake: the remaining bytes on THIS raw stream
+	// are opaque TLS records, not decodable MySQL command traffic.
+	preTLSStored bool
 }
 
 // handleInitialHandshakeV2 walks the MySQL connection phase on the V2
@@ -251,26 +266,39 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	if decodeCtx.UseSSL {
 		switch {
 		case !postTLS && sess.Opts.SkipTLSMITM:
-			// Observe-only proxyless TLS (TLS terminated in-JVM / by an
-			// SSL/GoTLS/JSSE uprobe, not by us): there is NO upstream socket to
-			// relay a live TLS upgrade onto, so performTLSUpgradeV2 cannot
-			// succeed here. Instead stash the pre-TLS server greeting + client
-			// SSLRequest in TLSHandshakeStore; the POST-TLS decrypted stream
-			// (routed here with PostTLSMode) pops them and records the full
-			// handshake + command phase. The pre-TLS config-mock shell (greeting
-			// + SSLRequest, already in res) is returned so it is emitted here.
-			// This is the V2 analogue of the legacy conn.go SkipTLSMITM branch.
-			if err := stashPreTLSHandshakeV2(ctx, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
+			// Observe-only capture (proxyless / sockmap): there is no relay that can
+			// perform a real TLS handshake for us, so we cannot send a
+			// KindUpgradeTLS directive — the observe-only supervisor would reject it
+			// ("proxyless observe-only capture cannot perform a TLS upgrade"), abort
+			// this stream, and the pre-TLS greeting would never be stored.
+			//
+			// Instead push the raw server greeting + SSLRequest into
+			// TLSHandshakeStore keyed by dest port. The separately-captured,
+			// uprobe-decrypted tls-* stream is routed back into THIS recorder with
+			// PostTLSMode set (see the `case postTLS` arm below) and pops them to
+			// reconstruct the decode context for the post-TLS auth + command phase.
+			//
+			// The remaining bytes on THIS raw stream are encrypted TLS records, so we
+			// stop after storing (preTLSStored) rather than continuing into the
+			// command phase.
+			//
+			// The !postTLS guard is load-bearing: sess.Opts.SkipTLSMITM is also true
+			// on the decrypted stream (same session options), so without it the
+			// decrypted stream would stash a second time and return instead of
+			// recording.
+			if err := storePreTLSHandshakeV2(ctx, logger, sess, handshake, clientFirst, res.reqTimestamp); err != nil {
 				return res, err
 			}
-			// Do NOT emit a config mock from the pre-TLS observe stream: it would
-			// be an incomplete [SSLRequest]-only mock that the replayer selects as
-			// SSL-eligible but then can't match the HandshakeResponse41 against
-			// ("no mysql mocks matched the HandshakeResponse41 within SSL-selected
-			// mocks"). The POST-TLS decrypted stream emits the authoritative
-			// combined [SSLRequest, HandshakeResponse41] config mock instead.
 			res.skipConfigMock = true
+			res.preTLSStored = true
 			return res, nil
+
+		case postTLS:
+			// The decrypted (uprobe) stream. The greeting was already restored from
+			// the store above, and the client packet just read IS the post-TLS
+			// HandshakeResponse41 with credentials, delivered in plaintext over the
+			// already-established TLS channel. There is no upgrade to perform, so
+			// fall through to the auth read below.
 
 		case postTLS:
 			// The client packet just read (clientFirst) IS the post-TLS
@@ -558,15 +586,13 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	return res, nil
 }
 
-// stashPreTLSHandshakeV2 pushes the raw pre-TLS server greeting + client
-// SSLRequest into the shared TLSHandshakeStore so the POST-TLS decrypted stream
-// (routed here with PostTLSMode) can pop them and reconstruct the handshake.
-// V2 analogue of the SkipTLSMITM branch in the legacy conn.go
-// handleInitialHandshake. Pushes under BOTH the connection-specific key and the
-// port-only fallback: the pre-TLS observe stream and the post-TLS decrypted
-// stream are different TCP connections (different ConnKeys), so the port key is
-// what bridges them.
-func stashPreTLSHandshakeV2(ctx context.Context, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time) error {
+// storePreTLSHandshakeV2 pushes the pre-TLS MySQL server greeting and the
+// client SSLRequest into the shared TLSHandshakeStore so the decrypted
+// (uprobe) tls-* stream can recover them. Stores under both the conn-specific
+// key and the port-only fallback key, because the raw observe-only stream and
+// the decrypted uprobe stream are different TCP connections with different
+// connIDs — only the port-only key (port:3306) reliably bridges the two.
+func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, greeting, sslRequest []byte, reqTimestamp time.Time) error {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
 		return fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
@@ -575,35 +601,45 @@ func stashPreTLSHandshakeV2(ctx context.Context, sess *supervisor.Session, greet
 	if sess.Opts.DstCfg != nil {
 		dstPort = uint16(sess.Opts.DstCfg.Port)
 	}
-	entry := models.TLSHandshakeEntry{
+	hsEntry := models.TLSHandshakeEntry{
 		RespPackets:  [][]byte{greeting},
 		ReqPackets:   [][]byte{sslRequest},
 		ReqTimestamp: reqTimestamp,
 	}
 	storeKey := models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort)
-	hsStore.Push(storeKey, entry)
-	// Also push under the port-only fallback key, which is what actually bridges
-	// the two halves: the pre-TLS observe stream and the post-TLS decrypted stream
-	// are different TCP connections with different ConnKeys.
+	hsStore.Push(storeKey, hsEntry)
+	// Port-only fallback: the raw and decrypted streams are different TCP
+	// connections with different ephemeral ports, so conn-specific keys won't
+	// match across them.
 	//
-	// Guarded on inequality (as the legacy path does): when ConnKey is empty the
-	// two keys are IDENTICAL, and pushing unconditionally would queue the same
-	// entry twice under one key. The post-TLS stream pops one copy and the
-	// duplicate lingers until the TTL, where a later connection pops it and
-	// reconstructs its handshake against a stale greeting.
-	if portKey := models.HandshakeStoreKey("", dstPort); portKey != storeKey {
-		hsStore.Push(portKey, entry)
+	// Guarded on inequality: when ConnKey is empty the two keys are IDENTICAL, and
+	// pushing unconditionally would queue the same entry twice under one key. The
+	// post-TLS stream pops one copy and the duplicate lingers until the TTL, where
+	// a later connection pops it and reconstructs against a stale greeting.
+	portKey := models.HandshakeStoreKey("", dstPort)
+	if portKey != storeKey {
+		hsStore.Push(portKey, hsEntry)
 	}
+	logger.Debug("V2: pushed pre-TLS MySQL greeting + SSLRequest to TLSHandshakeStore for post-TLS stitch",
+		zap.String("key", storeKey),
+		zap.String("portKey", portKey),
+		zap.String("connKey", sess.Opts.ConnKey),
+		zap.Uint16("dstPort", dstPort))
 	return nil
 }
 
 // popStoredGreetingV2 pops the pre-TLS server greeting (and client SSLRequest)
-// stashed by stashPreTLSHandshakeV2. Tries the connection-specific key first,
-// then the port-only fallback (which is what actually matches across the two
-// distinct streams). Waits briefly because the decrypted stream can reach here
-// before the pre-TLS stream has finished stashing. Returns
-// wire.ErrServerGreetingNotFound when nothing is available, so the caller skips
-// the connection gracefully (same as a genuine mid-stream join).
+// stored by storePreTLSHandshakeV2. Tries the connection-specific key first, then
+// the port-only fallback (which is what actually matches across the two distinct
+// streams). Waits briefly because the decrypted stream can reach here before the
+// raw stream has finished storing.
+//
+// This is what keeps MySQL-over-TLS on the V2 recorder: without it the decrypted
+// stream has no greeting to decode against and has to be handed to the legacy
+// post-TLS recorder instead.
+//
+// Returns wire.ErrServerGreetingNotFound when nothing is available, so the caller
+// skips the connection gracefully (same as a genuine mid-stream join).
 func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (greeting []byte, sslRequest []byte, reqTimestamp time.Time, err error) {
 	hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if !ok || hsStore == nil {
@@ -627,11 +663,11 @@ func popStoredGreetingV2(ctx context.Context, logger *zap.Logger, sess *supervis
 	if len(entry.ReqPackets) > 0 {
 		sslRequest = entry.ReqPackets[0]
 	}
-	// Carry the ORIGINAL chunk-derived arrival time of the greeting back to the
-	// caller. The pre-TLS stream stamped it from FakeConn chunk ReadAt times when it
-	// stashed the entry, so it is real traffic time; substituting time.Now() here
-	// would stamp the config mock with recorder wall clock at reconstruction time,
-	// which replay's per-test time freezing then reads back as the request time.
+	// Carry the ORIGINAL chunk-derived arrival time back to the caller. The raw
+	// stream stamped it from FakeConn chunk ReadAt times when it stored the entry,
+	// so it is real traffic time; substituting time.Now() here would stamp the
+	// config mock with recorder wall clock at reconstruction time, which replay's
+	// per-test time freezing then reads back as the request time.
 	return greeting, sslRequest, entry.ReqTimestamp, nil
 }
 

@@ -336,12 +336,14 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// — the host's keploy.yml is not bind-mounted into the agent
 		// container, so argv is the only propagation channel here.
 		// Hidden: only relevant when the operator already knows they
-		// need to bump these (saw drops with reason per_conn_cap /
-		// channel_full). See pkg/agent/proxy/relay/config.go.
+		// need to bump these (saw drops with reason per_conn_cap).
+		// See pkg/agent/proxy/relay/config.go.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB).")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024).")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024).")
+		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s).")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
+		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
 
 	default:
 		return errors.New("unknown command name")
@@ -364,13 +366,15 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Record.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode. Bytes flow verbatim between app and upstream until a TLS ClientHello is seen; the proxy then MITM-terminates both halves so the captured pcap is decryptable. Independent of --global-passthrough.")
 		// Advanced record-buffer tuning. Hidden from --help: only relevant
 		// when the operator already knows they need to bump these (saw
-		// per_conn_cap / channel_full drops in agent logs). Env vars
+		// per_conn_cap drops in agent logs). Env vars
 		// KEPLOY_RECORD_MAX_MEMORY_PER_CONN and KEPLOY_RECORD_QUEUE_SIZE
 		// override these flags.
 		cmd.Flags().Uint64("max-memory-per-conn", c.cfg.Record.RecordBuffer.MaxMemoryPerConnection, "Bytes; per-connection recording buffer cap (default 64MiB). Bump if you see per_conn_cap drops.")
-		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recording queue (default 1024). Bump if you see channel_full drops.")
+		cmd.Flags().Int("queue-size", c.cfg.Record.RecordBuffer.QueueSize, "Number of chunk slots in the recorder-to-parser hand-off channel (default 1024). Does not bound recording; raise max-memory-per-conn for per_conn_cap drops.")
+		cmd.Flags().Duration("consumer-stall-grace", c.cfg.Record.RecordBuffer.ConsumerStallGrace, "How long a closing connection waits on a parser that has stopped draining before abandoning its queued chunks (default 2s). Bounds stalled time, not elapsed time, and is only consulted after close.")
 		_ = cmd.Flags().MarkHidden("max-memory-per-conn")
 		_ = cmd.Flags().MarkHidden("queue-size")
+		_ = cmd.Flags().MarkHidden("consumer-stall-grace")
 	case "test":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -469,6 +473,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"memoryLimit":               "memory-limit",
 		"maxMemoryPerConnection":    "max-memory-per-conn",
 		"queueSize":                 "queue-size",
+		"consumerStallGrace":        "consumer-stall-grace",
 		"appId":                     "app-id",
 		"appName":                   "app-name",
 		"generateGithubActions":     "generate-github-actions",
@@ -1162,6 +1167,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
 				return err
 			}
+			if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
+				return err
+			}
 
 			// Cross-check: a single connection's recording buffer must
 			// not exceed the docker container's memory limit. Otherwise
@@ -1547,6 +1555,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err := c.resolveRecordBufferInt(cmd, "queue-size", "KEPLOY_RECORD_QUEUE_SIZE", &c.cfg.Record.RecordBuffer.QueueSize); err != nil {
 			return err
 		}
+		if err := c.resolveRecordBufferDuration(cmd, "consumer-stall-grace", "KEPLOY_RECORD_CONSUMER_STALL_GRACE", &c.cfg.Record.RecordBuffer.ConsumerStallGrace); err != nil {
+			return err
+		}
 
 		// Cross-check: max-memory-per-conn must not exceed the agent's
 		// memory limit. The agent's --memory-limit (Agent.MemoryLimit in
@@ -1626,6 +1637,37 @@ func (c *CmdConfigurator) resolveRecordBufferInt(cmd *cobra.Command, flagName, e
 		v, err := strconv.Atoi(envVal)
 		if err != nil {
 			c.logger.Debug("ignoring malformed env var; expected integer",
+				zap.String("envVar", envName),
+				zap.String("value", envVal),
+				zap.Error(err))
+		} else {
+			*target = v
+		}
+	}
+	return nil
+}
+
+// resolveRecordBufferDuration is the time.Duration sibling of
+// resolveRecordBufferUint64. Same precedence (flag, then env) and the same
+// tolerance for a malformed env var: log at debug and keep the previous
+// value rather than failing the command, because a typo'd tuning knob must
+// not stop a recording. The env value accepts any time.ParseDuration form
+// ("2s", "500ms", "1m30s"); a bare integer is rejected as malformed rather
+// than guessed at, since the unit is exactly the thing worth being explicit
+// about.
+func (c *CmdConfigurator) resolveRecordBufferDuration(cmd *cobra.Command, flagName, envName string, target *time.Duration) error {
+	if cmd.Flags().Changed(flagName) {
+		v, err := cmd.Flags().GetDuration(flagName)
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get "+flagName+" flag")
+			return fmt.Errorf("failed to get %s flag: %w", flagName, err)
+		}
+		*target = v
+	}
+	if envVal := os.Getenv(envName); envVal != "" {
+		v, err := time.ParseDuration(envVal)
+		if err != nil {
+			c.logger.Debug("ignoring malformed env var; expected a duration such as \"2s\"",
 				zap.String("envVar", envName),
 				zap.String("value", envVal),
 				zap.Error(err))
