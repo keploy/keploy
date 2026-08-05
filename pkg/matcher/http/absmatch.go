@@ -203,7 +203,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 			return false, reqCompare
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, reqBodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, reqBodyNoise, ignoreOrdering, logger)
 			exact := jsonComparisonResult.IsExact()
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))
@@ -377,7 +377,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 			return false, respCompare
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, logger)
 			exact := jsonComparisonResult.IsExact()
 			if err != nil {
 				logger.Error("failed to compare json", zap.Error(err))

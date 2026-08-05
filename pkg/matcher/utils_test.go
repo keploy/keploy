@@ -501,7 +501,7 @@ func TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ValidateAndMarshalJSON: %v", err)
 		}
-		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.product.stock": {}}, false)
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.product.stock": {}}, false, nil)
 		if err != nil {
 			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
 		}
@@ -516,7 +516,7 @@ func TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ValidateAndMarshalJSON: %v", err)
 		}
-		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.product.stock": {}}, false)
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.product.stock": {}}, false, nil)
 		if err != nil {
 			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
 		}
@@ -533,7 +533,7 @@ func TestJSONDiffWithNoiseControl_IndexedPathIsNotSupported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ValidateAndMarshalJSON: %v", err)
 		}
-		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.id": {}}, false)
+		res, err := JSONDiffWithNoiseControl(v, map[string][]string{"items.0.id": {}}, false, nil)
 		if err != nil {
 			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
 		}
@@ -553,7 +553,7 @@ func TestJSONDiffWithNoiseControl_NumericObjectKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateAndMarshalJSON: %v", err)
 	}
-	res, err := JSONDiffWithNoiseControl(v, map[string][]string{"data.2026.count": {}}, false)
+	res, err := JSONDiffWithNoiseControl(v, map[string][]string{"data.2026.count": {}}, false, nil)
 	if err != nil {
 		t.Fatalf("JSONDiffWithNoiseControl: %v", err)
 	}

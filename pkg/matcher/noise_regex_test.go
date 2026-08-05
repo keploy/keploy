@@ -3,10 +3,14 @@ package matcher
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"regexp"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // diffNoise is a small helper: compare two JSON documents under a noise map and
@@ -18,7 +22,7 @@ func diffNoise(t *testing.T, expected, actual string, noise map[string][]string)
 	if err != nil {
 		t.Fatalf("ValidateAndMarshalJSON: %v", err)
 	}
-	res, err := JSONDiffWithNoiseControl(v, noise, false)
+	res, err := JSONDiffWithNoiseControl(v, noise, false, nil)
 	if err != nil {
 		t.Fatalf("JSONDiffWithNoiseControl: %v", err)
 	}
@@ -284,13 +288,13 @@ func TestRegexNoise_GlobalKeyEnforcesPattern(t *testing.T) {
 			want:     true,
 		},
 		{
-			// No value to match, so the entry covers it — the same rule applied
-			// to a container, and what this did before patterns were enforced.
-			name:     "a missing key is excused by a pattern-guarded entry",
+			// A pattern has no value to match against, and a field disappearing
+			// is a schema change, not a volatile value.
+			name:     "a missing key is not excused by a pattern-guarded entry",
 			expected: `{"a":1,"status":"PAID"}`,
 			actual:   `{"a":1}`,
 			noise:    map[string][]string{"status": {"^PAID$"}},
-			want:     true,
+			want:     false,
 		},
 		{
 			name:     "a missing key is excused by an empty pattern list",
@@ -483,5 +487,187 @@ func TestRegexNoise_ArrayOfScalarsEnforcesPattern(t *testing.T) {
 	nested := map[string][]string{"order.items": {`^ord-\d+$`}}
 	if !diffNoise(t, `{"order":{"items":[{"id":"ord-1"}]}}`, `{"order":{"items":[{"id":"HACK"}]}}`, nested) {
 		t.Errorf("a non-scalar array relaxes its values rather than applying the pattern per element")
+	}
+}
+
+// TestRegexNoise_InvalidPatternIsReported pins that a pattern that cannot be
+// compiled is reported once. It silently matches nothing, so without a warning
+// the user sees a field they marked as noise start failing with no clue why.
+func TestRegexNoise_InvalidPatternIsReported(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	// Use a pattern unique to this test: the warning dedupes per pattern for the
+	// life of the process.
+	bad := `^(unclosed-` + t.Name()
+	e, a := `{"order":{"status":"PENDING"}}`, `{"order":{"status":"GARBAGE"}}`
+	v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+	if err != nil {
+		t.Fatalf("ValidateAndMarshalJSON: %v", err)
+	}
+	noise := map[string][]string{"order.status": {bad}}
+
+	res, err := JSONDiffWithNoiseControl(v, noise, false, logger)
+	if err != nil {
+		t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+	}
+	if res.IsExact() {
+		t.Errorf("an invalid pattern must not silence the field")
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("emitted %d warnings, want exactly 1: %v", logs.Len(), logs.All())
+	}
+	if got := logs.All()[0].ContextMap()["pattern"]; got != bad {
+		t.Errorf("warning names pattern %v, want %q", got, bad)
+	}
+
+	// Repeated compilation of the same pattern must not repeat the warning.
+	for i := 0; i < 20; i++ {
+		if _, err := JSONDiffWithNoiseControl(v, noise, false, logger); err != nil {
+			t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+		}
+	}
+	if logs.Len() != 1 {
+		t.Errorf("warning repeated %d times for one pattern, want 1", logs.Len())
+	}
+}
+
+// TestRegexNoise_ValidPatternWarnsNothing guards the common path from noise.
+func TestRegexNoise_ValidPatternWarnsNothing(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	e, a := `{"order":{"status":"PENDING"}}`, `{"order":{"status":"PAID"}}`
+	v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+	if err != nil {
+		t.Fatalf("ValidateAndMarshalJSON: %v", err)
+	}
+	if _, err := JSONDiffWithNoiseControl(v, map[string][]string{"order.status": {"^(PENDING|PAID)$"}}, false, logger); err != nil {
+		t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("emitted %d warnings for a valid pattern, want 0: %v", logs.Len(), logs.All())
+	}
+}
+
+// TestRegexNoise_NullValuedFieldCanBeNoise covers a field recorded as null. A
+// nullable volatile field is exactly what a pattern is for, but the null branch
+// used to ignore noise entirely, so no entry could ever cover it.
+func TestRegexNoise_NullValuedFieldCanBeNoise(t *testing.T) {
+	recorded := `{"order":{"cancelledAt":null}}`
+	replayed := `{"order":{"cancelledAt":"2026-08-05T08:22:51Z"}}`
+
+	if !diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {}}) {
+		t.Errorf("an empty pattern list must cover a field recorded as null")
+	}
+	if !diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^\d{4}-`}}) {
+		t.Errorf("a matching pattern must cover a field recorded as null")
+	}
+	if diffNoise(t, recorded, replayed, map[string][]string{"order.cancelledAt": {`^nope$`}}) {
+		t.Errorf("a non-matching pattern must leave the difference reported")
+	}
+	if !diffNoise(t, recorded, `{"order":{"cancelledAt":null}}`, map[string][]string{}) {
+		t.Errorf("null replayed as null is unchanged")
+	}
+}
+
+// TestRegexNoise_UnexpectedKeyHonoursPattern pins that an extra key in the
+// replay is excused on the same terms under path noise as under a global entry.
+func TestRegexNoise_UnexpectedKeyHonoursPattern(t *testing.T) {
+	if !diffNoise(t, `{"a":1}`, `{"a":1,"trace":"ord-9"}`, map[string][]string{"trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key matching its pattern should be excused")
+	}
+	if diffNoise(t, `{"a":1}`, `{"a":1,"trace":"HACK"}`, map[string][]string{"trace": {`^ord-\d+$`}}) {
+		t.Errorf("an unexpected key outside its pattern must be reported")
+	}
+}
+
+// TestRegexNoise_MissingKeyRuleIsConsistent pins that path noise and global
+// noise agree: only an unconditional entry excuses a key the replay dropped.
+func TestRegexNoise_MissingKeyRuleIsConsistent(t *testing.T) {
+	recorded := `{"order":{"a":1,"status":"PAID"}}`
+	replayed := `{"order":{"a":1}}`
+
+	for _, c := range []struct {
+		name  string
+		noise map[string][]string
+		want  bool
+	}{
+		{"global, unconditional", map[string][]string{"status": {}}, true},
+		{"global, pattern-guarded", map[string][]string{"status": {"^PAID$"}}, false},
+		{"path, unconditional", map[string][]string{"order.status": {}}, true},
+		{"path, pattern-guarded", map[string][]string{"order.status": {"^PAID$"}}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := diffNoise(t, recorded, replayed, c.noise); got != c.want {
+				t.Errorf("IsExact() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSubstringKeyMatch_IsDeterministic pins that overlapping header-noise keys
+// resolve the same way on every run. It used to range a map and take whichever
+// key came first, so a header could be noisy in one run and not the next.
+func TestSubstringKeyMatch_IsDeterministic(t *testing.T) {
+	mp := map[string][]string{
+		"id":              {"short"},
+		"request-id":      {"medium"},
+		"x-request-id":    {"long"},
+		"x-request-id-v2": {"longest"},
+	}
+	for i := 0; i < 300; i++ {
+		got, ok := SubstringKeyMatch("X-Request-Id", mp)
+		if !ok {
+			t.Fatalf("expected a match")
+		}
+		if len(got) != 1 || got[0] != "long" {
+			t.Fatalf("iteration %d: got %v, want the most specific matching key", i, got)
+		}
+	}
+}
+
+// TestCompareHeaders_InvalidPatternDoesNotPanic covers the other consumer of
+// getCompiled. MatchesAnyRegex dereferenced the same nil, so a typo in a header
+// noise pattern crashed the run exactly as a body one did.
+func TestCompareHeaders_InvalidPatternDoesNotPanic(t *testing.T) {
+	h1 := http.Header{"X-Trace": []string{"abc"}}
+	h2 := http.Header{"X-Trace": []string{"def"}}
+	res := &[]models.HeaderResult{}
+
+	// Must not panic, and an uncompilable pattern must not silence the header.
+	if CompareHeaders(h1, h2, res, map[string][]string{"x-trace": {"^(unclosed"}}) {
+		t.Errorf("an invalid pattern must not make a differing header noisy")
+	}
+}
+
+// TestMatchesAnyRegex_InvalidPatternDoesNotPanic is the direct guard.
+func TestMatchesAnyRegex_InvalidPatternDoesNotPanic(t *testing.T) {
+	ok, pattern := MatchesAnyRegex("anything", []string{"^(unclosed", `^any`})
+	if !ok || pattern != `^any` {
+		t.Errorf("got (%v, %q), want the valid pattern to still match", ok, pattern)
+	}
+	if ok, _ := MatchesAnyRegex("anything", []string{"^(unclosed"}); ok {
+		t.Errorf("an invalid pattern must not match")
+	}
+}
+
+// TestCompareHeaders_RegexEnforced pins that a header noise pattern constrains
+// the value, matching the body semantics.
+func TestCompareHeaders_RegexEnforced(t *testing.T) {
+	noise := map[string][]string{"x-trace": {`^ord-\d+$`}}
+
+	inPattern := &[]models.HeaderResult{}
+	if !CompareHeaders(
+		http.Header{"X-Trace": []string{"ord-1"}},
+		http.Header{"X-Trace": []string{"ord-2"}}, inPattern, noise) {
+		t.Errorf("a value inside the pattern should be ignored")
+	}
+
+	outOfPattern := &[]models.HeaderResult{}
+	if CompareHeaders(
+		http.Header{"X-Trace": []string{"ord-1"}},
+		http.Header{"X-Trace": []string{"HACK"}}, outOfPattern, noise) {
+		t.Errorf("a value outside the pattern must be reported")
 	}
 }

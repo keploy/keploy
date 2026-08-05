@@ -30,7 +30,7 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		return nil, err
 	}
 
-	idx := buildNoiseIndex(bodyNoise) // already in matcher/utils.go
+	idx := buildNoiseIndex(bodyNoise, nil) // already in matcher/utils.go
 
 	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
 	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
@@ -136,7 +136,7 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 		return nil
 	}
 
-	idx := buildNoiseIndex(known)
+	idx := buildNoiseIndex(known, nil)
 
 	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
 	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
@@ -192,7 +192,7 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		return nil
 	}
 
-	idx := buildNoiseIndex(known)
+	idx := buildNoiseIndex(known, nil)
 
 	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
 	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
@@ -260,9 +260,14 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 	keyLower := strings.ToLower(path)
-	if regs, noisy := ni.match(keyLower); noisy && len(regs) == 0 {
-		// whole subtree is noisy → ignore
-		return
+	if regs, noisy := ni.match(keyLower); noisy {
+		// An entry with no patterns ignores the whole subtree. A pattern-guarded
+		// entry ignores only the values it describes, so it must be evaluated
+		// against this value — otherwise a field the matcher just reported as a
+		// difference would be missing from the report explaining it.
+		if len(regs) == 0 || noisyForRegexps(regs, v) {
+			return
+		}
 	}
 
 	switch t := v.(type) {
