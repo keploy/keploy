@@ -209,6 +209,25 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 
 		if passThrough {
 			if bypass.Port == 0 || bypass.Port == destPort {
+				// Warn when commonly-needed infrastructure services are being
+				// bypassed so users can identify and fix their config. These
+				// services (Vault, OTel Collector, Consul) are often required
+				// during test replay but their mocks won't exist if recording
+				// skips them.
+				switch destPort {
+				case 8200: // Vault
+					logger.Warn("Bypassing Vault request due to passthrough rule — this request will NOT be recorded as a mock. "+
+						"If Vault is needed during test replay, remove port 8200 from bypass/passthrough config.",
+						zap.Uint("port", destPort), zap.String("url", req.URL.String()))
+				case 4318, 4317: // OpenTelemetry Collector (HTTP/gRPC)
+					logger.Warn("Bypassing OpenTelemetry Collector request due to passthrough rule — this request will NOT be recorded as a mock. "+
+						"If OTel export is needed during test replay, remove port from bypass/passthrough config or disable the exporter in test mode.",
+						zap.Uint("port", destPort), zap.String("url", req.URL.String()))
+				case 8500: // Consul
+					logger.Warn("Bypassing Consul request due to passthrough rule — this request will NOT be recorded as a mock. "+
+						"If Consul KV is needed during test replay, remove port 8500 from bypass/passthrough config.",
+						zap.Uint("port", destPort), zap.String("url", req.URL.String()))
+				}
 				return true
 			}
 			passThrough = false
