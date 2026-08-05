@@ -387,7 +387,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	}
 	hsStore, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if hsStore == nil {
-		return res, fmt.Errorf("post-TLS V2: TLSHandshakeStore not available in context")
+		return res, fmt.Errorf("post-TLS V2: PostTLSModeKey is set but TLSHandshakeStore is missing from the context — the SSL/GoTLS reader callback must set models.TLSHandshakeStoreKey (same store the pre-TLS raw stream pushes the greeting into) before dispatching the decrypted tls-* stream")
 	}
 	entry, ok := hsStore.PopWait(models.HandshakeStoreKey(sess.Opts.ConnKey, dstPort), 5*time.Second)
 	if !ok {
@@ -468,6 +468,12 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 			zap.Uint16("dstPort", dstPort))
 		decodeCtx.ClientCaps = wire.CLIENT_DEPRECATE_EOF
 		decodeCtx.ClientCapabilities = wire.CLIENT_DEPRECATE_EOF
+		// firstBuf is a COMMAND, not a handshake response — but LastOp is still
+		// HandshakeV10 from the greeting seed above, and DecodePayload treats
+		// LastOp==HandshakeV10 as "expect HandshakeResponse41/SSLRequest". Reset
+		// it so handleCommandsV2 decodes firstCmd as a command (mirrors the legacy
+		// handlePostTLSRecord seq==0 path, conn.go).
+		decodeCtx.LastOp.Store(clientKey, wire.RESET)
 		res.responseOperation = greetingPkt.Header.Type
 		res.firstCmd = firstBuf
 		res.resTimestamp = res.reqTimestamp
