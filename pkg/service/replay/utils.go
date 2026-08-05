@@ -299,7 +299,7 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 	}
 }
 
-func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
+func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, testCases []*models.TestCase, testSetID string) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
 	healthURL := cfg.Test.HealthURL
@@ -343,6 +343,56 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// port-readiness gate below.
 		case <-ctx.Done():
 			return false
+		}
+
+		// Prefer an HTTP-level round-trip against the SAME endpoint the test
+		// requests will actually dial, resolved the identical way the
+		// reset-resend readiness gate already does (resolveProbeTarget, used
+		// by waitForResetResendReady below) from the test set's own recorded
+		// request. This is the docker-compose analog of the docker-run gate
+		// below: dockerPublishedHostPort only parses a literal `-p`/
+		// `--publish` flag off the raw command string, so it never fires for
+		// `-c "docker compose up"` (port mappings live in the compose file,
+		// not the CLI invocation) — every docker-compose app previously fell
+		// straight through to the bare --delay sleep with NO readiness gate
+		// at all. A TCP-accept alone is also insufficient here: a compose
+		// app's HTTP server can start listening before it has finished
+		// wiring up its own dependency (e.g. a database cluster still
+		// initializing), so the port accepts but the request is reset mid-
+		// exchange. waitForHTTPServing only returns once a full HTTP
+		// round-trip completes, so it does not declare readiness early.
+		// Falls back to the TCP-only gates below when no HTTP test case is
+		// available to resolve from (kind != HTTP, empty test set, etc.), so
+		// gRPC-only sets and the existing docker-run/native paths are
+		// unaffected.
+		var probeTC *models.TestCase
+		for _, tc := range testCases {
+			if tc != nil && tc.Kind == models.HTTP {
+				probeTC = tc
+				break
+			}
+		}
+		if probeTC != nil {
+			if scheme, host, port, ok := resolveProbeTarget(cfg.Test, probeTC, testSetID, logger); ok {
+				ceiling := cfg.Test.HealthPollTimeout
+				if ceiling <= 0 {
+					ceiling = 60 * time.Second
+				}
+				pctx, pcancel := context.WithTimeout(ctx, ceiling)
+				err := waitForHTTPServing(pctx, scheme, host, port)
+				pcancel()
+				if err != nil {
+					if ctx.Err() != nil {
+						return false
+					}
+					logger.Warn("app did not complete an HTTP round-trip within the ceiling; firing tests anyway (replay may see connection reset/status_code got=0)",
+						zap.String("host", host),
+						zap.String("port", port),
+						zap.Duration("ceiling", ceiling),
+						zap.Error(err))
+				}
+				return true
+			}
 		}
 
 		// Docker apps with a published host port: after the --delay floor,
