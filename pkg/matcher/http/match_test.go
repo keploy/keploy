@@ -319,3 +319,68 @@ func TestMatch_CompareAll_JSONStillCompared(t *testing.T) {
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
 }
+
+// TestAssertionMatch_StatusCodeClass_T152 validates the fix for the bug where
+// status_code_class always compared against the hardcoded "2xx" class.
+// It covers all classes (2xx, 3xx, 4xx, 5xx) for both passing and failing cases.
+// See: https://github.com/keploy/keploy/issues/3843 (Team T152)
+func TestAssertionMatch_StatusCodeClass_T152(t *testing.T) {
+	logger := zap.NewNop()
+
+	tests := []struct {
+		name           string
+		assertedClass  string // assertion value set in the test case
+		actualStatus   int    // status code returned by the server
+		expectedToPass bool   // whether the assertion should pass
+	}{
+		// 2xx class
+		{"assert_2xx_server_200_pass", "2xx", 200, true},
+		{"assert_2xx_server_201_pass", "2xx", 201, true},
+		{"assert_2xx_server_500_fail", "2xx", 500, false},
+		{"assert_2xx_server_404_fail", "2xx", 404, false},
+		// 3xx class
+		{"assert_3xx_server_301_pass", "3xx", 301, true},
+		{"assert_3xx_server_302_pass", "3xx", 302, true},
+		{"assert_3xx_server_200_fail", "3xx", 200, false},
+		// 4xx class
+		{"assert_4xx_server_404_pass", "4xx", 404, true},
+		{"assert_4xx_server_400_pass", "4xx", 400, true},
+		{"assert_4xx_server_500_fail", "4xx", 500, false},
+		{"assert_4xx_server_200_fail", "4xx", 200, false},
+		// 5xx class
+		{"assert_5xx_server_500_pass", "5xx", 500, true},
+		{"assert_5xx_server_503_pass", "5xx", 503, true},
+		{"assert_5xx_server_200_fail", "5xx", 200, false},
+		{"assert_5xx_server_404_fail", "5xx", 404, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name: tt.name,
+				HTTPResp: models.HTTPResp{
+					StatusCode: 200,
+					Body:       `{}`,
+				},
+				Assertions: map[models.AssertionType]interface{}{
+					models.StatusCodeClass: tt.assertedClass,
+				},
+			}
+			actualResponse := &models.HTTPResp{
+				StatusCode: tt.actualStatus,
+				Body:       `{}`,
+			}
+
+			pass, result := AssertionMatch(tc, actualResponse, logger)
+
+			require.NotNil(t, result, "result must not be nil")
+			if tt.expectedToPass {
+				assert.True(t, pass,
+					"expected PASS: assert %q against status %d", tt.assertedClass, tt.actualStatus)
+			} else {
+				assert.False(t, pass,
+					"expected FAIL: assert %q against status %d", tt.assertedClass, tt.actualStatus)
+			}
+		})
+	}
+}
