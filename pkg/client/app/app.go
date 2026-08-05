@@ -54,8 +54,24 @@ type App struct {
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
-	EnableTesting   bool
-	Mode            models.Mode
+	// sdkStack tracks the containers the Docker-SDK compose orchestrator
+	// (compose_sdk.go) created for a `keploy cloud replay` run, so
+	// composeSDKTeardown can stop/remove them. Populated only on the in-memory
+	// compose path. sdkStackMu guards it: runComposeSDK (app-run goroutine)
+	// appends/reads it while ComposeDownOnSetupFailure -> ComposeDown ->
+	// composeSDKTeardown (the replay orchestrator goroutine, which bypasses
+	// run()'s downOnce) can concurrently snapshot+clear it.
+	sdkStackMu sync.Mutex
+	sdkStack   []sdkContainerRef
+	// useSDKCompose selects the Docker-SDK orchestrator over the `docker compose`
+	// CLI for the in-memory (cloud replay) path. Decided once in
+	// setupComposeInMemory (Setup, single goroutine — before Run/teardown
+	// goroutines exist, so the later reads in run()/ComposeDown are race-free):
+	// the SDK is used only as a FALLBACK when the compose CLI is unavailable
+	// (e.g. a distroless image with no compose plugin).
+	useSDKCompose bool
+	EnableTesting bool
+	Mode          models.Mode
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -280,10 +296,33 @@ func (a *App) setupComposeInMemory(extraArgs []string) error {
 	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
 	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService)
 
-	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
-		zap.String("cmd", a.cmd))
+	// Choose the orchestration backend for this cloud-replay run. Prefer the
+	// `docker compose` CLI when it is installed; fall back to the Docker SDK
+	// (compose_sdk.go) only when it is not — e.g. a distroless/shell-free image
+	// that ships no compose plugin. Decided here (Setup, single goroutine) so
+	// run() and ComposeDown read the same, already-settled choice without a race.
+	if dockerComposeCLIAvailable() {
+		a.logger.Info("docker compose CLI is available; running the in-memory cloud-replay stack via docker compose",
+			zap.String("cmd", a.cmd))
+	} else {
+		a.useSDKCompose = true
+		a.logger.Info("docker compose CLI is not available; falling back to the Docker SDK to orchestrate the in-memory cloud-replay stack",
+			zap.String("cmd", a.cmd))
+	}
 
 	return nil
+}
+
+// dockerComposeCLIAvailable reports whether the `docker compose` v2 CLI plugin
+// is usable — i.e. the docker binary is on PATH AND the compose plugin is
+// installed. `docker compose version` needs no shell (docker is a binary), so
+// this also works on a shell-free image; it returns false when either the
+// docker binary or the compose plugin is missing, which is exactly when cloud
+// replay should fall back to the Docker SDK.
+func dockerComposeCLIAvailable() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "docker", "compose", "version").Run() == nil
 }
 
 func (a *App) SetAppCommand(appCommand string) {
@@ -516,6 +555,16 @@ func (a *App) ComposeDown() {
 	// agent/app container names even when the down consumes its full budget
 	// (that name-freeing is exactly what avoids "container name already in use"
 	// on the next compose up).
+	// In-memory compose (`keploy cloud replay`) that was brought up via the
+	// Docker SDK fallback: tear it down the same way (no `docker compose`/`docker`
+	// CLI). composeSDKTeardown is self-bounded. When the CLI path was used
+	// instead (compose plugin available), fall through to the `docker compose
+	// down` branch below.
+	if len(a.composeContent) > 0 && a.useSDKCompose {
+		a.composeSDKTeardown()
+		return
+	}
+
 	downCtx, downCancel := context.WithTimeout(context.Background(), composeDownCmdBudget)
 	defer downCancel()
 
@@ -523,19 +572,15 @@ func (a *App) ComposeDown() {
 
 	switch {
 	case len(a.composeContent) > 0:
-		// In-memory mode: pipe compose YAML via stdin, no file on disk.
-		// Preserve project-scoping flags (-p/--project-name, --project-directory)
-		// from the original command so teardown targets the correct project.
+		// In-memory mode over the compose CLI: pipe the YAML via stdin, no file
+		// on disk. Preserve project-scoping flags (-p/--project-name,
+		// --project-directory) so teardown targets the correct project.
 		a.logger.Debug("Running docker compose down using in-memory compose content")
 		args := []string{"compose", "-f", "-"}
 		args = append(args, extractProjectFlags(a.cmd)...)
 		// --timeout 1: stop containers fast instead of the default 10s graceful
-		// wait PER container. Between test-sets `keploy test` restarts the whole
-		// compose stack; under loaded CI a slow `down` was exceeding the
-		// per-test-set teardown drain budget and being abandoned, leaving a
-		// half-removed agent container that the next test-set's `up` then
-		// collided with ("container name already in use" -> dependency
-		// keploy-agent failed to start -> test-set abandoned, no report).
+		// wait PER container, so a slow down between test-sets can't exceed the
+		// teardown-drain budget and leave a half-removed agent for the next up.
 		args = append(args, "down", "--timeout", "1")
 		downCmd = exec.CommandContext(downCtx, "docker", args...)
 		downCmd.Stdin = bytes.NewReader(a.composeContent)
@@ -1121,6 +1166,19 @@ func (a *App) run(ctx context.Context) models.AppError {
 	composeDown := func() { downOnce.Do(a.ComposeDown) }
 	if a.kind == utils.DockerCompose {
 		defer composeDown()
+	}
+
+	// `keploy cloud replay` path (in-memory compose) WHEN the `docker compose`
+	// CLI is unavailable: orchestrate the stack directly through the Docker SDK
+	// instead. useSDKCompose was decided in setupComposeInMemory (it is true only
+	// when the compose plugin is absent). Placed before the compose-CLI pre-run
+	// guards below (removeStaleComposeAgentWithin / docker-compose ps), which are
+	// not applicable to the SDK path. The deferred composeDown() above routes to
+	// composeSDKTeardown when useSDKCompose is set. When the compose CLI IS
+	// available this falls through to the unchanged CLI path, and the normal
+	// file-based `keploy test`/`keploy record` compose path is untouched.
+	if a.useSDKCompose && len(a.composeContent) > 0 {
+		return a.runComposeSDK(ctx)
 	}
 
 	// dockerRunName is the resolved user-app container name; reused by the
