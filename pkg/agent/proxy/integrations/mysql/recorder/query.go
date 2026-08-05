@@ -336,14 +336,14 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 		}
-		buf := make([]byte, len(c.data))
-		copy(buf, c.data)
+		// c.data is a fresh per-chunk buffer allocated in readRelay (never reused
+		// after the send), so hand it to the decoder directly — no re-copy.
 		ts := models.CapturedReqTime(ctx)
 		if !fromClient {
 			ts = models.CapturedRespTime(ctx)
 		}
 		select {
-		case decodeChan <- mysqlDecodeItem{fromClient: fromClient, data: buf, ts: ts}:
+		case decodeChan <- mysqlDecodeItem{fromClient: fromClient, data: c.data, ts: ts}:
 		case <-ctx.Done():
 		}
 		return nil
@@ -589,20 +589,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		if pendingCommand.Header.Type == "COM_STMT_PREPARE" {
 			mockType = "connection"
 		}
-		// Clamp resTimestamp >= reqTimestamp. On a KEEPALIVE/reused connection the
-		// CapturedRespTime source can carry over the PREVIOUS exchange's response
-		// time, producing ResTimestampMock < ReqTimestampMock for this query. Both
-		// the replay MockManager (mockmanager.go SetMocksWithWindow) and the control
-		// plane's filterByTimeStamp DROP such "invalid timestamp order" mocks before
-		// they ever reach the match pool — which silently deleted the SELECT-1 query
-		// mock (comQueryMocks=0 at replay) and orphaned it non-deterministically
-		// (depends on whether the pool reused the connection). Clamping keeps the
-		// mock's order valid so it survives the load filters. Response time only
-		// feeds ordering/windowing, so pinning it to the request time when the
-		// captured value is stale is correct, not lossy.
-		if resTimestamp.Before(reqTimestamp) {
-			resTimestamp = reqTimestamp
-		}
+		// (res>=req order is clamped centrally in recordMock for every mysql mock.)
 		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
 		pendingCommand = nil
 		pendingRespBundle = nil
